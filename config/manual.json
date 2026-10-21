@@ -1,0 +1,9 @@
+{
+  "selected_provider": "deepseek",
+  "selected_model": "deepseek-flash",
+  "providers": {
+    "deepseek": {
+      "key_ref": "env:DEEPSEEK_API_KEY"
+    }
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "source_sha256": {
+    "harness.rs": "932e8ed182ce1b047dcabaffbc149e61962ae34dda89191d6493deb527a2b41c",
+    "run_batch.py": "f27ebcb6c09817afbe4110bae1a2a62e311309f2cd53586128aeea49747f44a3",
+    "offline_cli_checks.py": "e5331123be08f319b75a734b786ce4a8fe4ce9a837d6789e65bbb454d789e14b"
+  },
+  "binary_sha256": "ead5505912adb85c7a7871a9cd4a28c80c334c5cd93fe1e75cc5bee74ff4e3db",
+  "offline_binary_sha256": "147b870b8fc2894c6b61fa3965b0e72bbb6d540d3f93959405581ac45d0bbe75",
+  "selected_credential_env_name": "DEEPSEEK_API_KEY",
+  "batch_id": "M7-P2-CFIX-2026-10-19",
+  "phase": "phase2",
+  "limit": 8,
+  "timeout_seconds": 1800,
+  "offline_mode": false,
+  "preflight_sha256": "501fbb17635fe0f878eb57a2d71072362561ef1673cd017b6cb4a295d897984b",
+  "root": "/tmp/013-m7-provider-92b37a5e",
+  "source_HEAD": "799fbb972c7c4b500cd01d3f20ee99055a01ac6b",
+  "branch": "test/013-memory-m7-provider-check",
+  "configuration": {
+    "provider": "deepseek",
+    "model": "deepseek-flash",
+    "protocol": "openai-chat",
+    "endpoint": "https://api.deepseek.com/chat/completions",
+    "request_params": {},
+    "credential_source": "/workspace/.env selected env entry",
+    "credential_present": true
+  },
+  "authorization": "user explicitly authorized this independent batch",
+  "argv": [
+    "/tmp/013-m7-provider-92b37a5e/target/debug/m7-provider-harness",
+    "--authorized-phase",
+    "/tmp/013-m7-provider-92b37a5e",
+    "phase2",
+    "M7-ONE-BATCH-2026-10-19"
+  ],
+  "cwd": "/tmp/013-m7-provider-92b37a5e/run/phase2",
+  "fixture": "independent; no previous batch outputs consumed"
+}

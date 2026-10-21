@@ -1,0 +1,2 @@
+v1
+SHARED-M9: NEW-A-V2-M9 and B-ONLY-M9; see MEMORY.md.

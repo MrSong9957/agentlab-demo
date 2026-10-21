@@ -1,0 +1,11 @@
+--- failed-dispatch.py
++++ open-fixed.py
+@@ -48,7 +48,7 @@
+ def save(path, value):
+     path = Path(path)
+     temp = path.with_suffix('.next')
+-    with temp.open('w', encoding='utf-8', opener=lambda p, f: os.open(p, f, 0o600)) as stream:
++    with open(temp, 'w', encoding='utf-8', opener=lambda p, f: os.open(p, f, 0o600)) as stream:
+         json.dump(value, stream, ensure_ascii=False, indent=2)
+         stream.write('\n')
+         stream.flush()

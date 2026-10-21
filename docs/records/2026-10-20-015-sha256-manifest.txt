@@ -1,0 +1,28 @@
+# 015 交付候选 SHA-256 清单（终版，2026-10-20）
+# 候选＝生产 7＋测试 7＋文档 4＝18 文件（全部未提交）；证据件 3 份明确排除于候选提交之外。
+# 本清单文件自身的指纹不含于自身，见最终返回。
+
+## 候选（18）
+2ea464136f29d522299db80096bd810ea55b8efa1cd8de9dbde25db522d031be  src/app/src/context.rs
+f03261e4201dcae81b67b4d7e1b95b25ee015d2dbf26515b6ebb8dcb312e47e8  src/app/src/lib.rs
+750d08b6aad8433b54a4e4bf03fb6912ebfadb1e71ace317405b0a371dc9cb6d  src/app/src/main.rs
+b5c3a3dfecd02aa72b32a812adf09b0a1d458cbb97eae935224f668d4571b77a  src/app/src/memory/rollout_input.rs
+ae2d98278ac139faaf9e71f342de277070d4813327aaea883ef5ba700c3ace07  src/app/src/prompt.rs
+e99a68937f4f69a4c7e0d9cf3de04453fc9ac2a14ae18b86d368c94c072d158d  src/app/src/tui_host.rs
+beb3c4c8979e7b0964d69ae635865006e0f76f2ecdc2a2f558093ecf3c38d016  src/app/src/turn.rs
+326d304f2681a2096ee30d4da8081f11bb5ec020bfad830eddbb455599a96591  src/app/tests/context_injection.rs
+3f0dacc02499d04438adfbf2db3d68f6f5247d0e5491f6c140a654d7d46d4c77  src/app/tests/e2e_acceptance.rs
+2f3fcf622f36229892fea49a6cf992c8b7e012b859a2192332a549a58299e7c4  src/app/tests/llm_flow.rs
+0e5c45405873c512e066ea37ba7dbe0cbc28eee96e7550c86cd6cfcb28f03b1b  src/app/tests/memory_phase1.rs
+23ed42259100e02c0391f0c32ed497334976f8388ec0bbdf70ef238a34fd21f6  src/app/tests/prompt_assembly.rs
+f02522c9a9b041e5d2d4c02ba31f2e942e4404080dbe08323b03d8786bb128d2  src/app/tests/session_cli.rs
+435ccadbafe5f51e93fd6ad9e23b2c34d3ad224b20890969047322ddf206a050  src/app/tests/tool_loop.rs
+6f0d82a8e056a8f16b6a406cd0e858e3e8ddc58b93b89aa25b0feca40e92906e  docs/specs/015-turn-context-injection.md
+f26b749cdea27fdba4c724bd7b78f17afe6c3f18e6ffce84df9676b096046b40  docs/specs/005-minimal-prompt-assembly.md
+3e3b6b94286aabc34c7c976fffb85889612d92c4685b045ff2b0aa594b37cdb1  docs/records/2026-10-20-015-implementation.md
+1292d7e2f9f97f1fda73ac4ba9d9acb49a4a1d975bfc94d399dc3012bbcb1923  docs/security/reports/2026-10-20-015-context-injection-security.md
+
+## 证据件（3，不属候选提交）
+7eedc04268e88f5efa1b72cae2fbcece7ff45a5b33837eebd457323b1c410e2c  docs/records/2026-10-20-015-final-diff.patch
+80f4e8a963a966ea62023b3c4e42d557f1ea0a8cd183bf0c325a17a0e24df652  docs/records/2026-10-20-015-final-verification.log
+（自身，见最终返回）  docs/records/2026-10-20-015-sha256-manifest.txt

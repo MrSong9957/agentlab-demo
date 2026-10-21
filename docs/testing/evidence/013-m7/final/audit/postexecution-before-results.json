@@ -1,0 +1,78 @@
+{
+  "passed": true,
+  "checked_before_new_repository_evidence": true,
+  "protected_files_matched": 582,
+  "protected_metadata_matched": 6,
+  "existing_documents_unchanged": true,
+  "git_status_unchanged_from_prepare": true,
+  "source_HEAD": "799fbb972c7c4b500cd01d3f20ee99055a01ac6b",
+  "branch": "test/013-memory-m7-provider-check",
+  "index_empty": true,
+  "stash_unchanged": true,
+  "worktrees_unchanged": true,
+  "main_unchanged": true,
+  "mismatches": [],
+  "execute_process_exit_code": 0,
+  "execution_elapsed_ms": 67487,
+  "real_HTTP_attempts": 8,
+  "background_pipeline_spawns": 0,
+  "internal_HTTP_retries": 0,
+  "batches": [
+    {
+      "batch_id": "M7-P1V2-CFIX-2026-10-19",
+      "phase": "phase1",
+      "closed": true,
+      "HTTP_attempts": 1,
+      "cumulative_attempts": 1,
+      "unused_allowance_sealed": 0,
+      "process_exit": 0,
+      "live_requests": true,
+      "all_HTTP_200": true,
+      "all_response_sizes_within_cap": true,
+      "run_files": [
+        "user/authorized-origins.json",
+        "user/sessions/auto-synthetic-cobalt.jsonl",
+        "user/memories/memories.sqlite"
+      ]
+    },
+    {
+      "batch_id": "M7-P2-CFIX-2026-10-19",
+      "phase": "phase2",
+      "closed": true,
+      "HTTP_attempts": 6,
+      "cumulative_attempts": 7,
+      "unused_allowance_sealed": 2,
+      "process_exit": 0,
+      "live_requests": true,
+      "all_HTTP_200": true,
+      "all_response_sizes_within_cap": true,
+      "run_files": [
+        "user/authorized-origins.json",
+        "user/sessions/auto-synthetic-cobalt.jsonl",
+        "user/memories/memory_summary.md",
+        "user/memories/MEMORY.md",
+        "user/memories/memories.sqlite",
+        "user/memories/raw_memories.md",
+        "user/memories/rollout_summaries/2023-11-14T15-13-20-Rahr-cobalt_synthetic.md"
+      ]
+    },
+    {
+      "batch_id": "M7-INJ-CFIX-2026-10-19",
+      "phase": "injection",
+      "closed": true,
+      "HTTP_attempts": 1,
+      "cumulative_attempts": 8,
+      "unused_allowance_sealed": 0,
+      "process_exit": 0,
+      "live_requests": true,
+      "all_HTTP_200": true,
+      "all_response_sizes_within_cap": true,
+      "run_files": [
+        "user/authorized-origins.json",
+        "user/sessions/auto-20261019T093758-1700.jsonl",
+        "user/sessions/auto-synthetic-cobalt.jsonl",
+        "user/memories/memory_summary.md"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+==============================
+  欢迎使用 Terminal Chat!
+  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出
+==============================
+已将 /tmp/tchat-sec-cfg-iucngc2g/manual.json 权限收紧为 0600
+警告：上级目录 /tmp 对其他用户可写，config 可能被整体替换；未自动修改，建议手动收紧
+错误：凭证 DEEPSEEK_API_KEY 未授权发送到 http://127.0.0.1:40911：非交互模式不做确认，已拒绝发送。可在交互模式运行确认，或预先在 /tmp/tchat-sec-user-bk_qesjm/authorized-origins.json 写入授权记录
+再见!

@@ -1,0 +1,46 @@
+{
+  "passed": true,
+  "protected_files_matched": 582,
+  "protected_metadata_matched": 6,
+  "mismatches": [],
+  "historical_evidence_and_old_closed_ledgers_unchanged": true,
+  "record_original_prefix_unchanged_through_section_11_12": true,
+  "spec_original_content_preserved_except_two_status_lines_and_one_result_paragraph": true,
+  "current_round_document_diff": "current-round-docs.diff",
+  "production_files_changed": false,
+  "tracked_differences": [
+    "docs/records/2026-10-19-013-m7-implementation.md",
+    "docs/specs/013-memory-system-v1.md"
+  ],
+  "new_repository_files_outside_this_candidate": false,
+  "source_HEAD": "799fbb972c7c4b500cd01d3f20ee99055a01ac6b",
+  "branch": "test/013-memory-m7-provider-check",
+  "main": "799fbb972c7c4b500cd01d3f20ee99055a01ac6b",
+  "main_unchanged": true,
+  "index_empty": true,
+  "stash_count": 0,
+  "stash_unchanged": true,
+  "worktrees_unchanged": true,
+  "worktree_count": 1,
+  "git_diff_check": {
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "actual_HTTP_attempts": 8,
+  "usage_total_tokens": 103780,
+  "unused_allowance_sealed": 2,
+  "all_batches_closed": true,
+  "temporary_authorizations_and_runtime_resources_removed": true,
+  "no_stage_commit_merge_push_branch_delete": true,
+  "M8_M9": "not implemented",
+  "V1": "incomplete",
+  "workspace_full_gate": "not run; explicit harness/doc-only scope",
+  "additional_standalone_typecheck_lint": "not run",
+  "candidate_file_count_including_manifest": 106,
+  "document_sha256": {
+    "docs/records/2026-10-19-013-m7-implementation.md": "1d69c378fc9c7627d405760f980cf08f70c2c90df97f8a5fa748d8035ceb26c3",
+    "docs/specs/013-memory-system-v1.md": "1d78b7d60e7352ea3831630d86cc026dbe79cff82811abfb4bcf3b6067c85e32"
+  },
+  "review_status": "stop here; await result review and evidence-delivery approval"
+}

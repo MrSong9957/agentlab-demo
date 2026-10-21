@@ -1,0 +1,10 @@
+{
+  "attempts": 1,
+  "counts": {
+    "phase1": 1,
+    "phase2": 0,
+    "injection": 0
+  },
+  "active_phase": "phase1",
+  "closed": true
+}

@@ -1,0 +1,13 @@
+
+running 8 tests
+test tests::budget_is_one_eight_one_and_ten_including_attempts ... ok
+test tests::final_request_limit_and_parameter_model_source_guards ... ok
+test tests::global_ceiling_is_checked_independently_at_reservation_boundary ... ok
+test tests::injection_tool_response_is_blocked_before_real_turn_dispatch ... ok
+test tests::offline_build_cannot_load_real_credentials_or_continue_live_transport ... ok
+test tests::real_library_three_stage_rehearsal_uses_only_offline_transport ... ok
+test tests::response_limit_and_abnormal_end_are_rejected ... ok
+test tests::wire_guard_refuses_wrong_origin_method_deadline_and_closed_batch ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s
+

@@ -1,0 +1,107 @@
+# tchat-tui：openai/codex@97771b1 codex-rs/tui 渲染层移植（008 规格）。
+# 文件来源、原样/必要适配清单见 README.md（待实现轮生成）。
+[package]
+name = "tchat-tui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "tchat_tui"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+# —— 本地 shim/vendor crate（008 §3-J5 适配定稿；来源与逐类型登记见各 crate）——
+codex-config = { path = "../shims/codex-config" }
+codex-protocol = { path = "../shims/codex-protocol" }
+codex-app-server-protocol = { path = "../shims/codex-app-server-protocol" }
+codex-app-server-client = { path = "../shims/codex-app-server-client" }
+codex-home = { path = "../shims/codex-home" }
+codex-utils-absolute-path = { path = "../shims/codex-utils-absolute-path" }
+codex-utils-path = { path = "../shims/codex-utils-path" }
+codex-utils-path-uri = { path = "../shims/codex-utils-path-uri" }
+codex-utils-string = { path = "../shims/codex-utils-string" }
+codex-utils-cli = { path = "../shims/codex-utils-cli" }
+codex-utils-elapsed = { path = "../shims/codex-utils-elapsed" }
+codex-shell-command = { path = "../shims/codex-shell-command" }
+codex-features = { path = "../shims/codex-features" }
+codex-otel = { path = "../shims/codex-otel" }
+codex-title = { path = "../shims/codex-title" }
+codex-git-utils = { path = "../shims/codex-git-utils" }
+codex-message-history = { path = "../shims/codex-message-history" }
+codex-utils-plugins = { path = "../shims/codex-utils-plugins" }
+codex-ansi-escape = { path = "../vendor/codex-ansi-escape" }
+codex-terminal-detection = { path = "../vendor/codex-terminal-detection" }
+codex-mermaid = { path = "../vendor/codex-mermaid" }
+codex-utils-fuzzy-match = { path = "../vendor/codex-utils-fuzzy-match" }
+
+ratatui = { version = "0.30.2", default-features = false, features = [
+    "crossterm",
+    "layout-cache",
+    "underline-color",
+    "scrolling-regions",
+    "unstable-backend-writer",
+    "unstable-rendered-line-info",
+    "unstable-widget-ref",
+] }
+crossterm = { version = "0.29.0", features = ["bracketed-paste", "event-stream"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-std", "io-util", "process", "sync", "fs", "signal", "test-util"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["time"] }
+futures = "0.3"
+pulldown-cmark = { version = "0.10", default-features = false, features = ["html"] }
+textwrap = "0.16.2"
+unicode-segmentation = "1.12"
+unicode-width = "0.2"
+syntect = { version = "5", default-features = false, features = ["parsing", "plist-load", "regex-onig"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-onig"] }
+itertools = "0.14"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+base64 = "0.22"
+rand = "0.9"
+url = "2.5.8"
+regex-lite = "0.1"
+lazy_static = "1"
+derive_more = { version = "2", features = ["is_variant"] }
+strum = { version = "0.27", features = ["derive"] }
+strum_macros = "0.27"
+ratatui-macros = "0.7.2"
+diffy = "0.4"
+shlex = "1"
+dirs = "6"
+dunce = "1"
+thiserror = "2"
+webbrowser = "1"
+urlencoding = "2"
+pathdiff = "0.2"
+anyhow = "1"
+vt100 = "0.16.2"  # 008-ADAPT：lib 的 test_backend（A7 集成测试）需要；母本为 dev-dep
+tempfile = "3"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+tracing = { version = "0.1", features = ["log"] }
+supports-color = "3"
+semver = "1"
+toml_edit = "0.22"
+toml = "0.8"
+libc = "0.2"
+uuid = { version = "1", features = ["v4"] }
+arboard = { version = "3", default-features = false, features = ["image-data"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_IO", "Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+insta = { version = "1.46", features = ["filters"] }
+pretty_assertions = "1.4"
+serial_test = "3"
+assert_matches = "1.5"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "4.4"

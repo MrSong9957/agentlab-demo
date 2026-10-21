@@ -1,0 +1,29 @@
+---
+source: tui/src/bottom_pane/chat_composer/sparkle_tests.rs
+assertion_line: 368
+expression: "snapshots.join(\"\\n\\n\")"
+---
+shortcut help:
+
+
+› Ask Codex to do anything
+
+
+
+after /model selects Astra:
+                            ⠈     ⢀     ⠁                 ⠂
+›⠁Ask Codex to do anything         ⠈      ⠁
+       ⢀            ⠠     ⠄         ⠠          ⢀    ⠠     ⡀
+  ? for shortcuts                                            100% context left
+
+literal pasted question mark:
+
+› ?
+
+                                                             100% context left
+
+after clearing and selecting Astra:
+
+› Ask Codex to do anything
+
+  ? for shortcuts                                            100% context left

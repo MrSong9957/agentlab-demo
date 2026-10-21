@@ -1,0 +1,20 @@
+# 原样 vendor：openai/codex@97771b1 codex-rs/mermaid（Apache-2.0）。
+# 唯一改动：workspace 依赖改独立版本号；lib 名保持 codex_mermaid 以便 vendored import 逐字节一致。
+[package]
+name = "codex-mermaid"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[lib]
+name = "codex_mermaid"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+unicode-width = "0.2"
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+insta = "1.46"
+tempfile = "3"

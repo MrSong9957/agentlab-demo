@@ -1,0 +1,10 @@
+# 009 目录整理：本文件为 workspace 入口（原根包声明移至 src/app/Cargo.toml）。
+# 从仓库根 cargo run/build/check/test 的语义经 default-members = ["src/app"] 保持。
+[workspace]
+members = ["src/app", "src/tui", "src/shims/*", "src/vendor/*"]
+default-members = ["src/app"]
+resolver = "2"
+
+# 008 D2：crossterm 必须使用上游 openai fork 固定 rev（母本 codex-rs/Cargo.toml [patch.crates-io] 同源）。
+[patch.crates-io]
+crossterm = { git = "https://github.com/openai-oss-forks/crossterm", rev = "ed1cdab335221515706178d68495bba2aed1924f" }

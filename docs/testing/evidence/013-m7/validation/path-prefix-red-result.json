@@ -1,0 +1,53 @@
+{
+  "baseline_frozen_tests": "6/0/0",
+  "red_test": "legal_cli_phase1",
+  "test_exit_code": 1,
+  "actual_CLI_exit_code": 2,
+  "actual_stderr": "batch scope rejected\n",
+  "expected_CLI_exit_code": 0,
+  "assertions_will_be_kept": true,
+  "red_harness_sha256": "3e28046561b4f47ccbc20545034aa562c79026f98f01281a2a9a03084e037ab8",
+  "offline_HTTP_attempts": 0,
+  "live_transport_and_real_credentials_compiled_out": true,
+  "CLI_report": {
+    "cases": [
+      {
+        "case": "legal_cli_phase1",
+        "passed": false,
+        "expected_exit": 0,
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": "batch scope rejected\n",
+        "no_side_effects": true,
+        "controller_and_argv_root_match": true,
+        "real_HTTP_attempts": 0,
+        "credential_loading_compiled": false,
+        "live_transport_compiled": false
+      }
+    ],
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "real_HTTP_attempts": 0,
+    "transport": "compile-time offline-only; CLI dry-run checkpoint"
+  },
+  "source_snapshot": "red-harness.rs",
+  "source_sha256": "3e28046561b4f47ccbc20545034aa562c79026f98f01281a2a9a03084e037ab8",
+  "build_exit_code": 0,
+  "normalized_check_argv": [
+    "python3",
+    "docs/records/013-m7-provider-check/offline_cli_checks.py",
+    "--binary",
+    "/tmp/013-m7-harness-fix-799fbb9/target/debug/m7-provider-harness",
+    "--result",
+    "/tmp/013-m7-harness-fix-799fbb9/evidence/cli-red.json",
+    "--case",
+    "legal_cli_phase1"
+  ],
+  "argv_note": "Normalized argument ordering for the executed RED check; target was the offline-only RED build, not the later mutant build.",
+  "build_log_tail": [
+    "warning: `tchat-tui` (lib) generated 497 warnings (run `cargo fix --lib -p tchat-tui` to apply 83 suggestions)",
+    "   Compiling terminal-chat v0.1.0 (/tmp/013-m7-harness-fix-799fbb9/source/src/app)",
+    "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.93s"
+  ]
+}

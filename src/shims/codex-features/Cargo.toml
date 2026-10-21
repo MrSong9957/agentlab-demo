@@ -1,0 +1,13 @@
+# 本地最小 shim（008 §3-J5 适配定稿）：仅为 tchat-tui vendored 文件提供 `use codex_features::…` 路径。
+# 内容＝保留文件实际消费的母本类型最小子集，逐类型登记于 src/lib.rs 注释。
+# 不是 openai/codex 对应 crate 的 vendor。
+[package]
+name = "codex-features"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "codex_features"
+path = "src/lib.rs"
+doctest = false

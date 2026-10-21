@@ -1,0 +1,22 @@
+{
+  "argv": [
+    "cargo",
+    "test",
+    "--offline",
+    "--locked",
+    "--manifest-path",
+    "/tmp/013-m7-plan-a-cfix-live-20261019-01/source/Cargo.toml",
+    "-p",
+    "terminal-chat",
+    "--bin",
+    "m7-provider-harness",
+    "--target-dir",
+    "/tmp/013-m7-plan-a-cfix-live-20261019-01/target-offline",
+    "--features",
+    "m7-offline-only",
+    "--",
+    "--test-threads=1"
+  ],
+  "exit_code": 0,
+  "elapsed_ms": 38491
+}

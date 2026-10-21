@@ -1,0 +1,39 @@
+{
+  "opened_only_this_temporary_scope": "/tmp/013-m7-provider-749273bb/run/phase1",
+  "real_user_data_accessed": false,
+  "temporary_grant_exactly_one_matching_origin_and_credential": true,
+  "stage1_rows": [
+    {
+      "thread_id": "auto-synthetic-cobalt",
+      "source_updated_at": 1699974800,
+      "raw_memory": "---\ndescription: Synthetic memory-confirmation session for fictional project cobalt-demo; user planted and re-confirmed stable preferences (Chinese communication, failures-before-passes reports) and the SYNTH-E17 handling rule (check verify-cobalt checklist first, no blind retries). All content is fictional.\ntask: remember-and-confirm stable preferences and fault-handling rule for synthetic project cobalt-demo\ntask_group: synthetic-memory-preference-planting\ntask_outcome: success\ncwd: /tmp/013-m7-provider-749273bb/run/phase1/cwd\nkeywords: cobalt-demo, SYNTH-E17, verify-cobalt, 中文, 先失败后通过, acceptance report, synthetic, long-term preferences\n---\n\n### Task 1: Record and re-confirm cobalt-demo preferences and SYNTH-E17 rule\n\ntask: persist stated stable preferences (Chinese; failures-before-passes acceptance reports) and the SYNTH-E17 handling rule (check verify-cobalt first) for the synthetic cobalt-demo project\ntask_group: synthetic-memory-preference-planting\ntask_outcome: success\n\nPreference signals:\n- The user stated stable preferences and asked to remember them: \"合成项目 cobalt-demo 的稳定偏好：用中文交流；验收报告必须先列失败项再列通过项。\" -> For cobalt-demo tasks, default to Chinese and order acceptance reports as failed items first, then passed items, without being re-asked.\n- The user gave a fixed fault rule: \"虚构故障 SYNTH-E17 的固定处理规则是先核对 verify-cobalt 清单，不重复盲目重试。\" -> When SYNTH-E17 appears, first check the verify-cobalt checklist instead of repeated blind retries.\n- The user re-confirmed explicitly: \"再次确认：cobalt-demo 一律中文，报告先失败后通过；以后出现 SYNTH-E17，先核对 verify-cobalt 清单。以上是重复确认的长期偏好与可复用经验\" -> Treat these as durable long-term defaults, not one-off instructions.\n\nReusable knowledge:\n- All rollout content is explicitly synthetic/fictional (user: \"全为合成内容\"); the assistant confirmed \"没有执行真实命令.\" Do not present verify-cobalt or SYNTH-E17 as real repository facts.\n- Declared defaults for cobalt-demo: communicate in Chinese; acceptance reports list failures before passes; for SYNTH-E17 check the verify-cobalt checklist before retrying.\n\nFailures and how to do differently:\n- No failure occurred. Avoid misrepresenting these synthetic artifacts as real commands, paths, or verification results; keep their fictional status legible.\n\nReferences:\n- \"用中文交流\" ; \"验收报告必须先列失败项再列通过项\"\n- \"虚构故障 SYNTH-E17 的固定处理规则是先核对 verify-cobalt 清单，不重复盲目重试\"\n- \"再次确认：cobalt-demo 一律中文，报告先失败后通过；以后出现 SYNTH-E17，先核对 verify-cobalt 清单。\"\n- Working directory: /tmp/013-m7-provider-749273bb/run/phase1/cwd",
+      "rollout_summary": "# Synthetic memory-confirmation session for the fictional `cobalt-demo` project\n\nRollout context: The rollout is explicitly a synthetic/fictional test session (the user states \"全为合成内容\" / all synthetic). There is no real codebase, no commands run, and the assistant confirms \"没有执行真实命令.\" The user's goal is to plant and re-confirm persistent preferences and one reusable fault-handling rule for a fictional project named `cobalt-demo`, asking the agent to remember them.\n\n## Task 1: Record and re-confirm stable `cobalt-demo` preferences and the `SYNTH-E17` handling rule\n\nOutcome: success\n\nPreference signals:\n- The user stated the stable preferences up front and asked to remember them for the project: \"合成项目 cobalt-demo 的稳定偏好：用中文交流；验收报告必须先列失败项再列通过项。\" -> For any `cobalt-demo` task, default to communicating in Chinese and format acceptance reports with failed items before passed items, without being re-asked.\n- The user gave a fixed handling rule for a fictional fault: \"虚构故障 SYNTH-E17 的固定处理规则是先核对 verify-cobalt 清单，不重复盲目重试。\" -> When `SYNTH-E17` appears, first check the `verify-cobalt` checklist rather than blindly retrying.\n- The user then re-confirmed with \"再次确认：cobalt-demo 一律中文，报告先失败后通过；以后出现 SYNTH-E17，先核对 verify-cobalt 清单。以上是重复确认的长期偏好与可复用经验\" -> The repetition signals these are intended as durable, long-term defaults that should not require the user to restate them on future runs.\n\nKey steps:\n- The user declared the preferences and asked the agent to persist them for the synthetic project.\n- The assistant acknowledged and restated the key points: SYNTH-E17 was framed as an expired-route issue located via the `verify-cobalt` checklist, and reports should list failures before passes.\n- The user re-confirmed the same preferences/rule, explicitly labeling them long-term and reusable.\n- The assistant acknowledged the confirmation and closed the synthetic task.\n\nFailures and how to do differently:\n- No failure occurred. All content is fictional/synthetic; do not treat `SYNTH-E17` or `verify-cobalt` as real artifacts from a real repository, and do not claim any real command was run (the assistant explicitly noted none were).\n\nReusable knowledge:\n- Stated defaults for the synthetic `cobalt-demo` project: (1) communicate in Chinese; (2) acceptance reports list failures before passes; (3) for `SYNTH-E17`, first check the `verify-cobalt` checklist instead of repeated blind retries.\n- These were explicitly framed by the user as \"长期偏好与可复用经验\" (long-term preferences and reusable experience), all within a synthetic context the user also flagged as \"全为合成内容.\"\n\nReferences:\n- [1] User: \"合成项目 cobalt-demo 的稳定偏好：用中文交流；验收报告必须先列失败项再列通过项。虚构故障 SYNTH-E17 的固定处理规则是先核对 verify-cobalt 清单，不重复盲目重试。\"\n- [2] User (re-confirmation): \"cobalt-demo 一律中文，报告先失败后通过；以后出现 SYNTH-E17，先核对 verify-cobalt 清单。\"\n- [3] Assistant: SYNTH-E17 located as an expired-route setting via the `verify-cobalt` checklist; report ordered failures-before-passes; \"没有执行真实命令.\"\n- Working directory: `/tmp/013-m7-provider-749273bb/run/phase1/cwd`.",
+      "rollout_slug": "cobalt-demo-synthetic-preferences",
+      "generated_at": 1700000000,
+      "usage_count": null,
+      "last_usage": null,
+      "selected_for_phase2": 0,
+      "selected_for_phase2_source_updated_at": null
+    }
+  ],
+  "stage1_count": 1,
+  "jobs": [
+    {
+      "kind": "memory_stage1",
+      "job_key": "auto-synthetic-cobalt",
+      "status": "done",
+      "input_watermark": 1699974800,
+      "last_success_watermark": 1699974800,
+      "last_error": null
+    },
+    {
+      "kind": "memory_consolidate_global",
+      "job_key": "global",
+      "status": "pending",
+      "input_watermark": 1699974800,
+      "last_success_watermark": 0,
+      "last_error": null
+    }
+  ],
+  "sqlite_quick_check": "ok"
+}

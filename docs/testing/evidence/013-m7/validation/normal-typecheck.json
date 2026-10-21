@@ -1,0 +1,21 @@
+{
+  "argv": [
+    "cargo",
+    "check",
+    "--offline",
+    "--locked",
+    "--manifest-path",
+    "/tmp/013-m7-plan-a-cfix2-normal/source/Cargo.toml",
+    "-p",
+    "terminal-chat",
+    "--bin",
+    "m7-provider-harness",
+    "--target-dir",
+    "/tmp/013-m7-cfix-normal-check-target"
+  ],
+  "exit_code": 0,
+  "elapsed_ms": 33474,
+  "normal_host_executed": false,
+  "real_HTTP_attempts": 0,
+  "real_credential_loaded": false
+}

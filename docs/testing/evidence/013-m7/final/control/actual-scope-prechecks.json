@@ -1,0 +1,157 @@
+{
+  "passed": 6,
+  "failed": 0,
+  "cases": [
+    {
+      "batch_id": "M7-P1V2-CFIX-2026-10-19",
+      "argv": [
+        "/tmp/013-m7-provider-749273bb/target/debug/m7-provider-harness",
+        "--authorized-phase",
+        "/tmp/013-m7-provider-749273bb",
+        "phase1",
+        "M7-ONE-BATCH-2026-10-19",
+        "--dry-run"
+      ],
+      "cwd": "/tmp/013-m7-provider-749273bb/run/phase1",
+      "cumulative_seed": {
+        "phase1": 0,
+        "phase2": 0,
+        "injection": 0
+      },
+      "outcome": {
+        "exit_code": 0,
+        "timed_out": false,
+        "elapsed_ms": 1,
+        "stdout": "{\"checkpoint\":\"send-preparation-allowed\",\"phase\":\"phase1\",\"dry_run\":true,\"offline_only_build\":true,\"credential_loaded\":false,\"origin_granted\":false,\"database_created\":false,\"HTTP_attempts\":0}\n",
+        "stderr": ""
+      },
+      "ledger_unchanged": true
+    },
+    {
+      "batch_id": "M7-P1V2-CFIX-2026-10-19",
+      "argv": [
+        "/tmp/013-m7-provider-749273bb/target/debug/m7-provider-harness",
+        "--authorized-phase",
+        "/tmp/013-m7-provider-749273bb",
+        "phase1",
+        "M7-ONE-BATCH-2026-10-19",
+        "--dry-run"
+      ],
+      "cwd": "/tmp/013-m7-provider-749273bb/run/phase1",
+      "cumulative_seed": {
+        "phase1": 0,
+        "phase2": 0,
+        "injection": 0
+      },
+      "outcome": {
+        "exit_code": 0,
+        "timed_out": false,
+        "elapsed_ms": 1,
+        "stdout": "{\"checkpoint\":\"send-preparation-allowed\",\"phase\":\"phase1\",\"dry_run\":true,\"offline_only_build\":true,\"credential_loaded\":false,\"origin_granted\":false,\"database_created\":false,\"HTTP_attempts\":0}\n",
+        "stderr": ""
+      },
+      "ledger_unchanged": true
+    },
+    {
+      "batch_id": "M7-P2-CFIX-2026-10-19",
+      "argv": [
+        "/tmp/013-m7-provider-92b37a5e/target/debug/m7-provider-harness",
+        "--authorized-phase",
+        "/tmp/013-m7-provider-92b37a5e",
+        "phase2",
+        "M7-ONE-BATCH-2026-10-19",
+        "--dry-run"
+      ],
+      "cwd": "/tmp/013-m7-provider-92b37a5e/run/phase2",
+      "cumulative_seed": {
+        "phase1": 0,
+        "phase2": 0,
+        "injection": 0
+      },
+      "outcome": {
+        "exit_code": 0,
+        "timed_out": false,
+        "elapsed_ms": 1,
+        "stdout": "{\"checkpoint\":\"send-preparation-allowed\",\"phase\":\"phase2\",\"dry_run\":true,\"offline_only_build\":true,\"credential_loaded\":false,\"origin_granted\":false,\"database_created\":false,\"HTTP_attempts\":0}\n",
+        "stderr": ""
+      },
+      "ledger_unchanged": true
+    },
+    {
+      "batch_id": "M7-P2-CFIX-2026-10-19",
+      "argv": [
+        "/tmp/013-m7-provider-92b37a5e/target/debug/m7-provider-harness",
+        "--authorized-phase",
+        "/tmp/013-m7-provider-92b37a5e",
+        "phase2",
+        "M7-ONE-BATCH-2026-10-19",
+        "--dry-run"
+      ],
+      "cwd": "/tmp/013-m7-provider-92b37a5e/run/phase2",
+      "cumulative_seed": {
+        "phase1": 1,
+        "phase2": 0,
+        "injection": 0
+      },
+      "outcome": {
+        "exit_code": 0,
+        "timed_out": false,
+        "elapsed_ms": 1,
+        "stdout": "{\"checkpoint\":\"send-preparation-allowed\",\"phase\":\"phase2\",\"dry_run\":true,\"offline_only_build\":true,\"credential_loaded\":false,\"origin_granted\":false,\"database_created\":false,\"HTTP_attempts\":0}\n",
+        "stderr": ""
+      },
+      "ledger_unchanged": true
+    },
+    {
+      "batch_id": "M7-INJ-CFIX-2026-10-19",
+      "argv": [
+        "/tmp/013-m7-provider-e9f9808b/target/debug/m7-provider-harness",
+        "--authorized-phase",
+        "/tmp/013-m7-provider-e9f9808b",
+        "injection",
+        "M7-ONE-BATCH-2026-10-19",
+        "--dry-run"
+      ],
+      "cwd": "/tmp/013-m7-provider-e9f9808b/run/injection",
+      "cumulative_seed": {
+        "phase1": 0,
+        "phase2": 0,
+        "injection": 0
+      },
+      "outcome": {
+        "exit_code": 0,
+        "timed_out": false,
+        "elapsed_ms": 1,
+        "stdout": "{\"checkpoint\":\"send-preparation-allowed\",\"phase\":\"injection\",\"dry_run\":true,\"offline_only_build\":true,\"credential_loaded\":false,\"origin_granted\":false,\"database_created\":false,\"HTTP_attempts\":0}\n",
+        "stderr": ""
+      },
+      "ledger_unchanged": true
+    },
+    {
+      "batch_id": "M7-INJ-CFIX-2026-10-19",
+      "argv": [
+        "/tmp/013-m7-provider-e9f9808b/target/debug/m7-provider-harness",
+        "--authorized-phase",
+        "/tmp/013-m7-provider-e9f9808b",
+        "injection",
+        "M7-ONE-BATCH-2026-10-19",
+        "--dry-run"
+      ],
+      "cwd": "/tmp/013-m7-provider-e9f9808b/run/injection",
+      "cumulative_seed": {
+        "phase1": 1,
+        "phase2": 8,
+        "injection": 0
+      },
+      "outcome": {
+        "exit_code": 0,
+        "timed_out": false,
+        "elapsed_ms": 1,
+        "stdout": "{\"checkpoint\":\"send-preparation-allowed\",\"phase\":\"injection\",\"dry_run\":true,\"offline_only_build\":true,\"credential_loaded\":false,\"origin_granted\":false,\"database_created\":false,\"HTTP_attempts\":0}\n",
+        "stderr": ""
+      },
+      "ledger_unchanged": true
+    }
+  ],
+  "real_HTTP_attempts": 0
+}

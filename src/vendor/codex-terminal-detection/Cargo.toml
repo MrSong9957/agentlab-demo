@@ -1,0 +1,18 @@
+# 原样 vendor：openai/codex@97771b1 codex-rs/terminal-detection（Apache-2.0）
+# 唯一改动：workspace 依赖改写为独立版本号。
+[package]
+name = "codex-terminal-detection"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[lib]
+name = "codex_terminal_detection"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+tracing = { version = "0.1", features = ["log"] }
+
+[dev-dependencies]
+pretty_assertions = "1.4"

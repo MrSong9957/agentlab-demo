@@ -1,0 +1,9 @@
+---
+source: src/tui/src/bottom_pane/chat_composer/history_search_paste_tests.rs
+expression: terminal.backend()
+---
+"                                                                      "
+"› git status                                                          "
+"                                                                      "
+"                                                                      "
+"  reverse-i-search: git status  enter accept                          "

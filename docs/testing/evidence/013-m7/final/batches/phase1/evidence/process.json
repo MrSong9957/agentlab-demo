@@ -1,0 +1,15 @@
+{
+  "exit_code": 0,
+  "timed_out": false,
+  "elapsed_ms": 11708,
+  "stdout": "{\"phase\":\"phase1\",\"passed\":true}\n",
+  "stderr": "",
+  "argv": [
+    "/tmp/013-m7-provider-749273bb/target/debug/m7-provider-harness",
+    "--authorized-phase",
+    "/tmp/013-m7-provider-749273bb",
+    "phase1",
+    "M7-ONE-BATCH-2026-10-19"
+  ],
+  "cwd": "/tmp/013-m7-provider-749273bb/run/phase1"
+}

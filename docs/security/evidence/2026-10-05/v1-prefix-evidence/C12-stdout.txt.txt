@@ -1,0 +1,13 @@
+==============================
+  欢迎使用 Terminal Chat!
+  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出
+==============================
+警告：上级目录 /tmp 对其他用户可写，config 可能被整体替换；未自动修改，建议手动收紧
+公共目录已更新基础资料：deepseek
+deepseek：刷新失败（凭证 DEEPSEEK_API_KEY 未授权发送到 http://127.0.0.1:44247：非交互模式不做确认，已拒绝发送。可在交互模式运行确认，或预先在 .terminal-chat/authorized-origins.json 写入授权记录），保留身份匹配的旧名单
+openai：跳过查询（环境变量 OPENAI_API_KEY 未设置（可在项目根目录 .env 中配置））
+刷新完成。所选模型不变，正在执行的请求不受影响。
+厂商 deepseek（基础地址 http://127.0.0.1:44247）有效模型：
+  deepseek-flash *（DeepSeek 官方模型），上下文 999999999999，输出上限 1
+  deepseek-v4-pro（DeepSeek-V4-Pro），上下文 1048576，输出上限 393216
+再见!

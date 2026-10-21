@@ -1,0 +1,233 @@
+{
+  "results": [
+    {
+      "id": "C0",
+      "title": "JSON 结构注入与元字符输入（预授权正常路径）",
+      "verdict": "PASS",
+      "detail": "请求数=1；恶意输入作为完整字符串值原样到达且 JSON 结构完好=True"
+    },
+    {
+      "id": "C1",
+      "title": "凭证只发往已授权地址（未授权拒绝/预授权放行）",
+      "verdict": "PASS",
+      "detail": "未授权拒绝（0 请求且提示未授权）=True；预授权后正常对话=True；授权记录中 Authorization: Authorization: Bearer <FAKE_KEY>"
+    },
+    {
+      "id": "C1b",
+      "title": "远程 http 明文外发被拦截（对照组）",
+      "verdict": "PASS",
+      "detail": "出站请求数=0，输出含 HTTPS 拒绝提示=True"
+    },
+    {
+      "id": "C2",
+      "title": "file: 凭证限定专用凭证目录（越界拒绝/合法放行）",
+      "verdict": "PASS",
+      "detail": "越界引用拒绝（0 请求＋明确提示）=True；目录内合法引用正常对话=True"
+    },
+    {
+      "id": "C3",
+      "title": "模型回复 ANSI/OSC 转义序列在显示边界剥离",
+      "verdict": "PASS",
+      "detail": "输出无任何 ESC/BEL 字节=True；正常正文保留=True；序列载荷不残留=True；输出：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>已将 /tmp/tchat-sec-cfg-f2m7s47l/manual.json 权限收紧为 0600<LF>警告：上级目录 /tmp 对其他用户可写，config 可能被整体替换；未自动修改，建议手动收紧<LF>Agent：正常开头屏幕已清除点我结尾<L"
+    },
+    {
+      "id": "C4",
+      "title": "错误消息统一 300 字符上限且转义序列剥离",
+      "verdict": "PASS",
+      "detail": "无 ESC/BEL=True；X 字符 277/320（已截断）=True；状态分类保留=True"
+    },
+    {
+      "id": "C5-space",
+      "title": "游标注入变体：'abc def'",
+      "verdict": "PASS",
+      "detail": "非法 id 被拒绝、未发出第二页请求（1 个请求）；输出：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>已将 /tmp/tchat-sec-cfg-_qj00pny/manual.json 权限收紧为 0600<LF>警告：上级目录 /tmp "
+    },
+    {
+      "id": "C5-amp",
+      "title": "游标注入变体：'abc&injected=1'",
+      "verdict": "PASS",
+      "detail": "请求行：GET /models?after=abc%26injected%3D1 HTTP/1.1；游标作为单个参数值无损传递=True；无头注入=True"
+    },
+    {
+      "id": "C5-hash",
+      "title": "游标注入变体：'abc#frag'",
+      "verdict": "PASS",
+      "detail": "请求行：GET /models?after=abc%23frag HTTP/1.1；游标作为单个参数值无损传递=True；无头注入=True"
+    },
+    {
+      "id": "C5-crlf",
+      "title": "游标注入变体：'abc<CR><LF>X-Injected: 1'",
+      "verdict": "PASS",
+      "detail": "非法 id 被拒绝、未发出第二页请求（1 个请求）；输出：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>已将 /tmp/tchat-sec-cfg-m82c28mb/manual.json 权限收紧为 0600<LF>警告：上级目录 /tmp "
+    },
+    {
+      "id": "C5-slash",
+      "title": "游标注入变体：'../../admin'",
+      "verdict": "PASS",
+      "detail": "请求行：GET /models?after=..%2F..%2Fadmin HTTP/1.1；游标作为单个参数值无损传递=True；无头注入=True"
+    },
+    {
+      "id": "C5-unicode",
+      "title": "游标注入变体：'模式Ａ'",
+      "verdict": "PASS",
+      "detail": "请求行：GET /models?after=%E6%A8%A1%E5%BC%8F%EF%BC%A1 HTTP/1.1；游标作为单个参数值无损传递=True；无头注入=True"
+    },
+    {
+      "id": "C6",
+      "title": "无限分页被 100 页上限截断（控制有效）",
+      "verdict": "PASS",
+      "detail": "/models 请求数=100（上限 100）；输出：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>已将 /tmp/tchat-sec-cfg-rjux7za2/manual.json 权限收紧为 0600<LF>警告：上级目录 /tmp "
+    },
+    {
+      "id": "C7-11MB",
+      "title": "恶意服务端返回 11MB 超大响应体",
+      "verdict": "PASS",
+      "detail": "超限明确报错=True；输出：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>已将 /tmp/tchat-sec-cfg-teha6n_z/manual.json 权限收紧为 0600<LF>警告：上级目录 /tmp "
+    },
+    {
+      "id": "C7-30MB",
+      "title": "恶意服务端返回 30MB 超大响应体",
+      "verdict": "PASS",
+      "detail": "超限明确报错=True；输出：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>已将 /tmp/tchat-sec-cfg-j0vlxqqt/manual.json 权限收紧为 0600<LF>警告：上级目录 /tmp "
+    },
+    {
+      "id": "C8a",
+      "title": "request_params 注入保留字段 model/messages",
+      "verdict": "PASS",
+      "detail": "出站请求数=0（应为 0）；拒绝原因含'保留字段'=True（排除授权门混淆）"
+    },
+    {
+      "id": "C8b",
+      "title": "保留字段大小写变体（Model）无覆盖效果",
+      "verdict": "INFO",
+      "detail": "发出请求=True；请求体同时含 Model（变体）=True 与小写 model 保持原值=True；JSON 键区分大小写，服务端以小写 model 为准，无覆盖效果（线级验证）"
+    },
+    {
+      "id": "C8c",
+      "title": "能力未知参数默认拒绝（发送前拦截）",
+      "verdict": "PASS",
+      "detail": "出站请求数=0（应为 0）；拒绝原因含'能力未知'=True（排除授权门混淆）"
+    },
+    {
+      "id": "C8d",
+      "title": "已确认参数的危险取值直通服务端（F8 范围，保持信息记录）",
+      "verdict": "WARN",
+      "detail": "max_tokens=-5，temperature=42；取值合法性由服务端兜底"
+    },
+    {
+      "id": "C9-大写 scheme",
+      "title": "base_url=HTTP://127.0.0.1:36411",
+      "verdict": "PASS",
+      "detail": "mock 收到请求=True（预期 True）；输出：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>已将 /tmp/tchat-sec-cfg-ffytp2yg/manual.json 权限收紧为 0"
+    },
+    {
+      "id": "C9-大写 host",
+      "title": "base_url=http://LOCALHOST:36131",
+      "verdict": "PASS",
+      "detail": "mock 收到请求=True（预期 True）；输出：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>已将 /tmp/tchat-sec-cfg-80dx1ega/manual.json 权限收紧为 0"
+    },
+    {
+      "id": "C9-userinfo 伪装",
+      "title": "base_url=http://127.0.0.1@evil.example:42171",
+      "verdict": "PASS",
+      "detail": "mock 收到请求=False（预期 False）；输出：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>已将 /tmp/tchat-sec-cfg-ynam72r6/manual.json 权限收紧为 0"
+    },
+    {
+      "id": "C9-前缀伪装域名",
+      "title": "base_url=http://localhost.evil.example:34353",
+      "verdict": "PASS",
+      "detail": "mock 收到请求=False（预期 False）；输出：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>已将 /tmp/tchat-sec-cfg-fz4di880/manual.json 权限收紧为 0"
+    },
+    {
+      "id": "C9-十进制 IP 等价 127.0.0.1",
+      "title": "base_url=http://2130706433:39597",
+      "verdict": "PASS",
+      "detail": "mock 收到请求=True（预期 True）；输出：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>已将 /tmp/tchat-sec-cfg-llamw_0z/manual.json 权限收紧为 0"
+    },
+    {
+      "id": "C9-IPv6 本机",
+      "title": "base_url=http://[::1]:45607",
+      "verdict": "PASS",
+      "detail": "mock 收到请求=False（预期 True）；输出：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>已将 /tmp/tchat-sec-cfg-4b0501fv/manual.json 权限收紧为 0"
+    },
+    {
+      "id": "C9-file 协议",
+      "title": "base_url=file:///etc/passwd",
+      "verdict": "PASS",
+      "detail": "mock 收到请求=False（预期 False）；输出：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>已将 /tmp/tchat-sec-cfg-klt2zza_/manual.json 权限收紧为 0"
+    },
+    {
+      "id": "C9-https 任意主机（无白名单）",
+      "title": "base_url=https://127.0.0.1:44985",
+      "verdict": "PASS",
+      "detail": "mock 收到请求=False（预期 True）；输出：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>已将 /tmp/tchat-sec-cfg-ouyheefz/manual.json 权限收紧为 0"
+    },
+    {
+      "id": "C10",
+      "title": "密钥含 CRLF 试图进行 HTTP 头注入",
+      "verdict": "PASS",
+      "detail": "出站请求数=0（应为 0）；拒绝原因含'换行或控制字符'=True（确认由密钥头安全检查拦截而非授权门）；头注入=False"
+    },
+    {
+      "id": "C11",
+      "title": "密钥为空：明确报错且不发包",
+      "verdict": "PASS",
+      "detail": "出站请求数=0；输出：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>已将 /tmp/tchat-sec-cfg-0skpt3k4/manual.json 权限收紧为 0600<LF>警告：上级目录 /tmp "
+    },
+    {
+      "id": "C11b",
+      "title": "密钥未设置：报缺失原因且不发包",
+      "verdict": "PASS",
+      "detail": "出站请求数=0；输出：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>已将 /tmp/tchat-sec-cfg-qeqio25i/manual.json 权限收紧为 0600<LF>警告：上级目录 /tmp "
+    },
+    {
+      "id": "C12",
+      "title": "公共目录：正式路径拒绝明文 http（开关失效）且投毒数据不入库",
+      "verdict": "PASS",
+      "detail": "两种场景均拒绝（提示 HTTPS）=True；明文目录未被访问=True；恶意字段未写入 auto_catalog.json=True；输出一：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>已将 /tmp/tchat-sec-cfg-60k_6_rg｜输出二：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>========================"
+    },
+    {
+      "id": "C13",
+      "title": "凭证明文落盘与文件权限（启动审计收紧）",
+      "verdict": "PASS",
+      "detail": "运行前 {'.env': '-rw-------', 'config/manual.json': '-rw-------'}；运行后 {'.env': '-rw-------', 'config/manual.json': '-rw-------'}；.env 已收紧为 0600=True"
+    },
+    {
+      "id": "C15",
+      "title": "5MB 单行输入无客户端限制直发服务端（F9 范围）",
+      "verdict": "INFO",
+      "detail": "出站请求体大小=5242948 字节；资源消耗由服务端限流兜底"
+    },
+    {
+      "id": "C16",
+      "title": "非法 UTF-8 输入不 panic、U+FFFD 不进入请求体",
+      "verdict": "PASS",
+      "detail": "退出码=0；请求体含 U+FFFD=False"
+    },
+    {
+      "id": "N1",
+      "title": "正常对话与模型切换",
+      "verdict": "OK",
+      "detail": "对话回复正常=True；切换后请求 model=deepseek-v4-pro=True"
+    },
+    {
+      "id": "N2",
+      "title": "合法自定义厂商/代理正常工作",
+      "verdict": "OK",
+      "detail": "请求体 model=proxy-model；输出：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>已将 /tmp/tchat-sec-cfg-5c1xnpc6"
+    },
+    {
+      "id": "N3",
+      "title": "目录刷新正常路径（厂商查询成功，公共同步按正式策略拒绝明文源）",
+      "verdict": "OK",
+      "detail": "厂商查询成功且名单替换=True；公共同步失败被如实报告且旧基础资料保留=True；输出：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>已将 /tmp/tchat-sec-cfg-bxja_dc_/manual.json 权限收紧为 0600<LF>警告：上级目录 /tmp 对其他用户可写，config 可能被整体替换；未自动修改，建议手动收紧<LF>公共目录同步失败，沿用基础资料：公共目录来"
+    },
+    {
+      "id": "N4",
+      "title": "PTY 交互授权询问→y 放行→授权持久化→后续免询问",
+      "verdict": "OK",
+      "detail": "交互询问出现=True；确认后对话成功=True；授权记录 0600 持久化=True；非交互复用授权成功=True"
+    }
+  ],
+  "leak_check": []
+}

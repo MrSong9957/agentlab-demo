@@ -1,0 +1,508 @@
+//! terminal-chat：终端循环 + 最小 LLM 对话与模型目录入口。
+//! 命令：/models 查看有效名单；/refresh 刷新目录；其余输入发送给所选模型。
+
+use terminal_chat::prompt::HistoryItem;
+use terminal_chat::{api, catalog, display, session, turn};
+use terminal_chat::tui_host;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
+use std::io::{self, IsTerminal, Write};
+use std::thread::sleep;
+use std::time::Duration;
+
+/// 显示边界：所有含不可信来源内容（模型回复、远端错误、目录元数据）的输出
+/// 统一经此过滤终端控制序列后打印。
+fn say(text: &str) {
+    println!("{}", display::sanitize_for_terminal(text));
+}
+
+/// 工具执行期的取消标志（N2b）：SIGINT 只置位，由 exec 轮询路径完成终止与回收。
+static TOOL_CANCEL: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_sigint(_sig: libc::c_int) {
+    TOOL_CANCEL.store(true, Ordering::SeqCst);
+}
+
+fn main() {
+    // .env 是环境变量的可选来源：启动时载入，已存在的变量不覆盖
+    catalog::load_dotenv_from(std::path::Path::new(".env"));
+
+    // 008-P3 交互入口切换：交互终端且 TERM 可用 → TUI（Owned 全屏）；否则行式原路径。
+    // TUI 模式跳过开场横幅（J10 显示层替代——母本 startup/empty state 接管首屏）。
+    if tui_host::tui_should_run() {
+        let agent = api::agent();
+        let mut autosave = session::Session::new(session::sessions_dir());
+        let host = std::sync::Arc::new(tui_host::TuiHost::new(agent.clone(), {
+            let mut s = session::Session::new(session::sessions_dir());
+            std::mem::swap(&mut s, &mut autosave);
+            autosave
+        }));
+        let mut rl = DefaultEditor::new().expect("初始化行编辑器失败");
+        // F7 权限审计：与行式同源同参（内容/脱敏/收紧行为不变）；置于授权前＝
+        // 行式"审计→读配置"顺序（0000 权限等角落先自愈再读，独立复审 P2-4）；
+        // TUI 以启动通知 cell 展示（008-REVIEW 独立审查 P2-7）
+        let startup_notices = catalog::audit_file_permissions(
+            Some(std::path::Path::new(".env")),
+            &catalog::config_dir(),
+        );
+        // 启动期 origin 授权（raw mode 之前的普通终端交互）
+        if let Err(e) = host.authorize_startup_origin(&mut |q| prompt_y_n(&mut rl, q)) {
+            println!("错误：{e}");
+            std::process::exit(1);
+        }
+        let exit = run_tui(host.clone(), startup_notices);
+        // 008：退出先取消仍在运行的 turn（006 N2b 语义：置标志→工具进程组终止→
+        // turn 迅速返回释放 history）——避免下方排空阻塞至工具超时
+        //（008-REVIEW 独立审查 P2-4）
+        host.set_cancel(true);
+        // 007：退出排空——与行式路径同契约（TUI 内 on_history 写失败的滞留待写段
+        // 在退出前补写；008-REVIEW 独立审查 P0-2）
+        if let Err(e) = host.flush_final_session() {
+            say(&format!("错误：会话退出排空失败：{e}"));
+        }
+        // 终端恢复后打印（001 契约）
+        println!("再见!");
+        std::process::exit(match exit {
+            Ok(_) => 0,
+            Err(_) => 1,
+        });
+    }
+
+    banner();
+
+    // 权限审计（F7）：.env/配置文件收紧、上级目录可写告警；只读元数据，不含秘密值
+    for line in catalog::audit_file_permissions(Some(std::path::Path::new(".env")), &catalog::config_dir()) {
+        say(&line);
+    }
+
+    let agent = api::agent();
+    let mut rl = DefaultEditor::new().expect("初始化行编辑器失败");
+    // 006：会话历史（内存态）；007：默认自动追加落盘，/resume 恢复继续
+    let mut history: Vec<HistoryItem> = Vec::new();
+    let mut autosave = session::Session::new(session::sessions_dir());
+    // 013-M7：threads 登记推进器（跨轮保持缓存库连接；enabled=false 零副作用）
+    let mut registrar = terminal_chat::memory::runner::ThreadRegistrar::default();
+
+    loop {
+        match rl.readline("你> ") {
+            Ok(line) => {
+                // 非法字节会变成替换符 \u{FFFD}，过滤掉它，保证处理干净无乱码
+                let input: String = line.chars().filter(|&c| c != '\u{FFFD}').collect();
+                let input = input.trim();
+
+                if !input.is_empty() {
+                    // 加入内存历史,按上键可回溯
+                    let _ = rl.add_history_entry(input);
+                }
+
+                if input == "exit" {
+                    break;
+                }
+
+                // 空输入不打印空行,直接继续循环
+                if !input.is_empty() {
+                    handle_input(&agent, &mut rl, input, &mut history, &mut autosave, &mut registrar);
+                }
+            }
+            // Ctrl+C:打断当前输入,直接退出
+            Err(ReadlineError::Interrupted) => break,
+            // Ctrl+D / EOF:正常退出
+            Err(ReadlineError::Eof) => break,
+            // 其他读取错误(如管道输入含非法 UTF-8):不 panic,按退出处理
+            Err(_) => break,
+        }
+    }
+
+    // 007：退出排空——主循环退出后、进程结束前补写一次；成功静默，失败明确报错
+    if let Err(e) = autosave.flush_final(&history) {
+        say(&format!("错误：会话退出排空失败：{e}"));
+    }
+    // 结束提示:exit / Ctrl+C / Ctrl+D 都会走到这里
+    println!("再见!");
+}
+
+/// 008-P3：组装驱动钩子并运行 TUI。
+fn run_tui(
+    host: std::sync::Arc<tui_host::TuiHost>,
+    startup_notices: Vec<String>,
+) -> Result<(), String> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    rt.block_on(async move {
+        let host_for_turn = host.clone();
+        let host_for_cmd = host.clone();
+        let host_cancel = host.clone();
+        let hooks = tchat_tui::chat_driver::DriverHooks {
+            spawn_turn: Box::new(move |input, tx| host_for_turn.spawn_turn(input, tx)),
+            run_command: Box::new(move |full| host_for_cmd.run_command(full)),
+            set_cancel_requested: Box::new(move |requested| host_cancel.set_cancel(requested)),
+            startup_notices,
+        };
+        let result = tchat_tui::chat_driver::run_interactive(hooks).await;
+        // 008-A5：终端恢复（母本语义：退出时离开备用屏＋禁用 raw mode/键盘增强/焦点）
+        if let Err(err) = tchat_tui::tui::restore_after_exit() {
+            eprintln!("警告：终端模式恢复失败：{err}");
+        }
+        result.map(|_| ()).map_err(|e| e.to_string())
+    })
+}
+
+fn banner() {
+    // 开场动画:转圈约 0.6s 后打印欢迎横幅;输出接管道(非终端)时跳过动画帧
+    let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    if io::stdout().is_terminal() {
+        for frame in frames {
+            print!("\r启动中 {frame}");
+            let _ = io::stdout().flush();
+            sleep(Duration::from_millis(60));
+        }
+        println!();
+    }
+    println!("==============================");
+    println!("  欢迎使用 Terminal Chat!");
+    println!("  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出");
+    println!("==============================");
+}
+
+/// 交互确认：仅接受 y/yes，其他输入（含读取错误）一律视为拒绝。
+fn prompt_y_n(rl: &mut DefaultEditor, question: &str) -> bool {
+    match rl.readline(question) {
+        Ok(line) => matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
+        Err(_) => false,
+    }
+}
+
+fn handle_input(
+    agent: &ureq::Agent,
+    rl: &mut DefaultEditor,
+    input: &str,
+    history: &mut Vec<HistoryItem>,
+    autosave: &mut session::Session,
+    registrar: &mut terminal_chat::memory::runner::ThreadRegistrar,
+) {
+    if let Some(rest) = input.strip_prefix('/') {
+        if let Some(arg) = rest.strip_prefix("save") {
+            if arg.is_empty() || arg.starts_with(char::is_whitespace) {
+                cmd_save(rl, arg, history);
+                return;
+            }
+        }
+        if let Some(arg) = rest.strip_prefix("resume") {
+            if arg.is_empty() || arg.starts_with(char::is_whitespace) {
+                cmd_resume(rl, arg, history, autosave);
+                return;
+            }
+        }
+        if let Some(arg) = rest.strip_prefix("memory-reset") {
+            if arg.is_empty() || arg.starts_with(char::is_whitespace) {
+                say(&terminal_chat::memory::runner::memory_reset(
+                    &catalog::user_dir(),
+                    arg,
+                ));
+                return;
+            }
+        }
+        match rest.trim() {
+            "models" => cmd_models(),
+            "refresh" => cmd_refresh(agent, rl),
+            "sessions" => cmd_sessions(),
+            "memory-status" => say(&terminal_chat::memory::runner::memory_status_text(
+                &catalog::user_dir(),
+            )),
+            other => say(&format!(
+                "未知命令 /{other}，可用：/models、/refresh、/save <名称>、/resume [名称]、/sessions、/memory-status、/memory-reset confirm"
+            )),
+        }
+        return;
+    }
+    cmd_chat(agent, rl, input, history, autosave, registrar);
+}
+
+/// `/save <名称>`：当前全部历史整体快照到 sessions/<名称>.jsonl（原子替换）。
+fn cmd_save(rl: &mut DefaultEditor, arg: &str, history: &[HistoryItem]) {
+    let name = arg.trim();
+    if name.is_empty() {
+        say("用法：/save <名称>（名称为 1–64 个字母、数字、.、_、-，且不以 auto- 开头）");
+        return;
+    }
+    let dir = session::sessions_dir();
+    if let Err(e) = session::validate_snapshot_name(name) {
+        say(&format!("错误：{e}"));
+        return;
+    }
+    // 已存在→交互确认覆盖；非交互模式拒绝覆盖（新名称不受限）
+    if dir.join(format!("{name}.jsonl")).exists() {
+        if !io::stdin().is_terminal() {
+            say("错误：非交互模式下拒绝覆盖已有快照");
+            return;
+        }
+        if !prompt_y_n(rl, &format!("快照 {name} 已存在，覆盖？")) {
+            say("已取消保存");
+            return;
+        }
+    }
+    match session::save_snapshot(&dir, name, history) {
+        Ok(n) => say(&format!("已保存快照 {name}（{n} 条记录）")),
+        Err(e) => say(&format!("错误：{e}")),
+    }
+}
+
+/// `/resume [名称]`：无参＝最近 auto 会话；有名＝指定会话（auto 续写或快照只读）。
+fn cmd_resume(
+    rl: &mut DefaultEditor,
+    arg: &str,
+    history: &mut Vec<HistoryItem>,
+    autosave: &mut session::Session,
+) {
+    let name = arg.trim();
+    let target = if name.is_empty() { None } else { Some(name) };
+    // 当前内存历史非空：交互 y 确认丢弃（含续写目标切换）；非交互一律拒绝
+    if !history.is_empty() {
+        if !io::stdin().is_terminal() {
+            say("错误：非交互模式下恢复会话要求当前历史为空（拒绝丢弃）");
+            return;
+        }
+        if !prompt_y_n(rl, &format!("恢复会话将丢弃当前 {} 条历史记录，继续？", history.len())) {
+            say("已取消恢复");
+            return;
+        }
+        // 丢弃前排空旧会话待写段：落盘记录集合须与内存历史一致（§1）；
+        // 排空失败中止恢复，旧记录保留在内存等待补写，不静默丢失
+        if let Err(e) = autosave.flush_final(history) {
+            say(&format!("错误：切换会话前旧会话排空失败，已中止恢复：{e}"));
+            return;
+        }
+    }
+    match autosave.resume(target) {
+        Ok(info) => {
+            if info.degraded {
+                say("该会话正被另一进程编辑，已只读装载；本运行的新记录将写入新的自动会话文件");
+            }
+            say(&info.loaded.summary());
+            *history = info.loaded.history;
+        }
+        Err(e) => say(&format!("错误：{e}")),
+    }
+}
+
+/// `/sessions`：列出会话名称＋文件字节数（readdir＋stat，不打开正文）。
+fn cmd_sessions() {
+    let list = session::list_sessions(&session::sessions_dir());
+    if list.is_empty() {
+        say("（暂无会话）");
+        return;
+    }
+    for (name, bytes) in list {
+        say(&format!("{name}  {bytes} 字节"));
+    }
+}
+
+fn build_dict() -> Option<catalog::FinalDict> {
+    match catalog::build_final() {
+        Ok(d) => Some(d),
+        Err(e) => {
+            say(&format!("错误：{e}"));
+            None
+        }
+    }
+}
+
+fn cmd_chat(
+    agent: &ureq::Agent,
+    rl: &mut DefaultEditor,
+    input: &str,
+    history: &mut Vec<HistoryItem>,
+    autosave: &mut session::Session,
+    registrar: &mut terminal_chat::memory::runner::ThreadRegistrar,
+) {
+    let Some(dict) = build_dict() else { return };
+    // 调用开始：route 返回的快照固定本次使用的配置与凭证，之后的刷新不影响本次调用
+    match catalog::route(&dict) {
+        Ok((prov, cred, model)) => {
+            // F1：凭证与已授权地址绑定；新增/变更地址需显式授权，非交互模式直接拒绝
+            let interactive = io::stdin().is_terminal();
+            let gate = catalog::origin_of(&prov.conn.base_url).and_then(|origin| {
+                catalog::ensure_origin_authorized(
+                    &origin,
+                    &cred.name,
+                    &catalog::fingerprint(&cred.value),
+                    interactive,
+                    &mut |q| prompt_y_n(rl, q),
+                )
+            });
+            match gate {
+                Ok(()) => {
+                    // 013-M7：记忆配置每轮装载（manual 段；无段＝默认关闭）。
+                    let mem_config = terminal_chat::memory::runner::load_memories_config();
+                    let user_dir = catalog::user_dir();
+                    // 013-M7 D2：带输入新轮已通过 route/origin 门＝成功启动，触发一次
+                    // 后台管线（enabled gate 在 runner 内——关闭态零副作用）。主轮成败
+                    // 不影响已启动的管线；进程退出不等待（批准边界）。
+                    terminal_chat::memory::runner::spawn_memory_pipeline(
+                        &user_dir,
+                        &mem_config,
+                        autosave.current_target_stem(),
+                        terminal_chat::memory::runner::ModelSend {
+                            conn: prov.conn.clone(),
+                            key: cred.value.clone(),
+                            model: model.clone(),
+                            agent: agent.clone(),
+                        },
+                    );
+                    // 006：工具调用循环——组装→请求→串行执行→结果回传→再请求
+                    // N2b：仅工具轮期间接管 SIGINT（只置取消标志），轮结束恢复默认——
+                    // 001 的动画/输入提示符 Ctrl+C 语义保持不变
+                    let conn = &prov.conn;
+                    let key = &cred.value;
+                    let mut sender =
+                        |body: &serde_json::Value| api::chat_with_body(conn, key, &model, body, agent);
+                    // 012：工具活动结构化事件——行式路径保持历史输出逐字节不变
+                    //（ToolBegin 打印同一活动行；ToolEnd 仅落史不打印，与 006 一致）
+                    let mut notify = |n: turn::TurnNotify| match n {
+                        turn::TurnNotify::Info(line) => say(&line),
+                        turn::TurnNotify::ToolBegin { id, name, .. } => {
+                            say(&turn::tool_activity_line(&name, &id));
+                        }
+                        turn::TurnNotify::ToolEnd { .. } => {}
+                    };
+                    // 013-M7：开启态以 UserWithMemory 接入 M6 注入（轮首读取一次、
+                    // 轮内复用、不入史——读取与 None 原样语义由 turn 层承接）；关闭态
+                    // 保持默认 User（既有行为逐字节不变）。
+                    let mem_root = terminal_chat::memory::runner::memories_root(&user_dir);
+                    let mode = if mem_config.enabled {
+                        turn::ToolMode::UserWithMemory {
+                            root: &mem_root,
+                            config: &mem_config,
+                        }
+                    } else {
+                        turn::ToolMode::User
+                    };
+                    unsafe {
+                        libc::signal(libc::SIGINT, on_sigint as extern "C" fn(libc::c_int) as libc::sighandler_t);
+                    }
+                    // 015：用户轮上下文来源（每轮解析：全局规则目录、cwd、SHELL、时钟）
+                    let context_sources = terminal_chat::context::ContextSources::from_env();
+                    let outcome = turn::run_user_turn_with_context(
+                        history,
+                        input,
+                        &mut sender,
+                        &mut notify,
+                        Some(&TOOL_CANCEL),
+                        // 007：每个入史点同步进入待写段并立即尝试提交（失败只提示一次）
+                        &mut |h: &[HistoryItem]| {
+                            if let Some(msg) = autosave.on_history(h) {
+                                say(&msg);
+                            }
+                            // 013-M7：threads 登记——仅 (stem, durable_len) 变化时推进
+                            //（未成功持久化的数据不登记为已更新版本）。
+                            registrar.note_persisted(&user_dir, &mem_config, autosave);
+                        },
+                        mode,
+                        &context_sources,
+                    );
+                    unsafe {
+                        libc::signal(libc::SIGINT, libc::SIG_DFL);
+                    }
+                    match outcome {
+                        Ok(reply) => {
+                            say(&format!("Agent：{reply}"));
+                            // 013-M8：用户轮完成位点——引用反馈 best-effort
+                            //（关闭态/解析/开库/计数失败均静默，不打断回复）。
+                            terminal_chat::memory::feedback::after_user_turn(
+                                &user_dir,
+                                &mem_config,
+                                &reply,
+                            );
+                        }
+                        Err(e) => say(&format!("错误：{e}")),
+                    }
+                }
+                Err(e) => say(&format!("错误：{e}")),
+            }
+        }
+        Err(e) => say(&format!("错误：{e}")),
+    }
+}
+
+fn cmd_models() {
+    let Some(dict) = build_dict() else { return };
+    let Some(pid) = dict.selected_provider.clone() else {
+        say("错误：手动配置未设置 selected_provider");
+        return;
+    };
+    let Some(prov) = dict.providers.get(&pid) else {
+        say(&format!("错误：selected_provider {pid} 不在最终字典中"));
+        return;
+    };
+    say(&format!(
+        "厂商 {pid}（基础地址 {}）有效模型：",
+        prov.conn.base_url
+    ));
+    if prov.models.is_empty() {
+        say("  （名单为空）");
+        return;
+    }
+    for (id, m) in &prov.models {
+        let name = m
+            .display_name
+            .clone()
+            .map(|n| format!("（{n}）"))
+            .unwrap_or_default();
+        let flag = if m.disabled == Some(true) { "【已禁用】" } else { "" };
+        let caps = match (m.context_length, m.max_output) {
+            (Some(c), Some(o)) => format!("，上下文 {c}，输出上限 {o}"),
+            (Some(c), None) => format!("，上下文 {c}"),
+            (None, Some(o)) => format!("，输出上限 {o}"),
+            (None, None) => "，能力未知".into(),
+        };
+        let sel = if dict.selected_model.as_deref() == Some(id.as_str()) { " *" } else { "" };
+        say(&format!("  {id}{sel}{name}{flag}{caps}"));
+    }
+}
+
+fn cmd_refresh(agent: &ureq::Agent, rl: &mut DefaultEditor) {
+    let interactive = io::stdin().is_terminal();
+    // 两个授权回调共用一个行编辑器：经 RefCell 顺序借用
+    let rl_cell = std::cell::RefCell::new(&mut *rl);
+    match catalog::refresh(
+        agent,
+        &mut |origin, name, fp| {
+            catalog::ensure_origin_authorized(origin, name, fp, interactive, &mut |q| {
+                prompt_y_n(&mut rl_cell.borrow_mut(), q)
+            })
+        },
+        &mut |origin| {
+            catalog::ensure_catalog_origin_authorized(origin, interactive, &mut |q| {
+                prompt_y_n(&mut rl_cell.borrow_mut(), q)
+            })
+        },
+        None, // 正式路径：不注入目录地址，一律强制 HTTPS
+    ) {
+        Ok(report) => {
+            match &report.public_error {
+                Some(e) => say(&format!("公共目录同步失败，沿用基础资料：{e}")),
+                None if report.public_updated.is_empty() => say("公共目录：无更新"),
+                None => say(&format!(
+                    "公共目录已更新基础资料：{}",
+                    report.public_updated.join("、")
+                )),
+            }
+            for (id, n) in &report.queried {
+                say(&format!("{id}：查询到 {n} 个模型，名单已替换"));
+            }
+            for (id, reason) in &report.failed {
+                say(&format!("{id}：刷新失败（{reason}），保留身份匹配的旧名单"));
+            }
+            for (id, reason) in &report.skipped {
+                say(&format!("{id}：跳过查询（{reason}）"));
+            }
+            say("刷新完成。所选模型不变，正在执行的请求不受影响。");
+        }
+        Err(e) => say(&format!("错误：{e}")),
+    }
+}

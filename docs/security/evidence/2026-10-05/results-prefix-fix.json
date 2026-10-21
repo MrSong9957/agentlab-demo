@@ -1,0 +1,11 @@
+{
+  "results": [
+    {
+      "id": "C12",
+      "title": "公共目录同步：明文 http 可用 + 恶意字段写入本地目录并回显（二次注入）",
+      "verdict": "WARN",
+      "detail": "明文 http 拉取公共目录=True；恶意字段写入 auto_catalog.json=True；/models 回显转义序列=False；输出：==============================<LF>  欢迎使用 Terminal Chat!<LF>  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出<LF>==============================<LF>警告：上级目录 /tmp 对其他用户可写，config 可能被整体替换；未自动修改，建议手动收紧<LF>公共目录已更新基础资料：deepseek<LF>deepseek：刷新失败（凭证 DEEPSEEK_API_KEY 未授权发送到 http://127.0."
+    }
+  ],
+  "leak_check": []
+}

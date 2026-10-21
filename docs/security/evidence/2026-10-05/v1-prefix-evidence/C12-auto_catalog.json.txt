@@ -1,0 +1,37 @@
+{
+  "updated_at": 1791198552,
+  "providers": {
+    "deepseek": {
+      "base": {
+        "source": "public",
+        "updated_at": 1791198552,
+        "base_url": "https://api.deepseek.com",
+        "protocol": "openai-chat",
+        "key_ref": "env:DEEPSEEK_API_KEY",
+        "models": {
+          "deepseek-flash": {
+            "id": "deepseek-flash",
+            "display_name": "DeepSeek 官方\u001b]0;POISONED\u0007模型",
+            "context_length": 999999999999,
+            "max_output": 1
+          },
+          "deepseek-v4-pro": {
+            "id": "deepseek-v4-pro",
+            "display_name": "DeepSeek-V4-Pro",
+            "context_length": 1048576,
+            "max_output": 393216
+          }
+        }
+      }
+    },
+    "openai": {
+      "base": {
+        "source": "builtin",
+        "updated_at": 0,
+        "base_url": "https://api.openai.com/v1",
+        "protocol": "openai-chat",
+        "key_ref": "env:OPENAI_API_KEY"
+      }
+    }
+  }
+}

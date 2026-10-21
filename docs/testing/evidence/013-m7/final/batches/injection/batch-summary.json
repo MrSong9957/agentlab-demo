@@ -1,0 +1,80 @@
+{
+  "batch_id": "M7-INJ-CFIX-2026-10-19",
+  "phase": "injection",
+  "root": "/tmp/013-m7-provider-e9f9808b",
+  "status": "passed",
+  "HTTP_attempts": 1,
+  "cumulative_attempts": 8,
+  "closed": true,
+  "unused_allowance_sealed": 0,
+  "result": {
+    "phase": "injection",
+    "passed": true,
+    "reply": {
+      "Ok": "环境代号：COBALT-17"
+    },
+    "unique_system": true,
+    "history_records": 2,
+    "persisted_lines": 3,
+    "persist_errors": [],
+    "flush": {
+      "Ok": null
+    },
+    "memory_block_not_persisted": true,
+    "role_semantic_equivalence": "not established",
+    "fixture": "independent synthetic summary",
+    "background_pipeline_spawns": 0,
+    "attempts_at_end": {
+      "attempts": 8,
+      "counts": {
+        "phase1": 1,
+        "phase2": 6,
+        "injection": 1
+      },
+      "active_phase": "injection",
+      "closed": false,
+      "batch_id": "M7-INJ-CFIX-2026-10-19",
+      "batch_limit": 1,
+      "ledger_kind": "authorized_live",
+      "cumulative_seed_from_closed_predecessors": {
+        "phase1": 1,
+        "phase2": 6,
+        "injection": 0
+      },
+      "counter_contract": "attempts is cumulative; counts[active_phase] is this independent batch only"
+    }
+  },
+  "process_exit": 0,
+  "timed_out": false,
+  "elapsed_ms": 1145,
+  "responses": [
+    {
+      "event": "response",
+      "phase": "injection",
+      "request_index": 1,
+      "status": 200,
+      "elapsed_ms": 1105,
+      "response_json_bytes": 1054,
+      "finish_reason": "stop",
+      "response_id": "dd3f47f9-e347-4126-9105-b630af8fa20c",
+      "usage": {
+        "prompt_tokens": 5949,
+        "completion_tokens": 115,
+        "total_tokens": 6064,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 106
+        },
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 5949
+      },
+      "error": null
+    }
+  ],
+  "reason": "passed",
+  "internal_HTTP_retries": 0,
+  "background_pipeline_spawns": 0,
+  "cost": "unknown"
+}

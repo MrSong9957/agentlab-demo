@@ -1,0 +1,18 @@
+{
+  "batch_id": "M7-P1V2-2026-10-19",
+  "attempts": 0,
+  "counts": {
+    "phase1": 0,
+    "phase2": 0,
+    "injection": 0
+  },
+  "active_phase": null,
+  "closed": true,
+  "batch_limit": 1,
+  "batch_attempts": 0,
+  "three_batch_cumulative_attempts": 0,
+  "unused_allowance_sealed": 1,
+  "closure_reason": "common offline preflight failed before this batch started",
+  "further_batch_permitted": false,
+  "no_allowance_transfer": true
+}

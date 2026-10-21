@@ -1,0 +1,79 @@
+# agentlab-demo 开发容器
+# 环境变量决定程序往哪里写；volume 决定容器重建后数据还在不在。
+name: agentlab-demo
+
+services:
+  dev:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    image: agentlab-demo-dev:latest
+    container_name: agentlab-demo-dev
+    user: dev
+    working_dir: /workspace
+    command: sleep infinity
+    # 交互式会话分配 TTY；TERM 给缺省值（exec 会话自动继承），
+    # 需要与本机终端严格一致时可在 exec 加 -e TERM="$TERM" 覆盖
+    stdin_open: true
+    tty: true
+    environment:
+      TERM: xterm-256color
+      # 容器程序统一走 Windows 宿主机 FlClash（仅系统代理，混合端口 7890）。
+      # host.docker.internal 由 Docker Desktop 解析到宿主机（IPv4 192.168.65.254）。
+      # 2026-10-18 验证：CONNECT 隧道建立、api.github.com 返回 HTTP 200。
+      # 重建容器（up -d）后生效；当前容器的存量 shell 需重建或见 ~/.bashrc 导出块。
+      HTTP_PROXY: http://host.docker.internal:7890
+      HTTPS_PROXY: http://host.docker.internal:7890
+      http_proxy: http://host.docker.internal:7890
+      https_proxy: http://host.docker.internal:7890
+      NO_PROXY: localhost,127.0.0.1,::1,host.docker.internal
+      no_proxy: localhost,127.0.0.1,::1,host.docker.internal
+      # Agent 配置目录（写入持久卷）
+      CLAUDE_CONFIG_DIR: /home/dev/.claude
+      CODEX_HOME: /home/dev/.codex
+      # 下载缓存（可清理，容器重建后仍在卷里）
+      npm_config_cache: /cache/npm
+      npm_config_store_dir: /cache/pnpm/store
+      npm_config_cache_dir: /cache/pnpm/cache
+      PLAYWRIGHT_BROWSERS_PATH: /cache/playwright
+      # Cargo（持久卷，不能整卷删除）
+      CARGO_HOME: /home/dev/.cargo
+      CARGO_TARGET_DIR: /workspace/target
+    volumes:
+      # 项目源码
+      - type: bind
+        source: ..
+        target: /workspace
+        bind:
+          create_host_path: false
+      # 共享知识库（Windows 只保留这一份）
+      - type: bind
+        source: D:/AgentLab/shared/Obsidian
+        target: /vault
+        read_only: false
+        bind:
+          create_host_path: false
+      # Agent 配置长期数据
+      - type: volume
+        source: zcode-home
+        target: /home/dev/.zcode
+      - type: volume
+        source: claude-home
+        target: /home/dev/.claude
+      - type: volume
+        source: codex-home
+        target: /home/dev/.codex
+      - type: volume
+        source: cargo-home
+        target: /home/dev/.cargo
+      # 可清理缓存
+      - type: volume
+        source: cache
+        target: /cache
+
+volumes:
+  zcode-home:
+  claude-home:
+  codex-home:
+  cargo-home:
+  cache:

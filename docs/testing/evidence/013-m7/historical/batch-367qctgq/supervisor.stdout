@@ -1,0 +1,3 @@
+{"event": "phase_started", "phase": "phase1", "cumulative_attempts": 0}
+{"event": "phase_finished", "phase": "phase1", "exit_code": 1, "timed_out": false, "elapsed_ms": 2889, "phase_attempts": 1, "cumulative_attempts": 1}
+{"all_passed": false, "HTTP_attempts": 1, "counts": {"phase1": 1, "phase2": 0, "injection": 0}, "unused_allowance": 9, "known_usage_subtotal": {"prompt_tokens": 6634, "completion_tokens": 287, "total_tokens": 6921}, "responses_with_unknown_usage": 0}

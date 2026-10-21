@@ -1,0 +1,3 @@
+{"event":"http_attempt","phase":"injection","phase_attempt":1,"cumulative_attempt":8,"request_bytes":25963,"endpoint":"https://api.deepseek.com/chat/completions","transport":"live"}
+{"event":"http_headers","status":200,"headers_elapsed_ms":1096,"transport":"live"}
+{"event":"response","phase":"injection","request_index":1,"status":200,"elapsed_ms":1105,"response_json_bytes":1054,"finish_reason":"stop","response_id":"dd3f47f9-e347-4126-9105-b630af8fa20c","usage":{"prompt_tokens":5949,"completion_tokens":115,"total_tokens":6064,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":106},"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":5949},"error":null}

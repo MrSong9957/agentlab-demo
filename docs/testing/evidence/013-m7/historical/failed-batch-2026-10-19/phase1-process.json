@@ -1,0 +1,7 @@
+{
+  "exit_code": 2,
+  "timed_out": false,
+  "elapsed_ms": 2,
+  "stdout": "",
+  "stderr": "batch scope rejected\n"
+}

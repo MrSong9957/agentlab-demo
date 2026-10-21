@@ -1,0 +1,9 @@
+[package]
+name = "codex-message-history"
+version = "0.1.0"
+edition = "2024"
+publish = false
+[lib]
+name = "codex_message_history"
+path = "src/lib.rs"
+doctest = false

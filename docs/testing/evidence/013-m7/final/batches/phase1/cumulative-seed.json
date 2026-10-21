@@ -1,0 +1,9 @@
+{
+  "closed_predecessor_counts": {
+    "phase1": 0,
+    "phase2": 0,
+    "injection": 0
+  },
+  "batch_start_cumulative": 0,
+  "no_allowance_transfer": true
+}

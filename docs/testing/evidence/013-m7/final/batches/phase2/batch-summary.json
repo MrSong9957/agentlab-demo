@@ -1,0 +1,212 @@
+{
+  "batch_id": "M7-P2-CFIX-2026-10-19",
+  "phase": "phase2",
+  "root": "/tmp/013-m7-provider-92b37a5e",
+  "status": "passed",
+  "HTTP_attempts": 6,
+  "cumulative_attempts": 7,
+  "closed": true,
+  "unused_allowance_sealed": 2,
+  "result": {
+    "phase": "phase2",
+    "passed": true,
+    "outcome": "Succeeded { sql_committed: true }",
+    "artifact_validation": {
+      "Ok": null
+    },
+    "tool_success_names": [
+      "mem_list",
+      "mem_read",
+      "mem_write"
+    ],
+    "selected_source_snapshot": true,
+    "git_baseline_clean": true,
+    "summary_first_line": "v1",
+    "MEMORY_bytes": 2591,
+    "summary_bytes": 2288,
+    "job": {
+      "kind": "memory_consolidate_global",
+      "job_key": "global",
+      "status": "done",
+      "retry_at": null,
+      "retry_remaining": 3,
+      "last_error": null,
+      "input_watermark": 1699974800,
+      "last_success_watermark": 1699974800
+    },
+    "fixture": "independent synthetic seed, not phase1 output",
+    "background_pipeline_spawns": 0,
+    "attempts_at_end": {
+      "attempts": 7,
+      "counts": {
+        "phase1": 1,
+        "phase2": 6,
+        "injection": 0
+      },
+      "active_phase": "phase2",
+      "closed": false,
+      "batch_id": "M7-P2-CFIX-2026-10-19",
+      "batch_limit": 8,
+      "ledger_kind": "authorized_live",
+      "cumulative_seed_from_closed_predecessors": {
+        "phase1": 1,
+        "phase2": 0,
+        "injection": 0
+      },
+      "counter_contract": "attempts is cumulative; counts[active_phase] is this independent batch only"
+    }
+  },
+  "process_exit": 0,
+  "timed_out": false,
+  "elapsed_ms": 20459,
+  "responses": [
+    {
+      "event": "response",
+      "phase": "phase2",
+      "request_index": 1,
+      "status": 200,
+      "elapsed_ms": 1086,
+      "response_json_bytes": 920,
+      "finish_reason": "tool_calls",
+      "response_id": "1def47b6-991c-49bf-8fed-97f943a48efb",
+      "usage": {
+        "prompt_tokens": 11876,
+        "completion_tokens": 83,
+        "total_tokens": 11959,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 11876
+      },
+      "error": null
+    },
+    {
+      "event": "response",
+      "phase": "phase2",
+      "request_index": 2,
+      "status": 200,
+      "elapsed_ms": 1192,
+      "response_json_bytes": 1117,
+      "finish_reason": "tool_calls",
+      "response_id": "994a0782-5a70-4756-b689-0e1a9fc53b8f",
+      "usage": {
+        "prompt_tokens": 12738,
+        "completion_tokens": 150,
+        "total_tokens": 12888,
+        "prompt_tokens_details": {
+          "cached_tokens": 11904
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 33
+        },
+        "prompt_cache_hit_tokens": 11904,
+        "prompt_cache_miss_tokens": 834
+      },
+      "error": null
+    },
+    {
+      "event": "response",
+      "phase": "phase2",
+      "request_index": 3,
+      "status": 200,
+      "elapsed_ms": 9310,
+      "response_json_bytes": 7991,
+      "finish_reason": "tool_calls",
+      "response_id": "e0f6cfc1-bc1f-4e85-b14b-ad5e8bcfdcd5",
+      "usage": {
+        "prompt_tokens": 13358,
+        "completion_tokens": 1840,
+        "total_tokens": 15198,
+        "prompt_tokens_details": {
+          "cached_tokens": 12800
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 1049
+        },
+        "prompt_cache_hit_tokens": 12800,
+        "prompt_cache_miss_tokens": 558
+      },
+      "error": null
+    },
+    {
+      "event": "response",
+      "phase": "phase2",
+      "request_index": 4,
+      "status": 200,
+      "elapsed_ms": 3638,
+      "response_json_bytes": 3133,
+      "finish_reason": "tool_calls",
+      "response_id": "4c9ed9b2-b53d-42a9-a300-33b7c137c19d",
+      "usage": {
+        "prompt_tokens": 15225,
+        "completion_tokens": 625,
+        "total_tokens": 15850,
+        "prompt_tokens_details": {
+          "cached_tokens": 14976
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 6
+        },
+        "prompt_cache_hit_tokens": 14976,
+        "prompt_cache_miss_tokens": 249
+      },
+      "error": null
+    },
+    {
+      "event": "response",
+      "phase": "phase2",
+      "request_index": 5,
+      "status": 200,
+      "elapsed_ms": 948,
+      "response_json_bytes": 699,
+      "finish_reason": "tool_calls",
+      "response_id": "6e2bd2bb-5014-4fa8-a04e-32ad53c01304",
+      "usage": {
+        "prompt_tokens": 15878,
+        "completion_tokens": 37,
+        "total_tokens": 15915,
+        "prompt_tokens_details": {
+          "cached_tokens": 15744
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_cache_hit_tokens": 15744,
+        "prompt_cache_miss_tokens": 134
+      },
+      "error": null
+    },
+    {
+      "event": "response",
+      "phase": "phase2",
+      "request_index": 6,
+      "status": 200,
+      "elapsed_ms": 3629,
+      "response_json_bytes": 3267,
+      "finish_reason": "stop",
+      "response_id": "6c024c9c-4fcc-4a46-b3bf-cc15178eedcf",
+      "usage": {
+        "prompt_tokens": 16015,
+        "completion_tokens": 685,
+        "total_tokens": 16700,
+        "prompt_tokens_details": {
+          "cached_tokens": 15872
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_cache_hit_tokens": 15872,
+        "prompt_cache_miss_tokens": 143
+      },
+      "error": null
+    }
+  ],
+  "reason": "passed",
+  "internal_HTTP_retries": 0,
+  "background_pipeline_spawns": 0,
+  "cost": "unknown"
+}

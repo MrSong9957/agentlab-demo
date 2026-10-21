@@ -1,0 +1,12 @@
+[package]
+name = "codex-models-manager"
+version = "0.1.0"
+edition = "2024"
+publish = false
+[lib]
+name = "codex_models_manager"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+serde_json = "1.0.151"

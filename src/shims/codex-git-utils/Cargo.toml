@@ -1,0 +1,9 @@
+[package]
+name = "codex-git-utils"
+version = "0.1.0"
+edition = "2024"
+publish = false
+[lib]
+name = "codex_git_utils"
+path = "src/lib.rs"
+doctest = false

@@ -1,0 +1,14 @@
+==============================
+  欢迎使用 Terminal Chat!
+  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出
+==============================
+已将 /tmp/tchat-sec-cfg-bfqalzn_/manual.json 权限收紧为 0600
+警告：上级目录 /tmp 对其他用户可写，config 可能被整体替换；未自动修改，建议手动收紧
+公共目录同步失败，沿用基础资料：公共目录本机 http 仅测试可用：需设置 TCHAT_PUBLIC_CATALOG_INSECURE_LOOPBACK=1
+deepseek：刷新失败（凭证 DEEPSEEK_API_KEY 未授权发送到 http://127.0.0.1:34369：非交互模式不做确认，已拒绝发送。可在交互模式运行确认，或预先在 /tmp/tchat-sec-user-mzy3qeuf/authorized-origins.json 写入授权记录），保留身份匹配的旧名单
+openai：跳过查询（环境变量 OPENAI_API_KEY 未设置（可在项目根目录 .env 中配置））
+刷新完成。所选模型不变，正在执行的请求不受影响。
+厂商 deepseek（基础地址 http://127.0.0.1:34369）有效模型：
+  deepseek-flash *（DeepSeek-V4.1-Flash），上下文 1048576，输出上限 393216
+  deepseek-v4-pro（DeepSeek-V4-Pro），上下文 1048576，输出上限 393216
+再见!

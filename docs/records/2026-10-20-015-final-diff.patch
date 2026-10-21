@@ -1,0 +1,2430 @@
+# 015 交付候选最终差异（基线 2d7be44 → 工作区终态，2026-10-20）
+# 第一部分：已跟踪文件差异（git diff，13 个）；第二部分：未跟踪新文件全文（5 个）
+
+diff --git a/docs/specs/005-minimal-prompt-assembly.md b/docs/specs/005-minimal-prompt-assembly.md
+index a4b69c1..d618514 100644
+--- a/docs/specs/005-minimal-prompt-assembly.md
++++ b/docs/specs/005-minimal-prompt-assembly.md
+@@ -40,7 +40,7 @@
+ 
+ 1. 剔除 `## Planning` 与 `## update_plan` 节——本地未提供该工具，用 Codex 自带 `without_update_plan_instructions`（它即为此场景设计）。
+ 2. `prompt.md` 中 apply_patch 旧示例 `{"command":["apply_patch","*** Begin Patch…"]}` 为 shell 包装形态，与本地 JSON 契约冲突；该行最小改写为 `{"patch":"*** Begin Patch…"}`（Codex 无现成处理器，属必要改写）。
+-3. AGENTS.md 注入声明最小修正：原文称根 AGENTS.md 内容"已随 developer 消息注入、无需重读"——本地不做任何注入，不得声称内容已注入；将该句最小修正为"需要时通过现有 `exec_command` 读取适用的 AGENTS.md 文件"。不新增自动发现或注入模块。
++3. AGENTS.md 注入声明最小修正：原文称根 AGENTS.md 内容"已随 developer 消息注入、无需重读"——本地不做任何注入，不得声称内容已注入；将该句最小修正为"需要时通过现有 `exec_command` 读取适用的 AGENTS.md 文件"。不新增自动发现或注入模块。（**修订注记 2026-10-20，已实施**：015 规格 [docs/specs/015-turn-context-injection.md](015-turn-context-injection.md) 已实现用户轮上下文注入，本适配随之反转——声明现为与其 §3-5 一致的新句 "The applicable AGENTS.md instructions and environment context are provided in a user message before the current input and don't need to be re-read."，嵌入母本与其余三项适配不变；005 其余契约不因 015 改变。）
+ 4. 其余提及 sandbox/审批升级等保留原文（措辞已限定"视运行配置而定"，不与白名单冲突，列为已知差异）。
+ 
+ **协议映射（Codex 结构 → Chat Completions，保持现有发送层；本地 `system` 首位属接口适配）**：Codex 将基础提示词作为 developer 消息加入 `input` 前部（见对照行）；本地适配为 `messages[0] = {role:"system", content:发送版提示词}`。`ResponseItem::Message` 文本项 → `{role, content:string}`（历史逐条、本轮置末位）。`ToolSpec::Function` → `{type:"function", function:{name, description, parameters}}`。`ToolSpec::Freeform`（apply_patch）→ 适配为 Function（唯一必填字符串 `patch`，004 契约）：为保持本地 JSON 工具契约，不增加 custom 工具支持。`Prompt` 其余字段（`parallel_tool_calls`、`output_schema` 等）不映射、不声明。
+diff --git a/src/app/src/lib.rs b/src/app/src/lib.rs
+index 500d4a3..ad53322 100644
+--- a/src/app/src/lib.rs
++++ b/src/app/src/lib.rs
+@@ -3,6 +3,7 @@
+ pub mod api;
+ pub mod apply_patch;
+ pub mod catalog;
++pub mod context;
+ pub mod display;
+ pub mod exec;
+ pub mod memory;
+diff --git a/src/app/src/main.rs b/src/app/src/main.rs
+index 3e1f8e2..8305df7 100755
+--- a/src/app/src/main.rs
++++ b/src/app/src/main.rs
+@@ -385,7 +385,9 @@ fn cmd_chat(
+                     unsafe {
+                         libc::signal(libc::SIGINT, on_sigint as extern "C" fn(libc::c_int) as libc::sighandler_t);
+                     }
+-                    let outcome = turn::run_tool_turn_with_mode(
++                    // 015：用户轮上下文来源（每轮解析：全局规则目录、cwd、SHELL、时钟）
++                    let context_sources = terminal_chat::context::ContextSources::from_env();
++                    let outcome = turn::run_user_turn_with_context(
+                         history,
+                         input,
+                         &mut sender,
+@@ -401,6 +403,7 @@ fn cmd_chat(
+                             registrar.note_persisted(&user_dir, &mem_config, autosave);
+                         },
+                         mode,
++                        &context_sources,
+                     );
+                     unsafe {
+                         libc::signal(libc::SIGINT, libc::SIG_DFL);
+diff --git a/src/app/src/memory/rollout_input.rs b/src/app/src/memory/rollout_input.rs
+index 7591d7f..78e9ab7 100644
+--- a/src/app/src/memory/rollout_input.rs
++++ b/src/app/src/memory/rollout_input.rs
+@@ -179,6 +179,11 @@ pub fn sanitize_history_item_for_memories(item: &HistoryItem) -> Option<HistoryI
+ fn is_memory_excluded_fragment(text: &str) -> bool {
+     matches_marked_fragment(text, "# AGENTS.md instructions", "</INSTRUCTIONS>")
+         || matches_marked_fragment(text, "<skill>", "</skill>")
++        // 015：用户轮上下文消息（AGENTS＋环境合并块，可带替换声明）——合并块
++        // 以 </environment_context> 结尾，不命中上文「以 </INSTRUCTIONS> 结尾」
++        // 的整条匹配；复用 015 同一识别器（剥声明→完整结构）剔除，
++        // 既有两类剔除行为保持不变。
++        || crate::context::context_body(text).is_some()
+ }
+ 
+ /// 上游 `matches_marked_fragment` 逐字移植：整条消息以起始标记开头、结束
+@@ -237,6 +242,33 @@ mod tests {
+         assert!(read_recent_rollout_items(&p).is_err(), "未知版本整拒");
+     }
+ 
++    /// 015（c9）：用户轮上下文消息（AGENTS＋环境合并块）自提炼输入剔除——
++    /// 首轮裸消息与带替换声明消息两种形态；既有 AGENTS-only/`<skill>` 剔除行为不变，
++    /// 相似开头但结构不完整的普通用户文本保留。
++    #[test]
++    fn context_injection_messages_excluded_and_legacy_rules_kept() {
++        // 015 真实格式样本（测试侧按规格 §1 独立构造）
++        let bare = "# AGENTS.md instructions for /w\n\n<INSTRUCTIONS>\n规则R\n</INSTRUCTIONS>\n\n<environment_context>\n  <cwd>/w</cwd>\n  <shell>/bin/sh</shell>\n  <current_date>2025-10-09</current_date>\n</environment_context>";
++        let declared = format!(
++            "The following context replaces the previously provided AGENTS.md instructions and environment context.\n\n{bare}"
++        );
++        let env_only = "<environment_context>\n  <cwd>/w</cwd>\n  <current_date>2025-01-01</current_date>\n</environment_context>";
++        for text in [bare, declared.as_str(), env_only] {
++            assert!(is_memory_excluded_fragment(text), "015 ctx 应剔除：{text}");
++            assert!(sanitize_history_item_for_memories(&user(text)).is_none());
++        }
++        // 既有行为不变：AGENTS-only（以 </INSTRUCTIONS> 结尾）与 <skill> 仍剔除
++        assert!(is_memory_excluded_fragment(
++            "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nA\n</INSTRUCTIONS>"
++        ));
++        assert!(is_memory_excluded_fragment("<skill>demo</skill>"));
++        // 相似开头但结构不完整：不剔除；普通对话原样保留
++        assert!(!is_memory_excluded_fragment("# AGENTS.md instructions for /w\n普通粘贴"));
++        assert!(!is_memory_excluded_fragment("<environment_context>普通粘贴"));
++        let kept = user("真实用户输入");
++        assert_eq!(sanitize_history_item_for_memories(&kept), Some(kept.clone()));
++    }
++
+     #[test]
+     fn keeps_source_order_and_handles_missing_trailing_newline() {
+         let t = Tmp::new("ord");
+diff --git a/src/app/src/prompt.rs b/src/app/src/prompt.rs
+index 0fde70e..c61bc2a 100644
+--- a/src/app/src/prompt.rs
++++ b/src/app/src/prompt.rs
+@@ -205,11 +205,15 @@ fn rewrite_apply_patch_example(text: &str) -> String {
+     text.replacen(old_arg, &new_arg, 1)
+ }
+ 
+-/// AGENTS.md 注入声明修正（005 §3 适配 3）：母本声称根 AGENTS.md 内容已随 developer
+-/// 消息注入；本地不做任何注入，改为需要时用现有 exec_command 读取适用文件。
++/// 015 §1 替换声明：内容变化后新上下文消息的首行（逐字节固定，后随空行）。
++pub const CONTEXT_REPLACEMENT_DECLARATION: &str = "The following context replaces the previously provided AGENTS.md instructions and environment context.";
++
++/// AGENTS.md 注入声明（005 §3 适配 3，015 反转）：母本声称内容已随 developer
++/// 消息注入；015 起本地在每个用户轮前注入一条 user 上下文消息（`context.rs`），
++/// 声明改为与事实一致——已由 user 消息提供、无需重读。
+ fn rewrite_agents_md_claim(text: &str) -> String {
+     let old = "The contents of the AGENTS.md file at the root of the repo and any directories from the CWD up to the root are included with the developer message and don't need to be re-read.";
+-    let new = "AGENTS.md contents are not injected automatically. When you need them, read the applicable AGENTS.md files with the existing exec_command tool.";
++    let new = "The applicable AGENTS.md instructions and environment context are provided in a user message before the current input and don't need to be re-read.";
+     assert_eq!(text.matches(old).count(), 1, "AGENTS.md 注入声明应恰出现一次");
+     text.replacen(old, new, 1)
+ }
+diff --git a/src/app/src/tui_host.rs b/src/app/src/tui_host.rs
+index dc54a0b..21af13a 100644
+--- a/src/app/src/tui_host.rs
++++ b/src/app/src/tui_host.rs
+@@ -265,7 +265,9 @@ impl TuiHost {
+             } else {
+                 turn::ToolMode::User
+             };
+-            let result = turn::run_tool_turn_with_mode(
++            // 015：用户轮上下文来源（轮线程内解析：全局规则目录、cwd、SHELL、时钟）
++            let context_sources = crate::context::ContextSources::from_env();
++            let result = turn::run_user_turn_with_context(
+                 &mut history.lock().unwrap(),
+                 &input,
+                 &mut sender,
+@@ -273,6 +275,7 @@ impl TuiHost {
+                 Some(&HOST_CANCEL),
+                 &mut on_record,
+                 mode,
++                &context_sources,
+             );
+             unsafe {
+                 libc::signal(libc::SIGINT, libc::SIG_DFL);
+@@ -510,10 +513,19 @@ fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
+     let mut out = Vec::new();
+     for item in history {
+         match item {
+-            HistoryItem::Text(m) => out.push(HostHistoryItem::Text {
+-                assistant: m.role == crate::prompt::HistoryRole::Assistant,
+-                content: m.content.clone(),
+-            }),
++            HistoryItem::Text(m) => {
++                // 015：自动上下文消息不作为真实用户发言展示（仅投影层过滤，
++                // 历史与请求面不变；识别与去重共用同一识别器）
++                if m.role == crate::prompt::HistoryRole::User
++                    && crate::context::context_body(&m.content).is_some()
++                {
++                    continue;
++                }
++                out.push(HostHistoryItem::Text {
++                    assistant: m.role == crate::prompt::HistoryRole::Assistant,
++                    content: m.content.clone(),
++                });
++            }
+             HistoryItem::AssistantToolCalls { tool_calls, .. } => {
+                 for call in tool_calls {
+                     pending.insert(call.id.clone(), (call.name.clone(), call.arguments.clone()));
+@@ -769,6 +781,47 @@ mod tests {
+         }
+     }
+ 
++    /// 015：/resume 投影跳过自动上下文消息——不作为真实用户发言展示
++    ///（裸消息与带替换声明两种形态；仅展示层过滤，历史与请求面不变）。
++    #[test]
++    fn project_history_items_skips_context_messages() {
++        use tchat_tui::chat_driver::HostHistoryItem as H;
++        let env_block = "<environment_context>\n  <cwd>/w</cwd>\n  <current_date>2025-10-09</current_date>\n</environment_context>";
++        let declared = format!(
++            "The following context replaces the previously provided AGENTS.md instructions and environment context.\n\n# AGENTS.md instructions for /w\n\n<INSTRUCTIONS>\n规则\n</INSTRUCTIONS>\n\n{env_block}"
++        );
++        let history = vec![
++            HistoryItem::Text(crate::prompt::HistoryMessage {
++                role: crate::prompt::HistoryRole::User,
++                content: declared,
++            }),
++            HistoryItem::Text(crate::prompt::HistoryMessage {
++                role: crate::prompt::HistoryRole::User,
++                content: "真实输入".into(),
++            }),
++            HistoryItem::Text(crate::prompt::HistoryMessage {
++                role: crate::prompt::HistoryRole::Assistant,
++                content: "答".into(),
++            }),
++        ];
++        let items = project_history_items(&history);
++        assert_eq!(items.len(), 2, "ctx 不进展示投影");
++        match &items[0] {
++            H::Text { assistant, content } => {
++                assert!(!assistant);
++                assert_eq!(content, "真实输入");
++            }
++            other => panic!("首项应为真实输入：{other:?}"),
++        }
++        assert!(matches!(&items[1], H::Text { assistant: true, .. }));
++        // 环境块裸消息（无规则形态）同样跳过
++        let history2 = vec![HistoryItem::Text(crate::prompt::HistoryMessage {
++            role: crate::prompt::HistoryRole::User,
++            content: env_block.to_string(),
++        })];
++        assert!(project_history_items(&history2).is_empty());
++    }
++
+     use super::*;
+     use std::time::Duration;
+ 
+diff --git a/src/app/src/turn.rs b/src/app/src/turn.rs
+index 22da262..2bf9c06 100644
+--- a/src/app/src/turn.rs
++++ b/src/app/src/turn.rs
+@@ -79,6 +79,10 @@ pub fn tool_activity_line(name: &str, id: &str) -> String {
+     )
+ }
+ 
++/// 空白用户输入的统一错误文案（入口预检与循环内校验共用；prompt 层
++/// `build_request` 另有一处属 005 既有契约文本）。
++const BLANK_INPUT_ERROR: &str = "当前用户输入不能为空或全为空白";
++
+ /// 取消后未执行调用的结果：按对应工具的既定结果结构记录未执行原因——
+ /// exec_command/apply_patch 构造各自结果结构体序列化（字段与错误语义同工具本体同源）；
+ /// 其他名称（未知工具）与未知工具回传通道一致：单 `error` 字段通用结构，
+@@ -269,6 +273,58 @@ pub fn run_tool_turn(
+     )
+ }
+ 
++/// 015：用户轮入口——在压入本轮用户输入**之前**注入上下文消息（仅 `User`/
++/// `UserWithMemory`；`MemoryMerge` 内部轮不读取不注入），随后完全复用既有循环
++/// [`run_tool_turn_with_mode`]（签名与行为不变）。空白输入校验先于上下文写入：
++/// 拒绝时历史与 `on_record` 零新增。来源读取每用户轮恰一次，轮内续请求不重读。
++/// 内容与历史中最后一条上下文消息相同则不重复注入；不同则注入带替换声明的
++/// 新消息（比较前剥除声明，基线由历史承载）。
++pub fn run_user_turn_with_context(
++    history: &mut Vec<HistoryItem>,
++    current_input: &str,
++    sender: &mut dyn FnMut(&Value) -> Result<Value, String>,
++    notify: &mut dyn FnMut(TurnNotify),
++    cancel: Option<&std::sync::atomic::AtomicBool>,
++    on_record: &mut dyn FnMut(&[HistoryItem]),
++    mode: ToolMode<'_>,
++    sources: &crate::context::ContextSources,
++) -> Result<String, String> {
++    if current_input.trim().is_empty() {
++        return Err(BLANK_INPUT_ERROR.into());
++    }
++    if !matches!(mode, ToolMode::MemoryMerge { .. }) {
++        let built = crate::context::build_context_message(sources);
++        for notice in &built.notices {
++            notify(TurnNotify::Info(notice.clone()));
++        }
++        let inject_text = match crate::context::last_context_body(history) {
++            Some(previous) if previous == built.message => None,
++            Some(_) => Some(format!(
++                "{}\n\n{}",
++                crate::prompt::CONTEXT_REPLACEMENT_DECLARATION,
++                built.message
++            )),
++            None => Some(built.message),
++        };
++        if let Some(text) = inject_text {
++            history.push(HistoryItem::Text(HistoryMessage {
++                role: HistoryRole::User,
++                content: text,
++            }));
++            on_record(history);
++        }
++    }
++    run_tool_turn_with_mode(
++        history,
++        current_input,
++        sender,
++        notify,
++        cancel,
++        on_record,
++        mode,
++    )
++}
++
+ /// 运行一轮（013-M5 D3 参数化）：`mode` 决定请求组装的工具集/system 与
+ /// 执行分派注册表；循环、整批校验、取消与上限语义对各模式完全一致
+ /// （合并轮沿用每轮 8 请求、每批 32 上限）。
+@@ -288,7 +344,7 @@ pub fn run_tool_turn_with_mode(
+     mode: ToolMode<'_>,
+ ) -> Result<String, String> {
+     if current_input.trim().is_empty() {
+-        return Err("当前用户输入不能为空或全为空白".into());
++        return Err(BLANK_INPUT_ERROR.into());
+     }
+     // 取消状态不跨用户轮（006：每轮开始复位）
+     if let Some(c) = cancel {
+diff --git a/src/app/tests/e2e_acceptance.rs b/src/app/tests/e2e_acceptance.rs
+index ea252ef..634c2de 100644
+--- a/src/app/tests/e2e_acceptance.rs
++++ b/src/app/tests/e2e_acceptance.rs
+@@ -253,9 +253,10 @@ fn window_contains(hay: &[u8], needle: &[u8]) -> bool {
+ 
+ fn pty_cli(project: Option<&Path>, envs: &[(&str, &str)]) -> Command {
+     let mut cmd = Command::new(env!("CARGO_BIN_EXE_terminal-chat"));
+-    if let Some(d) = project {
+-        cmd.current_dir(d);
+-    }
++    // 015：未指定项目目录时默认落 /tmp（无 .git 祖先、无 AGENTS.md）——上下文
++    // 注入为环境块形态，测试不依赖仓库真实 AGENTS.md 内容
++    let default_dir = std::env::temp_dir();
++    cmd.current_dir(project.unwrap_or(&default_dir));
+     for (k, v) in envs {
+         cmd.env(k, v);
+     }
+@@ -479,7 +480,7 @@ fn s1_pty_normal_session_full_roundtrip() {
+     assert_eq!(reqs[0].auth.as_deref(), Some("Bearer s1-key-value"));
+     let body: Value = serde_json::from_str(&reqs[0].body).unwrap();
+     assert_eq!(body["model"], "deepseek-flash");
+-    // 005/006 契约：system（发送版提示词）首位＋user＋两项工具定义
++    // 005/006 契约：system（发送版提示词）首位＋015 ctx＋user＋两项工具定义
+     assert_eq!(body["messages"][0]["role"], "system");
+     assert!(
+         body["messages"][0]["content"]
+@@ -489,7 +490,17 @@ fn s1_pty_normal_session_full_roundtrip() {
+         "system 应为 Codex 母本适配版提示词"
+     );
+     assert_eq!(body["messages"][1]["role"], "user");
+-    assert_eq!(body["messages"][1]["content"], "你好");
++    // 015：ctx（环境块形态）恰在本轮输入之前
++    assert!(
++        body["messages"][1]["content"]
++            .as_str()
++            .unwrap()
++            .starts_with("<environment_context>"),
++        "ctx 应为环境块：{}",
++        body["messages"][1]["content"]
++    );
++    assert_eq!(body["messages"][2]["role"], "user");
++    assert_eq!(body["messages"][2]["content"], "你好");
+     assert_eq!(body["tools"].as_array().unwrap().len(), 2);
+     // 凭证明文不回显；已授权命中不改写授权记录
+     assert!(!out.contains(key), "密钥明文不得出现在终端输出");
+@@ -567,16 +578,28 @@ fn s2a_pty_first_use_authorization_agree_and_persist() {
+         assert_eq!(r.auth.as_deref(), Some("Bearer s2a-key-value"));
+     }
+     let body: Value = serde_json::from_str(&reqs[1].body).unwrap();
+-    // 006：第二轮请求携带第一轮历史（system 首位＋user→assistant→新 user）
++    // 006：第二轮请求携带第一轮历史（system 首位＋015 ctx→user→assistant→新 user；
++    // 同会话内容不变，ctx 不重复注入）
+     let roles: Vec<&str> = body["messages"]
+         .as_array()
+         .unwrap()
+         .iter()
+         .map(|m| m["role"].as_str().unwrap())
+         .collect();
+-    assert_eq!(roles, vec!["system", "user", "assistant", "user"], "跨轮历史原样携带");
+-    assert_eq!(body["messages"][2]["content"], json!("S2A-AGREE-OK"), "第一轮回复入历史");
+-    assert_eq!(body["messages"][3]["content"], "第二条消息");
++    assert_eq!(
++        roles,
++        vec!["system", "user", "user", "assistant", "user"],
++        "跨轮历史原样携带（含 015 ctx 恰一条）"
++    );
++    assert!(
++        body["messages"][1]["content"]
++            .as_str()
++            .unwrap()
++            .starts_with("<environment_context>"),
++        "015 ctx 为环境块"
++    );
++    assert_eq!(body["messages"][3]["content"], json!("S2A-AGREE-OK"), "第一轮回复入历史");
++    assert_eq!(body["messages"][4]["content"], "第二条消息");
+     // 授权记录变化：从无到有，且 (origin, 指纹) 双匹配、私有权限
+     let grant_text = std::fs::read_to_string(&auth_file).unwrap();
+     let store: Value = serde_json::from_str(&grant_text).unwrap();
+@@ -1186,15 +1209,15 @@ fn n2b_esc_interrupt_cancels_tool_group_cli_alive() {
+     assert_eq!(mock.count(), 2);
+     let body: serde_json::Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
+     let msgs = body["messages"].as_array().unwrap();
+-    // system + user(go) + assistant(tool_calls 2) + tool(cancelled) + tool(skipped) + user(next)
++    // system + user(015 ctx) + user(go) + assistant(tool_calls 2) + tool(cancelled) + tool(skipped) + user(next)
+     let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+-    assert_eq!(roles, vec!["system", "user", "assistant", "tool", "tool", "user"], "{body}");
+-    assert_eq!(msgs[2]["tool_calls"].as_array().unwrap().len(), 2);
+-    let r1: serde_json::Value = serde_json::from_str(msgs[3]["content"].as_str().unwrap()).unwrap();
+-    assert_eq!(msgs[3]["tool_call_id"], json!("call-n2b-writer"));
++    assert_eq!(roles, vec!["system", "user", "user", "assistant", "tool", "tool", "user"], "{body}");
++    assert_eq!(msgs[3]["tool_calls"].as_array().unwrap().len(), 2);
++    let r1: serde_json::Value = serde_json::from_str(msgs[4]["content"].as_str().unwrap()).unwrap();
++    assert_eq!(msgs[4]["tool_call_id"], json!("call-n2b-writer"));
+     assert_eq!(r1["status"], json!("cancelled"), "执行中调用按 cancelled 结构记录：{r1}");
+-    let r2: serde_json::Value = serde_json::from_str(msgs[4]["content"].as_str().unwrap()).unwrap();
+-    assert_eq!(msgs[4]["tool_call_id"], json!("call-n2b-second"));
++    let r2: serde_json::Value = serde_json::from_str(msgs[5]["content"].as_str().unwrap()).unwrap();
++    assert_eq!(msgs[5]["tool_call_id"], json!("call-n2b-second"));
+     assert_eq!(r2["status"], json!("cancelled"), "未执行调用记录未执行原因：{r2}");
+     assert!(r2["error"].as_str().unwrap().contains("未执行"), "{r2}");
+     pty.send_line("/exit"); // 008-ADAPT：TUI 退出走 /exit
+@@ -1278,12 +1301,13 @@ fn n2b2_mixed_batch_cancel_per_tool_result_shapes() {
+     let body: serde_json::Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
+     let msgs = body["messages"].as_array().unwrap();
+     let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+-    assert_eq!(roles, vec!["system", "user", "assistant", "tool", "tool", "user"], "{body}");
+-    assert_eq!(msgs[3]["tool_call_id"], json!("call-mix-exec"));
+-    let re: serde_json::Value = serde_json::from_str(msgs[3]["content"].as_str().unwrap()).unwrap();
++    // 015：ctx（user）恰一条，位于首轮输入之前
++    assert_eq!(roles, vec!["system", "user", "user", "assistant", "tool", "tool", "user"], "{body}");
++    assert_eq!(msgs[4]["tool_call_id"], json!("call-mix-exec"));
++    let re: serde_json::Value = serde_json::from_str(msgs[4]["content"].as_str().unwrap()).unwrap();
+     assert_eq!(re["status"], json!("cancelled"), "exec 结果用其 cancelled 结构：{re}");
+-    assert_eq!(msgs[4]["tool_call_id"], json!("call-mix-patch"));
+-    let rp: serde_json::Value = serde_json::from_str(msgs[4]["content"].as_str().unwrap()).unwrap();
++    assert_eq!(msgs[5]["tool_call_id"], json!("call-mix-patch"));
++    let rp: serde_json::Value = serde_json::from_str(msgs[5]["content"].as_str().unwrap()).unwrap();
+     assert_eq!(rp["ok"], json!(false), "apply_patch 结果用其契约结构：{rp}");
+     assert_eq!(rp["changed_files"], json!([]), "{rp}");
+     assert!(rp["error"].as_str().unwrap().contains("未执行"), "{rp}");
+@@ -1620,17 +1644,21 @@ fn s15_tui_exit_flushes_pending_session_writes() {
+     }
+     let mut pty = PtySession::spawn(cmd);
+     pty.wait_screen("? for shortcuts").unwrap();
+-    // 连发 10 轮（每轮约 135B 记录）：累计第 8 轮前后必然超过 1024B → 追加失败。
+-    // 短消息（8 字符）与既有用例键入节奏一致，不触发 paste-burst 吸收
++    // 连发 10 轮：累计必然超过 1024B → 追加失败。015 上下文消息增大单轮记录，
++    // 失败提示出现得更早——逐轮捕捉（提示行会随后续轮次滚出屏幕）
++    let mut saw_append_failure = false;
+     for i in 1..=10 {
+         pty.send_line("填充记录测试数据");
+         // 各轮回复文本互异：等待本轮回复而非旧内容（避免竞态）
+         pty.wait_screen(&format!("S15-R{i}")).unwrap();
++        if !saw_append_failure {
++            std::thread::sleep(Duration::from_millis(100));
++            pty.feed_screen();
++            saw_append_failure = pty.vt.to_string().contains("自动会话追加失败");
++        }
+     }
+-    std::thread::sleep(Duration::from_millis(300));
+-    pty.feed_screen();
+     assert!(
+-        pty.vt.to_string().contains("自动会话追加失败"),
++        saw_append_failure,
+         "追加失败提示应可见（P0-1 修复面）\n{}",
+         pty.vt.vt100().screen().contents()
+     );
+@@ -6432,11 +6460,16 @@ fn s81_m7_enabled_turn_injects_and_spawns_pipeline() {
+         assert!(std::time::Instant::now() < deadline, "后台管线必须在轮启动后建库");
+         std::thread::sleep(Duration::from_millis(100));
+     }
+-    // 播种断言（上游原序 seed）
+-    assert!(
+-        mem_root.join("extensions").join("ad_hoc").join("instructions.md").is_file(),
+-        "扩展说明必须随管线播种"
+-    );
++    // 播种断言（上游原序 seed）：播种在建库后的独立临界区（runner 先 open 库
++    // 再 seed）——同样有界等待，消除「见库即断言」的结构竞态（终验轮实测命中）
++    let instructions = mem_root.join("extensions").join("ad_hoc").join("instructions.md");
++    while !instructions.is_file() {
++        assert!(
++            std::time::Instant::now() < deadline,
++            "扩展说明必须随管线播种"
++        );
++        std::thread::sleep(Duration::from_millis(100));
++    }
+     // threads 登记：当前 auto 会话已登记（毫秒）
+     std::thread::sleep(Duration::from_millis(400)); // 登记随入史点已发生，稍待后台收尾
+     let store = terminal_chat::memory::store::MemoryStore::open(
+diff --git a/src/app/tests/llm_flow.rs b/src/app/tests/llm_flow.rs
+index 93e5163..dc7d278 100644
+--- a/src/app/tests/llm_flow.rs
++++ b/src/app/tests/llm_flow.rs
+@@ -672,7 +672,11 @@ fn bin_pipe_session_chats_and_lists_models() {
+ 
+     use std::io::Write;
+     use std::process::{Command, Stdio};
++    // 015：cwd 落临时目录（无 .git 祖先）——上下文注入为环境块形态，
++    // 测试不依赖仓库真实 AGENTS.md 内容
++    let project = TempDir::new("e2e-bin-proj");
+     let mut child = Command::new(env!("CARGO_BIN_EXE_terminal-chat"))
++        .current_dir(project.path())
+         .env("TCHAT_CONFIG_DIR", dir.path())
+         .env("TCHAT_USER_DIR", user.path())
+         .env("TCHAT_E2E_KEY", "e2e-key")
+@@ -703,8 +707,14 @@ fn bin_pipe_session_chats_and_lists_models() {
+         body["messages"][0]["content"],
+         json!(terminal_chat::prompt::sent_instructions())
+     );
++    // 015：上下文消息（环境块形态）恰在首轮输入之前
+     assert_eq!(body["messages"][1]["role"], "user");
+-    assert_eq!(body["messages"][1]["content"], "你好");
++    let ctx = body["messages"][1]["content"].as_str().unwrap();
++    assert!(ctx.starts_with("<environment_context>"), "ctx＝环境块：{ctx}");
++    assert!(ctx.contains(&format!("<cwd>{}</cwd>", project.path().display())));
++    assert!(ctx.contains("<current_date>"));
++    assert_eq!(body["messages"][2]["role"], "user");
++    assert_eq!(body["messages"][2]["content"], "你好");
+     let tools = body["tools"].as_array().unwrap();
+     assert_eq!(tools.len(), 2);
+     assert_eq!(tools[0]["function"]["name"], "exec_command");
+@@ -1880,7 +1890,10 @@ fn n1_real_cli_three_paths_no_raw_cr() {
+ 
+     use std::io::Write;
+     use std::process::{Command, Stdio};
++    // 015：cwd 落临时目录，避免注入依赖仓库真实 AGENTS.md（消息序随之固定）
++    let project = TempDir::new("n1-cli-proj");
+     let mut child = Command::new(env!("CARGO_BIN_EXE_terminal-chat"))
++        .current_dir(project.path())
+         .env("TCHAT_CONFIG_DIR", dir.path())
+         .env("TCHAT_USER_DIR", user.path())
+         .env("TCHAT_N1_KEY", key)
+@@ -1908,7 +1921,7 @@ fn n1_real_cli_three_paths_no_raw_cr() {
+     assert!(reqs.len() >= 3, "{reqs:?}");
+     let body: serde_json::Value = serde_json::from_str(&reqs[1].body).unwrap();
+     assert_eq!(
+-        body["messages"][2]["tool_calls"][0]["id"],
++        body["messages"][3]["tool_calls"][0]["id"],
+         json!("AAAA\rBBBB"),
+         "历史中的原始 tool_call_id 必须保真"
+     );
+diff --git a/src/app/tests/memory_phase1.rs b/src/app/tests/memory_phase1.rs
+index 98c76c3..a006b83 100644
+--- a/src/app/tests/memory_phase1.rs
++++ b/src/app/tests/memory_phase1.rs
+@@ -493,12 +493,15 @@ fn m3_selected_model_and_system_prompt_enter_request_body() {
+ fn m3_context_injections_stripped_from_input() {
+     let e = env("strip");
+     let agents_md = "# AGENTS.md instructions for /tmp\n\n<INSTRUCTIONS>\n规则\n</INSTRUCTIONS>";
++    // 015（c9）：真实用户轮上下文消息（AGENTS＋环境合并块，带替换声明）同被剔除
++    let declared_ctx = "The following context replaces the previously provided AGENTS.md instructions and environment context.\n\n# AGENTS.md instructions for /tmp\n\n<INSTRUCTIONS>\n规则\n</INSTRUCTIONS>\n\n<environment_context>\n  <cwd>/tmp</cwd>\n  <shell>/bin/sh</shell>\n  <current_date>2025-10-09</current_date>\n</environment_context>";
+     let skill = "<skill>\n<name>demo</name>\n</skill>";
+     let path = write_session(
+         &e.sessions,
+         "t",
+         &[
+             user_msg(agents_md),
++            user_msg(declared_ctx),
+             user_msg(skill),
+             user_msg("真实用户输入"),
+             HistoryItem::ToolResult {
+@@ -515,6 +518,11 @@ fn m3_context_injections_stripped_from_input() {
+     assert_eq!(outcome, Stage1JobOutcome::SucceededWithOutput);
+     let body = serde_json::to_string(&seen.lock().unwrap().clone().unwrap()).unwrap();
+     assert!(!body.contains("AGENTS.md instructions"), "注入说明不作为用户事实");
++    assert!(
++        !body.contains("replaces the previously provided"),
++        "015 带声明的上下文消息整条剔除"
++    );
++    assert!(!body.contains("<environment_context>"), "环境块不作为用户事实");
+     assert!(!body.contains("<skill>"), "技能注入剥离");
+     assert!(body.contains("真实用户输入"), "真实用户输入保留");
+     assert!(!body.contains("duration_ms"), "展示数据不进模型请求");
+diff --git a/src/app/tests/prompt_assembly.rs b/src/app/tests/prompt_assembly.rs
+index 8f753a6..132331f 100644
+--- a/src/app/tests/prompt_assembly.rs
++++ b/src/app/tests/prompt_assembly.rs
+@@ -52,7 +52,8 @@ fn expected_sent() -> String {
+     text.push('\n'); // 母本以换行结尾，lines() 会丢掉它
+ 
+     let old_agents = "The contents of the AGENTS.md file at the root of the repo and any directories from the CWD up to the root are included with the developer message and don't need to be re-read.";
+-    let new_agents = "AGENTS.md contents are not injected automatically. When you need them, read the applicable AGENTS.md files with the existing exec_command tool.";
++    // 015 反转 005 适配 3：声明改为「已由 user 消息提供、无需重读」
++    let new_agents = "The applicable AGENTS.md instructions and environment context are provided in a user message before the current input and don't need to be re-read.";
+     assert_eq!(text.matches(old_agents).count(), 1);
+     text = text.replacen(old_agents, new_agents, 1);
+ 
+@@ -87,7 +88,18 @@ fn s2_sent_prompt_only_listed_adaptations() {
+         !sent.contains("included with the developer message"),
+         "AGENTS.md 注入声明应已修正"
+     );
+-    assert!(sent.contains("exec_command tool"), "修正后应指向 exec_command 读取");
++    // 015（c8）：适配 3 反转——旧声明（母本句与 005 句）零残留，新声明恰一处
++    assert!(!sent.contains("not injected automatically"), "005 旧声明不得残留");
++    assert!(!sent.contains("read the applicable AGENTS.md files"), "005 旧声明不得残留");
++    assert_eq!(
++        sent.matches("provided in a user message before the current input").count(),
++        1,
++        "015 新声明恰出现一次"
++    );
++    assert!(
++        sent.contains("don't need to be re-read"),
++        "新声明保留无需重读语义"
++    );
+     // 第 4 项适配＝保留原文：已知差异措辞仍在
+     assert!(sent.contains("escalated"), "sandbox/审批升级措辞应保留原文");
+     assert!(sent.contains("## Task execution"), "无关章节不得被改动");
+diff --git a/src/app/tests/session_cli.rs b/src/app/tests/session_cli.rs
+index ef612c3..cfee679 100644
+--- a/src/app/tests/session_cli.rs
++++ b/src/app/tests/session_cli.rs
+@@ -282,16 +282,21 @@ fn e1_auto_save_default_and_resume_roundtrip() {
+     let loaded = load_session_file(&auto_path).unwrap();
+     assert_eq!(loaded.skipped_lines, 0);
+     assert_eq!(loaded.repairs, 0);
+-    assert_eq!(loaded.history.len(), 6, "{:?}",
++    assert_eq!(loaded.history.len(), 7, "{:?}",
+         loaded.history.iter().map(|h| serde_json::to_string(h).unwrap()).collect::<Vec<_>>());
+-    assert_eq!(serde_json::to_string(&loaded.history[0]).unwrap(),
++    // 015：首条为自动上下文消息（user 角色），次条为本轮输入
++    assert!(matches!(&loaded.history[0],
++        terminal_chat::prompt::HistoryItem::Text(m)
++            if m.role == terminal_chat::prompt::HistoryRole::User
++                && terminal_chat::context::context_body(&m.content).is_some()));
++    assert_eq!(serde_json::to_string(&loaded.history[1]).unwrap(),
+         serde_json::to_string(&terminal_chat::prompt::HistoryItem::Text(
+             terminal_chat::prompt::HistoryMessage {
+                 role: terminal_chat::prompt::HistoryRole::User,
+                 content: "你好".into(),
+             })).unwrap());
+-    // 工具结果为真实 exec 结果结构（第 3 项：user→tool_calls→result）
+-    match &loaded.history[2] {
++    // 工具结果为真实 exec 结果结构（第 4 项：ctx→user→tool_calls→result）
++    match &loaded.history[3] {
+         terminal_chat::prompt::HistoryItem::ToolResult { tool_call_id, content, .. } => {
+             assert_eq!(tool_call_id, "call-e1");
+             let v: Value = serde_json::from_str(content).unwrap();
+@@ -309,9 +314,9 @@ fn e1_auto_save_default_and_resume_roundtrip() {
+     assert!(raw.contains("你好") && raw.contains("再问一次"));
+ 
+     // 新启动 /resume（无参）：装载完整，首轮请求投影与内存历史逐条一致
+-    let work2 = TempDir::new("sc-e1-run2");
++    //（015：同 cwd 复跑——上下文内容不变不触发替换注入，投影才逐条一致）
+     let (out2, err2, code2) = run_pipe(
+-        work2.path(),
++        work.path(),
+         &fx.envs(),
+         "/resume\n续聊\nexit\n",
+     );
+@@ -323,8 +328,8 @@ fn e1_auto_save_default_and_resume_roundtrip() {
+     assert_eq!(body["messages"], expected["messages"], "首轮请求投影与恢复历史逐条一致");
+     // 本轮新记录也自动落盘（同文件续写）
+     let loaded2 = load_session_file(&auto_path).unwrap();
+-    assert_eq!(loaded2.history.len(), 8);
+-    assert_eq!(loaded2.history[6],
++    assert_eq!(loaded2.history.len(), 9);
++    assert_eq!(loaded2.history[7],
+         terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
+             role: terminal_chat::prompt::HistoryRole::User,
+             content: "续聊".into(),
+@@ -341,9 +346,14 @@ fn e3_failed_request_turn_user_record_persisted() {
+     assert!(out.contains("错误："), "{out}");
+     wait_until(|| fx.autos().len() == 1);
+     let loaded = load_session_file(&fx.sessions().join(&fx.autos()[0])).unwrap();
+-    assert_eq!(loaded.history.len(), 1, "失败轮 user 记录已落盘：{:?}",
++    assert_eq!(loaded.history.len(), 2, "失败轮 user 记录已落盘：{:?}",
+         loaded.history.iter().map(|h| serde_json::to_string(h).unwrap()).collect::<Vec<_>>());
+     assert!(matches!(&loaded.history[0],
++        terminal_chat::prompt::HistoryItem::Text(m)
++            if m.role == terminal_chat::prompt::HistoryRole::User
++                && terminal_chat::context::context_body(&m.content).is_some()),
++        "015：自动上下文消息先于 user 入史");
++    assert!(matches!(&loaded.history[1],
+         terminal_chat::prompt::HistoryItem::Text(m)
+             if m.role == terminal_chat::prompt::HistoryRole::User && m.content == "这轮会失败"));
+ }
+@@ -444,11 +454,11 @@ fn e7_snapshot_to_auto_full_context_roundtrip() {
+     let autos: Vec<String> = fx.autos().into_iter().filter(|n| n != "auto-20260101T000000-1.jsonl").collect();
+     let run1_auto = fx.sessions().join(&autos[0]);
+     let loaded = load_session_file(&run1_auto).unwrap();
+-    assert_eq!(loaded.history.len(), 8, "快照 4 条＋新轮 4 条");
++    assert_eq!(loaded.history.len(), 9, "快照 4 条＋新轮 5 条（含 015 上下文）");
+ 
+     // 运行二：无参 /resume 取新 auto 文件（字典序最大）→ 首轮请求投影逐条一致
+-    let work2 = TempDir::new("sc-e7-run2");
+-    let (out2, _e, code2) = run_pipe(work2.path(), &fx.envs(), "/resume\n验证轮输入\nexit\n");
++    //（015：同 cwd 复跑——上下文内容不变不触发替换注入）
++    let (out2, _e, code2) = run_pipe(work.path(), &fx.envs(), "/resume\n验证轮输入\nexit\n");
+     assert_eq!(code2, Some(0), "{out2}");
+     let body: Value = serde_json::from_str(&fx.mock.requests()[2].body).unwrap();
+     let expected = build_request(&loaded.history, "验证轮输入").unwrap();
+@@ -559,28 +569,27 @@ fn e8_two_process_lock_conflict_degrades() {
+     assert_eq!(code_c, Some(0), "{out_c}");
+     assert!(out_c.contains("Agent：C-续写"), "{out_c}");
+     assert!(!out_c.contains("正被另一进程编辑"), "{out_c}");
+-    // auto-X 最终内容：原始记录＋C 轮（user＋assistant）——A/B 均未损坏它
++    // auto-X 最终内容：原始记录＋C 轮（015 上下文＋user＋assistant）——A/B 均未损坏它
+     let loaded = load_session_file(&fx.sessions().join(target)).unwrap();
+-    assert_eq!(loaded.history.len(), 3, "{:?}",
++    assert_eq!(loaded.history.len(), 4, "{:?}",
+         loaded.history.iter().map(|h| serde_json::to_string(h).unwrap()).collect::<Vec<_>>());
+-    // B 的新记录在 B 自己的新 auto 文件，且以完整上下文开篇（原始记录＋B 新消息）
++    // B 的新记录在 B 自己的新 auto 文件，且以完整上下文开篇（原始记录＋015 上下文＋B 新消息）
+     let b_auto: Vec<String> = fx.autos().into_iter().filter(|n| n != target).collect();
+     assert_eq!(b_auto.len(), 1, "B 恰创建一个自己的 auto 文件：{b_auto:?}");
+     let b_loaded = load_session_file(&fx.sessions().join(&b_auto[0])).unwrap();
+-    assert_eq!(
+-        b_loaded.history,
+-        vec![
+-            terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
+-                role: terminal_chat::prompt::HistoryRole::User,
+-                content: "原始记录".into(),
+-            }),
+-            terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
+-                role: terminal_chat::prompt::HistoryRole::User,
+-                content: "B 的新消息".into(),
+-            }),
+-        ],
+-        "B 的新 auto 文件以完整上下文开篇"
+-    );
++    assert_eq!(b_loaded.history.len(), 3, "完整上下文开篇：{:?}",
++        b_loaded.history.iter().map(|h| serde_json::to_string(h).unwrap()).collect::<Vec<_>>());
++    assert!(matches!(&b_loaded.history[0],
++        terminal_chat::prompt::HistoryItem::Text(m)
++            if m.role == terminal_chat::prompt::HistoryRole::User && m.content == "原始记录"));
++    assert!(matches!(&b_loaded.history[1],
++        terminal_chat::prompt::HistoryItem::Text(m)
++            if m.role == terminal_chat::prompt::HistoryRole::User
++                && terminal_chat::context::context_body(&m.content).is_some()),
++        "015：上下文消息随 B 轮入史");
++    assert!(matches!(&b_loaded.history[2],
++        terminal_chat::prompt::HistoryItem::Text(m)
++            if m.role == terminal_chat::prompt::HistoryRole::User && m.content == "B 的新消息"));
+ }
+ 
+ /// 写者半行暂停（受控夹具：测试进程扮演暂停中的写者——持锁＋已写无换行半行）：
+@@ -712,7 +721,7 @@ fn e6_pty_confirm_overwrite_and_discard() {
+     pty.wait("Agent：第一轮");
+     // /save 名称两次：第二次询问覆盖，n 拒绝（文件保持第一次内容）
+     pty.send("/save mine");
+-    pty.wait("已保存快照 mine（2 条记录）");
++    pty.wait("已保存快照 mine（3 条记录）");
+     pty.send("/save mine");
+     pty.wait("快照 mine 已存在，覆盖？");
+     pty.send("n");
+@@ -721,16 +730,16 @@ fn e6_pty_confirm_overwrite_and_discard() {
+     pty.send("/save mine");
+     pty.wait("快照 mine 已存在，覆盖？");
+     pty.send("y");
+-    pty.wait("已保存快照 mine（2 条记录）");
++    pty.wait("已保存快照 mine（3 条记录）");
+     // 非空历史丢弃：/resume 需确认，n 拒绝（历史保留），y 生效
+     pty.send("/resume mine");
+-    pty.wait("恢复会话将丢弃当前 2 条历史记录，继续？");
++    pty.wait("恢复会话将丢弃当前 3 条历史记录，继续？");
+     pty.send("n");
+     pty.wait("已取消恢复");
+     pty.send("/resume mine");
+-    pty.wait("恢复会话将丢弃当前 2 条历史记录，继续？");
++    pty.wait("恢复会话将丢弃当前 3 条历史记录，继续？");
+     pty.send("y");
+-    pty.wait("恢复 2 条（跳过 0 行，修复 0 处）");
++    pty.wait("恢复 3 条（跳过 0 行，修复 0 处）");
+     pty.send("exit");
+     pty.wait("再见!");
+     let (out, code) = pty.finish();
+@@ -928,27 +937,29 @@ fn e18_tool_secret_fidelity_and_credential_boundary() {
+     let body2: Value = serde_json::from_str(&reqs[1].body).unwrap();
+     let m1 = body1["messages"].as_array().unwrap();
+     let m2 = body2["messages"].as_array().unwrap();
+-    assert_eq!(m1.len(), 2, "请求1＝system＋user");
+-    assert_eq!(m2.len(), 4, "请求2＝system＋user＋assistant 批＋tool 结果");
++    // 015：请求1＝system＋ctx＋user；请求2 再加 assistant 批与 tool 结果
++    assert_eq!(m1.len(), 3, "请求1＝system＋ctx＋user");
++    assert_eq!(m2.len(), 5, "请求2＝system＋ctx＋user＋assistant 批＋tool 结果");
+     assert_eq!(m1[0]["role"], json!("system"), "system 恒首位（提示为编译期固定内容）");
+-    assert_eq!(m1[1]["content"], json!("读取秘密"));
+-    assert_eq!(m2[2]["tool_calls"][0]["id"], json!("call-s"));
++    assert!(m1[1]["content"].as_str().unwrap().starts_with("<environment_context>"), "015 上下文消息");
++    assert_eq!(m1[2]["content"], json!("读取秘密"));
++    assert_eq!(m2[3]["tool_calls"][0]["id"], json!("call-s"));
+ 
+     // S 保真（请求层）：tool 消息 content 为字符串，二次解码后 .output == S
+-    let tool_content = m2[3]["content"].as_str().unwrap();
++    let tool_content = m2[4]["content"].as_str().unwrap();
+     let exec_result: Value = serde_json::from_str(tool_content).expect("tool content 为 ExecResult JSON");
+     assert_eq!(exec_result["output"].as_str().unwrap(), s_secret, "请求层 .output 与 S 逐字一致");
+     assert_eq!(exec_result["exit_code"], json!(0));
+-    assert_eq!(m2[3]["tool_call_id"], json!("call-s"));
++    assert_eq!(m2[4]["tool_call_id"], json!("call-s"));
+ 
+-    // S 保真（会话文件层）：5 行（meta＋4 记录）；ToolResult 行二次解码一致
++    // S 保真（会话文件层）：6 行（meta＋5 记录，含 015 上下文）；ToolResult 行二次解码一致
+     let autos = fx.autos();
+     assert_eq!(autos.len(), 1);
+     let auto_path = fx.sessions().join(&autos[0]);
+     let raw_text = fs::read_to_string(&auto_path).unwrap();
+     let raw_lines: Vec<&str> = raw_text.lines().collect();
+-    assert_eq!(raw_lines.len(), 5, "meta＋4 条记录");
+-    let rec3: Value = serde_json::from_str(raw_lines[3]).unwrap();
++    assert_eq!(raw_lines.len(), 6, "meta＋5 条记录（含 015 上下文）");
++    let rec3: Value = serde_json::from_str(raw_lines[4]).unwrap();
+     assert_eq!(rec3["type"], json!("tool_result"));
+     let file_exec: Value = serde_json::from_str(rec3["content"].as_str().unwrap()).unwrap();
+     assert_eq!(file_exec["output"].as_str().unwrap(), s_secret, "会话文件层 .output 与 S 逐字一致");
+@@ -1069,14 +1080,14 @@ fn e21_over_limit_cli_closure_and_independence() {
+     assert_eq!(code, Some(0), "{out}");
+     assert!(out.contains("错误：") && out.contains("10 MiB"), "超限明确报错：{out}");
+     assert_eq!(fx.mock.count(), 0, "零请求、无重试");
+-    // user 已入史并落盘：文件恰＋1 行
++    // user 已入史并落盘：文件恰＋2 行（015 上下文＋本轮 user）
+     let lines = fs::read_to_string(fx.sessions().join("auto-big-1.jsonl")).unwrap().lines().count();
+-    assert_eq!(lines, n + 1 + 1, "meta＋{n} 条恢复记录＋本轮 user");
++    assert_eq!(lines, n + 1 + 2, "meta＋{n} 条恢复记录＋本轮 ctx＋user");
+ 
+     // 独立性：/save、/sessions、再恢复（新进程，空历史无确认门）
+     let work2 = TempDir::new("sc-e21-save");
+     let (out2, _e2, _c2) = run_pipe(work2.path(), &fx.envs(), "/resume auto-big-1\n/save kept\n/sessions\nexit\n");
+-    assert!(out2.contains(&format!("已保存快照 kept（{} 条记录）", n + 1)), "{out2}");
++    assert!(out2.contains(&format!("已保存快照 kept（{} 条记录）", n + 2)), "{out2}");
+     assert!(out2.contains("kept  "), "/sessions 列出快照及字节数：{out2}");
+     assert!(out2.contains("恢复 ") && out2.contains("（跳过 0 行，修复 0 处）"), "再恢复 N+1 条：{out2}");
+ }
+@@ -1124,9 +1135,9 @@ fn e22_same_file_size_different_projection() {
+     let sent_len = serde_json::to_vec(&sent).unwrap().len();
+     assert!(sent_len <= REQ_LIMIT - 1, "最终请求字节 {sent_len} 应在上限内");
+     // 独立核对：装载投影（n_b 条文本记录）重建请求，字节＋固定开销＝实测值
+-    // CLI 已向乙文件追加本轮 user＋终文 2 条：核对基准＝运行前 n_b 条＋本轮输入
++    // CLI 已向乙文件追加本轮 015 上下文＋user＋终文 3 条：核对基准＝运行前 n_b 条＋本轮输入
+     let loaded_b = terminal_chat::session::load_session_file(&path_b).unwrap();
+-    assert_eq!(loaded_b.history.len(), n_b + 2, "装载＝运行前记录＋本轮 user＋终文");
++    assert_eq!(loaded_b.history.len(), n_b + 3, "装载＝运行前记录＋本轮 ctx＋user＋终文");
+     let pre_run = &loaded_b.history[..n_b];
+     let proj_b = serde_json::to_vec(&terminal_chat::prompt::build_request(pre_run, "x").unwrap()).unwrap().len();
+     assert!(proj_b < REQ_LIMIT, "乙投影须在限内：{proj_b}");
+@@ -1135,13 +1146,21 @@ fn e22_same_file_size_different_projection() {
+     let fixed_overhead = sent_len.saturating_sub(expected_projection);
+     assert!(
+         fixed_overhead <= 4096,
+-        "投影 {expected_projection}＋固定开销 {fixed_overhead} 应重组实测 {sent_len}（开销为 model 等固定字段）"
++        "投影 {expected_projection}＋固定开销 {fixed_overhead} 应重组实测 {sent_len}（开销为 model 等固定字段＋015 上下文）"
+     );
+-    // 内容一致性：投影与装载历史逐条对应
++    // 内容一致性：装载投影逐条一致；恰一条 015 上下文消息位于本轮输入之前
+     let msgs = sent["messages"].as_array().unwrap();
+     let exp_msgs = expected_messages["messages"].as_array().unwrap();
+-    assert_eq!(msgs.len(), exp_msgs.len(), "messages 数＝装载投影数＋system＋本轮 user");
+-    for (m, e) in msgs.iter().zip(exp_msgs.iter()) {
++    assert_eq!(msgs.len(), exp_msgs.len() + 1, "messages 数＝装载投影数＋system＋本轮 user＋一条上下文");
++    let last = msgs.len();
++    assert_eq!(msgs[0], exp_msgs[0], "system 一致");
++    assert_eq!(msgs[last - 2]["role"], json!("user"), "015 上下文为 user 消息");
++    assert!(
++        msgs[last - 2]["content"].as_str().unwrap().starts_with("<environment_context>"),
++        "上下文＝环境块形态（恰在本轮输入之前）"
++    );
++    assert_eq!(msgs[last - 1], exp_msgs[exp_msgs.len() - 1], "本轮输入在末位");
++    for (m, e) in msgs[1..last - 2].iter().zip(exp_msgs[1..].iter()) {
+         assert_eq!(m, e, "投影逐条一致");
+     }
+ }
+diff --git a/src/app/tests/tool_loop.rs b/src/app/tests/tool_loop.rs
+index 32d0d88..ac455a6 100644
+--- a/src/app/tests/tool_loop.rs
++++ b/src/app/tests/tool_loop.rs
+@@ -132,8 +132,10 @@ fn t1_plain_reply_ends_immediately() {
+     let body = req_body(&mock, 0);
+     assert_eq!(body["model"], json!("deepseek-flash"));
+     let roles = role_seq(&body);
+-    assert_eq!(roles, vec!["system", "user"], "消息序 system→user");
+-    assert_eq!(body["messages"][1]["content"], json!("你好"));
++    // 015：ctx（环境块）先于本轮输入
++    assert_eq!(roles, vec!["system", "user", "user"], "消息序 system→ctx→user");
++    assert!(body["messages"][1]["content"].as_str().unwrap().starts_with("<environment_context>"));
++    assert_eq!(body["messages"][2]["content"], json!("你好"));
+     let tools = body["tools"].as_array().unwrap();
+     assert_eq!(tools.len(), 2);
+     assert_eq!(tools[0]["function"]["name"], json!("exec_command"));
+@@ -158,14 +160,14 @@ fn t2_apply_patch_creates_file_and_echoes_result() {
+     assert_eq!(std::fs::read(&target).unwrap(), b"T2-CONTENT\n".to_vec(), "文件字节");
+     assert_eq!(mock.count(), 2, "工具轮后必须再请求一次");
+     let body = req_body(&mock, 1);
+-    assert_eq!(role_seq(&body), vec!["system", "user", "assistant", "tool"]);
+-    assert_eq!(count_role(&body, "user"), 1, "当前 user 只追加一次");
++    assert_eq!(role_seq(&body), vec!["system", "user", "user", "assistant", "tool"]);
++    assert_eq!(count_role(&body, "user"), 2, "015 ctx＋本轮 user");
+     assert_eq!(count_role(&body, "system"), 1, "system 每请求恰一条");
+-    let assistant = &body["messages"][2];
++    let assistant = &body["messages"][3];
+     assert_eq!(assistant["content"], json!(null), "content null 原样保留");
+     assert_eq!(assistant["tool_calls"][0]["id"], json!("call-create01"));
+     assert_eq!(assistant["tool_calls"][0]["function"]["name"], json!("apply_patch"));
+-    let tool = &body["messages"][3];
++    let tool = &body["messages"][4];
+     assert_eq!(tool["tool_call_id"], json!("call-create01"), "tool_call_id 必须匹配");
+     let result: Value = serde_json::from_str(tool["content"].as_str().unwrap()).unwrap();
+     assert_eq!(result["ok"], json!(true), "ApplyPatchResult JSON：{result}");
+@@ -190,7 +192,7 @@ fn t3_exec_command_returns_real_output_and_exit_code() {
+     assert_eq!(code, Some(0), "{out}");
+     assert!(out.contains("[工具] exec_command（call-exe"), "{out}");
+     let body = req_body(&mock, 1);
+-    let tool = &body["messages"][3];
++    let tool = &body["messages"][4];
+     assert_eq!(tool["tool_call_id"], json!("call-exec-77"));
+     let result: Value = serde_json::from_str(tool["content"].as_str().unwrap()).unwrap();
+     assert_eq!(result["status"], json!("completed"), "{result}");
+@@ -284,11 +286,11 @@ fn t6_history_carried_across_user_turns() {
+     let roles = role_seq(&body);
+     assert_eq!(
+         roles,
+-        vec!["system", "user", "assistant", "tool", "assistant", "user"],
+-        "第 3 请求含完整历史＋新 user"
++        vec!["system", "user", "user", "assistant", "tool", "assistant", "user"],
++        "第 3 请求含完整历史（015 ctx）＋新 user"
+     );
+     assert_eq!(count_role(&body, "system"), 1);
+-    assert_eq!(body["messages"][4]["content"], json!("完成一"), "最终回复入历史");
++    assert_eq!(body["messages"][5]["content"], json!("完成一"), "最终回复入历史");
+ }
+ 
+ /// T7：循环上限——恒返调用时恰 8 请求后报上限，无第 9 次、无假回复。
+@@ -335,8 +337,8 @@ fn t8_request_failure_no_retry_history_kept() {
+     let roles = role_seq(&body3);
+     assert_eq!(
+         roles,
+-        vec!["system", "user", "assistant", "tool", "user"],
+-        "请求失败后历史保留已执行记录"
++        vec!["system", "user", "user", "assistant", "tool", "user"],
++        "请求失败后历史保留已执行记录（含 015 ctx）"
+     );
+ }
+ 
+@@ -367,7 +369,7 @@ fn t10_non_null_content_preserved_but_not_shown() {
+     assert_eq!(code, Some(0), "{out}");
+     assert!(!out.contains("思考片段-T10"), "带调用的 content 不得提前显示：{out}");
+     let body = req_body(&mock, 1);
+-    assert_eq!(body["messages"][2]["content"], json!("思考片段-T10"),
++    assert_eq!(body["messages"][3]["content"], json!("思考片段-T10"),
+         "原始字符串原样回传，不改成 null");
+ }
+ 
+@@ -390,7 +392,7 @@ fn t11_current_user_not_duplicated_in_loop() {
+     assert_eq!(code, Some(0), "{out}");
+     assert_eq!(mock.count(), 3);
+     let body = req_body(&mock, 2);
+-    assert_eq!(count_role(&body, "user"), 1, "当前 user 只追加一次");
++    assert_eq!(count_role(&body, "user"), 2, "015 ctx＋本轮 user，循环不重复追加");
+     assert_eq!(count_role(&body, "system"), 1);
+     assert_eq!(tool_msgs(&body).len(), 2, "两批结果各就位");
+ }
+@@ -417,8 +419,8 @@ fn t12_invalid_batch_no_side_effects_history_stays_valid() {
+     let roles = role_seq(&body);
+     assert_eq!(
+         roles,
+-        vec!["system", "user", "user"],
+-        "无效 assistant 不入历史：第 2 请求仅 system＋两个 user（本轮回复在其之后产生）"
++        vec!["system", "user", "user", "user"],
++        "无效 assistant 不入历史：第 2 请求仅 system＋ctx＋go＋next（本轮回复在其之后产生）"
+     );
+     assert!(out.contains("Agent：第二轮回复"), "{out}");
+ }
+
+# ---- 未跟踪新文件（全文）----
+diff --git a/src/app/src/context.rs b/src/app/src/context.rs
+new file mode 100644
+index 0000000..a3be805
+--- /dev/null
++++ b/src/app/src/context.rs
+@@ -0,0 +1,320 @@
++//! 用户轮上下文注入（015 规格）：项目规则（AGENTS.md 链）＋环境上下文的来源
++//! 加载、消息构造与去重识别。仅读取与组装：不联网、不执行命令、不写文件。
++//! 来源全部参数化（[`ContextSources`]），测试注入临时目录与固定时钟；
++//! 块内布局对齐调查样本 item5（标题后空行、内容行包装、段间分隔行）。
++
++use crate::memory::Clock;
++use crate::prompt::{HistoryItem, HistoryMessage, HistoryRole};
++use std::io::Read;
++use std::path::{Path, PathBuf};
++
++/// 规则正文（全局＋项目链拼接，含段间分隔）固定字节预算（015 §1；Codex
++/// `project_doc_max_bytes` 默认值）。标题、`<INSTRUCTIONS>` 包装行与环境块
++/// 不占该预算。
++const CONTENT_BUDGET_BYTES: usize = 32_768;
++
++/// 段间分隔（全局→项目根→cwd 逐来源之间，字节计入预算）。
++const SEGMENT_SEPARATOR: &str = "\n\n--- project-doc ---\n\n";
++
++/// 上下文组装来源（015 §1）：宿主每用户轮解析一次后传入。
++#[derive(Clone)]
++pub struct ContextSources {
++    /// 全局规则目录（002 `config_dir` 机制，`TCHAT_CONFIG_DIR` 可覆盖）。
++    pub global_dir: PathBuf,
++    /// 进程工作目录：项目链起点（向上找最近含 `.git` 的祖先）与环境块 cwd。
++    pub cwd: PathBuf,
++    /// 环境变量 `SHELL`；缺失传 `None`。
++    pub shell: Option<String>,
++    /// 注入时钟（013 `Clock` 模式）：UTC 日期来源。
++    pub clock: Clock,
++}
++
++impl ContextSources {
++    /// 宿主生产来源：全局目录＝`config_dir()`，cwd＝进程工作目录（失败回退
++    /// `.`），shell＝`SHELL`，时钟＝系统时钟。测试注入临时目录与固定时钟。
++    pub fn from_env() -> Self {
++        Self {
++            global_dir: crate::catalog::config_dir(),
++            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
++            shell: std::env::var("SHELL").ok(),
++            clock: crate::memory::system_clock(),
++        }
++    }
++}
++
++/// 组装结果：`message` 为完整上下文消息文本（不含替换声明）；
++/// `notices` 为跳过/截断提示行（含路径与原因类别，不含规则正文）。
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct BuiltContext {
++    pub message: String,
++    pub notices: Vec<String>,
++}
++
++/// 加载来源的元数据判定（015 文件异常边界）：仅自动加载「`AGENTS.md` 本身是
++/// 普通、非符号链接文件」的来源；缺失属正常路径（静默）。
++enum SourceProbe {
++    /// 普通文件（含字节大小）。
++    Regular(u64),
++    Missing,
++    Symlink,
++    NotRegular,
++    /// 元数据读取失败（权限等）。
++    MetaError,
++}
++
++fn probe_source(path: &Path) -> SourceProbe {
++    match std::fs::symlink_metadata(path) {
++        Ok(md) => {
++            if md.file_type().is_symlink() {
++                SourceProbe::Symlink
++            } else if md.is_file() {
++                SourceProbe::Regular(md.len())
++            } else {
++                SourceProbe::NotRegular
++            }
++        }
++        Err(e) if e.kind() == std::io::ErrorKind::NotFound => SourceProbe::Missing,
++        Err(_) => SourceProbe::MetaError,
++    }
++}
++
++fn skip_notice(path: &Path, reason: &str) -> String {
++    format!("上下文加载：跳过 {}（{reason}）", path.display())
++}
++
++/// 有界读取并解码：至多 `read_limit` 字节（调用方给剩余预算＋3，用于多字节
++/// 边界判定）。文件长于读取上限且缓冲尾是不完整多字节序列时按字符边界收尾
++/// （读取边界，非文件损坏）；文件本身非法 UTF-8 或读取失败则跳过并记原因。
++fn load_source_text(
++    path: &Path,
++    file_size: u64,
++    read_limit: usize,
++    notices: &mut Vec<String>,
++) -> Option<String> {
++    let file = match std::fs::File::open(path) {
++        Ok(f) => f,
++        Err(_) => {
++            notices.push(skip_notice(path, "读取失败"));
++            return None;
++        }
++    };
++    let mut buf = Vec::new();
++    if file.take(read_limit as u64).read_to_end(&mut buf).is_err() {
++        notices.push(skip_notice(path, "读取失败"));
++        return None;
++    }
++    let file_longer = file_size > read_limit as u64;
++    match String::from_utf8(buf) {
++        Ok(text) => Some(text),
++        Err(e) => {
++            if e.utf8_error().error_len().is_none() && file_longer {
++                // 读取边界截断多字节字符：回退到完整字符（valid_up_to 保证
++                // 前缀仍是合法 UTF-8，重建不会失败）
++                let valid = e.utf8_error().valid_up_to();
++                String::from_utf8(e.into_bytes()[..valid].to_vec()).ok()
++            } else {
++                notices.push(skip_notice(path, "非法 UTF-8"));
++                None
++            }
++        }
++    }
++}
++
++/// 预算耗尽后停止加载（015 §1）：不再打开任何后续来源文件；仅以元数据判定
++/// 是否存在后续普通文件来源，存在则记一行提示（不读正文，纯空白来源可能被
++/// 多报——罕见角形，换取「不再读取」的严格性）。
++fn has_regular_source(path: &Path) -> bool {
++    matches!(probe_source(path), SourceProbe::Regular(_))
++}
++
++/// 拼接预算内的 UTF-8 前缀；超出则按字符边界回退并标记截断。
++enum BudgetPrefix<'a> {
++    Within(&'a str),
++    Truncated(&'a str),
++}
++
++fn utf8_prefix(text: &str, max: usize) -> BudgetPrefix<'_> {
++    if text.len() <= max {
++        BudgetPrefix::Within(text)
++    } else {
++        let mut end = max;
++        while !text.is_char_boundary(end) {
++            end -= 1;
++        }
++        BudgetPrefix::Truncated(&text[..end])
++    }
++}
++
++/// 项目规则链（015 §1）：从 cwd 向上找最近含 `.git` 的祖先（含 cwd 自身）
++/// 作为根，返回根→cwd 目录序；无 `.git` 祖先时仅 cwd 一个目录。
++fn project_chain_dirs(cwd: &Path) -> Vec<PathBuf> {
++    let mut root = None;
++    let mut dir = cwd;
++    loop {
++        if dir.join(".git").symlink_metadata().is_ok() {
++            root = Some(dir);
++            break;
++        }
++        match dir.parent() {
++            Some(parent) => dir = parent,
++            None => break,
++        }
++    }
++    let Some(root) = root else {
++        return vec![cwd.to_path_buf()];
++    };
++    let mut chain = vec![cwd.to_path_buf()];
++    let mut cur = cwd;
++    while cur != root {
++        cur = cur.parent().expect("root 由 cwd 逐级向上扫描所得，必为祖先");
++        chain.push(cur.to_path_buf());
++    }
++    chain.reverse();
++    chain
++}
++
++/// XML 文本转义（环境块值；标题行非 XML 上下文，不转义）。
++fn xml_escape(s: &str) -> String {
++    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
++}
++
++/// UTC 日期 `YYYY-MM-DD`（注入时钟 epoch 秒；chrono 无 clock feature，013-M4 模式）。
++fn utc_date(clock: &Clock) -> String {
++    chrono::DateTime::<chrono::Utc>::from_timestamp(clock(), 0)
++        .map(|dt| dt.format("%Y-%m-%d").to_string())
++        .unwrap_or_else(|| "1970-01-01".into())
++}
++
++fn environment_block(sources: &ContextSources) -> String {
++    let cwd = sources.cwd.display().to_string();
++    let mut block = String::from("<environment_context>\n");
++    block.push_str(&format!("  <cwd>{}</cwd>\n", xml_escape(&cwd)));
++    if let Some(shell) = sources.shell.as_deref() {
++        if !shell.trim().is_empty() {
++            block.push_str(&format!("  <shell>{}</shell>\n", xml_escape(shell)));
++        }
++    }
++    block.push_str(&format!(
++        "  <current_date>{}</current_date>\n",
++        utc_date(&sources.clock)
++    ));
++    block.push_str("</environment_context>");
++    block
++}
++
++/// 加载来源并构造上下文消息（015 §1 字节级形态）。规则正文按「全局→项目
++/// 根→cwd」顺序拼接为单一 `content`（来源文本首尾 trim，段间固定分隔，分隔
++/// 计入预算）；读取按剩余预算有界，预算耗尽（含恰好占满）停止加载后续来源。
++pub fn build_context_message(sources: &ContextSources) -> BuiltContext {
++    let mut notices = Vec::new();
++    let mut content = String::new();
++    let mut has_project = false;
++
++    let chain = project_chain_dirs(&sources.cwd);
++    let paths: Vec<PathBuf> = std::iter::once(sources.global_dir.join("AGENTS.md"))
++        .chain(chain.into_iter().map(|d| d.join("AGENTS.md")))
++        .collect();
++
++    for (index, path) in paths.iter().enumerate() {
++        let remaining = CONTENT_BUDGET_BYTES.saturating_sub(content.len());
++        if remaining == 0 {
++            // 终态审查修订：扫描全部剩余来源的存在性（仅元数据），首个后续
++            // 路径缺失/异常不得掩蔽更后链上目录的普通来源
++            if paths[index..].iter().any(|p| has_regular_source(p)) {
++                notices.push(format!(
++                    "上下文加载：规则正文预算（{CONTENT_BUDGET_BYTES} 字节）已耗尽，停止加载后续 AGENTS.md 来源"
++                ));
++            }
++            break;
++        }
++        let file_size = match probe_source(&path) {
++            SourceProbe::Regular(size) => size,
++            SourceProbe::Missing => continue,
++            SourceProbe::Symlink => {
++                notices.push(skip_notice(&path, "符号链接"));
++                continue;
++            }
++            SourceProbe::NotRegular => {
++                notices.push(skip_notice(&path, "非普通文件"));
++                continue;
++            }
++            SourceProbe::MetaError => {
++                notices.push(skip_notice(&path, "读取失败"));
++                continue;
++            }
++        };
++        let Some(text) = load_source_text(&path, file_size, remaining + 3, &mut notices) else {
++            continue;
++        };
++        let trimmed = text.trim();
++        if trimmed.is_empty() {
++            // 缺失/纯空白来源：正常路径，静默跳过
++            continue;
++        }
++        if index > 0 {
++            has_project = true;
++        }
++        let candidate = if content.is_empty() {
++            trimmed.to_string()
++        } else {
++            format!("{content}{SEGMENT_SEPARATOR}{trimmed}")
++        };
++        match utf8_prefix(&candidate, CONTENT_BUDGET_BYTES) {
++            BudgetPrefix::Within(within) => content = within.to_string(),
++            BudgetPrefix::Truncated(prefix) => {
++                content = prefix.to_string();
++                notices.push(format!(
++                    "上下文加载：{} 规则正文超出 {CONTENT_BUDGET_BYTES} 字节预算，已按 UTF-8 边界截断",
++                    path.display()
++                ));
++                break;
++            }
++        }
++    }
++
++    let mut message = String::new();
++    if !content.is_empty() {
++        if has_project {
++            message.push_str(&format!(
++                "# AGENTS.md instructions for {}\n\n",
++                sources.cwd.display()
++            ));
++        } else {
++            message.push_str("# AGENTS.md instructions\n\n");
++        }
++        message.push_str("<INSTRUCTIONS>\n");
++        message.push_str(&content);
++        message.push_str("\n</INSTRUCTIONS>\n\n");
++    }
++    message.push_str(&environment_block(sources));
++    BuiltContext { message, notices }
++}
++
++/// 识别完整上下文消息并返回规范化正文：先剥除至多一条完整替换声明及其约定
++/// 分隔（声明行＋空行，仅逐字节前缀匹配时剥除），再识别完整结构（以
++/// `# AGENTS.md instructions` 或 `<environment_context>` 开头、以
++/// `</environment_context>` 结尾且含完整 INSTRUCTIONS 包装/块间结构）。
++/// 仅相似标题或标记开头、结构不完整的普通用户文本不认定为上下文。
++pub fn context_body(text: &str) -> Option<&str> {
++    let stripped = text
++        .strip_prefix(crate::prompt::CONTEXT_REPLACEMENT_DECLARATION)
++        .and_then(|rest| rest.strip_prefix("\n\n"))
++        .unwrap_or(text);
++    let is_full = stripped.ends_with("</environment_context>")
++        && ((stripped.starts_with("# AGENTS.md instructions")
++            && stripped.contains("\n\n<INSTRUCTIONS>\n")
++            && stripped.contains("\n</INSTRUCTIONS>\n\n<environment_context>\n"))
++            || stripped.starts_with("<environment_context>\n  <cwd>"));
++    is_full.then_some(stripped)
++}
++
++/// 向后扫描历史 user 文本项，取最后一条上下文消息的规范化正文（去重比较
++/// 基线；resume 后自动恢复，零新增持久化状态）。
++pub fn last_context_body(history: &[HistoryItem]) -> Option<&str> {
++    history.iter().rev().find_map(|item| match item {
++        HistoryItem::Text(HistoryMessage { role, content }) if *role == HistoryRole::User => {
++            context_body(content)
++        }
++        _ => None,
++    })
++}
+diff --git a/src/app/tests/context_injection.rs b/src/app/tests/context_injection.rs
+new file mode 100644
+index 0000000..a7924fa
+--- /dev/null
++++ b/src/app/tests/context_injection.rs
+@@ -0,0 +1,909 @@
++//! 015 规格验收：用户轮上下文注入（项目规则 AGENTS.md 链＋环境上下文）。
++//! 全部使用独立临时目录＋固定时钟/来源，不依赖真实用户目录或真实时间；
++//! 预期上下文文本一律由测试侧按规格 §1 字节级形态**独立重建**，不调用生产组装函数。
++
++use serde_json::{json, Value};
++use std::path::{Path, PathBuf};
++use terminal_chat::context::{build_context_message, context_body, ContextSources};
++use terminal_chat::memory::{Clock, MemoriesConfig};
++use terminal_chat::prompt::{HistoryItem, HistoryMessage, HistoryRole, ToolCallRecord};
++use terminal_chat::turn::{run_tool_turn_with_mode, run_user_turn_with_context, ToolMode};
++
++/// 固定时钟锚点：UTC 2025-10-09。
++const T0: i64 = 1_760_000_000;
++const T0_DATE: &str = "2025-10-09";
++/// 015 §1 固定替换声明（逐字节）。
++const DECL: &str = "The following context replaces the previously provided AGENTS.md instructions and environment context.";
++
++fn clock_at(t: i64) -> Clock {
++    std::sync::Arc::new(move || t)
++}
++
++struct Tmp(PathBuf);
++
++impl Tmp {
++    fn new(tag: &str) -> Self {
++        let p = std::env::temp_dir().join(format!(
++            "tchat-015-{tag}-{}-{}",
++            std::process::id(),
++            std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .unwrap()
++                .as_nanos()
++        ));
++        std::fs::create_dir_all(&p).unwrap();
++        Tmp(p)
++    }
++    fn path(&self) -> &Path {
++        &self.0
++    }
++}
++
++impl Drop for Tmp {
++    fn drop(&mut self) {
++        let _ = std::fs::remove_dir_all(&self.0);
++    }
++}
++
++fn sources(global_dir: &Path, cwd: &Path, shell: Option<&str>, t: i64) -> ContextSources {
++    ContextSources {
++        global_dir: global_dir.to_path_buf(),
++        cwd: cwd.to_path_buf(),
++        shell: shell.map(str::to_string),
++        clock: clock_at(t),
++    }
++}
++
++/// 测试侧 XML 文本转义（独立实现，勿引用生产代码）。
++fn xml_escape(s: &str) -> String {
++    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
++}
++
++/// 测试侧独立重建 015 §1 字节级形态：`global`/`project` 为原始文件文本
++/// （重建内部做与规格一致的首尾 trim 与段间分隔）。
++fn rebuild_ctx(
++    cwd: &str,
++    shell: Option<&str>,
++    date: &str,
++    global: Option<&str>,
++    project: &[&str],
++) -> String {
++    let mut segs: Vec<&str> = Vec::new();
++    if let Some(g) = global {
++        if !g.trim().is_empty() {
++            segs.push(g.trim());
++        }
++    }
++    let mut has_project = false;
++    for p in project {
++        if !p.trim().is_empty() {
++            segs.push(p.trim());
++            has_project = true;
++        }
++    }
++    let mut out = String::new();
++    if !segs.is_empty() {
++        if has_project {
++            out.push_str(&format!("# AGENTS.md instructions for {cwd}\n\n"));
++        } else {
++            out.push_str("# AGENTS.md instructions\n\n");
++        }
++        out.push_str("<INSTRUCTIONS>\n");
++        out.push_str(&segs.join("\n\n--- project-doc ---\n\n"));
++        out.push_str("\n</INSTRUCTIONS>\n\n");
++    }
++    out.push_str("<environment_context>\n");
++    out.push_str(&format!("  <cwd>{}</cwd>\n", xml_escape(cwd)));
++    if let Some(sh) = shell {
++        if !sh.trim().is_empty() {
++            out.push_str(&format!("  <shell>{}</shell>\n", xml_escape(sh)));
++        }
++    }
++    out.push_str(&format!("  <current_date>{date}</current_date>\n"));
++    out.push_str("</environment_context>");
++    out
++}
++
++fn answer(text: &str) -> Value {
++    json!({ "choices": [{ "message": { "role": "assistant", "content": text },
++        "finish_reason": "stop" }] })
++}
++
++fn tool_reply(id: &str, name: &str, arguments: &Value) -> Value {
++    json!({ "choices": [{ "message": { "role": "assistant", "content": null,
++        "tool_calls": [{ "id": id, "type": "function",
++            "function": { "name": name, "arguments": arguments.to_string() } }] },
++        "finish_reason": "tool_calls" }] })
++}
++
++fn user(content: &str) -> HistoryItem {
++    HistoryItem::Text(HistoryMessage {
++        role: HistoryRole::User,
++        content: content.to_string(),
++    })
++}
++
++fn assistant(content: &str) -> HistoryItem {
++    HistoryItem::Text(HistoryMessage {
++        role: HistoryRole::Assistant,
++        content: content.to_string(),
++    })
++}
++
++/// 请求/历史中上下文消息计数（按块标记独立计数，不依赖生产识别器）。
++fn ctx_marker_count(texts: &[&str]) -> usize {
++    texts
++        .iter()
++        .filter(|t| t.contains("<environment_context>") && t.contains("</environment_context>"))
++        .count()
++}
++
++/// c1：首轮注入——三层来源（全局＋根＋cwd）字节级一致，ctx 先于用户输入，
++/// 持久化点逐项可见。
++#[test]
++fn t01_first_turn_full_context_byte_exact() {
++    let cfg = Tmp::new("c1-cfg");
++    let proj = Tmp::new("c1-proj");
++    std::fs::write(cfg.path().join("AGENTS.md"), "全局规则A\n").unwrap();
++    let root = proj.path().join("repo");
++    let sub = root.join("pkg");
++    std::fs::create_dir_all(root.join(".git")).unwrap();
++    std::fs::create_dir_all(&sub).unwrap();
++    std::fs::write(root.join("AGENTS.md"), "根规则R\n").unwrap();
++    std::fs::write(sub.join("AGENTS.md"), "项目规则C\n").unwrap();
++    let src = sources(cfg.path(), &sub, Some("/bin/testsh"), T0);
++
++    let mut history = Vec::new();
++    let mut bodies = Vec::new();
++    let mut recorded = Vec::new();
++    let reply = run_user_turn_with_context(
++        &mut history,
++        "你好",
++        &mut |b| {
++            bodies.push(b.clone());
++            Ok(answer("完成"))
++        },
++        &mut |_| {},
++        None,
++        &mut |h| recorded.push(h.len()),
++        ToolMode::User,
++        &src,
++    )
++    .unwrap();
++    assert_eq!(reply, "完成");
++    assert_eq!(bodies.len(), 1);
++
++    let cwd = sub.display().to_string();
++    let expected = rebuild_ctx(
++        &cwd,
++        Some("/bin/testsh"),
++        T0_DATE,
++        Some("全局规则A\n"),
++        &["根规则R\n", "项目规则C\n"],
++    );
++    let msgs = bodies[0]["messages"].as_array().unwrap();
++    assert_eq!(msgs.len(), 3, "system → ctx → 本轮输入");
++    assert_eq!(msgs[0]["role"], json!("system"));
++    assert_eq!(msgs[1]["role"], json!("user"));
++    assert_eq!(msgs[1]["content"], json!(expected), "ctx 与独立重建逐字节一致");
++    assert_eq!(msgs[2]["role"], json!("user"));
++    assert_eq!(msgs[2]["content"], json!("你好"));
++
++    // 历史与持久化点：ctx 先于 user 入史；每个入史点各回调一次
++    assert_eq!(history.len(), 3, "ctx、user、assistant");
++    match (&history[0], &history[1]) {
++        (
++            HistoryItem::Text(HistoryMessage {
++                role: r1,
++                content: c1,
++            }),
++            HistoryItem::Text(HistoryMessage {
++                role: r2,
++                content: c2,
++            }),
++        ) => {
++            assert_eq!(*r1, HistoryRole::User);
++            assert_eq!(c1, &expected);
++            assert_eq!(*r2, HistoryRole::User);
++            assert_eq!(c2, "你好");
++        }
++        other => panic!("历史前两项应为 ctx 与本轮输入：{other:?}"),
++    }
++    assert_eq!(recorded, vec![1, 2, 3], "三个入史点：首快照恰仅含 ctx");
++}
++
++/// c2：无规则→仅环境块；仅全局→无 for 后缀；SHELL 缺失/纯空白→无 shell 行；
++/// 纯空白来源静默跳过。
++#[test]
++fn t02_env_only_global_only_blank_shell() {
++    let cfg = Tmp::new("c2-cfg");
++    let proj = Tmp::new("c2-proj");
++    let cwd = proj.path().display().to_string();
++
++    // 无任何规则文件：仅环境块、无标题行，无提示
++    let built = build_context_message(&sources(cfg.path(), proj.path(), Some("/bin/sh"), T0));
++    assert_eq!(
++        built.message,
++        rebuild_ctx(&cwd, Some("/bin/sh"), T0_DATE, None, &[])
++    );
++    assert!(!built.message.contains("AGENTS.md instructions"));
++    assert!(built.notices.is_empty());
++
++    // 仅全局：无 ` for {cwd}` 后缀
++    std::fs::write(cfg.path().join("AGENTS.md"), "仅全局G\n").unwrap();
++    let built = build_context_message(&sources(cfg.path(), proj.path(), Some("/bin/sh"), T0));
++    assert_eq!(
++        built.message,
++        rebuild_ctx(&cwd, Some("/bin/sh"), T0_DATE, Some("仅全局G\n"), &[])
++    );
++    assert!(!built.message.contains(&format!("instructions for {cwd}")));
++
++    // SHELL 缺失与纯空白：整行省略
++    for shell in [None, Some("  \t ")] {
++        let built = build_context_message(&sources(cfg.path(), proj.path(), shell, T0));
++        assert_eq!(
++            built.message,
++            rebuild_ctx(&cwd, shell, T0_DATE, Some("仅全局G\n"), &[])
++        );
++        assert!(!built.message.contains("<shell>"));
++    }
++
++    // 纯空白规则文件＝跳过（无提示）
++    std::fs::write(cfg.path().join("AGENTS.md"), " \n\t\n").unwrap();
++    let built = build_context_message(&sources(cfg.path(), proj.path(), Some("/bin/sh"), T0));
++    assert_eq!(
++        built.message,
++        rebuild_ctx(&cwd, Some("/bin/sh"), T0_DATE, None, &[])
++    );
++    assert!(built.notices.is_empty(), "空白来源静默跳过：{:?}", built.notices);
++}
++
++/// c2：项目链取最近 `.git` 根、按根→cwd 排序、无文件目录跳过。
++#[test]
++fn t03_chain_nearest_git_root_skips_gap_dirs() {
++    let proj = Tmp::new("c2-chain");
++    let outer = proj.path().join("outer");
++    let mid = outer.join("mid");
++    let deep = mid.join("gap").join("deep");
++    std::fs::create_dir_all(outer.join(".git")).unwrap();
++    std::fs::create_dir_all(mid.join(".git")).unwrap();
++    std::fs::create_dir_all(&deep).unwrap();
++    std::fs::write(outer.join("AGENTS.md"), "外层O\n").unwrap();
++    std::fs::write(mid.join("AGENTS.md"), "中层M\n").unwrap();
++    std::fs::write(deep.join("AGENTS.md"), "深层D\n").unwrap();
++
++    // 最近根＝mid（outer 的更远根不得入选）；gap 目录无文件被跳过
++    let built = build_context_message(&sources(proj.path(), &deep, Some("/bin/sh"), T0));
++    let cwd = deep.display().to_string();
++    assert_eq!(
++        built.message,
++        rebuild_ctx(&cwd, Some("/bin/sh"), T0_DATE, None, &["中层M\n", "深层D\n"])
++    );
++
++    // 无 .git 祖先：只查 cwd 一个目录
++    let loose = Tmp::new("c2-loose");
++    std::fs::write(loose.path().join("AGENTS.md"), "散目录L\n").unwrap();
++    let built = build_context_message(&sources(proj.path(), loose.path(), Some("/bin/sh"), T0));
++    let cwd = loose.path().display().to_string();
++    assert_eq!(
++        built.message,
++        rebuild_ctx(&cwd, Some("/bin/sh"), T0_DATE, None, &["散目录L\n"])
++    );
++}
++
++/// c2：异常来源（符号链接/目录/非法 UTF-8/读取失败）跳过＋原因提示、不中止轮；
++/// 提示不含规则正文。
++#[test]
++fn t04_anomalous_sources_skipped_with_notice_no_abort() {
++    let cfg = Tmp::new("c2-anom-cfg");
++    let proj = Tmp::new("c2-anom-proj");
++    // 全局＝符号链接
++    let real = cfg.path().join("real.md");
++    std::fs::write(&real, "符号链接目标正文G\n").unwrap();
++    std::os::unix::fs::symlink(&real, cfg.path().join("AGENTS.md")).unwrap();
++    // 项目根＝目录（非普通文件）
++    let root = proj.path().join("r");
++    let sub = root.join("s");
++    std::fs::create_dir_all(root.join(".git")).unwrap();
++    std::fs::create_dir_all(&sub).unwrap();
++    std::fs::create_dir_all(root.join("AGENTS.md")).unwrap();
++    // cwd＝非法 UTF-8 内容
++    std::fs::write(sub.join("AGENTS.md"), b"R\xff\xfeULE\n").unwrap();
++
++    let built = build_context_message(&sources(cfg.path(), &sub, Some("/bin/sh"), T0));
++    assert!(
++        !built.message.contains("INSTRUCTIONS"),
++        "全部来源异常→无 AGENTS 块：{}",
++        built.message
++    );
++    assert_eq!(built.notices.len(), 3, "三个异常来源各一行提示：{:?}", built.notices);
++    for n in &built.notices {
++        assert!(!n.contains("符号链接目标正文G"), "提示不得含规则正文：{n}");
++        assert!(!n.contains('R'), "提示不得含规则正文：{n}");
++    }
++    assert!(built.notices.iter().any(|n| n.contains("符号链接")));
++    assert!(built.notices.iter().any(|n| n.contains("非普通文件")));
++    assert!(built.notices.iter().any(|n| n.contains("UTF-8")));
++
++    // 读取失败（chmod 000；测试进程非 root）：来源跳过且用户轮正常完成
++    let cfg2 = Tmp::new("c2-anom-cfg2");
++    let proj2 = Tmp::new("c2-anom-proj2");
++    let unreadable = cfg2.path().join("AGENTS.md");
++    std::fs::write(&unreadable, "不可读正文G\n").unwrap();
++    use std::os::unix::fs::PermissionsExt;
++    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
++    let built2 = build_context_message(&sources(cfg2.path(), proj2.path(), Some("/bin/sh"), T0));
++    assert!(!built2.message.contains("INSTRUCTIONS"));
++    assert!(
++        built2.notices.iter().any(|n| n.contains("读取失败")),
++        "读取失败有提示：{:?}",
++        built2.notices
++    );
++    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644)).unwrap();
++
++    let mut history = Vec::new();
++    let src2 = sources(cfg2.path(), proj2.path(), Some("/bin/sh"), T0);
++    let reply = run_user_turn_with_context(
++        &mut history,
++        "继续",
++        &mut |_| Ok(answer("轮未中止")),
++        &mut |_| {},
++        None,
++        &mut |_| {},
++        ToolMode::User,
++        &src2,
++    )
++    .unwrap();
++    assert_eq!(reply, "轮未中止");
++    assert_eq!(history.len(), 3, "ctx（仅环境块）、user、assistant");
++}
++
++/// c3：同内容跨轮与轮内续请求都不重复注入。
++#[test]
++fn t05_same_content_not_reinjected() {
++    let cfg = Tmp::new("c3-cfg");
++    let proj = Tmp::new("c3-proj");
++    std::fs::write(cfg.path().join("AGENTS.md"), "稳定规则S\n").unwrap();
++    std::fs::create_dir_all(proj.path().join(".git")).unwrap();
++    let src = sources(cfg.path(), proj.path(), Some("/bin/sh"), T0);
++
++    let mut history = Vec::new();
++    let mut all_bodies = Vec::new();
++    for input in ["第一问", "第二问"] {
++        run_user_turn_with_context(
++            &mut history,
++            input,
++            &mut |b| {
++                all_bodies.push(b.clone());
++                Ok(answer("答"))
++            },
++            &mut |_| {},
++            None,
++            &mut |_| {},
++            ToolMode::User,
++            &src,
++        )
++        .unwrap();
++    }
++    let texts: Vec<&str> = history
++        .iter()
++        .filter_map(|h| match h {
++            HistoryItem::Text(m) if m.role == HistoryRole::User => Some(m.content.as_str()),
++            _ => None,
++        })
++        .collect();
++    assert_eq!(ctx_marker_count(&texts), 1, "两轮后历史恰 1 条 ctx");
++    for (i, body) in all_bodies.iter().enumerate() {
++        let msgs = body["messages"].as_array().unwrap();
++        let texts: Vec<&str> = msgs
++            .iter()
++            .filter_map(|m| m["content"].as_str())
++            .collect();
++        assert_eq!(ctx_marker_count(&texts), 1, "第 {} 次请求 ctx 恰一次", i + 1);
++    }
++
++    // 轮内工具续请求：ctx 仍恰一次（历史携带，不重注入）
++    let mut bodies3 = Vec::new();
++    run_user_turn_with_context(
++        &mut history,
++        "第三问",
++        &mut |b| {
++            bodies3.push(b.clone());
++            if bodies3.len() == 1 {
++                Ok(tool_reply("c3-1", "exec_command", &json!({ "cmd": "true" })))
++            } else {
++                Ok(answer("三轮答"))
++            }
++        },
++        &mut |_| {},
++        None,
++        &mut |_| {},
++        ToolMode::User,
++        &src,
++    )
++    .unwrap();
++    assert_eq!(bodies3.len(), 2);
++    let texts: Vec<&str> = history
++        .iter()
++        .filter_map(|h| match h {
++            HistoryItem::Text(m) if m.role == HistoryRole::User => Some(m.content.as_str()),
++            _ => None,
++        })
++        .collect();
++    assert_eq!(ctx_marker_count(&texts), 1, "工具轮后仍恰 1 条 ctx");
++    for body in &bodies3 {
++        let msgs = body["messages"].as_array().unwrap();
++        let texts: Vec<&str> = msgs.iter().filter_map(|m| m["content"].as_str()).collect();
++        assert_eq!(ctx_marker_count(&texts), 1);
++    }
++}
++
++/// c4：A→B→B——变化带替换声明、旧消息保留；再同内容不再注入。
++#[test]
++fn t06_content_change_replaces_with_declaration_abb() {
++    let cfg = Tmp::new("c4-cfg");
++    let proj = Tmp::new("c4-proj");
++    std::fs::create_dir_all(proj.path().join(".git")).unwrap();
++    let mut src = sources(cfg.path(), proj.path(), Some("/bin/sh"), T0);
++
++    let expected = |rules: &str| {
++        rebuild_ctx(
++            &proj.path().display().to_string(),
++            Some("/bin/sh"),
++            T0_DATE,
++            Some(rules),
++            &[],
++        )
++    };
++
++    // 轮 1：A（裸消息，无声明）
++    std::fs::write(cfg.path().join("AGENTS.md"), "版本A\n").unwrap();
++    let mut history = Vec::new();
++    run_user_turn_with_context(
++        &mut history, "问一",
++        &mut |_| Ok(answer("答一")), &mut |_| {}, None, &mut |_| {},
++        ToolMode::User, &src,
++    ).unwrap();
++    let ctx_a = expected("版本A\n");
++    match &history[0] {
++        HistoryItem::Text(m) => {
++            assert_eq!(m.content, ctx_a);
++            assert!(!m.content.contains(DECL), "首次注入无替换声明");
++        }
++        other => panic!("{other:?}"),
++    }
++
++    // 轮 2：文件改为 B → 带声明的新消息，旧 A 保留
++    std::fs::write(cfg.path().join("AGENTS.md"), "版本B\n").unwrap();
++    let mut bodies2 = Vec::new();
++    run_user_turn_with_context(
++        &mut history, "问二",
++        &mut |b| { bodies2.push(b.clone()); Ok(answer("答二")) },
++        &mut |_| {}, None, &mut |_| {},
++        ToolMode::User, &src,
++    ).unwrap();
++    let ctx_b = expected("版本B\n");
++    let texts: Vec<&str> = history
++        .iter()
++        .filter_map(|h| match h {
++            HistoryItem::Text(m) if m.role == HistoryRole::User => Some(m.content.as_str()),
++            _ => None,
++        })
++        .collect();
++    assert_eq!(ctx_marker_count(&texts), 2, "A 与 B(带声明) 两条");
++    let msgs = bodies2[0]["messages"].as_array().unwrap();
++    let texts: Vec<&str> = msgs.iter().filter_map(|m| m["content"].as_str()).collect();
++    assert_eq!(ctx_marker_count(&texts), 2, "请求携带 A＋B");
++    let declared_new = format!("{DECL}\n\n{ctx_b}");
++    assert!(texts.contains(&declared_new.as_str()), "新消息＝声明＋空行＋B");
++
++    // 轮 3：B 未变 → 不再注入
++    src = sources(cfg.path(), proj.path(), Some("/bin/sh"), T0);
++    run_user_turn_with_context(
++        &mut history, "问三",
++        &mut |_| Ok(answer("答三")), &mut |_| {}, None, &mut |_| {},
++        ToolMode::User, &src,
++    ).unwrap();
++    let texts: Vec<&str> = history
++        .iter()
++        .filter_map(|h| match h {
++            HistoryItem::Text(m) if m.role == HistoryRole::User => Some(m.content.as_str()),
++            _ => None,
++        })
++        .collect();
++    assert_eq!(ctx_marker_count(&texts), 2, "A→B→B 后仍恰 2 条 ctx");
++}
++
++/// c4：仿冒文本不认定为上下文（其后真实注入）；真实形态不同正文→带声明；
++/// 带声明等正文→不注入。
++#[test]
++fn t07_lookalike_not_recognized_real_forms_recognized() {
++    let cfg = Tmp::new("c4b-cfg");
++    let proj = Tmp::new("c4b-proj");
++    std::fs::write(cfg.path().join("AGENTS.md"), "现行规则N\n").unwrap();
++    std::fs::create_dir_all(proj.path().join(".git")).unwrap();
++    let src = sources(cfg.path(), proj.path(), Some("/bin/sh"), T0);
++    let ctx_now = rebuild_ctx(
++        &proj.path().display().to_string(),
++        Some("/bin/sh"),
++        T0_DATE,
++        Some("现行规则N\n"),
++        &[],
++    );
++
++    // 仿冒 1：以标题开头、以 </INSTRUCTIONS> 结尾（无环境块）→ 不认定为上下文；
++    // 其后注入裸消息（基线不存在）
++    for lookalike in [
++        format!(
++            "# AGENTS.md instructions for {}\n\n<INSTRUCTIONS>\n用户粘贴的说明\n</INSTRUCTIONS>",
++            proj.path().display()
++        ),
++        "<environment_context>\n  <cwd>普通用户输入开头</cwd>".to_string(),
++    ] {
++        let mut history = vec![user(&lookalike), assistant("收到")];
++        run_user_turn_with_context(
++            &mut history, "新问题",
++            &mut |_| Ok(answer("答")), &mut |_| {}, None, &mut |_| {},
++            ToolMode::User, &src,
++        )
++        .unwrap();
++        assert_eq!(history[2], HistoryItem::Text(HistoryMessage {
++            role: HistoryRole::User,
++            content: ctx_now.clone(),
++        }), "仿冒不被认作基线：注入裸消息（无声明）：{lookalike}");
++    }
++
++    // 真实形态、正文不同（此前存在上下文）→ 新消息带声明
++    let ctx_old = rebuild_ctx(
++        &proj.path().display().to_string(),
++        Some("/bin/sh"),
++        T0_DATE,
++        Some("旧正文O\n"),
++        &[],
++    );
++    let mut history = vec![user(&ctx_old), assistant("旧答")];
++    run_user_turn_with_context(
++        &mut history, "新问题",
++        &mut |_| Ok(answer("答")), &mut |_| {}, None, &mut |_| {},
++        ToolMode::User, &src,
++    ).unwrap();
++    assert_eq!(history[2], HistoryItem::Text(HistoryMessage {
++        role: HistoryRole::User,
++        content: format!("{DECL}\n\n{ctx_now}"),
++    }), "真实旧上下文被识别：新消息带替换声明");
++
++    // 带声明的等正文（恢复形态）→ 不注入
++    let mut history = vec![
++        user(&format!("{DECL}\n\n{ctx_now}")),
++        user("上一问"),
++        assistant("上一答"),
++    ];
++    run_user_turn_with_context(
++        &mut history, "继续",
++        &mut |_| Ok(answer("答")), &mut |_| {}, None, &mut |_| {},
++        ToolMode::User, &src,
++    ).unwrap();
++    let texts: Vec<&str> = history
++        .iter()
++        .filter_map(|h| match h {
++            HistoryItem::Text(m) if m.role == HistoryRole::User => Some(m.content.as_str()),
++            _ => None,
++        })
++        .collect();
++    assert_eq!(ctx_marker_count(&texts), 1, "声明剥除后比较：等正文不注入");
++}
++
++/// c5：ctx 项经 serde 往返（007 行格式）恢复基线——不再注入；序列化形状零新增字段。
++#[test]
++fn t08_serde_roundtrip_restores_dedup_baseline() {
++    let cfg = Tmp::new("c5-cfg");
++    let proj = Tmp::new("c5-proj");
++    std::fs::write(cfg.path().join("AGENTS.md"), "版本B\n").unwrap();
++    std::fs::create_dir_all(proj.path().join(".git")).unwrap();
++    let src = sources(cfg.path(), proj.path(), Some("/bin/sh"), T0);
++    let ctx_b = rebuild_ctx(
++        &proj.path().display().to_string(),
++        Some("/bin/sh"),
++        T0_DATE,
++        Some("版本B\n"),
++        &[],
++    );
++
++    // 007 行格式＝serde tagged JSON：逐条序列化→解析回（/resume 装载路径）
++    let original = vec![
++        user(&format!("{DECL}\n\n{ctx_b}")),
++        user("上一问"),
++        assistant("上一答"),
++    ];
++    let mut history: Vec<HistoryItem> = original
++        .iter()
++        .map(|it| serde_json::from_str(&serde_json::to_string(it).unwrap()).unwrap())
++        .collect();
++
++    // ctx 项序列化形状：恰 type/role/content 三字段（无新增持久化状态）
++    let ctx_json: Value =
++        serde_json::from_str(&serde_json::to_string(&history[0]).unwrap()).unwrap();
++    let mut keys: Vec<&str> = ctx_json.as_object().unwrap().keys().map(String::as_str).collect();
++    keys.sort_unstable();
++    assert_eq!(keys, vec!["content", "role", "type"], "ctx＝普通 Text 项");
++
++    let mut bodies = Vec::new();
++    run_user_turn_with_context(
++        &mut history, "恢复后首问",
++        &mut |b| { bodies.push(b.clone()); Ok(answer("答")) },
++        &mut |_| {}, None, &mut |_| {},
++        ToolMode::User, &src,
++    ).unwrap();
++    let texts: Vec<&str> = history
++        .iter()
++        .filter_map(|h| match h {
++            HistoryItem::Text(m) if m.role == HistoryRole::User => Some(m.content.as_str()),
++            _ => None,
++        })
++        .collect();
++    assert_eq!(ctx_marker_count(&texts), 1, "恢复基线生效：不重复注入");
++    let msgs = bodies[0]["messages"].as_array().unwrap();
++    let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
++    assert_eq!(roles, vec!["system", "user", "user", "assistant", "user"]);
++    assert_eq!(msgs[2]["content"], json!("上一问"));
++    assert_eq!(msgs[4]["content"], json!("恢复后首问"));
++}
++
++/// c6：预算截断——UTF-8 边界、包装完整、分隔计入、恰不超预算、截断提示、
++/// 恰好占满后停止加载。
++#[test]
++fn t09_budget_truncation_utf8_boundary_and_exhaustion() {
++    let cfg = Tmp::new("c6-cfg");
++    let proj = Tmp::new("c6-proj");
++    let root = proj.path().join("repo");
++    std::fs::create_dir_all(root.join(".git")).unwrap();
++
++    // 独立 UTF-8 边界前缀
++    let byte_prefix = |s: &str, max: usize| -> String {
++        if s.len() <= max {
++            s.to_string()
++        } else {
++            let mut end = max;
++            while !s.is_char_boundary(end) {
++                end -= 1;
++            }
++            s[..end].to_string()
++        }
++    };
++    let env_block = |cwd: &str| -> String {
++        format!(
++            "<environment_context>\n  <cwd>{}</cwd>\n  <shell>/bin/sh</shell>\n  <current_date>{T0_DATE}</current_date>\n</environment_context>",
++            xml_escape(cwd)
++        )
++    };
++
++    // a) 两 ASCII 文件合计超预算：分隔行计入，截为恰 32768 字节前缀
++    std::fs::write(cfg.path().join("AGENTS.md"), "G".repeat(20_000)).unwrap();
++    std::fs::write(root.join("AGENTS.md"), "P".repeat(20_000)).unwrap();
++    let built = build_context_message(&sources(cfg.path(), &root, Some("/bin/sh"), T0));
++    let cwd = root.display().to_string();
++    let full = format!("{}\n\n--- project-doc ---\n\n{}", "G".repeat(20_000), "P".repeat(20_000));
++    let expected_content = byte_prefix(&full, 32_768);
++    assert_eq!(expected_content.len(), 32_768);
++    assert_eq!(
++        built.message,
++        format!(
++            "# AGENTS.md instructions for {cwd}\n\n<INSTRUCTIONS>\n{expected_content}\n</INSTRUCTIONS>\n\n{}",
++            env_block(&cwd)
++        )
++    );
++    assert!(
++        built.notices.iter().any(|n| n.contains("32768")),
++        "截断提示：{:?}",
++        built.notices
++    );
++
++    // b) 截点落在多字节字符中间：按字符边界回退，无 U+FFFD
++    std::fs::write(cfg.path().join("AGENTS.md"), format!("{}{}", "a".repeat(32_700), "汉".repeat(200))).unwrap();
++    let built = build_context_message(&sources(cfg.path(), &root, Some("/bin/sh"), T0));
++    let expected_content = format!("{}{}", "a".repeat(32_700), "汉".repeat(22));
++    assert_eq!(expected_content.len(), 32_766, "边界回退到完整字符");
++    assert!(built.message.contains(&format!("<INSTRUCTIONS>\n{expected_content}\n</INSTRUCTIONS>")));
++    assert!(!built.message.contains('\u{fffd}'), "不得产生替换字符");
++
++    // c) 全局恰好占满：content＝全局全文、项目文件不再进入、预算耗尽有提示
++    std::fs::write(cfg.path().join("AGENTS.md"), "E".repeat(32_768)).unwrap();
++    let built = build_context_message(&sources(cfg.path(), &root, Some("/bin/sh"), T0));
++    assert!(built.message.contains(&format!("<INSTRUCTIONS>\n{}\n</INSTRUCTIONS>", "E".repeat(32_768))));
++    assert!(!built.message.contains('P'), "预算耗尽：项目文件不再加载");
++    assert!(
++        built.notices.iter().any(|n| n.contains("32768")),
++        "预算耗尽提示：{:?}",
++        built.notices
++    );
++
++    // d) 耗尽后首个后续路径缺失、更后链上目录有普通来源：仍记耗尽提示
++    //（终态审查发现补钉：缺失不得掩蔽更后来源的存在性）
++    let cfg2 = Tmp::new("c6-cfg2");
++    let proj2 = Tmp::new("c6-proj2");
++    let root2 = proj2.path().join("repo2");
++    let sub2 = root2.join("sub2");
++    std::fs::create_dir_all(root2.join(".git")).unwrap();
++    std::fs::create_dir_all(&sub2).unwrap();
++    std::fs::write(cfg2.path().join("AGENTS.md"), "F".repeat(32_768)).unwrap();
++    std::fs::write(sub2.join("AGENTS.md"), "后来者L\n").unwrap();
++    let built = build_context_message(&sources(cfg2.path(), &sub2, Some("/bin/sh"), T0));
++    assert!(
++        built.message.contains(&format!("<INSTRUCTIONS>\n{}\n</INSTRUCTIONS>", "F".repeat(32_768))),
++        "content＝恰好占满的全局"
++    );
++    assert!(!built.message.contains("后来者L"), "更后来源不加载");
++    assert!(
++        built.notices.iter().any(|n| n.contains("32768")),
++        "首后续缺失不掩蔽更后来源：{:?}",
++        built.notices
++    );
++}
++
++/// c7：MemoryMerge 内部轮经新入口与直调逐字节一致——不读取不注入。
++#[test]
++fn t10_memory_merge_mode_injects_nothing() {
++    let cfg = Tmp::new("c7-cfg");
++    let proj = Tmp::new("c7-proj");
++    std::fs::write(cfg.path().join("AGENTS.md"), "规则M\n").unwrap();
++    std::fs::create_dir_all(proj.path().join(".git")).unwrap();
++    let src = sources(cfg.path(), proj.path(), Some("/bin/sh"), T0);
++    let mem_root = Tmp::new("c7-mem");
++    let mode = ToolMode::MemoryMerge {
++        root: mem_root.path(),
++        system: "merge-system",
++        expected_epoch: 0,
++    };
++
++    let mut h1 = Vec::new();
++    let mut b1 = Vec::new();
++    run_tool_turn_with_mode(
++        &mut h1, "合并",
++        &mut |b| { b1.push(b.clone()); Ok(answer("直调答")) },
++        &mut |_| {}, None, &mut |_| {}, mode,
++    ).unwrap();
++    let mut h2 = Vec::new();
++    let mut b2 = Vec::new();
++    run_user_turn_with_context(
++        &mut h2, "合并",
++        &mut |b| { b2.push(b.clone()); Ok(answer("直调答")) },
++        &mut |_| {}, None, &mut |_| {}, mode, &src,
++    ).unwrap();
++    assert_eq!(
++        serde_json::to_string(&b1[0]).unwrap(),
++        serde_json::to_string(&b2[0]).unwrap(),
++        "合并轮请求经新入口逐字节不变"
++    );
++    assert_eq!(h1, h2, "合并轮历史经新入口不变");
++    assert!(!serde_json::to_string(&b2[0]).unwrap().contains("<INSTRUCTIONS>"));
++}
++
++/// c10：空白输入校验先于上下文写入——拒绝时历史与 on_record 零新增。
++#[test]
++fn t11_blank_input_rejected_before_context_write() {
++    let cfg = Tmp::new("c10-cfg");
++    let proj = Tmp::new("c10-proj");
++    std::fs::write(cfg.path().join("AGENTS.md"), "规则W\n").unwrap();
++    let src = sources(cfg.path(), proj.path(), Some("/bin/sh"), T0);
++    for blank in ["", "  \n\t", "\u{3000}"] {
++        let mut history = Vec::new();
++        let mut recorded = 0usize;
++        let err = run_user_turn_with_context(
++            &mut history, blank,
++            &mut |_| Ok(answer("不应到达")), &mut |_| {}, None,
++            &mut |_| recorded += 1,
++            ToolMode::User, &src,
++        )
++        .unwrap_err();
++        assert!(err.contains("空白"), "{blank:?} 应拒绝：{err}");
++        assert!(history.is_empty(), "拒绝路径不得写入任何历史项");
++        assert_eq!(recorded, 0, "拒绝路径不得触发 on_record");
++    }
++}
++
++/// c10：与工具历史共存（顺序/原文不变）；UserWithMemory 同样注入（D4 尾段不受影响）。
++#[test]
++fn t12_coexists_with_tool_history_and_user_with_memory() {
++    let cfg = Tmp::new("c10b-cfg");
++    let proj = Tmp::new("c10b-proj");
++    std::fs::write(cfg.path().join("AGENTS.md"), "规则X\n").unwrap();
++    let src = sources(cfg.path(), proj.path(), Some("/bin/sh"), T0);
++
++    let seeded = vec![
++        user("旧问"),
++        HistoryItem::AssistantToolCalls {
++            tool_calls: vec![ToolCallRecord {
++                id: "call-1".into(),
++                name: "exec_command".into(),
++                arguments: r#"{"cmd":"true"}"#.into(),
++            }],
++            content: None,
++        },
++        HistoryItem::ToolResult {
++            tool_call_id: "call-1".into(),
++            content: r#"{"status":"completed"}"#.into(),
++            display: None,
++        },
++    ];
++    let mut history = seeded.clone();
++    let mut bodies = Vec::new();
++    run_user_turn_with_context(
++        &mut history, "新问",
++        &mut |b| { bodies.push(b.clone()); Ok(answer("答")) },
++        &mut |_| {}, None, &mut |_| {},
++        ToolMode::User, &src,
++    ).unwrap();
++    let msgs = bodies[0]["messages"].as_array().unwrap();
++    let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
++    assert_eq!(
++        roles,
++        vec!["system", "user", "assistant", "tool", "user", "user"],
++        "种子历史原样投影，ctx 恰在本轮输入之前"
++    );
++    assert_eq!(msgs[1]["content"], json!("旧问"));
++    assert_eq!(msgs[2]["tool_calls"][0]["id"], json!("call-1"));
++    assert_eq!(msgs[3]["tool_call_id"], json!("call-1"));
++    assert!(
++        msgs[4]["content"].as_str().unwrap().contains("<INSTRUCTIONS>"),
++        "ctx 紧邻本轮输入之前"
++    );
++    assert_eq!(msgs[5]["content"], json!("新问"));
++
++    // UserWithMemory（空记忆根→无 D4 尾段）：ctx 照常注入，system＝发送版提示词
++    let mem_root = Tmp::new("c10b-mem");
++    let config = MemoriesConfig::default();
++    let mut history2 = Vec::new();
++    let mut bodies2 = Vec::new();
++    run_user_turn_with_context(
++        &mut history2, "带记忆模式的问",
++        &mut |b| { bodies2.push(b.clone()); Ok(answer("答")) },
++        &mut |_| {}, None, &mut |_| {},
++        ToolMode::UserWithMemory { root: mem_root.path(), config: &config },
++        &src,
++    ).unwrap();
++    let msgs = bodies2[0]["messages"].as_array().unwrap();
++    assert_eq!(msgs.len(), 3, "system → ctx → 输入");
++    assert!(
++        msgs[1]["content"].as_str().unwrap().contains("<INSTRUCTIONS>"),
++        "UserWithMemory 同样注入 ctx"
++    );
++    assert_eq!(
++        msgs[0]["content"],
++        json!(terminal_chat::prompt::sent_instructions()),
++        "无记忆摘要时 system 保持发送版（D4 契约不变）"
++    );
++}
++
++/// c1 附：cwd/SHELL 的 XML 文本转义（环境块内转义；标题行保持原文）。
++#[test]
++fn t13_xml_escaping_cwd_and_shell() {
++    let proj = Tmp::new("c13");
++    let odd = proj.path().join("d&anger<l>");
++    std::fs::create_dir_all(&odd).unwrap();
++    // 无规则：仅环境块，值转义
++    let built = build_context_message(&sources(proj.path(), &odd, Some("sh<&>tag"), T0));
++    let raw = odd.display().to_string();
++    assert!(built.message.contains(&format!("  <cwd>{}</cwd>\n", xml_escape(&raw))));
++    assert!(built.message.contains("  <shell>sh&lt;&amp;&gt;tag</shell>\n"));
++    assert!(!built.message.contains(&format!("<cwd>{raw}</cwd>")));
++    // 有项目规则：标题行用原始路径（非 XML 上下文）
++    std::fs::write(odd.join("AGENTS.md"), "规则T\n").unwrap();
++    let built = build_context_message(&sources(proj.path(), &odd, Some("/bin/sh"), T0));
++    assert!(built.message.contains(&format!("# AGENTS.md instructions for {raw}\n\n")));
++}
++
++/// 识别器边界：`context_body` 剥至多一条声明；空白与残缺文本不识别。
++#[test]
++fn t14_context_body_recognition_edges() {
++    let ctx = rebuild_ctx("/w", Some("/bin/sh"), T0_DATE, Some("R\n"), &[]);
++    assert_eq!(context_body(&ctx), Some(ctx.as_str()));
++    let declared = format!("{DECL}\n\n{ctx}");
++    assert_eq!(context_body(&declared), Some(ctx.as_str()), "剥除一条声明");
++    // 两条声明只剥一条：剩余声明使其不再匹配结构
++    let double = format!("{DECL}\n\n{declared}");
++    assert_eq!(context_body(&double), None, "至多剥一条");
++    assert_eq!(context_body("普通用户文本"), None);
++    assert_eq!(context_body(""), None);
++    assert_eq!(context_body("# AGENTS.md instructions for /w\n用户粘贴"), None);
++    assert_eq!(context_body("<environment_context>\n开头但无闭合"), None);
++}
+diff --git a/docs/specs/015-turn-context-injection.md b/docs/specs/015-turn-context-injection.md
+new file mode 100644
+index 0000000..df96654
+--- /dev/null
++++ b/docs/specs/015-turn-context-injection.md
+@@ -0,0 +1,119 @@
++# 规格：用户轮上下文注入（项目规则 AGENTS.md ＋ 环境信息）
++
++> 状态：**已实现并验证**（2026-10-20 实施轮完成：RED→GREEN→综合测试→安全门禁→独立审查→L3 全量；待用户批准提交）　更新：2026-10-20
++> 需求来源：2026-10-20 用户指令——依据已验收调查提交 `2d7be44f0a403d1656aac89ecce1c959366b86ea`（[Codex 上下文组装调查报告](../records/2026-10-20-codex-context-assembly.md)＋[实测样本](../records/2026-10-20-codex-context-assembly-prompt-sample.json)）准备本项目上下文组装的下一个最小交付。
++> 上游锚点：openai/codex 固定提交 `014489466a1739c2c563cdfe57880c2c7c8680e3`（调查报告 §2 清单 #5/#6、§5.2、§8.2/§8.8；本规格不引用未在该报告核实过的上游行为）。
++> 与既有规格的关系：005 交付了最小组装主链（system＋两工具＋历史＋本轮输入）并**明确排除** AGENTS.md 自动注入（§1 范围）；本规格补上该缺口并**反转 005 适配 3**（见 §3-5）。006（工具循环/历史投影）、007（会话持久化）、013/014（记忆系统，含 D2 轮级触发、D3 合并轮受限工具、D4 记忆 system 尾段注入）契约全部沿用，不改。
++
++## 1. 目标 & I/O
++
++- **目标**：每个用户轮开始时，加载「项目规则（AGENTS.md 链）＋环境上下文」，构造**恰一条 user 角色上下文消息**注入模型请求（位于本轮用户输入之前）；内容与上次注入相同则不重复注入，不同则注入一条带替换声明的新消息；该消息作为普通历史项进入历史并按 007 契约持久化。
++- **注入入口（实施轮定案）**：`turn.rs` 新增用户轮入口 `run_user_turn_with_context`（包转 `run_tool_turn_with_mode`）——上下文消息在压入本轮用户输入**之前**压入并 `on_record`；`run_tool_turn_with_mode` 自身签名与行为保持逐字节不变（006/012/013 全部既有调用与测试零改动），两宿主（CLI/TUI）改调新入口。仅 `ToolMode::User` 与 `UserWithMemory` 两模式注入；`MemoryMerge` 内部轮不读取、不注入。
++- **输入**（全部为本项目既有机制，无新增配置项）：
++
++| 来源 | 加载条件 | 缺失/为空时行为 | 限制 |
++|---|---|---|---|
++| 全局规则 `config_dir()/AGENTS.md`（`TCHAT_CONFIG_DIR` 可覆盖，`catalog.rs::config_dir`，002 机制） | 每用户轮读取一次（与 013 记忆上下文同位：轮开始、轮内续请求不重读） | 文件不存在或纯空白→跳过该来源 | 与项目链共用一条正文预算（见下） |
++| 项目规则链：从 cwd 向上找**最近**含 `.git` 的祖先（含 cwd 自身）作为根，根→cwd 每目录至多读 `AGENTS.md` 一个文件（仅此文件名），按根→cwd 顺序拼接；无 `.git` 祖先时只查 cwd 一个目录 | 同上 | 单目录缺失/空白→跳过该目录；全链为空→省略整个 AGENTS 块 | 同上 |
++| 环境上下文：cwd（进程工作目录）、shell（环境变量 `SHELL`）、UTC 日期（注入时钟，见 §3-6） | 恒定加载 | `SHELL` 缺失或纯空白→省略 `<shell>` 行；cwd/日期恒存在 | 文本恒定有界，不占正文预算 |
++
++- **文件异常边界（本项目适配，纳入验收）**：仅自动加载「`AGENTS.md` 本身是普通、非符号链接文件」的来源——先 `symlink_metadata` 判定：符号链接、目录/FIFO/设备等非普通文件→跳过该来源；缺失→静默跳过（正常路径）；读取失败或内容非法 UTF-8→跳过该来源。跳过均不中止正常用户轮，经宿主提示通道记一行原因（含路径与原因类别，**不含规则正文**）。读入本身有界（见下），不做整文件读入后再截断。
++- **正文预算与拼接（唯一截断策略）**：规则正文按「全局→项目根→cwd」加载顺序拼接为单一 `content`：每个来源文本先做首尾空白修剪（trim），来源间以固定分隔 `\n\n--- project-doc ---\n\n` 连接（分隔计入预算）。`content` 逐字节预算 **32768**（UTF-8）：统一保留预算内拼接结果的 UTF-8 前缀，尾部按 UTF-8 字符边界回退（不产生无效文本；`</INSTRUCTIONS>` 包装行与环境块不计入预算、恒完整）。单文件读取上限＝当前剩余预算（＋至多 3 字节判定边界）；预算耗尽（含恰好占满）后停止加载：**不再打开任何后续来源文件**，仅以元数据判定存在后续普通文件来源时记一行提示（纯空白来源可能被多报——罕见角形，换取「不再读取」的严格性）。发生截断时记一行提示（不再有「整段丢弃」二选一）。
++- **输出**（一条 `HistoryItem::Text(HistoryMessage{role: User})`；块内布局对齐调查样本 item5——标题后空行、内容行包装、段间分隔行；AGENTS 块在前、环境块在后，块间恰一个空行）：
++
++  ```
++  # AGENTS.md instructions for {cwd}          ← 仅当存在项目链内容时带 ` for {cwd}` 后缀；仅全局规则时无后缀；无任何规则时整块（本行至 </INSTRUCTIONS>）省略
++  （空行）
++  <INSTRUCTIONS>
++  {规则正文 content，段间 \n\n--- project-doc ---\n\n}
++  </INSTRUCTIONS>
++  （空行）
++  <environment_context>
++    <cwd>{cwd}</cwd>
++    <shell>{SHELL}</shell>                    ← 缺失或纯空白时整行省略
++    <current_date>{YYYY-MM-DD}</current_date> ← UTC
++  </environment_context>
++  ```
++
++  字节级形态：有规则时 `# AGENTS.md instructions[ for {cwd}]\n\n<INSTRUCTIONS>\n{content}\n</INSTRUCTIONS>\n\n<environment_context>\n  <cwd>…</cwd>\n[  <shell>…</shell>\n]  <current_date>…</current_date>\n</environment_context>`；无规则时消息即环境块本身（以 `<environment_context>` 开头、`</environment_context>` 结尾）。`<cwd>`/`<shell>` 值按 XML 文本规则转义（`&`→`&amp;`、`<`→`&lt;`、`>`→`&gt;`）；标题行中的 cwd 不转义（非 XML 上下文）。日期由注入时钟 epoch 秒换算 UTC `YYYY-MM-DD`（chrono 既有依赖，无 clock feature，013-M4 模式）。
++- **注入与去重（识别顺序固定）**：构造当前上下文消息后，与历史比较决定是否注入：
++  1. 向后扫描历史 user 文本项，对每项**先剥除至多一条完整替换声明及其约定分隔**（声明行＋空行，仅当逐字节前缀匹配时剥除）；
++  2. 再**识别完整上下文结构**（剥除后文本须以 `# AGENTS.md instructions` 或 `<environment_context>` 开头、以 `</environment_context>` 结尾，且含完整 INSTRUCTIONS 包装/块间结构——仅相似标题或标记开头、结构不完整的普通用户文本不认定为上下文）；
++  3. 最后**比较规范化正文**（＝剥除声明后的全文）与当前构造文本：相同→不注入；不同→注入，且此前存在过上下文消息时新消息在最前加替换声明行 `The following context replaces the previously provided AGENTS.md instructions and environment context.`（后随空行）；不存在→注入裸消息。
++  识别与比较不得先按原始文本前缀筛选（否则替换消息会漏识别）。比较基线完全由历史承载，resume 后自动恢复。
++- **约束**：同一轮内续请求（工具循环）不再读取或注入；同一输入产出相同结果；本轮输入仍不得全为空白——**空白输入的既有校验先于上下文写入**（拒绝输入时，历史与 `on_record` 不得新增上下文或用户项）；来源（目录、cwd、SHELL、时钟）全部参数化注入，测试不得依赖真实用户目录或真实时间（AGENTS.md 测试规范）。
++- **范围外（明确不做）**：`AGENTS.override.md` 与可配置 fallback 文件名；CLAUDE.md 等其他规则文件名；线程级指令层；世界状态逐 section 差量与独立的替换/移除声明语义（本地简化为整消息比较＋单一替换声明）；timezone/shell_version/platform/filesystem/network 环境块；按采样步骤刷新（仅按用户轮）；上下文文件监视与动态通知；压缩、WS 增量、MCP/插件/Skills 发现（调查边界参考，非本目标依赖）；新增任何配置项。
++
++## 2. 边界 & 风险
++
++- [ ] 上下文消息进入历史引发的耦合面：①07 会话保存/恢复重放（ctx 即普通 Text 项，无格式变更，恢复后去重基线必须来自重放历史）；②013 记忆提炼输入过滤——**实施轮核实发现**：既有过滤器按「以 `</INSTRUCTIONS>` 结尾」整条匹配，而 015 合并块以 `</environment_context>` 结尾，真实 ctx 消息**不会**被既有过滤命中；需最小适配——过滤识别复用 015 的同一识别器（剥声明→整结构），既有 `</INSTRUCTIONS>` 结尾与 `<skill>` 两类过滤行为保持不变（既有用例零改动验证）；③e2e 精确位置断言（`e2e_acceptance.rs:483-492`、`:577-579`、`:1190-1191`、`:1280-1281` 等硬编码消息序/角色序）随实施**更新断言而非放宽**；管道模式测试的 cwd 必须落到临时目录（继承 `/workspace` 会读入仓库真实 AGENTS.md，测试不得依赖仓库内容）。
++- [ ] TUI `/resume` 投影：`tui_host::project_history_items` 把 user 文本项直映为用户气泡——ctx 消息不得被当成新的真实用户发言展示，投影层按同一识别器跳过 ctx 项（仅展示层过滤，历史与请求面不变）；CLI `/resume` 仅打印摘要、不回放条目，无需改动。运行中注入本身不产生任何展示事件（无 DriverEvent/say），CLI/TUI 交互不变。
++- [ ] 重复注入：去重比较基线丢失（忘写 on_record、resume 后基线不可恢复）、替换声明未剥除导致恒判不同、日期跨天触发非必要替换（已知简化，接受并记录）。
++- [ ] 005 适配 3 反转改变 `sent_instructions()`：prompt_assembly `s2` 的独立重建与"exec_command tool"断言按新声明更新；嵌入母本（`assets/codex/prompt.md`）与发送版仍是两个可分别校验的文本（005 契约不变）。
++- [ ] 预算截断切在 UTF-8 多字节字符中间产生无效文本；截断必须发生在 `<INSTRUCTIONS>` 内容文本上（保留闭合标签，消息结构完整）；有界读取在字符边界收尾（＋3 字素判定，非文件本身损坏）。
++- [ ] AGENTS.md 内容随请求外发到模型服务（与 Codex 同面）；本注入不经过 `display` 层（非终端输出路径）；文件内容由使用者在本地控制，不做密钥扫描（边界记录，安全审查复核）。跳过/截断提示行不包含规则正文。
++- [ ] 时钟/环境来源在测试中不可控：必须沿用 013 `Clock` 注入模式与可覆盖的 cwd/config_dir 来源，禁止测试依赖真实时间或真实用户目录（AGENTS.md 测试规范）。
++
++## 3. 关键判断（为什么）
++
++1. **选「项目规则＋环境注入」为最小缺口**：005 主链与 006 工具循环已交付（调查确认本项目已具备"一次模型请求的上下文组装"最小主链：system＋工具声明＋历史＋工具结果＋本轮输入，样本对照见调查报告 §7.2 与本项目 `build_turn_request` 族）；调查 §2 清单中本项目仍缺失的一等上下文来源只有项目规则与环境上下文两项，且 005 适配 3（"AGENTS.md 未注入、请用 exec_command 自行读取"）正是该缺口的显式占位。压缩/世界状态差量/WS 增量按任务边界仅作参考，不纳入。
++2. **user 角色消息进历史，而非仿照 D4 走 system 尾段**：证据三重——①Codex 将 AGENTS＋环境合并为一条 user 消息、置于真实输入之前、写入持久历史（调查 §2 #5/#6、样本 item5/6）；②本地 013 记忆输入过滤器已按 `# AGENTS.md instructions…</INSTRUCTIONS>` 用户消息标记格式预设（rollout_input.rs:180），历史位是既有设计预期；③规则是要求模型遵循的指令且体积可达预算上限，入历史一次注入、续请求与后续轮次经历史携带，避免每轮重复拼入 system（调查 §8.1 的位置策略权衡）。与 D4（记忆＝小体积参考摘要、system 尾段、按轮重读）并存：两类内容体积与语义不同，分置有据。
++3. **去重＝整消息文本比较，不引入哈希或 section 差量**：Codex 的世界状态 section 快照/diff 是支撑「多来源独立差量＋替换/移除声明」的完整机制；本地最小等价是「构造当前消息→与历史最后一条上下文消息全文比较」。等价跳过、不同注入替换声明消息；比较基线完全由历史承载，resume 后自动恢复，零新增持久化状态。跨天日期变化触发一次替换注入——已知简化，影响一次消息体积，接受。
++4. **预算 32 KiB 固定常量、全局＋项目共用**：32 KiB 是 Codex `project_doc_max_bytes` 默认值（调查 §2 #5）；本地沿用 003/004/005 的固定边界风格，不加配置项。Codex 预算只约束项目条目（调查 §7.4 未确认项 5），本地简化为全局＋项目合计一条预算——更保守（总量必不超），作为已批准适配记录。
++5. **反转 005 适配 3**：提示词中的"宿主已做某事"声明是契约（005 坑004）；注入落地后声明必须改为与事实一致——新声明固定为：`The applicable AGENTS.md instructions and environment context are provided in a user message before the current input and don't need to be re-read.`（替换 005 现行"需要时用 exec_command 读取"声明句，其余适配不变）。
++6. **UTC 日期复用 013 `Clock` 注入模式**（`memory/store.rs:58` `Arc<dyn Fn() -> i64>`＋`system_clock()`）：chrono 未启用 clock feature（013-M4 已锁定该模式），epoch 秒换算 UTC 日期无需新依赖；不引入 timezone（Codex 有 IANA 时区，本地从简，记录为差异）。
++7. **`MemoryMerge` 不注入**：013 D3 合并轮使用受限工具集与专用 system，其历史是记忆内部合并语义；注入项目规则会污染合并输入且无用户轮语义。合并轮管线继续直调 `run_tool_turn_with_mode`（不经新入口），请求组装与 013 D3 逐字节不变。
++8. **注入入口用包转函数而非改 `run_tool_turn_with_mode` 签名**（实施轮定案）：保持 006 契约函数与全部既有调用/测试零改动；新入口只增加「空白输入预检＋上下文注入」两步，随后完全复用既有循环。
++
++## 4. 坑记录（预测，实测后回填）
++
++- 坑001（已验证未发生）：ctx 经 `on_record` 落盘（t01 快照 1/2/3；session_cli e1/e3 落盘断言）；c5 通过。
++- 坑002（实测命中）：llm_flow 2 用例、session_cli 8 用例、tool_loop 8 用例、e2e 5 用例因消息序/计数位移失败——全部按新序更新断言（未放宽）；llm_flow 两管道用例与 e2e `pty_cli` 默认 cwd 落临时目录（`/tmp`，无 `.git` 祖先），消除对仓库真实 AGENTS.md 的依赖。
++- 坑003（已验证防住）：t09 多字节边界反例（截点落汉字中→回退 32766 完整字符）；变异 B（去掉边界回退）被 t09 击杀。
++- 坑004（已验证未发生）：t02 缺失与纯空白均整行省略。
++- 坑005（已验证防住）：t06/t08 通过；变异 A（不剥声明）被 t06/t07/t08/t14＋过滤用例击杀。
++- 坑006（实测命中并已适配）：RED 阶段证实裸/带声明合并块消息均不被既有过滤器剔除；适配＝`is_memory_excluded_fragment` 增用 `context::context_body`（单一识别器），既有两类过滤用例零改动仍绿（c9）。
++- 坑007（已验证防住）：`project_history_items` 跳过 ctx（tui_host 新用例，裸/带声明两形态）；CLI `/resume` 只打印摘要、无需改动（核实）。
++
++## 5. 预测 → 实测（实施轮 RED→GREEN 验收面；实测列回填中）
++
++| # | 场景 | 预测 / 验收 | 实测 |
++|---|---|---|---|
++| c1 | 首轮注入（临时目录：全局＋根＋cwd 子目录三层 AGENTS.md） | 首请求消息序恰为 `system → ctx → user输入`；ctx 文本与测试侧按 §1 字节级形态独立重建逐字节一致（含标题后缀、段间分隔行、块序、空行、环境块各行、XML 转义、UTC 日期） | ✅ t01：序正确、逐字节一致、on_record 快照 1/2/3 |
++| c2 | 空值/缺失/异常文件边界 | 无任何规则文件→ctx 仅含环境块且无标题行；仅全局→无 ` for {cwd}` 后缀；`SHELL` 缺失或纯空白→无 shell 行；纯空白来源跳过；符号链接/目录/读取失败/非法 UTF-8 来源→跳过＋原因提示（不含正文）、轮正常完成；cwd/日期恒在 | ✅ t02/t03/t04（含最近 `.git` 根、跳空目录、chmod 000 读失败轮不中止） |
++| c3 | 内容不变去重 | 同内容第二轮：历史中 ctx 消息恰 1 条（不新增），请求中 ctx 恰出现一次；轮内工具续请求不重读不重注入；A→B→B（B 注入后再次同内容不再注入，历史恰 2 条 ctx：A 裸＋B 带声明） | ✅ t05/t06（A→B→B 历史恰 2 条、请求恰 2 次出现后不再增） |
++| c4 | 内容变化替换与识别 | 修改项目 AGENTS.md 后下一轮：新 ctx 带替换声明行、旧消息保留历史；仅相似标题/标记开头但结构不完整的普通用户文本不被认作上下文（其后真实变化的 ctx 仍正确注入）；保存恢复含 B 的历史后再次输入→不再注入（基线来自重放历史）；移除全部规则→新消息为环境块＋替换声明 | ✅ t06（替换声明）/t07（两类仿冒不认作基线、其后裸注入；真实旧上下文→带声明；声明等正文→不注入）/t08（恢复基线） |
++| c5 | resume 基线（007 兼容） | 含 ctx 消息的历史经序列化/恢复（serde 往返＝007 行格式）后首轮：不重复注入；会话文件中 ctx 为普通 Text 项，无格式变更 | ✅ t08（恰 type/role/content 三字段）；e2e session_cli e1/e7/e8 全链恢复不重注入 |
++| c6 | 预算截断 | 项目链合计 >32 KiB：截断发生在 `content`、按 UTF-8 字符边界、`</INSTRUCTIONS>` 保留、消息结构完整；总量恰不超 32768（分隔行计入）；截断有提示行；全局先占预算、后续来源不再打开（仅元数据判定提示）；多字节字符边界反例（截点落在汉字中间）不产生 U+FFFD | ✅ t09 三态（两文件/多字节边界 32766 回退/恰好占满）；运行探针：200 MiB 单来源 content 恰 32768、峰值 RSS 3628 KiB（未整读） |
++| c7 | MemoryMerge 不注入 | 经新入口以 MemoryMerge 模式运行：历史/请求与直调 `run_tool_turn_with_mode` 逐字节一致（无 ctx、工具集与 system 与 013 D3 不变）；来源文件存在也不读取 | ✅ t10（请求与历史逐字节一致）；memory_phase2 43 用例不变 |
++| c8 | 005 适配 3 反转 | `sent_instructions()` 新声明恰出现一次、旧声明（含 005 现行句）零残留；嵌入母本 `assets/codex/prompt.md` 字节不变；其余三项适配不变 | ✅ prompt_assembly s2（新句恰一、两句旧声明零残留）；s1 母本 SHA 锚不变；e2e n2b 实测请求含新句 |
++| c9 | 记忆输入过滤兼容（013） | 含真实 ctx 消息的会话作提炼输入→首轮裸 ctx 与带替换声明 ctx 两种形态均被剔除（适配后）；既有 `</INSTRUCTIONS>` 结尾与 `<skill>` 过滤用例行为不变；环境块随整条剔除 | ✅ rollout_input 新用例（两种形态剔除＋既有两类不变＋仿冒保留）；memory_phase1 m3 扩带声明样本实测剔除 |
++| c10 | 历史/工具信息兼容（006）与副作用顺序 | 带工具调用与结果的历史＋ctx 注入共存：消息投影顺序、角色、原文逐字保留；空白本轮输入仍明确报错且历史与 `on_record` 零新增（上下文写入先于用户项、后于空白校验）；UserWithMemory 模式 ctx 与记忆尾段并存（D4 不变） | ✅ t11（拒绝零写入）/t12（工具历史共存、UserWithMemory 注入且无尾段时 system 不变）；e2e n2b/n2b2/s1/s2a 全链 |
++
++**验收方法与验证层级**（命令与工作目录：容器内 `/workspace`）：
++
++- **L1（聚焦）**：新增 `src/app/tests/context_injection.rs`（c1–c8、c10，独立临时目录＋注入时钟/来源，遵守测试规范）＋ `memory` 侧 rollout 输入用例扩展（c9）——`cargo test --test context_injection`。
++- **L2（受影响模块回归）**：`cargo test --test prompt_assembly --test llm_flow --test tool_loop --test session --test session_cli --test memory_inject --test memory_phase1`（套件名已按 `src/app/tests/` 实际核实；prompt_assembly 断言随 c8 更新，e2e 位置断言随实施更新后纳入 L3）。
++- **L3（全量，AGENTS.md §7）**：`cargo check && cargo test --workspace --no-fail-fast`（记录通过/失败/跳过数）＋ `cargo test --test e2e_acceptance`（REPL 交互行为变化面：请求消息序变化，按 001 规格以伪终端验收更新）。
++- **流程**：tdd（RED 先行，c1–c10 为 RED 素材）→ comprehensive-testing（变异：去重未剥声明的反例、预算边界字符反例）→ Security Testing Gate **进入**（新增自动文件读取面：固定文件名、只读、固定预算、无用户可控路径拼接；重点核查非普通文件/符号链接、读取预算、环境转义、提示行内容、记忆提炼输入兼容边界）→ code-review → 全量回归（L3）。
++- **本轮基线（2026-10-20，main @ 2d7be44，分支建立前实测）**：`cargo check` exit 0（仅 tchat-tui 既有 warning，无 terminal-chat 新告警）。`cargo test --workspace --no-fail-fast`：全部套件通过，唯一例外为 e2e_acceptance 的既有 PTY 抖动——准备轮首轮 104/2、复跑 105/1（总数 106）；具名者仅 `s44`（滚轮选区，单独运行通过，与 014 规格记录一致），另一失败用例全名未留存于任何存活输出→**未确认**（不豁免、不归类）。实施轮改生产代码前复验（2026-10-20，两次连续全量）：`cargo test --test e2e_acceptance` **106/106×2 全绿**（20.9s/20.8s；证据 `/tmp/015-e2e-baseline-r1.txt`、`r2.txt`）。terminal-chat 侧各套件计数（准备轮实测）：lib 142、apply_patch 35、exec_command 16、llm_flow 51、memory_* 九套件 182、prompt_assembly 6、session 33、session_cli 24、session_perf 1、tool_loop 14——全部 0 失败。
++
++**实测记录**（2026-10-20 实施轮，容器内 `/workspace`，分支 `feat/015-turn-context-injection` @ 基线 `2d7be44`）：
++
++- **基线补全（改生产代码前）**：准备轮两例 e2e 失败的完整名称未留存于任何存活输出→第二例按规则记**未确认**（仅 s44 具名，与 014 记录一致的既有 PTY 抖动）；实施轮复验 e2e 两次连续全量 **106/106×2 全绿**（20.9s/20.8s，证据 `/tmp/015-e2e-baseline-r1/r2.txt`）。
++- **RED**：`context_injection` 11/14 失败（t08/t10/t11 为与桩行为兼容的回归守卫）＋prompt_assembly s2＋memory_phase1 m3＋rollout_input/tui_host 新用例失败——六处 RED 实测。
++- **GREEN 与 L1/L2**：`context_injection` 14/14；lib 144/144（含 2 新用例）；L2 七套件 prompt_assembly 6、llm_flow 51、tool_loop 14、session 33、session_cli 24、memory_inject 18、memory_phase1 19——全部 0 失败。
++- **e2e**：106/106（更新 s1/s2a/n2b/n2b2/s15 断言＋`pty_cli` 默认 cwd 落 `/tmp`、llm_flow 两管道用例 cwd 落临时目录——均为断言随新消息序更新，未放宽）。
++- **综合测试（变异）**：A 不剥声明→t06/t07/t08/t14＋rollout 过滤击杀；B 无 UTF-8 边界回退→t09 击杀；C 仅前缀识别→t07/t14＋rollout 过滤击杀；三变异恢复后全绿。
++- **安全门禁**：轻量报告 `docs/security/reports/2026-10-20-015-context-injection-security.md`（200 MiB 来源有界读取探针：content 恰 32768、峰值 RSS 3628 KiB）。
++- **独立审查**：双轴（Standards/Spec）并行审查；处理 5 项发现（`ContextSources::from_env()` 收拢重复、UTF-8 重建不可达分支扁平化、预算耗尽后不再打开文件仅元数据判定〔本表 c6 行同步〕、空白输入文案常量化、误建 `devnull` 清理），修复后 L1/lib 复验绿。
++- **L3 最终**：`cargo check` exit 0（terminal-chat 0 告警；期间新增 1 处多余 `mut` 告警已修）；`cargo test --workspace --no-fail-fast` 共五轮：四轮全绿（捕获轮 **3035 通过 / 0 失败 / 3 忽略**，含 e2e 106），一轮出现**单例未具名失败**（该轮仅聚合统计未留存输出；前后三次全量复跑均全绿）——统一记**未确认失败**（证据不足，不作任何归因），不据此豁免也不视为交付阻断。
++- **证据收口轮（2026-10-20 追加）**：终态补充独立审查覆盖首轮审查后全部生产增量（5 处：`from_env`、UTF-8 重建扁平化、`has_regular_source`、空白文案常量、`mut`）——增量无缺陷，但发现**预算耗尽分支只检查首个后续路径**（首路径缺失会掩蔽更后来源的存在性，与 §1「存在后续来源时提示」不符）→ 修复为扫描全部剩余路径的元数据存在性＋t09 补钉角形 (d)，变异 D（退回单路径）被 t09(d) 击杀后恢复。终验两轮：第一轮 workspace 全绿但 standalone e2e 出现 `s81_m7_enabled_turn_injects_and_spawns_pipeline` 播种断言失败——根因实证为**既有测试结构竞态**（管线建库先于播种、断言无等待窗；runner.rs 顺序＋单跑通过＋本任务 diff 不涉 runner），范围内修复为与建库同款的有界等待（断言不放宽）；第二轮（最终候选）：`cargo check` exit 0、`cargo test --workspace --no-fail-fast` exit 0（内含 e2e 106/106）、`cargo test --test e2e_acceptance` exit 0（106/106），合计 **3141 通过 / 0 失败 / 3 忽略**（日志 `docs/records/2026-10-20-015-final-verification.log`，含完整命令、cwd、退出码与两轮完整输出）。
++
++---
++
++## 附：实施轮修改范围与禁止范围（供 Supervisor 下发）
++
++**允许修改**：`src/app/src/context.rs`（新建：来源加载＋消息构造＋去重识别）；`src/app/src/lib.rs`（注册 `context` 模块，最小改动）；`src/app/src/prompt.rs`（适配 3 反转＋替换声明常量）；`src/app/src/turn.rs`（新入口 `run_user_turn_with_context`：空白预检＋User/UserWithMemory 注入、MemoryMerge 不注入；来源参数化，时钟/目录可注入）；`src/app/src/main.rs`、`src/app/src/tui_host.rs`（改调新入口传入来源；TUI `/resume` 投影跳过 ctx 项）；`src/app/src/memory/rollout_input.rs`（过滤识别复用 015 识别器的最小适配＋用例扩展 c9）；`src/app/tests/context_injection.rs`（新建）；`src/app/tests/prompt_assembly.rs`（c8 断言更新）；`src/app/tests/e2e_acceptance.rs`（消息位置断言更新＋受影响用例 cwd 落临时目录）；`docs/specs/005-minimal-prompt-assembly.md`（适配 3 加一行指向本规格的修订注记，已完成）。
++
++**禁止修改**：003/004 工具契约与两工具白名单；007 存储格式与恢复语义（ctx＝普通 Text 历史项，零 schema 变更）；013/014 的 D2/D3/D4 及全部已验收行为（c9 适配不得改变既有两类过滤的已验收行为）；`assets/codex/prompt.md` 嵌入母本字节；生产代码之外的任何用户文件；不新增配置项/依赖；不实现压缩、WS 增量、世界状态差量、Skills/MCP/插件发现。
+diff --git a/docs/records/2026-10-20-015-implementation.md b/docs/records/2026-10-20-015-implementation.md
+new file mode 100644
+index 0000000..cc11a6b
+--- /dev/null
++++ b/docs/records/2026-10-20-015-implementation.md
+@@ -0,0 +1,70 @@
++# 015 用户轮上下文注入——实施记录
++
++> 日期：2026-10-20　分支：`feat/015-turn-context-injection`（基线 `2d7be44`，合并目标 `main`）
++> 规格：`docs/specs/015-turn-context-injection.md`（含实施轮同步的五条收口条款与证据收口轮追加）
++> 流程：规格同步 → RED → GREEN → 综合测试（变异）→ 安全门禁 → code-review（双轴＋终态补充）→ L3 全量 ×2 → 证据收口；全程未提交。
++
++## 1. 逐文件清单与分类统计（以 Git 实际状态核定）
++
++**分类统计：生产 7＋测试 7＋文档 4＝18 份**（暂存区为空；全部未提交）。
++
++| # | 文件 | 类别 | 用途 |
++|---|---|---|---|
++| 1 | `src/app/src/context.rs`（新） | 生产 | 来源加载（全局＋最近 `.git` 根→cwd 链）、有界读取与 UTF-8 边界、32768 字节唯一截断、异常来源跳过＋提示、字节级消息构造、`context_body` 完整结构识别（剥至多一条声明）、去重基线、`ContextSources::from_env()` |
++| 2 | `src/app/src/lib.rs` | 生产 | 注册 `context` 模块（一行） |
++| 3 | `src/app/src/turn.rs` | 生产 | 新入口 `run_user_turn_with_context`：空白预检→User/UserWithMemory 注入→复用既有循环；MemoryMerge 不注入；空白文案常量 |
++| 4 | `src/app/src/prompt.rs` | 生产 | 适配 3 反转（母本句→015 新句）；`CONTEXT_REPLACEMENT_DECLARATION` 常量 |
++| 5 | `src/app/src/main.rs` | 生产 | CLI 宿主改调新入口（`from_env()`） |
++| 6 | `src/app/src/tui_host.rs` | 生产 | TUI 宿主改调新入口；`/resume` 投影跳过 ctx 项（仅展示层） |
++| 7 | `src/app/src/memory/rollout_input.rs` | 生产 | 过滤最小适配：`context_body` 识别器加入剔除（既有两类过滤不变） |
++| 8 | `src/app/tests/context_injection.rs`（新） | 测试 | c1–c8/c10 共 14 用例（独立临时目录＋固定时钟；预期文本测试侧独立重建；t09 含四态预算角形） |
++| 9 | `src/app/tests/prompt_assembly.rs` | 测试 | s2 断言随 c8 更新 |
++| 10 | `src/app/tests/llm_flow.rs` | 测试 | 两管道用例 cwd 落临时目录＋消息序断言更新 |
++| 11 | `src/app/tests/session_cli.rs` | 测试 | 8 用例按新记录数/消息序更新（e1/e7 同 cwd 复跑；e22「＋1 条 ctx」结构对齐） |
++| 12 | `src/app/tests/tool_loop.rs` | 测试 | 8 用例角色序/索引更新 |
++| 13 | `src/app/tests/e2e_acceptance.rs` | 测试 | `pty_cli` 默认 cwd 落 `/tmp`；s1/s2a/n2b/n2b2 断言更新；s15 逐轮捕捉提示；`s81_m7_enabled_turn_injects_and_spawns_pipeline` 播种断言改有界等待（既有竞态，证据收口轮修复） |
++| 14 | `src/app/tests/memory_phase1.rs` | 测试 | m3 扩带替换声明的合并块样本 |
++| 15 | `docs/specs/015-turn-context-injection.md`（新） | 文档 | 规格＋收口条款＋实测回填＋证据收口轮追加 |
++| 16 | `docs/specs/005-minimal-prompt-assembly.md` | 文档 | 适配 3 修订注记（已实施） |
++| 17 | `docs/records/2026-10-20-015-implementation.md`（新，本文件） | 文档 | 实施记录与证据 |
++| 18 | `docs/security/reports/2026-10-20-015-context-injection-security.md`（新） | 文档 | 轻量安全报告 |
++
++**保护排除（他人工作，未触碰、不入提交）**：`AGENTS.md`、`project-lessons.md`、`docs/records/2026-10-20-013-memory-codex-comparison.md`、`docs/records/2026-10-02-install-mattpocock-skills.md`。
++
++## 2. 关键证据
++
++- **RED（六处）**：context_injection 11/14 失败；prompt_assembly s2、memory_phase1 m3、rollout_input/tui_host 新用例失败（t08/t10/t11 为与桩行为兼容的回归守卫，实现后仍绿）。
++- **变异**：A 不剥声明→t06/t07/t08/t14＋rollout 过滤击杀；B 无边界回退→t09；C 仅前缀识别→t07/t14＋rollout 过滤；D 耗尽只查首路径→t09(d)（证据收口轮新增）。全部恢复后绿。
++- **有界读取运行探针**（临时测试，证据跑毕即删）：200 MiB 全 `Z` 来源→content 恰 32768、截断提示存在、VmHWM 3628 KiB（整读将 ≥204800 KiB）。
++- **安全门禁**：轻量报告见文件 18；200 MiB 探针、符号链接/非普通/非法 UTF-8/读取失败跳过、提示不含正文、XML 转义、记忆输入剔除均实测通过。
++
++## 3. 独立审查覆盖、发现与处理
++
++- **首轮双轴（实施轮）**：两代理均被显式指派「未跟踪新文件用 Read 读全文」，输出引用 `context.rs:100-105`、`context_injection.rs:22-46`、`e2e_acceptance.rs:255`、`rollout_input.rs:214` 等具体行号证明确读。Standards 无硬违规（3 判断题）；Spec 核对 §1 全条款。处理 5 项：`from_env()` 收拢重复、UTF-8 重建不可达分支扁平化、预算耗尽改不打开文件仅元数据判定、空白文案常量化、误建 `devnull` 清理。
++- **终态补充审查（证据收口轮）**：首轮审查后生产代码有上述 5 处修复，故对**最终状态**补做独立审查（已跟踪差异＋两个未跟踪新文件全文＋规格）。结论：5 处增量无缺陷；发现 1 项低危——**预算耗尽分支只检查首个后续路径**，首路径缺失/异常会掩蔽更后链上目录的普通来源存在性，与规格 §1「存在后续普通文件来源时记一行提示」不符。处理：修复为扫描全部剩余路径的元数据存在性（仍不打开任何文件）＋t09 补钉角形 (d)＋变异 D 证伪。
++- **终验轮实测失败 1 例**：第一轮终验 standalone e2e `s81_m7_enabled_turn_injects_and_spawns_pipeline` 播种断言失败。根因实证：管线建库（`MemoryStore::open`）与播种（`runner.rs:262` 独立临界区）存在先后间隙，测试「见库即断言」无等待窗——**既有测试结构竞态**（单跑通过；本任务 diff 不涉 runner/播种）；范围内修复为与建库同款 10 秒有界等待（断言语义不放宽）。实施轮 workspace 那例未具名失败仍为**未确认失败**（证据不足，不作归因）。
++
++## 4. 最终验证证据（证据收口轮第二轮，覆盖最终候选）
++
++| 命令（cwd=/workspace） | 退出码 | 结果 |
++|---|---|---|
++| `cargo check` | 0 | terminal-chat 0 告警 |
++| `cargo test --workspace --no-fail-fast` | 0 | 全套件绿（内含 e2e 106/106） |
++| `cargo test --test e2e_acceptance` | 0 | 106/106 |
++
++合计 **3141 通过 / 0 失败 / 3 忽略**；日志（含完整命令、cwd、两轮全部输出与退出码）：`docs/records/2026-10-20-015-final-verification.log`（原始留存 `/tmp/015-final-verification.log`）。**时间线**：最后一次生产代码修改＝预算耗尽分支扫描修复（先于第一轮终验）；第一轮终验发现 `s81_m7_enabled_turn_injects_and_spawns_pipeline` 既有竞态后**仅改测试**（播种断言改 10 秒有界等待，无生产变更）；第二轮终验（上表，覆盖最终候选）；此后仅改文档。
++
++既有运行记录保留：实施前 e2e 106/106×2（`/tmp/015-e2e-baseline-r1/r2.txt`）；实施轮捕获轮 workspace 3035/0/3（`/tmp/015-l3-full-run.txt`）；e2e 单套件 106/106（多轮）。
++
++## 5. 候选文件 SHA-256 指纹（终版）
++
++终版指纹清单（候选 18＋证据件 3，含各文件完整 SHA-256）：`docs/records/2026-10-20-015-sha256-manifest.txt`。本文件自身的指纹只出现在该清单与最终返回中，不写入自身正文（自引不变式）。
++
++完整可审阅差异（含 5 个未跟踪新文件全文）：`docs/records/2026-10-20-015-final-diff.patch`；终验完整日志（命令、cwd、退出码、两轮全部输出）：`docs/records/2026-10-20-015-final-verification.log`。以上三份均为**交付证据件，不属候选提交**。
++
++## 6. 剩余风险与已知简化
++
++- 跨天日期变化触发一次替换注入（规格 §3-3 已接受）；session_cli e1/e7 同 cwd 复跑存在 UTC 午夜切分秒级竞态（未观察到）。
++- 预算耗尽提示以元数据判定：以空白开头的后续普通文件会多报一行（安全报告已记录）。
++- AGENTS.md 规则正文随请求外发模型服务——与 Codex 同面，规格 §2 边界记录。
++- 实施轮 workspace 单例未具名失败＝**未确认失败**（证据不足，不作归因；前后多轮全量全绿）。
+diff --git a/docs/security/reports/2026-10-20-015-context-injection-security.md b/docs/security/reports/2026-10-20-015-context-injection-security.md
+new file mode 100644
+index 0000000..2a04226
+--- /dev/null
++++ b/docs/security/reports/2026-10-20-015-context-injection-security.md
+@@ -0,0 +1,36 @@
++# 015 用户轮上下文注入——安全检查报告（轻量）
++
++> 日期：2026-10-20　范围：`feat/015-turn-context-injection`（规格 `docs/specs/015-turn-context-injection.md`）
++> 检查方式：新增自动文件读取面的逐项审查＋定向测试与运行时探针；无专用安全 Skill，按规格 §5 预案出轻量报告。
++
++## 1. 新增攻击面
++
++每个用户轮自动读取：`config_dir()/AGENTS.md`（`TCHAT_CONFIG_DIR` 可覆盖）＋「最近 `.git` 祖先→cwd」各目录的 `AGENTS.md`；读取结果作为 user 消息随模型请求外发。文件名固定（`AGENTS.md`），无用户可控路径拼接；目录来源与 002 配置机制同源（`catalog::config_dir`，`.env` 信任根跳过名单 F1 已覆盖 `TCHAT_CONFIG_DIR`）。
++
++## 2. 检查项与证据
++
++| 检查项 | 方法 | 结果 |
++|---|---|---|
++| 符号链接来源 | `symlink_metadata` 判定＋跳过；`t04`（symlink→notice，正文不入消息） | 通过 |
++| 非普通文件（目录/FIFO/设备） | 同上；`t04`（目录→notice） | 通过 |
++| 读取失败/非法 UTF-8 | 跳过＋原因提示、不中止轮；`t04`（chmod 000＋非法字节） | 通过 |
++| 缺失/纯空白 | 静默跳过；`t02`/`t04` | 通过 |
++| 读取预算（不整读） | 单文件读取上限＝剩余预算＋3（多字节边界判定）；**运行时探针**：200 MiB 全 `Z` 的 `AGENTS.md`，content 恰 32768 字节、截断提示存在、进程峰值 RSS（VmHWM）3628 KiB ≪ 204800 KiB——未整读（探针为临时测试，证据跑毕即删，非交付物） | 通过 |
++| 正文总量上限 | 拼接（含分隔）≤32768 字节、UTF-8 字符边界回退；`t09`（两文件/多字节边界/恰好占满三态） | 通过 |
++| 预算耗尽停止加载 | 耗尽后不再打开任何后续来源文件，仅以元数据判定是否提示；`t09c` | 通过 |
++| 环境块转义 | cwd/SHELL 按 XML 文本转义（`&`/`<`/`>`），SHELL 缺失或纯空白整行省略；`t13`/`t02` | 通过 |
++| 提示行内容 | 仅路径＋原因类别，不含规则正文；`t04` 断言提示不含正文片段 | 通过 |
++| 记忆提炼输入兼容 | ctx 消息（裸/带声明）自提炼输入剔除，规则正文不作为用户事实进入长期记忆；`rollout_input::context_injection_messages_excluded_and_legacy_rules_kept`＋`memory_phase1::m3`（含声明形态样本） | 通过 |
++| 空白输入副作用顺序 | 校验先于上下文写入，拒绝时历史/`on_record` 零新增；`t11` | 通过 |
++| 展示层 | 注入不产生展示事件；TUI `/resume` 投影跳过 ctx（不当作用户发言）；`tui_host::project_history_items_skips_context_messages`＋e2e s10 类投影用例不变 | 通过 |
++| 外发边界（已知同面） | AGENTS.md 内容随请求发给模型服务——与 Codex 及用户手动粘贴同面；本地文件由使用者控制，不做密钥扫描（规格 §2 边界记录） | 记录在案 |
++
++## 3. 剩余限制
++
++- 规则正文外发依赖用户对自身 AGENTS.md 的控制（与 003/005 既定姿态一致）；不新增缓解。
++- 预算耗尽的「是否还有来源」判定只看元数据：以空白开头的后续普通文件也会触发提示（多报一角，不影响预算上界与读取严格性）。
++- `.git` 标记可为符号链接（只影响链根选择，加载仍限普通非符号链接文件），无安全影响。
++
++## 4. 结论
++
++新增读取面满足：固定文件名、只读、有界、异常跳过不中止、提示不含正文、环境值转义、记忆输入剔除。未发现可利用问题；上述限制均已记录。

@@ -1,0 +1,3 @@
+{"v":1}
+{"type":"text","role":"user","content":"仅根据给定合成摘要回答环境代号，不调用工具。"}
+{"type":"text","role":"assistant","content":"环境代号：COBALT-17"}

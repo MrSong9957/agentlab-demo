@@ -1,0 +1,23 @@
+{
+  "attempts": 8,
+  "counts": {
+    "phase1": 1,
+    "phase2": 6,
+    "injection": 1
+  },
+  "active_phase": "injection",
+  "closed": true,
+  "batch_id": "M7-INJ-CFIX-2026-10-19",
+  "batch_limit": 1,
+  "ledger_kind": "authorized_live",
+  "cumulative_seed_from_closed_predecessors": {
+    "phase1": 1,
+    "phase2": 6,
+    "injection": 0
+  },
+  "counter_contract": "attempts is cumulative; counts[active_phase] is this independent batch only",
+  "batch_attempts": 1,
+  "unused_allowance_sealed": 0,
+  "closure_reason": "passed",
+  "further_batch_permitted": false
+}

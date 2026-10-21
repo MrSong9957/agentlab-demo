@@ -1,0 +1,401 @@
+{
+  "batches": [
+    {
+      "batch_id": "M7-P1V2-CFIX-2026-10-19",
+      "phase": "phase1",
+      "root": "/tmp/013-m7-provider-749273bb",
+      "status": "passed",
+      "HTTP_attempts": 1,
+      "cumulative_attempts": 1,
+      "closed": true,
+      "unused_allowance_sealed": 0,
+      "result": {
+        "phase": "phase1",
+        "passed": true,
+        "outcome": "SucceededWithOutput",
+        "stage1_output": {
+          "raw_memory": "---\ndescription: Synthetic memory-confirmation session for fictional project cobalt-demo; user planted and re-confirmed stable preferences (Chinese communication, failures-before-passes reports) and the SYNTH-E17 handling rule (check verify-cobalt checklist first, no blind retries). All content is fictional.\ntask: remember-and-confirm stable preferences and fault-handling rule for synthetic project cobalt-demo\ntask_group: synthetic-memory-preference-planting\ntask_outcome: success\ncwd: /tmp/013-m7-provider-749273bb/run/phase1/cwd\nkeywords: cobalt-demo, SYNTH-E17, verify-cobalt, 中文, 先失败后通过, acceptance report, synthetic, long-term preferences\n---\n\n### Task 1: Record and re-confirm cobalt-demo preferences and SYNTH-E17 rule\n\ntask: persist stated stable preferences (Chinese; failures-before-passes acceptance reports) and the SYNTH-E17 handling rule (check verify-cobalt first) for the synthetic cobalt-demo project\ntask_group: synthetic-memory-preference-planting\ntask_outcome: success\n\nPreference signals:\n- The user stated stable preferences and asked to remember them: \"合成项目 cobalt-demo 的稳定偏好：用中文交流；验收报告必须先列失败项再列通过项。\" -> For cobalt-demo tasks, default to Chinese and order acceptance reports as failed items first, then passed items, without being re-asked.\n- The user gave a fixed fault rule: \"虚构故障 SYNTH-E17 的固定处理规则是先核对 verify-cobalt 清单，不重复盲目重试。\" -> When SYNTH-E17 appears, first check the verify-cobalt checklist instead of repeated blind retries.\n- The user re-confirmed explicitly: \"再次确认：cobalt-demo 一律中文，报告先失败后通过；以后出现 SYNTH-E17，先核对 verify-cobalt 清单。以上是重复确认的长期偏好与可复用经验\" -> Treat these as durable long-term defaults, not one-off instructions.\n\nReusable knowledge:\n- All rollout content is explicitly synthetic/fictional (user: \"全为合成内容\"); the assistant confirmed \"没有执行真实命令.\" Do not present verify-cobalt or SYNTH-E17 as real repository facts.\n- Declared defaults for cobalt-demo: communicate in Chinese; acceptance reports list failures before passes; for SYNTH-E17 check the verify-cobalt checklist before retrying.\n\nFailures and how to do differently:\n- No failure occurred. Avoid misrepresenting these synthetic artifacts as real commands, paths, or verification results; keep their fictional status legible.\n\nReferences:\n- \"用中文交流\" ; \"验收报告必须先列失败项再列通过项\"\n- \"虚构故障 SYNTH-E17 的固定处理规则是先核对 verify-cobalt 清单，不重复盲目重试\"\n- \"再次确认：cobalt-demo 一律中文，报告先失败后通过；以后出现 SYNTH-E17，先核对 verify-cobalt 清单。\"\n- Working directory: /tmp/013-m7-provider-749273bb/run/phase1/cwd",
+          "rollout_summary": "# Synthetic memory-confirmation session for the fictional `cobalt-demo` project\n\nRollout context: The rollout is explicitly a synthetic/fictional test session (the user states \"全为合成内容\" / all synthetic). There is no real codebase, no commands run, and the assistant confirms \"没有执行真实命令.\" The user's goal is to plant and re-confirm persistent preferences and one reusable fault-handling rule for a fictional project named `cobalt-demo`, asking the agent to remember them.\n\n## Task 1: Record and re-confirm stable `cobalt-demo` preferences and the `SYNTH-E17` handling rule\n\nOutcome: success\n\nPreference signals:\n- The user stated the stable preferences up front and asked to remember them for the project: \"合成项目 cobalt-demo 的稳定偏好：用中文交流；验收报告必须先列失败项再列通过项。\" -> For any `cobalt-demo` task, default to communicating in Chinese and format acceptance reports with failed items before passed items, without being re-asked.\n- The user gave a fixed handling rule for a fictional fault: \"虚构故障 SYNTH-E17 的固定处理规则是先核对 verify-cobalt 清单，不重复盲目重试。\" -> When `SYNTH-E17` appears, first check the `verify-cobalt` checklist rather than blindly retrying.\n- The user then re-confirmed with \"再次确认：cobalt-demo 一律中文，报告先失败后通过；以后出现 SYNTH-E17，先核对 verify-cobalt 清单。以上是重复确认的长期偏好与可复用经验\" -> The repetition signals these are intended as durable, long-term defaults that should not require the user to restate them on future runs.\n\nKey steps:\n- The user declared the preferences and asked the agent to persist them for the synthetic project.\n- The assistant acknowledged and restated the key points: SYNTH-E17 was framed as an expired-route issue located via the `verify-cobalt` checklist, and reports should list failures before passes.\n- The user re-confirmed the same preferences/rule, explicitly labeling them long-term and reusable.\n- The assistant acknowledged the confirmation and closed the synthetic task.\n\nFailures and how to do differently:\n- No failure occurred. All content is fictional/synthetic; do not treat `SYNTH-E17` or `verify-cobalt` as real artifacts from a real repository, and do not claim any real command was run (the assistant explicitly noted none were).\n\nReusable knowledge:\n- Stated defaults for the synthetic `cobalt-demo` project: (1) communicate in Chinese; (2) acceptance reports list failures before passes; (3) for `SYNTH-E17`, first check the `verify-cobalt` checklist instead of repeated blind retries.\n- These were explicitly framed by the user as \"长期偏好与可复用经验\" (long-term preferences and reusable experience), all within a synthetic context the user also flagged as \"全为合成内容.\"\n\nReferences:\n- [1] User: \"合成项目 cobalt-demo 的稳定偏好：用中文交流；验收报告必须先列失败项再列通过项。虚构故障 SYNTH-E17 的固定处理规则是先核对 verify-cobalt 清单，不重复盲目重试。\"\n- [2] User (re-confirmation): \"cobalt-demo 一律中文，报告先失败后通过；以后出现 SYNTH-E17，先核对 verify-cobalt 清单。\"\n- [3] Assistant: SYNTH-E17 located as an expired-route setting via the `verify-cobalt` checklist; report ordered failures-before-passes; \"没有执行真实命令.\"\n- Working directory: `/tmp/013-m7-provider-749273bb/run/phase1/cwd`.",
+          "rollout_slug": "cobalt-demo-synthetic-preferences",
+          "source_updated_at": 1699974800
+        },
+        "job": {
+          "kind": "memory_stage1",
+          "job_key": "auto-synthetic-cobalt",
+          "status": "done",
+          "retry_at": null,
+          "retry_remaining": 3,
+          "last_error": null,
+          "input_watermark": 1699974800,
+          "last_success_watermark": 1699974800
+        },
+        "source_bytes": 1020,
+        "strict_parser": "existing StageOneOutput::parse",
+        "background_pipeline_spawns": 0,
+        "attempts_at_end": {
+          "attempts": 1,
+          "counts": {
+            "phase1": 1,
+            "phase2": 0,
+            "injection": 0
+          },
+          "active_phase": "phase1",
+          "closed": false,
+          "batch_id": "M7-P1V2-CFIX-2026-10-19",
+          "batch_limit": 1,
+          "ledger_kind": "authorized_live",
+          "cumulative_seed_from_closed_predecessors": {
+            "phase1": 0,
+            "phase2": 0,
+            "injection": 0
+          },
+          "counter_contract": "attempts is cumulative; counts[active_phase] is this independent batch only"
+        }
+      },
+      "process_exit": 0,
+      "timed_out": false,
+      "elapsed_ms": 11708,
+      "responses": [
+        {
+          "event": "response",
+          "phase": "phase1",
+          "request_index": 1,
+          "status": 200,
+          "elapsed_ms": 11622,
+          "response_json_bytes": 12298,
+          "finish_reason": "stop",
+          "response_id": "ff415811-e37d-4f80-b86f-f7ceb08f4007",
+          "usage": {
+            "prompt_tokens": 6621,
+            "completion_tokens": 2585,
+            "total_tokens": 9206,
+            "prompt_tokens_details": {
+              "cached_tokens": 6144
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 1044
+            },
+            "prompt_cache_hit_tokens": 6144,
+            "prompt_cache_miss_tokens": 477
+          },
+          "error": null
+        }
+      ],
+      "reason": "passed",
+      "internal_HTTP_retries": 0,
+      "background_pipeline_spawns": 0,
+      "cost": "unknown"
+    },
+    {
+      "batch_id": "M7-P2-CFIX-2026-10-19",
+      "phase": "phase2",
+      "root": "/tmp/013-m7-provider-92b37a5e",
+      "status": "passed",
+      "HTTP_attempts": 6,
+      "cumulative_attempts": 7,
+      "closed": true,
+      "unused_allowance_sealed": 2,
+      "result": {
+        "phase": "phase2",
+        "passed": true,
+        "outcome": "Succeeded { sql_committed: true }",
+        "artifact_validation": {
+          "Ok": null
+        },
+        "tool_success_names": [
+          "mem_list",
+          "mem_read",
+          "mem_write"
+        ],
+        "selected_source_snapshot": true,
+        "git_baseline_clean": true,
+        "summary_first_line": "v1",
+        "MEMORY_bytes": 2591,
+        "summary_bytes": 2288,
+        "job": {
+          "kind": "memory_consolidate_global",
+          "job_key": "global",
+          "status": "done",
+          "retry_at": null,
+          "retry_remaining": 3,
+          "last_error": null,
+          "input_watermark": 1699974800,
+          "last_success_watermark": 1699974800
+        },
+        "fixture": "independent synthetic seed, not phase1 output",
+        "background_pipeline_spawns": 0,
+        "attempts_at_end": {
+          "attempts": 7,
+          "counts": {
+            "phase1": 1,
+            "phase2": 6,
+            "injection": 0
+          },
+          "active_phase": "phase2",
+          "closed": false,
+          "batch_id": "M7-P2-CFIX-2026-10-19",
+          "batch_limit": 8,
+          "ledger_kind": "authorized_live",
+          "cumulative_seed_from_closed_predecessors": {
+            "phase1": 1,
+            "phase2": 0,
+            "injection": 0
+          },
+          "counter_contract": "attempts is cumulative; counts[active_phase] is this independent batch only"
+        }
+      },
+      "process_exit": 0,
+      "timed_out": false,
+      "elapsed_ms": 20459,
+      "responses": [
+        {
+          "event": "response",
+          "phase": "phase2",
+          "request_index": 1,
+          "status": 200,
+          "elapsed_ms": 1086,
+          "response_json_bytes": 920,
+          "finish_reason": "tool_calls",
+          "response_id": "1def47b6-991c-49bf-8fed-97f943a48efb",
+          "usage": {
+            "prompt_tokens": 11876,
+            "completion_tokens": 83,
+            "total_tokens": 11959,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 11876
+          },
+          "error": null
+        },
+        {
+          "event": "response",
+          "phase": "phase2",
+          "request_index": 2,
+          "status": 200,
+          "elapsed_ms": 1192,
+          "response_json_bytes": 1117,
+          "finish_reason": "tool_calls",
+          "response_id": "994a0782-5a70-4756-b689-0e1a9fc53b8f",
+          "usage": {
+            "prompt_tokens": 12738,
+            "completion_tokens": 150,
+            "total_tokens": 12888,
+            "prompt_tokens_details": {
+              "cached_tokens": 11904
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 33
+            },
+            "prompt_cache_hit_tokens": 11904,
+            "prompt_cache_miss_tokens": 834
+          },
+          "error": null
+        },
+        {
+          "event": "response",
+          "phase": "phase2",
+          "request_index": 3,
+          "status": 200,
+          "elapsed_ms": 9310,
+          "response_json_bytes": 7991,
+          "finish_reason": "tool_calls",
+          "response_id": "e0f6cfc1-bc1f-4e85-b14b-ad5e8bcfdcd5",
+          "usage": {
+            "prompt_tokens": 13358,
+            "completion_tokens": 1840,
+            "total_tokens": 15198,
+            "prompt_tokens_details": {
+              "cached_tokens": 12800
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 1049
+            },
+            "prompt_cache_hit_tokens": 12800,
+            "prompt_cache_miss_tokens": 558
+          },
+          "error": null
+        },
+        {
+          "event": "response",
+          "phase": "phase2",
+          "request_index": 4,
+          "status": 200,
+          "elapsed_ms": 3638,
+          "response_json_bytes": 3133,
+          "finish_reason": "tool_calls",
+          "response_id": "4c9ed9b2-b53d-42a9-a300-33b7c137c19d",
+          "usage": {
+            "prompt_tokens": 15225,
+            "completion_tokens": 625,
+            "total_tokens": 15850,
+            "prompt_tokens_details": {
+              "cached_tokens": 14976
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 6
+            },
+            "prompt_cache_hit_tokens": 14976,
+            "prompt_cache_miss_tokens": 249
+          },
+          "error": null
+        },
+        {
+          "event": "response",
+          "phase": "phase2",
+          "request_index": 5,
+          "status": 200,
+          "elapsed_ms": 948,
+          "response_json_bytes": 699,
+          "finish_reason": "tool_calls",
+          "response_id": "6e2bd2bb-5014-4fa8-a04e-32ad53c01304",
+          "usage": {
+            "prompt_tokens": 15878,
+            "completion_tokens": 37,
+            "total_tokens": 15915,
+            "prompt_tokens_details": {
+              "cached_tokens": 15744
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_cache_hit_tokens": 15744,
+            "prompt_cache_miss_tokens": 134
+          },
+          "error": null
+        },
+        {
+          "event": "response",
+          "phase": "phase2",
+          "request_index": 6,
+          "status": 200,
+          "elapsed_ms": 3629,
+          "response_json_bytes": 3267,
+          "finish_reason": "stop",
+          "response_id": "6c024c9c-4fcc-4a46-b3bf-cc15178eedcf",
+          "usage": {
+            "prompt_tokens": 16015,
+            "completion_tokens": 685,
+            "total_tokens": 16700,
+            "prompt_tokens_details": {
+              "cached_tokens": 15872
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_cache_hit_tokens": 15872,
+            "prompt_cache_miss_tokens": 143
+          },
+          "error": null
+        }
+      ],
+      "reason": "passed",
+      "internal_HTTP_retries": 0,
+      "background_pipeline_spawns": 0,
+      "cost": "unknown"
+    },
+    {
+      "batch_id": "M7-INJ-CFIX-2026-10-19",
+      "phase": "injection",
+      "root": "/tmp/013-m7-provider-e9f9808b",
+      "status": "passed",
+      "HTTP_attempts": 1,
+      "cumulative_attempts": 8,
+      "closed": true,
+      "unused_allowance_sealed": 0,
+      "result": {
+        "phase": "injection",
+        "passed": true,
+        "reply": {
+          "Ok": "环境代号：COBALT-17"
+        },
+        "unique_system": true,
+        "history_records": 2,
+        "persisted_lines": 3,
+        "persist_errors": [],
+        "flush": {
+          "Ok": null
+        },
+        "memory_block_not_persisted": true,
+        "role_semantic_equivalence": "not established",
+        "fixture": "independent synthetic summary",
+        "background_pipeline_spawns": 0,
+        "attempts_at_end": {
+          "attempts": 8,
+          "counts": {
+            "phase1": 1,
+            "phase2": 6,
+            "injection": 1
+          },
+          "active_phase": "injection",
+          "closed": false,
+          "batch_id": "M7-INJ-CFIX-2026-10-19",
+          "batch_limit": 1,
+          "ledger_kind": "authorized_live",
+          "cumulative_seed_from_closed_predecessors": {
+            "phase1": 1,
+            "phase2": 6,
+            "injection": 0
+          },
+          "counter_contract": "attempts is cumulative; counts[active_phase] is this independent batch only"
+        }
+      },
+      "process_exit": 0,
+      "timed_out": false,
+      "elapsed_ms": 1145,
+      "responses": [
+        {
+          "event": "response",
+          "phase": "injection",
+          "request_index": 1,
+          "status": 200,
+          "elapsed_ms": 1105,
+          "response_json_bytes": 1054,
+          "finish_reason": "stop",
+          "response_id": "dd3f47f9-e347-4126-9105-b630af8fa20c",
+          "usage": {
+            "prompt_tokens": 5949,
+            "completion_tokens": 115,
+            "total_tokens": 6064,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 106
+            },
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 5949
+          },
+          "error": null
+        }
+      ],
+      "reason": "passed",
+      "internal_HTTP_retries": 0,
+      "background_pipeline_spawns": 0,
+      "cost": "unknown"
+    }
+  ],
+  "counts": {
+    "phase1": 1,
+    "phase2": 6,
+    "injection": 1
+  },
+  "HTTP_attempts": 8,
+  "unused_allowance_sealed": 2,
+  "shared_stop": null,
+  "elapsed_ms": 67487,
+  "global_seconds_limit": 2280,
+  "background_pipeline_spawns": 0,
+  "internal_HTTP_retries": 0,
+  "cost": "unknown",
+  "independent_fixtures": true,
+  "same_data_chain_end_to_end_claimed": false,
+  "further_batch_permitted": false,
+  "ledger_kind": "authorized_live",
+  "real_HTTP_attempts": 8,
+  "simulated_attempts": 0
+}

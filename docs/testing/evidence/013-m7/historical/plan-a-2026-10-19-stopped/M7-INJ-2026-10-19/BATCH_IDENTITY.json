@@ -1,0 +1,18 @@
+{
+  "batch_id": "M7-INJ-2026-10-19",
+  "phase": "injection",
+  "private_root": "/tmp/013-m7-provider-m7a3v201",
+  "batch_limit": 1,
+  "phase_seconds_limit": 240,
+  "overall_seconds_limit": 2280,
+  "root_purpose": "closed tombstone created after common preflight failure; never runtime",
+  "source_HEAD": "799fbb972c7c4b500cd01d3f20ee99055a01ac6b",
+  "branch": "test/013-memory-m7-provider-check",
+  "harness_sha256": "148626298729769ad4e0461503a03ec951d6dff66916533d5ac3af803d21f82b",
+  "fixture_status": "approved independent fixture not instantiated or sent",
+  "provider": "deepseek",
+  "model": "deepseek-flash",
+  "protocol": "openai-chat",
+  "endpoint": "https://api.deepseek.com/chat/completions",
+  "request_params": {}
+}

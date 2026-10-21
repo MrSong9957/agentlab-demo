@@ -1,0 +1,21 @@
+# 原样 vendor：openai/codex@97771b1 codex-rs/ansi-escape（Apache-2.0，见上游仓库 LICENSE/NOTICE）
+# 唯一改动：workspace 依赖改写为独立版本号。
+[package]
+name = "codex-ansi-escape"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[lib]
+name = "codex_ansi_escape"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+ansi-to-tui = "8.0.1"
+ratatui = { version = "0.30.2", default-features = false }
+tracing = { version = "0.1", features = ["log"] }
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+tracing-subscriber = "0.3"

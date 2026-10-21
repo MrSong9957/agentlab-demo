@@ -1,0 +1,56 @@
+{
+  "checks": [
+    {
+      "check": "safe_0600_atomic_save_through_actual_helper",
+      "passed": true
+    },
+    {
+      "check": "v2_fixture_and_provider_limits_unchanged",
+      "passed": true
+    },
+    {
+      "check": "closed_simulation_cannot_resume_or_change_ledgers",
+      "passed": true
+    },
+    {
+      "check": "failure-stops-all",
+      "passed": true
+    },
+    {
+      "check": "drop-cumulative-seed",
+      "passed": true
+    }
+  ],
+  "real_HTTP_attempts": 0,
+  "mutations": [
+    {
+      "name": "failure-stops-all",
+      "detected": true,
+      "expected_case": "single-batch-failure",
+      "actual_counts": {
+        "phase1": 1,
+        "phase2": 0,
+        "injection": 0
+      },
+      "assertions_unchanged": true
+    },
+    {
+      "name": "drop-cumulative-seed",
+      "detected": true,
+      "expected_case": "normal",
+      "actual_counts": {
+        "phase1": 1,
+        "phase2": 3,
+        "injection": 0
+      },
+      "assertions_unchanged": true
+    }
+  ],
+  "simulation_work_roots": [
+    "/tmp/013-m7-plan-a-proof-574282-failure-stops-all",
+    "/tmp/013-m7-plan-a-proof-574282-drop-cumulative-seed"
+  ],
+  "passed": 5,
+  "failed": 0,
+  "skipped": 0
+}

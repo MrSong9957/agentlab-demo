@@ -1,0 +1,11 @@
+---
+source: src/tui/src/bottom_pane/chat_composer/history_search_paste_tests.rs
+expression: "format!(\"{}\\nCursor: {cursor:?}\", terminal.backend())"
+---
+"                                                                      "
+"› draft                                                               "
+"                                                                      "
+"                                                                      "
+"  reverse-i-search: foo↵bar⇥baz  no match · enter restore             "
+
+Cursor: Some((31, 4))

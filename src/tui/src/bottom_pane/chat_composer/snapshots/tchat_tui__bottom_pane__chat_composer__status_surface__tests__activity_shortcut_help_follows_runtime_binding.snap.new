@@ -1,0 +1,51 @@
+---
+source: tui/src/bottom_pane/chat_composer/status_surface_tests.rs
+assertion_line: 440
+expression: "snapshots.join(\"\\n---\\n\")"
+---
+"f4"
+
+
+
+
+
+
+
+
+
+
+› Ask Codex
+
+  MODEL · ~/project · Context 20% used
+
+---
+"ctrl-x t"
+
+
+
+
+
+
+
+
+
+
+› Ask Codex
+
+  MODEL · ~/project · Context 20% used
+
+---
+[]
+
+
+
+
+
+
+
+
+
+
+› Ask Codex
+
+  MODEL · ~/project · Context 20% used

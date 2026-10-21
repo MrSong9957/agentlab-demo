@@ -1,0 +1,26 @@
+--- permission-failing-controller.py
++++ plan_a.py
+@@ -250,6 +250,7 @@
+         assert sha(original) == cached['offline_binary_sha256']
+         (WORK / 'target-offline/debug').mkdir(parents=True, mode=0o700)
+         shutil.copyfile(original, WORK / 'target-offline/debug/m7-provider-harness')
++        (WORK / 'target-offline/debug/m7-provider-harness').chmod(0o700)
+         for name in ('cli-checks.json','v2-verification.json'):
+             shutil.copyfile(BUILD_FROM / name, WORK / name)
+         save(WORK / 'build-reuse.json', {'reference':str(BUILD_FROM), 'sha256':sha(original),
+@@ -287,6 +288,7 @@
+             shutil.copyfile(WORK / name, root / name)
+         shutil.copyfile(WORK / 'preflight.json', root / 'preflight.json')
+         shutil.copyfile(offline, root / 'target/debug/m7-provider-harness')
++        (root / 'target/debug/m7-provider-harness').chmod(0o700)
+         (root / 'BATCH_STARTED').write_text(batch_id + ': exclusive new scope; offline preflight then at most one live invocation.\n')
+         host = controller(root)
+         assert host['BASE'] == root
+@@ -319,6 +321,7 @@
+     for batch_id, phase, limit, timeout, root_name in BATCHES:
+         root = Path(root_name)
+         shutil.copyfile(live, root / 'target/debug/m7-provider-harness')
++        (root / 'target/debug/m7-provider-harness').chmod(0o700)
+         ready = {'source_sha256': SOURCE_HASHES, 'binary_sha256': live_sha,
+                  'offline_binary_sha256': offline_sha, 'selected_credential_env_name': 'DEEPSEEK_API_KEY',
+                  'batch_id': batch_id, 'phase': phase, 'limit': limit, 'timeout_seconds': timeout, 'offline_mode': OFFLINE,

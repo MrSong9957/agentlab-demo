@@ -1,0 +1,34 @@
+# 本地最小 shim（008 §3-J5 适配定稿）：仅为 tchat-tui vendored 文件提供 `use codex_shell_command::…` 路径。
+# 内容＝保留文件实际消费的母本类型最小子集，逐类型登记于 src/lib.rs 注释。
+# 不是 openai/codex 对应 crate 的 vendor。
+[package]
+name = "codex-shell-command"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "codex_shell_command"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25"
+shlex = "1"
+codex-protocol = { path = "../codex-protocol" }
+serde = { version = "1.0.229", features = ["derive"] }
+libc = "0.2"
+which = "7"
+codex-utils-absolute-path = { path = "../codex-utils-absolute-path" }
+base64 = "0.22"
+once_cell = "1"
+regex = "1"
+url = "2.5.8"
+tree-sitter-powershell = "0.25"
+
+[dev-dependencies]
+anyhow = "1"
+serde_json = "1.0.151"
+pretty_assertions = "1.4"
+tempfile = "3"

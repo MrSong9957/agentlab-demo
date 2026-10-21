@@ -1,0 +1,10 @@
+# 原样 vendor：openai/codex@97771b1 codex-rs/utils/fuzzy-match（Apache-2.0）。
+[package]
+name = "codex-utils-fuzzy-match"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+[lib]
+name = "codex_utils_fuzzy_match"
+path = "src/lib.rs"
+doctest = false

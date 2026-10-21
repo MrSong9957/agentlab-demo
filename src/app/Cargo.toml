@@ -1,0 +1,22 @@
+[package]
+name = "terminal-chat"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+diffy = "0.4"  # 012：apply_patch 展示差异（真实前后内容的统一 diff；与 tchat-tui 同锁版本）
+libc = "0.2"
+rustyline = { version = "18", default-features = false, features = ["buffer-redux"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+ureq = { version = "2", features = ["json"] }
+url = "2.5.8"
+
+tchat-tui = { path = "../tui" }  # 008-P3：真实接入恢复
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+regex-lite = "0.1"  # 013-M3 D7：redact_secrets 移植（工作区已锁版本，tui 同款；regex 兼容性由移植测试证明）
+codex-utils-string = { path = "../shims/codex-utils-string" }  # 013-M3 D11：截断/近似换算复用 008 shim（上游同文件逐字节）
+chrono = { version = "0.4", default-features = false, features = ["std"] } # 013-M4：复用锁定版本，固定 UTC 格式
+uuid = { version = "1", default-features = false } # 013-M4：上游文件名的 UUID 解析/时间戳；不生成随机 UUID

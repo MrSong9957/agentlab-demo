@@ -1,0 +1,1 @@
+{"passed": 4, "failed": 0, "real_HTTP_attempts": 0, "checks": ["watchdog terminates process", "failure stops later stages", "success executes stages once", "single-use start marker"]}
