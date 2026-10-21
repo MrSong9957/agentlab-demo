@@ -9,6 +9,21 @@ docker compose -f .devcontainer/compose.yaml config --quiet
 docker compose -f .devcontainer/compose.yaml up -d --build
 ```
 
+## API Key 配置
+
+在容器内的仓库根目录执行以下命令；已有 `.env` 时保留其内容：
+
+```bash
+if [ ! -e .env ]; then
+  (umask 077; cp .env.example .env)
+fi
+chmod 600 .env
+```
+
+编辑本地 `.env`，按需填写对应厂商的真实密钥；默认 DeepSeek 使用 `DEEPSEEK_API_KEY`。`.env.example` 按国内、国外及聚合平台分组，列有各厂商的凭证变量与官方文档，其余值保持为空即可。程序启动时从当前工作目录加载 `.env`，跳过空值，已设置的环境变量优先。`.env` 已被 Git 忽略，真实 Key 只保存在本地；可提交的 `.env.example` 保持空值。
+
+项目内置 DeepSeek 和 OpenAI。其他厂商需在 `config/manual.json` 中配置地址、模型及凭证引用，例如 `"key_ref": "env:DASHSCOPE_API_KEY"`。当前仅支持 `openai-chat` 协议，接入时须核对厂商提供的 Chat Completions 兼容入口。
+
 ## 容器内测试
 
 ```powershell

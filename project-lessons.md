@@ -56,7 +56,8 @@
 - F1（2026-10-09，`docs/security/reports/2026-10-09-backend-security.md`）：`.env` 不得注入信任根控制变量，跳过名单 `TCHAT_CONFIG_DIR`/`TCHAT_USER_DIR`/`TCHAT_PUBLIC_CATALOG_URL`/`HOME`/`APPDATA`（大小写不敏感）；后扩展 `TCHAT_SESSION_TS`/`TCHAT_SESSION_PID`（007 注入提供者）。普通凭证变量不受影响。
 - 2026-10-10 高风险清单轮：凭证值脱敏（`api.rs::redact_credential`）、错误消息 300 字符统一。
 - 014 符号链接拒绝对齐：`docs/security/reports/2026-10-20-014-memory-minimal-revisions-security.md`。
-- 2026-10-21 仓库凭证脱敏：根 `.env` 自最早提交被跟踪，清空工作区或新增忽略规则都不能清除已有历史。已精确替换历史密钥、清除旧 reflog 和废弃对象，保留提交元数据及空值 `.env`；忽略范围按用户要求仅讨论。扫描命中的固定脱敏测试样例须结合测试上下文判定，不能为扫描清零改掉样例或新增豁免。证据与旧新提交映射见 `docs/records/2026-10-21-github-sanitization.md`。
+- 2026-10-21 仓库凭证脱敏：根 `.env` 自最早提交被跟踪，清空工作区或新增忽略规则都不能清除已有历史。已精确替换历史密钥、清除旧 reflog 和废弃对象，保留提交元数据及空值 `.env`；脱敏阶段的忽略范围按用户要求仅讨论。扫描命中的固定脱敏测试样例须结合测试上下文判定，不能为扫描清零改掉样例或新增豁免。证据与旧新提交映射见 `docs/records/2026-10-21-github-sanitization.md`。
+- Git 忽略范围调查：第一批已按用户要求取消跟踪并忽略真实 `.env`，保留本地内容与 `0600` 权限，提供空值 `.env.example`，并忽略根目录 `.pytest_cache/`。`auto_catalog.json` 可由内置资料离线重建，但查询缓存含 `cred_fp` 等连接身份；它与共享手动配置需分开评估。`.agents` 当前保存代理／技能定义，不能直接当缓存；另有 3 份 `.snap.new` 虽命中规则仍已被跟踪，关联测试已标记 `008-TRIM`，不得靠改规则或接受新快照掩盖。事实、验证与其余待讨论范围见 `docs/records/2026-10-21-gitignore-scope-plan.md`。
 
 ## 7. 实现取舍与问题根因
 

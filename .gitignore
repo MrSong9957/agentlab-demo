@@ -3,3 +3,9 @@
 *.snap.new
 db
 .agents
+
+# 本地 API 凭证
+.env
+
+# 根目录 pytest 缓存
+/.pytest_cache/
