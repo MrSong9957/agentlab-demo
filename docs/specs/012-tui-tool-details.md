@@ -234,3 +234,7 @@
 - **恢复历史中的 running**：只表示当时状态——按事实文本呈现（命令关联＋已收集输出＋“恢复后进程不再受本会话管理”），不渲染为可交互的当前活会话 cell（016 §3.3；回归 `project_history_items_renders_running_as_past_state`）。
 - **安全**：运行中 cell 的命令／输出／会话编号载荷经同一渲染管线——A7 扩展 `a7_running_session_cell_payload_is_neutralized`（CSI/OSC52/nF 零动作）；PTY 输出继续经现有终端显示过滤。
 - 验证：`tui_host` 内嵌（running 映射＋write_stdin 关联）、`chat_driver` 投影、e2e N2b/N2b2（TUI 取消保活＋退出清理）。
+
+## 017 补充说明（2026-10-22，已批准交付）
+
+`update_plan` 终态加入同一「实时 ToolEnd 与 /resume 同一投影」通道：`HostHistoryItem` 增 `Plan` 变体（成功快照＝上游 `PlanUpdateCell` 渲染，失败/取消＝原因 cell），实时替换与恢复投影共用 `project_tool_item`；计划 cell 的完整视图（说明＋原文顺序）经 Ctrl+T 详情页/展开可见，Owned transcript 紧凑视图按母本语义排序并隐藏说明。见 [017-update-plan](017-update-plan.md)。

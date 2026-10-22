@@ -204,7 +204,7 @@ TUI 和行式输出都应明确显示“进程仍在运行／会话编号／实�
 
 ## 8. 实施与验证记录（2026-10-22，已批准交付）
 
-实现位置：`src/app/src/proc_session.rs`（进程会话管理器：启动／监控／读取线程、头尾缓存、终止与关闭）、`src/app/src/exec.rs`（参数与结果层：六字段六状态、yield/timeout/tty、write_stdin 参数）、`src/app/src/prompt.rs`（三工具定义＋`ToolDisplay::Stdin`）、`src/app/src/turn.rs`（分派与取消语义、`procs` 参数）、`src/app/src/main.rs`／`src/app/src/tui_host.rs`（宿主持有管理器、/resume 重置、退出清理、展示）、`src/tui/src/chat_driver.rs`（`running` 投影）。无新增依赖（复用 libc）。
+实现位置：`src/app/src/proc_session.rs`（进程会话管理器：启动／监控／读取线程、头尾缓存、终止与关闭）、`src/app/src/exec.rs`（参数与结果层：六字段六状态、yield/timeout/tty、write_stdin 参数）、`src/app/src/prompt.rs`（三工具定义＋`ToolDisplay::Stdin`；017 起为四工具定义——update_plan 见 017 规格）、`src/app/src/turn.rs`（分派与取消语义、`procs` 参数）、`src/app/src/main.rs`／`src/app/src/tui_host.rs`（宿主持有管理器、/resume 重置、退出清理、展示）、`src/tui/src/chat_driver.rs`（`running` 投影）。无新增依赖（复用 libc）。
 
 **§6 验证矩阵 → 实测落点**：
 

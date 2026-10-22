@@ -1,6 +1,5 @@
 ---
-source: tui/src/history_cell/tests.rs
-assertion_line: 2632
+source: src/tui/src/history_cell/plans_tests.rs
 expression: rendered
 ---
 Compact

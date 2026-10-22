@@ -22,12 +22,13 @@ pub const MAX_MODEL_REQUESTS_PER_TURN: usize = 8;
 /// 单批 tool_calls 上限（2026-10-10 安全修复 N3：入史/执行前检查，超限整批拒绝）。
 pub const MAX_TOOL_CALLS_PER_BATCH: usize = 32;
 
-/// 一轮的工具面（013-M5 D3 参数化；016 三工具）：`User`＝既有用户轮契约
-/// （恰 `exec_command`/`apply_patch`/`write_stdin`，后两者之外无新工具）；
+/// 一轮的工具面（013-M5 D3 参数化；017 四工具）：`User`＝既有用户轮契约
+/// （恰 `exec_command`/`apply_patch`/`write_stdin`/`update_plan`，此外无新工具）；
 /// `MemoryMerge`＝内部合并轮（恰 `mem_read`/`mem_write`/`mem_list`，
-/// 限 `root` 记忆根；请求组装注入三项工具与合并系统提示）。**权限在执行
-/// 分派层生效**：不在当前模式注册表内的工具名（含另一模式的工具）一律按
-/// 未知工具拒绝执行——仅靠请求体列出工具不构成权限保护。
+/// 限 `root` 记忆根；请求组装注入三项工具与合并系统提示，**不声明也不执行
+/// update_plan**）。**权限在执行分派层生效**：不在当前模式注册表内的工具名
+///（含另一模式的工具）一律按未知工具拒绝执行——仅靠请求体列出工具不构成
+/// 权限保护。
 #[derive(Debug, Clone, Copy)]
 pub enum ToolMode<'a> {
     User,
@@ -122,6 +123,8 @@ fn skipped_by_cancel(name: &str, mode: &ToolMode<'_>) -> String {
             error: Some(error.to_string()),
         })
         .expect("ApplyPatchResult 可序列化"),
+        // 017：update_plan 未执行＝两字段失败结构（不产生成功计划快照）
+        "update_plan" => json!({ "ok": false, "error": error }).to_string(),
         _ => json!({ "error": error }).to_string(),
     }
 }
@@ -294,9 +297,12 @@ fn execute_tool(
                 None,
             ),
         },
+        // 017：update_plan——解析参数、回传两字段结果；不执行步骤、不触文件或
+        // 命令，无展示数据（恢复投影由成功结果＋原始参数重建，display 保持 None）。
+        "update_plan" => (crate::plan::execute(&call.arguments), None),
         other => (
             json!({
-                "error": format!("未知工具 {other}，可用：exec_command、apply_patch、write_stdin")
+                "error": format!("未知工具 {other}，可用：exec_command、apply_patch、write_stdin、update_plan")
             })
             .to_string(),
             None,
@@ -708,6 +714,81 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 017：update_plan 分派——合法参数返回两字段成功结果（display None，
+    /// 不新增持久化展示变体）；参数错误按同一两字段结构回传原因，不升级为
+    /// 协议错误；内部记忆合并轮按未知工具拒绝（权限在分派层，跨模式工具名不执行）。
+    #[test]
+    fn update_plan_dispatch_shapes_and_memory_merge_isolation() {
+        let ok_args = r#"{"explanation":"开始","plan":[{"step":"接入","status":"in_progress"}]}"#;
+        let r = execute_tool(
+            &ParsedToolCall {
+                id: "p1".into(),
+                name: "update_plan".into(),
+                arguments: ok_args.into(),
+            },
+            None,
+            &ToolMode::User,
+            &ProcessManager::new(),
+        );
+        assert_eq!(r.0, r#"{"ok":true,"error":null}"#);
+        assert!(r.1.is_none(), "017：计划结果无展示数据（display 保持 None）");
+        // 参数错误（非法状态）：两字段失败＋具体原因
+        let r = execute_tool(
+            &ParsedToolCall {
+                id: "p2".into(),
+                name: "update_plan".into(),
+                arguments: r#"{"plan":[{"step":"s","status":"blocked"}]}"#.into(),
+            },
+            None,
+            &ToolMode::User,
+            &ProcessManager::new(),
+        );
+        let v: Value = serde_json::from_str(&r.0).unwrap();
+        assert_eq!(v["ok"], json!(false), "{v}");
+        assert!(
+            v["error"].as_str().unwrap().contains("blocked"),
+            "失败原因含非法状态原文：{v}"
+        );
+        // 内部记忆合并轮：分派层拒绝（mem 注册表外一律未知工具）
+        let root = std::path::Path::new("/nonexistent-mem-root-017");
+        let r = execute_tool(
+            &ParsedToolCall {
+                id: "p3".into(),
+                name: "update_plan".into(),
+                arguments: ok_args.into(),
+            },
+            None,
+            &ToolMode::MemoryMerge {
+                root,
+                system: "",
+                expected_epoch: 0,
+            },
+            &ProcessManager::new(),
+        );
+        let v: Value = serde_json::from_str(&r.0).unwrap();
+        assert!(
+            v["error"].as_str().unwrap().contains("未知工具 update_plan"),
+            "合并轮不得执行计划工具：{v}"
+        );
+    }
+
+    /// 017：取消后跳过的 update_plan 调用＝相同两字段失败结构，错误沿用
+    /// SKIPPED_BY_CANCEL_MESSAGE；该结果不得恢复为成功快照。
+    #[test]
+    fn update_plan_cancelled_skip_is_two_field_failure() {
+        let shape = skipped_by_cancel("update_plan", &ToolMode::User);
+        assert_eq!(
+            serde_json::from_str::<Value>(&shape).unwrap(),
+            json!({ "ok": false, "error": SKIPPED_BY_CANCEL_MESSAGE }),
+            "取消跳过＝两字段失败结构"
+        );
+        let args = r#"{"plan":[{"step":"s","status":"pending"}]}"#;
+        assert!(
+            crate::plan::success_snapshot(args, &shape).is_none(),
+            "取消跳过不得产生成功快照"
+        );
+    }
+
     #[test]
     fn execute_unknown_tool_and_bad_json_arguments() {
         let r = execute_tool(
@@ -724,6 +805,10 @@ mod tests {
         assert!(
             v["error"].as_str().unwrap().contains("未知工具 web_search"),
             "{v}"
+        );
+        assert!(
+            v["error"].as_str().unwrap().contains("update_plan"),
+            "未知工具提示应列出 update_plan：{v}"
         );
         let r = execute_tool(
             &ParsedToolCall {

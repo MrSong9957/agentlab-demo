@@ -186,6 +186,40 @@ impl PtySession {
         self.master.write_all(bytes).expect("PTY 写入失败");
     }
 
+    /// 017：真实缩放＋测试侧屏幕同步——在既有 [`PtySession::resize`]（TIOCSWINSZ
+    /// →SIGWINCH→驱动重绘）基础上把 VT100 屏幕同步为新尺寸，此后的字节按新
+    /// 尺寸解析；用于断言重排后的窄/宽布局本身（与既有 resize 的「解析器保持
+    /// 原尺寸、行号一一对应」语义互补，各自服务不同断言面）。
+    fn resize_and_sync(&mut self, cols: u16, rows: u16) {
+        self.resize(cols, rows);
+        self.vt.set_size(rows, cols);
+    }
+
+    /// 017：有界等待自定义屏幕谓词成立（真实屏幕断言；超时报错含屏幕与说明）。
+    fn wait_screen_pred(
+        &mut self,
+        desc: &str,
+        pred: impl Fn(&str) -> bool,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + WATCHDOG;
+        loop {
+            self.feed_screen();
+            if pred(&self.vt.to_string()) {
+                return Ok(());
+            }
+            if Instant::now() > deadline {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                return Err(format!(
+                    "等待屏幕条件 {:?} 超时，屏幕：\n{}",
+                    desc,
+                    self.vt.to_string()
+                ));
+            }
+            self.read_once(50);
+        }
+    }
+
     /// 发送一行：先写文本、隔 150ms 再写 CR。008-ADAPT：
     /// - TUI raw mode 下 Enter＝CR；TUI 之前的 rustyline 提问对 CR 经 ICRNL 按行结束；
     /// - TUI composer 的 paste-burst 启发式（≥3 个 ASCII 字符连打→120ms 内的
@@ -509,7 +543,7 @@ fn s1_pty_normal_session_full_roundtrip() {
     );
     assert_eq!(body["messages"][2]["role"], "user");
     assert_eq!(body["messages"][2]["content"], "你好");
-    assert_eq!(body["tools"].as_array().unwrap().len(), 3, "016：三工具");
+    assert_eq!(body["tools"].as_array().unwrap().len(), 4, "017：四工具");
     // 凭证明文不回显；已授权命中不改写授权记录
     assert!(!out.contains(key), "密钥明文不得出现在终端输出");
     assert_eq!(
@@ -7305,4 +7339,215 @@ fn s90_m8_line_mode_citation_feedback_updates_usage() {
     let (count, last) = s89_usage(user.path(), &id);
     assert_eq!(count, Some(1), "真实行式轮完成后引用反馈恰 +1");
     assert!(last.is_some_and(|t| t >= 1_700_000_000), "last_usage 已写入：{last:?}");
+}
+
+// ---------- S91：TUI update_plan 计划快照渲染与恢复一致（017）----------
+
+/// S91：TUI 真实链路——模型调用 update_plan → 屏幕出现说明与步骤清单
+///（三种状态标记）；最终回复正常渲染；退出后新会话 /resume 恢复同一快照
+///（零模型请求、不重放）；失败调用的参数不画成成功清单。
+#[test]
+fn s91_tui_update_plan_snapshot_and_resume_consistency() {
+    let cfg = TempDir::new("s91-cfg");
+    let user = TempDir::new("s91-user");
+    let key = "s91-key";
+    let plan_args = json!({
+        "explanation": "S91-计划说明-开始任务",
+        "plan": [
+            { "step": "S91-步骤-接入", "status": "completed" },
+            { "step": "S91-步骤-验证", "status": "in_progress" },
+            { "step": "S91-步骤-收尾", "status": "pending" }
+        ]
+    })
+    .to_string();
+    let tc = json!({ "choices": [{ "message": {
+        "role": "assistant", "content": null,
+        "tool_calls": [
+            { "id": "s91-plan-1", "type": "function",
+              "function": { "name": "update_plan", "arguments": plan_args } },
+            { "id": "s91-plan-2", "type": "function",
+              "function": { "name": "update_plan",
+                "arguments": json!({ "plan": [{ "step": "坏状态", "status": "blocked" }] }).to_string() } }
+        ]
+    }, "finish_reason": "tool_calls" }] })
+    .to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc),
+        MockResp::json(200, chat_body("S91-最终-完成")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S91_KEY");
+    let origin = catalog::origin_of(&mock.url).unwrap();
+    seed_grant(user.path(), &origin, &catalog::fingerprint(key));
+
+    let mut pty = PtySession::spawn(pty_cli(None, &[
+        ("TCHAT_CONFIG_DIR", cfg.path().to_str().unwrap()),
+        ("TCHAT_USER_DIR", user.path().to_str().unwrap()),
+        ("TCHAT_S91_KEY", key),
+    ]));
+    pty.wait_screen("? for shortcuts").unwrap(); // TUI 就绪
+    pty.send_line("按计划执行");
+    // 成功快照：紧凑视图＝标题＋计数＋按状态排序的步骤（进行中→待办→已完成）
+    pty.wait_screen("Updated Plan · 1/3 complete").unwrap();
+    pty.wait_screen("□ S91-步骤-验证").unwrap();
+    pty.wait_screen("□ S91-步骤-收尾").unwrap();
+    pty.wait_screen("✔ S91-步骤-接入").unwrap();
+    // 失败调用：原因呈现，坏状态步骤不画进清单
+    pty.wait_screen("update_plan 未生效").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    pty.feed_screen();
+    let screen = pty.vt.to_string();
+    assert!(!screen.contains("坏状态"), "失败参数不得画成清单：{screen}");
+    // 最终回复渲染
+    pty.wait_screen("S91-最终-完成").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    // Ctrl+T 详情页：完整视图含说明（紧凑视图按母本语义不展示说明）
+    pty.send_raw(b"\x14"); // Ctrl+T
+    pty.wait_screen("S91-计划说明-开始任务").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    pty.send_raw(b"q"); // q 关详情页（012 §8）
+    std::thread::sleep(Duration::from_millis(300));
+    pty.send_line("/exit");
+    pty.wait_output("再见!", WATCHDOG).unwrap();
+    let (out, status) = pty.finish();
+    assert_eq!(status.code(), Some(0), "退出码契约，输出：{out}");
+    // 请求配对：两字段成功/失败结果与原始参数、调用 ID 对应
+    assert_eq!(mock.requests().len(), 2, "恰两次请求");
+    let body2: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
+    let tools: Vec<&Value> = body2["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == json!("tool"))
+        .collect();
+    assert_eq!(tools.len(), 2);
+    assert_eq!(tools[0]["tool_call_id"], json!("s91-plan-1"));
+    assert_eq!(
+        serde_json::from_str::<Value>(tools[0]["content"].as_str().unwrap()).unwrap(),
+        json!({ "ok": true, "error": null })
+    );
+    let failed: Value = serde_json::from_str(tools[1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(failed["ok"], json!(false), "失败两字段：{failed}");
+    let assistant = body2["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == json!("assistant") && m.get("tool_calls").is_some())
+        .unwrap();
+    assert_eq!(
+        assistant["tool_calls"][0]["function"]["arguments"],
+        json!(plan_args),
+        "原始参数逐字投影"
+    );
+
+    // 恢复一致：新 TUI 会话 /resume（无参＝最近 auto）→ 同一快照渲染；零请求
+    let mock2 = spawn_mock(vec![]);
+    write_manual(cfg.path(), &mock2.url, "env:TCHAT_S91_KEY");
+    let origin2 = catalog::origin_of(&mock2.url).unwrap();
+    seed_grant(user.path(), &origin2, &catalog::fingerprint(key));
+    let mut pty2 = PtySession::spawn(pty_cli(None, &[
+        ("TCHAT_CONFIG_DIR", cfg.path().to_str().unwrap()),
+        ("TCHAT_USER_DIR", user.path().to_str().unwrap()),
+        ("TCHAT_S91_KEY", key),
+    ]));
+    pty2.wait_screen("? for shortcuts").unwrap();
+    pty2.send_line("/resume");
+    pty2.wait_screen("Updated Plan").unwrap();
+    pty2.wait_screen("✔ S91-步骤-接入").unwrap();
+    pty2.wait_screen("□ S91-步骤-验证").unwrap();
+    pty2.wait_screen("update_plan 未生效").unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    pty2.send_line("/exit");
+    pty2.wait_output("再见!", WATCHDOG).unwrap();
+    let (_out2, status2) = pty2.finish();
+    assert_eq!(status2.code(), Some(0));
+    assert!(
+        mock2.requests().is_empty(),
+        "恢复只投影不重放（零模型请求）"
+    );
+}
+
+// ---------- S92：TUI 计划真实缩放重排（017 补验收）----------
+
+/// S92：同一会话内实际改变 PTY 窗口尺寸（宽 200 → 窄 40 → 宽 200）：
+/// - 宽屏：紧凑视图三种状态齐全，长中文步骤连续成行；
+/// - 窄屏：紧凑行按新宽度重排（长步骤裁剪出省略号 `…`）；Ctrl+T 详情页完整
+///   视图折行且文本完整——前缀与尾部各自成行可见、整行不截断丢字；
+/// - 回宽：完整步骤重新连续成行、省略号消失、状态标记保持。
+/// 全程有界等待＋VT100 解析后的真实屏幕断言（无固定延时、不查通知日志）。
+#[test]
+fn s92_tui_update_plan_resize_reflow_integrity() {
+    let cfg = TempDir::new("s92-cfg");
+    let user = TempDir::new("s92-user");
+    let key = "s92-key";
+    let long_step = "S92-长步骤-一二三四五六七八九十甲乙丙丁戊己庚辛壬癸";
+    let plan_args = json!({
+        "explanation": "S92-缩放-说明",
+        "plan": [
+            { "step": "S92-步骤-已完成", "status": "completed" },
+            { "step": "S92-步骤-进行中", "status": "in_progress" },
+            { "step": long_step, "status": "pending" }
+        ]
+    })
+    .to_string();
+    let tc = json!({ "choices": [{ "message": {
+        "role": "assistant", "content": null,
+        "tool_calls": [{ "id": "s92-plan", "type": "function",
+            "function": { "name": "update_plan", "arguments": plan_args } }]
+    }, "finish_reason": "tool_calls" }] })
+    .to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc),
+        MockResp::json(200, chat_body("S92-最终-完成")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S92_KEY");
+    let origin = catalog::origin_of(&mock.url).unwrap();
+    seed_grant(user.path(), &origin, &catalog::fingerprint(key));
+
+    let mut pty = PtySession::spawn(pty_cli(None, &[
+        ("TCHAT_CONFIG_DIR", cfg.path().to_str().unwrap()),
+        ("TCHAT_USER_DIR", user.path().to_str().unwrap()),
+        ("TCHAT_S92_KEY", key),
+    ]));
+    pty.wait_screen("? for shortcuts").unwrap(); // TUI 就绪
+    pty.send_line("按计划执行");
+    // 宽屏（200 列）：计数＋三种状态＋长步骤连续成行（不折行不裁剪）
+    pty.wait_screen("Updated Plan · 1/3 complete").unwrap();
+    pty.wait_screen("□ S92-步骤-进行中").unwrap();
+    pty.wait_screen("✔ S92-步骤-已完成").unwrap();
+    pty.wait_screen(&format!("□ {long_step}")).unwrap();
+    pty.wait_screen("S92-最终-完成").unwrap();
+
+    // 窄屏（40 列）：主视图紧凑行重排——长步骤裁剪出省略号、连续长行消失
+    pty.resize_and_sync(40, 30);
+    pty.wait_screen_pred("窄屏重排（省略号出现）", |s| s.contains('…')).unwrap();
+    pty.wait_screen_pred("窄屏裁剪（长步骤不再连续成行）", |s| {
+        !s.contains(long_step)
+    })
+    .unwrap();
+    // 状态标记在窄屏重排后保持
+    pty.wait_screen("□ S92-步骤-进行中").unwrap();
+
+    // 详情页（Ctrl+T）窄屏完整视图：折行且文本完整——前缀/尾部分自成行，
+    // 整行无截断丢字（尾部仍在屏）
+    pty.send_raw(b"\x14"); // Ctrl+T
+    pty.wait_screen("S92-缩放-说明").unwrap(); // 完整视图含说明
+    // 折行点实测落在「甲」后（40 列）：首行含前缀、次行「乙…癸」自成行，
+    // 两分片均可见且整串不再连续——完整无丢字
+    pty.wait_screen_pred("窄屏详情折行完整（前缀行＋折行尾段行、不连续）", |s| {
+        s.contains("S92-长步骤-一") && s.contains("乙丙丁戊己庚辛壬癸") && !s.contains(long_step)
+    })
+    .unwrap();
+    pty.send_raw(b"q"); // 关详情页
+
+    // 回宽（200 列）：完整步骤重新连续成行、省略号消失
+    pty.resize_and_sync(PTY_COLS, PTY_ROWS);
+    pty.wait_screen(&format!("□ {long_step}")).unwrap();
+    pty.wait_screen_pred("回宽无裁剪", |s| !s.contains('…')).unwrap();
+    pty.wait_screen("✔ S92-步骤-已完成").unwrap();
+
+    pty.send_line("/exit");
+    pty.wait_output("再见!", WATCHDOG).unwrap();
+    let (out, status) = pty.finish();
+    assert_eq!(status.code(), Some(0), "退出码契约，输出：{out}");
+    assert_eq!(mock.requests().len(), 2, "恰两次模型请求（resize 不触发请求）");
 }

@@ -26,7 +26,7 @@
 | 复用项 | 固定提交来源 | 类型 / 函数 | 方式 |
 |---|---|---|---|
 | 基础提示词 | [models-manager/prompt.md](https://github.com/openai/codex/blob/2fdf047c9631c9ed01a31b62efb7891718a931a8/codex-rs/models-manager/prompt.md)，加载确认 [model_info.rs#L16](https://github.com/openai/codex/blob/2fdf047c9631c9ed01a31b62efb7891718a931a8/codex-rs/models-manager/src/model_info.rs#L16) | `BASE_INSTRUCTIONS = include_str!("../prompt.md")` | 原文直接复用（嵌入母本，逐字节不改） |
-| 未开放工具提示处理 | [update_plan_instructions.rs](https://github.com/openai/codex/blob/2fdf047c9631c9ed01a31b62efb7891718a931a8/codex-rs/prompts/src/update_plan_instructions.rs) | `without_update_plan_instructions(&str) -> String` | 局部代码复用（纯文本过滤） |
+| 未开放工具提示处理 | [update_plan_instructions.rs](https://github.com/openai/codex/blob/2fdf047c9631c9ed01a31b62efb7891718a931a8/codex-rs/prompts/src/update_plan_instructions.rs) | `without_update_plan_instructions(&str) -> String` | 局部代码复用（纯文本过滤；**017 起停用**——update_plan 工具已接入，指引按母本原文保留，过滤器及其锚定测试移除，见 017 修订注记） |
 | exec_command 定义 | [shell_spec.rs](https://github.com/openai/codex/blob/2fdf047c9631c9ed01a31b62efb7891718a931a8/codex-rs/core/src/tools/handlers/shell_spec.rs) | `create_exec_command_tool*`（`required:["cmd"]`、`additionalProperties:false`） | 母本＋必要适配 |
 | apply_patch 定义 | [apply_patch_spec.rs](https://github.com/openai/codex/blob/2fdf047c9631c9ed01a31b62efb7891718a931a8/codex-rs/core/src/tools/handlers/apply_patch_spec.rs) | `create_apply_patch_freeform_tool` | 母本＋必要适配（适配为 function，见下） |
 | 补丁语法 | [apply_patch.lark](https://github.com/openai/codex/blob/2fdf047c9631c9ed01a31b62efb7891718a931a8/codex-rs/core/assets/tools/apply_patch.lark) | `start: begin_patch hunk+ end_patch`（含 `change_move`） | 语法母本；本地为无 Move 子集（004） |
@@ -38,14 +38,14 @@
 
 **基础提示词的必要适配（仅以下四项，逐项说明，不重写整篇；发送文本＝母本＋且仅＋这些适配）**：
 
-1. 剔除 `## Planning` 与 `## update_plan` 节——本地未提供该工具，用 Codex 自带 `without_update_plan_instructions`（它即为此场景设计）。
+1. 剔除 `## Planning` 与 `## update_plan` 节——本地未提供该工具，用 Codex 自带 `without_update_plan_instructions`（它即为此场景设计）。（**修订注记 2026-10-22，017 已实施**：`update_plan` 工具接入（规格 [017-update-plan](017-update-plan.md)），本适配停用——发送版保留母本两节原文，适配仅剩②③④三项；`without_update_plan_instructions` 与其上游锚定测试随之移除，发送文本差分对照仍由 `s2` 承担（独立重建不再剔除两节）。）
 2. `prompt.md` 中 apply_patch 旧示例 `{"command":["apply_patch","*** Begin Patch…"]}` 为 shell 包装形态，与本地 JSON 契约冲突；该行最小改写为 `{"patch":"*** Begin Patch…"}`（Codex 无现成处理器，属必要改写）。
 3. AGENTS.md 注入声明最小修正：原文称根 AGENTS.md 内容"已随 developer 消息注入、无需重读"——本地不做任何注入，不得声称内容已注入；将该句最小修正为"需要时通过现有 `exec_command` 读取适用的 AGENTS.md 文件"。不新增自动发现或注入模块。（**修订注记 2026-10-20，已实施**：015 规格 [docs/specs/015-turn-context-injection.md](015-turn-context-injection.md) 已实现用户轮上下文注入，本适配随之反转——声明现为与其 §3-5 一致的新句 "The applicable AGENTS.md instructions and environment context are provided in a user message before the current input and don't need to be re-read."，嵌入母本与其余三项适配不变；005 其余契约不因 015 改变。）
 4. 其余提及 sandbox/审批升级等保留原文（措辞已限定"视运行配置而定"，不与白名单冲突，列为已知差异）。
 
 **协议映射（Codex 结构 → Chat Completions，保持现有发送层；本地 `system` 首位属接口适配）**：Codex 将基础提示词作为 developer 消息加入 `input` 前部（见对照行）；本地适配为 `messages[0] = {role:"system", content:发送版提示词}`。`ResponseItem::Message` 文本项 → `{role, content:string}`（历史逐条、本轮置末位）。`ToolSpec::Function` → `{type:"function", function:{name, description, parameters}}`。`ToolSpec::Freeform`（apply_patch）→ 适配为 Function（唯一必填字符串 `patch`，004 契约）：为保持本地 JSON 工具契约，不增加 custom 工具支持。`Prompt` 其余字段（`parallel_tool_calls`、`output_schema` 等）不映射、不声明。
 
-**工具定义（016 修订：以本地 003/004/016 契约为准）**：`exec_command` 参数恰为 `cmd`（必填）、`workdir`、`yield_time_ms`、`timeout_ms`、`max_output_chars`、`tty`——默认可续接语义（等待只控制返回；运行中返回 `session_id`）；Codex 的 `max_output_tokens/shell/login` 未实现不声明。`write_stdin`（016 新增）参数恰为 `session_id`（必填）、`chars`、`yield_time_ms`、`max_output_chars`、`terminate`。`apply_patch` 描述复用 Codex 首句"The `apply_patch` tool can be used to edit files."，删除"FREEFORM… do not wrap the patch in JSON"（与 JSON 契约相反）；语法说明不含 Move to。三工具仅出现在用户轮请求面；内部记忆合并轮仍为受限 mem 工具（013）。
+**工具定义（016 修订：以本地 003/004/016 契约为准）**：`exec_command` 参数恰为 `cmd`（必填）、`workdir`、`yield_time_ms`、`timeout_ms`、`max_output_chars`、`tty`——默认可续接语义（等待只控制返回；运行中返回 `session_id`）；Codex 的 `max_output_tokens/shell/login` 未实现不声明。`write_stdin`（016 新增）参数恰为 `session_id`（必填）、`chars`、`yield_time_ms`、`max_output_chars`、`terminate`。`apply_patch` 描述复用 Codex 首句"The `apply_patch` tool can be used to edit files."，删除"FREEFORM… do not wrap the patch in JSON"（与 JSON 契约相反）；语法说明不含 Move to。四工具（017 起增 `update_plan`——参数恰 `plan`（必填，元素 `{step,status}`，状态枚举 `pending/in_progress/completed`）与可选 `explanation`，Schema 对齐上游 `plan_spec.rs`）仅出现在用户轮请求面（含带记忆摘要的用户轮）；内部记忆合并轮仍为受限 mem 工具（013，不声明不执行 `update_plan`）。
 
 ## 4. 坑记录 → 实测后同步到个人知识库
 
@@ -77,3 +77,5 @@
 **固定边界同步（2026-10-10，N4）**：工具定义中 `timeout_ms` 描述为 1..=60000（默认 10000）、`max_output_chars` 为 1..=100000 码点（默认 10000）；最终模型请求 JSON（含 model、messages、tools、request_params 序列化后）≤10 MiB（UTF-8 字节），发送前经限计量序列化检查（不先生成无界缓冲），超限零发送并明确报错、本轮结束保留历史。
 
 **016 修订注记（2026-10-22，待批准）**：用户轮工具面由两项增至三项（`exec_command` 可续接语义＋新增 `write_stdin`）；`exec_command` 描述改为可续接语义（等待只控制返回、运行中返回句柄），参数表加入 `yield_time_ms`/`tty`，`timeout_ms` 描述取消 1..=60000 上限。测试同步：`s3`/`s4`/`s6` 按三工具契约更新（`prompt_assembly` 6/6 通过）；`tools` 数量断言在 tool_loop/llm_flow/e2e 同步为 3。本规格其余适配与母本锚定不变。
+
+**017 修订注记（2026-10-22，已批准交付）**：用户轮工具面由三项增至四项（新增 `update_plan`，定义与解析契约见 [017-update-plan](017-update-plan.md)）；适配①（剔除计划指引节）停用，母本 `## Planning`/`## `update_plan`` 两节按原文保留，嵌入母本锚点（字节数＋SHA-256）不变。测试同步：`s2`（指引保留＋独立重建不再剔节）、`s3`/`s4`（四工具）、`s6`（update_plan Schema 与解析差分锚定）；`tools` 数量断言在 tool_loop/llm_flow/e2e/memory_inject 同步为 4。

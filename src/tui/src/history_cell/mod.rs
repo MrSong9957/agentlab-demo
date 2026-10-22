@@ -69,9 +69,9 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::local_image_label_text;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::permissions::NetworkSandboxPolicy;
-// 008-TRIM: use codex_protocol::plan_tool::PlanItemArg;（plan/权限 cell 面，008 §1）
-// 008-TRIM: use codex_protocol::plan_tool::StepStatus;（plan/权限 cell 面，008 §1）
-// 008-TRIM: use codex_protocol::plan_tool::UpdatePlanArgs;（plan/权限 cell 面，008 §1）
+use codex_protocol::plan_tool::PlanItemArg; // 017 恢复（计划 cell 事件源已接入）
+use codex_protocol::plan_tool::StepStatus; // 017 恢复（同上）
+use codex_protocol::plan_tool::UpdatePlanArgs; // 017 恢复（同上）
 use codex_protocol::user_input::TextElement;
 use codex_utils_absolute_path::AbsolutePathBuf;
 // 008-TRIM: use codex_utils_cli::format_env_display（MCP cell 测试裁剪残留，008 §1）
@@ -109,7 +109,11 @@ mod markdown_render_cache;
 mod messages;
 mod notices;
 mod patches;
-// 008-TRIM: mod plans（008 §1 裁剪清单：无本地事件源）
+mod plans; // 017 恢复（update_plan 事件源已接入，008 §1 曾裁剪）
+
+#[cfg(test)]
+#[path = "plans_tests.rs"]
+mod plans_tests;
 // 008-TRIM: mod request_user_input（008 §1 裁剪清单：无本地事件源）
 // 008-TRIM: mod search（008 §1 裁剪清单：无本地事件源）
 mod separators;
@@ -132,7 +136,7 @@ pub(crate) use exec::*;
 pub use messages::*; // 008-ADAPT：pub（A7：AgentMarkdownCell 公开）
 pub(crate) use notices::*;
 pub(crate) use patches::*;
-// 008-TRIM: pub(crate) use plans::*;（裁剪 cell，008 §1）
+pub(crate) use plans::*; // 017 恢复（update_plan 事件源已接入）
 // 008-TRIM: pub(crate) use request_user_input::*;（裁剪 cell，008 §1）
 // 008-TRIM: pub(crate) use search::*;（裁剪 cell，008 §1）
 pub(crate) use separators::*;

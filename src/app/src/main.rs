@@ -376,13 +376,34 @@ fn cmd_chat(
                         |body: &serde_json::Value| api::chat_with_body(conn, key, &model, body, agent);
                     // 012：工具活动结构化事件——行式路径保持历史输出逐字节不变
                     //（ToolBegin 打印同一活动行；ToolEnd 仅落史不打印，与 006 一致）；
-                    // 016：运行中／已取消但进程仍存活的工具，明确展示会话编号。
+                    // 016：运行中／已取消但进程仍存活的工具，明确展示会话编号；
+                    // 017：update_plan 的 ToolEnd 打印计划清单/原因（成功快照说明与步骤）。
                     let mut notify = |n: turn::TurnNotify| match n {
                         turn::TurnNotify::Info(line) => say(&line),
                         turn::TurnNotify::ToolBegin { id, name, .. } => {
                             say(&turn::tool_activity_line(&name, &id));
                         }
-                        turn::TurnNotify::ToolEnd { name, result, .. } => {
+                        turn::TurnNotify::ToolEnd {
+                            name,
+                            arguments,
+                            result,
+                            ..
+                        } => {
+                            // 017：计划更新成功——输出说明与步骤清单（say 经终端过滤；
+                            // 失败/取消输出原因，不把失败调用画成清单；结果未知不打印）
+                            if name == "update_plan" {
+                                if let Some(snapshot) =
+                                    terminal_chat::plan::success_snapshot(&arguments, &result)
+                                {
+                                    for line in terminal_chat::plan::cli_lines(&snapshot) {
+                                        say(&line);
+                                    }
+                                } else if let Some(err) =
+                                    terminal_chat::plan::result_error(&result)
+                                {
+                                    say(&terminal_chat::plan::cli_failure_line(&err));
+                                }
+                            }
                             // 016：运行中/终止/超时三类宿主侧生命周期状态明确展示
                             //（自然完成含非零退出仍由模型回复承载——006 行式纪律）
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&result) {

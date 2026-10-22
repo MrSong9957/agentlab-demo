@@ -42,6 +42,15 @@ impl VT100Backend {
     pub fn vt100(&self) -> &vt100::Parser {
         self.crossterm_backend.writer()
     }
+
+    /// 017：调整模拟屏幕尺寸——与测试侧对 PTY master 的 TIOCSWINSZ 配套，
+    /// 使 resize 后的字节流按新尺寸解析（屏幕断言与真实窗口一致）。
+    pub fn set_size(&mut self, rows: u16, cols: u16) {
+        self.crossterm_backend
+            .writer_mut()
+            .screen_mut()
+            .set_size(rows, cols);
+    }
 }
 
 impl Write for VT100Backend {

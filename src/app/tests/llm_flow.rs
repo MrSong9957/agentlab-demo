@@ -716,9 +716,10 @@ fn bin_pipe_session_chats_and_lists_models() {
     assert_eq!(body["messages"][2]["role"], "user");
     assert_eq!(body["messages"][2]["content"], "你好");
     let tools = body["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 3, "016：三工具");
+    assert_eq!(tools.len(), 4, "017：四工具");
     assert_eq!(tools[0]["function"]["name"], "exec_command");
     assert_eq!(tools[1]["function"]["name"], "apply_patch");
+    assert_eq!(tools[3]["function"]["name"], "update_plan");
     // C1（回归基线）：预授权路径的请求确实携带凭证；已授权命中不重写授权记录
     assert_eq!(
         mock.requests()[0].auth.as_deref(),
@@ -1548,9 +1549,10 @@ fn chat_with_body_sends_normal_params_and_assembled_core() {
     assert_eq!(body["messages"][0]["role"], "system");
     assert_eq!(body["messages"][1]["content"], "你好");
     let tools = body["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 3, "016：三工具");
+    assert_eq!(tools.len(), 4, "017：四工具");
     assert_eq!(tools[0]["function"]["name"], "exec_command");
     assert_eq!(tools[1]["function"]["name"], "apply_patch");
+    assert_eq!(tools[3]["function"]["name"], "update_plan");
 }
 
 // ---------- NET-B01：全部重定向状态码一律拒绝 ----------

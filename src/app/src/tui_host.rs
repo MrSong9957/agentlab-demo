@@ -787,6 +787,31 @@ fn tool_end_item(
                 changes,
             })
         }
+        // 017：计划终态——成功快照（结果明确成功且参数可解析）经终端过滤后
+        // 交给 TUI 计划 cell；失败/取消只带原因；结果未知（非 JSON）或「成功但
+        // 参数损坏」返回 None（调用方按普通文本降级，不推断成功）。
+        "update_plan" => {
+            if let Some(snapshot) = crate::plan::success_snapshot(arguments, result) {
+                return Some(HostHistoryItem::Plan {
+                    update: Some(crate::plan::sanitized_for_display(&snapshot)),
+                    cancelled: false,
+                    error: None,
+                });
+            }
+            crate::plan::result_error(result)
+                .map(|error| {
+                    // 展示副本统一过终端过滤（serde 错误消息可内嵌模型可控的
+                    // 字段/变体名——错误文本同样属不可信来源；CLI 侧经 say 过滤）
+                    let error = crate::display::sanitize_for_terminal(&error);
+                    let cancelled =
+                        cancelled_event || error.as_str() == turn::SKIPPED_BY_CANCEL_MESSAGE;
+                    HostHistoryItem::Plan {
+                        update: None,
+                        cancelled,
+                        error: Some(error),
+                    }
+                })
+        }
         _ => None,
     }
 }
@@ -1005,6 +1030,138 @@ mod tests {
 
     use super::*;
     use std::time::Duration;
+
+    /// 017：update_plan 终态转换——成功＝快照（展示副本已过终端过滤）；
+    /// 失败＝原因；取消（含恢复路径按 SKIPPED 常量识别）＝cancelled；
+    /// 「成功但参数损坏」与结果未知＝None（普通文本降级，不推断成功）。
+    #[test]
+    fn tool_end_item_update_plan_shapes() {
+        use tchat_tui::chat_driver::HostHistoryItem as H;
+        // 说明含 ESC 序列、步骤含 BEL：展示副本过滤，快照仍重建
+        let args = "{\"explanation\":\"说\\u001b[2J明\",\"plan\":[{\"step\":\"步\\u0007骤\",\"status\":\"in_progress\"}]}";
+        match tool_end_item("update_plan", args, r#"{"ok":true,"error":null}"#, None, false) {
+            Some(H::Plan { update: Some(u), cancelled, error }) => {
+                assert!(!cancelled);
+                assert!(error.is_none());
+                assert_eq!(u.explanation.as_deref(), Some("说明"), "展示副本已过滤：{u:?}");
+                assert_eq!(u.plan[0].step, "步骤");
+            }
+            other => panic!("成功形状：{other:?}"),
+        }
+        // 失败：ok=false＋原因；错误文本（可内嵌模型可控变体名）同样过终端过滤
+        let esc_error = "unknown variant `\u{1b}[2Jbad`, expected pending";
+        match tool_end_item(
+            "update_plan",
+            r#"{"plan":[]}"#,
+            &serde_json::json!({ "ok": false, "error": esc_error }).to_string(),
+            None,
+            false,
+        ) {
+            Some(H::Plan { update: None, cancelled, error }) => {
+                assert!(!cancelled);
+                assert_eq!(
+                    error.as_deref(),
+                    Some("unknown variant `bad`, expected pending"),
+                    "失败原因展示副本已过滤：{error:?}"
+                );
+            }
+            other => panic!("失败形状：{other:?}"),
+        }
+        // 取消：恢复路径按结果中的 SKIPPED 常量识别（cancelled_event=false）
+        match tool_end_item(
+            "update_plan",
+            r#"{"plan":[]}"#,
+            &serde_json::json!({ "ok": false, "error": turn::SKIPPED_BY_CANCEL_MESSAGE }).to_string(),
+            None,
+            false,
+        ) {
+            Some(H::Plan { update: None, cancelled, .. }) => assert!(cancelled, "SKIPPED 常量识别取消"),
+            other => panic!("取消形状：{other:?}"),
+        }
+        // 实时取消事件旗标（结果形状同上）
+        match tool_end_item(
+            "update_plan",
+            r#"{"plan":[]}"#,
+            r#"{"ok":false,"error":"别的原因"}"#,
+            None,
+            /*cancelled_event*/ true,
+        ) {
+            Some(H::Plan { update: None, cancelled, .. }) => assert!(cancelled, "事件旗标优先"),
+            other => panic!("事件取消形状：{other:?}"),
+        }
+        // 成功结果＋参数损坏 → None（文本降级）；结果非 JSON → None
+        assert!(tool_end_item("update_plan", "corrupt", r#"{"ok":true,"error":null}"#, None, false).is_none());
+        assert!(tool_end_item("update_plan", args, "not json", None, false).is_none());
+        // 成功但缺 error 字段（非明确成功）＋无 error 文本 → None
+        assert!(tool_end_item("update_plan", args, r#"{"ok":true}"#, None, false).is_none());
+    }
+
+    /// 017：恢复投影——成功计划调用配对重建快照（与实时同一转换）；失败调用
+    /// 不重建为成功；未配对结果按文本投影（不丢失）。
+    #[test]
+    fn project_history_items_restores_plan_snapshots() {
+        use tchat_tui::chat_driver::HostHistoryItem as H;
+        let plan_args = r#"{"explanation":"说明","plan":[{"step":"步骤一","status":"completed"}]}"#;
+        let history = vec![
+            HistoryItem::Text(crate::prompt::HistoryMessage {
+                role: crate::prompt::HistoryRole::User,
+                content: "go".into(),
+            }),
+            HistoryItem::AssistantToolCalls {
+                tool_calls: vec![
+                    crate::prompt::ToolCallRecord {
+                        id: "plan-ok".into(),
+                        name: "update_plan".into(),
+                        arguments: plan_args.into(),
+                    },
+                    crate::prompt::ToolCallRecord {
+                        id: "plan-bad".into(),
+                        name: "update_plan".into(),
+                        arguments: r#"{"plan":[]}"#.into(),
+                    },
+                ],
+                content: None,
+            },
+            HistoryItem::ToolResult {
+                tool_call_id: "plan-ok".into(),
+                content: r#"{"ok":true,"error":null}"#.into(),
+                display: None,
+            },
+            HistoryItem::ToolResult {
+                tool_call_id: "plan-bad".into(),
+                content: r#"{"ok":false,"error":"工具参数不是有效 JSON：oops"}"#.into(),
+                display: None,
+            },
+            // 未配对孤儿结果：按文本投影不丢失
+            HistoryItem::ToolResult {
+                tool_call_id: "orphan-plan".into(),
+                content: r#"{"ok":true,"error":null}"#.into(),
+                display: None,
+            },
+        ];
+        let items = project_history_items(&history);
+        match &items[1] {
+            H::Plan { update: Some(u), .. } => {
+                assert_eq!(u.explanation.as_deref(), Some("说明"));
+                assert_eq!(u.plan[0].step, "步骤一");
+            }
+            other => panic!("成功快照重建：{other:?}"),
+        }
+        match &items[2] {
+            H::Plan { update: None, cancelled, error } => {
+                assert!(!cancelled);
+                assert!(error.as_deref().unwrap().contains("oops"));
+            }
+            other => panic!("失败不重建成功：{other:?}"),
+        }
+        match &items[3] {
+            H::Text { assistant, content } => {
+                assert!(*assistant);
+                assert_eq!(content, r#"{"ok":true,"error":null}"#);
+            }
+            other => panic!("孤儿结果按文本：{other:?}"),
+        }
+    }
 
     /// P2-2（008-REVIEW 独立审查）：turn 线程 panic（如毒锁）不得静默死亡——
     /// 必须以 Failed 事件回推，驱动恢复可用（否则 turn_running 永久卡死）。

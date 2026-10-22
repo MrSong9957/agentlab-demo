@@ -29,27 +29,12 @@ fn s1_embedded_source_matches_pinned_commit() {
     assert_eq!(hex, RAW_SHA256, "嵌入母本与固定提交不一致");
 }
 
-/// 测试侧独立重建发送版提示词：按 005 §3 的描述剔除两节＋两处行内修正，
-/// 与实现（Codex 过滤器移植＋替换函数）形成差分对照。
+/// 测试侧独立重建发送版提示词：017 起 update_plan 工具已接入，不再剔除
+/// `## Planning`／`## \`update_plan\`` 两节；仅剩 005 §3 的两处行内修正，
+/// 与实现形成差分对照。
 fn expected_sent() -> String {
     let raw = RAW_BASE_INSTRUCTIONS;
-    let mut kept: Vec<&str> = Vec::new();
-    let lines: Vec<&str> = raw.lines().collect();
-    let mut i = 0;
-    while i < lines.len() {
-        let l = lines[i];
-        if l == "## Planning" || l == "## `update_plan`" {
-            i += 1;
-            while i < lines.len() && !lines[i].starts_with("# ") && !lines[i].starts_with("## ") {
-                i += 1;
-            }
-            continue;
-        }
-        kept.push(l);
-        i += 1;
-    }
-    let mut text = kept.join("\n");
-    text.push('\n'); // 母本以换行结尾，lines() 会丢掉它
+    let mut text = raw.to_string();
 
     let old_agents = "The contents of the AGENTS.md file at the root of the repo and any directories from the CWD up to the root are included with the developer message and don't need to be re-read.";
     // 015 反转 005 适配 3：声明改为「已由 user 消息提供、无需重读」
@@ -69,16 +54,25 @@ fn expected_sent() -> String {
     text
 }
 
-/// 2. 提示词适配（发送文本）：与嵌入母本是不同文本；只含 005 §3 列出的适配，
-/// 并与测试侧独立重建逐字节一致。
+/// 2. 提示词适配（发送文本）：与嵌入母本是不同文本；只含列出的适配，
+/// 并与测试侧独立重建逐字节一致。017：计划指引两节已恢复（母本原文保留）。
 #[test]
 fn s2_sent_prompt_only_listed_adaptations() {
     let sent = sent_instructions();
     let raw = RAW_BASE_INSTRUCTIONS;
     assert_ne!(sent, raw, "发送文本不得等于母本（未做适配）");
-    assert!(sent.len() < raw.len(), "剔除两节后应更短");
-    assert!(!sent.contains("update_plan"), "update_plan 指引应已剔除");
-    assert!(!sent.contains("## Planning"), "## Planning 节应已剔除");
+    assert!(sent.len() < raw.len(), "apply_patch 示例改写后应更短");
+    // 017：计划指引不再剔除——两节标题与工具指引均保留（母本原文）
+    assert!(sent.contains("## Planning"), "## Planning 节应保留");
+    assert!(sent.contains("## `update_plan`"), "update_plan 工具节应保留");
+    assert!(
+        sent.contains("You have access to an `update_plan` tool"),
+        "Planning 节工具指引应保留"
+    );
+    assert!(
+        sent.contains("At most one step can be") || sent.contains("exactly one `in_progress` step"),
+        "计划指引正文应保留"
+    );
     assert!(
         !sent.contains("{\"command\":[\"apply_patch\""),
         "apply_patch 旧 shell 包装示例应已改写"
@@ -107,10 +101,10 @@ fn s2_sent_prompt_only_listed_adaptations() {
     assert_eq!(sent, expected_sent(), "发送文本与独立重建不一致（存在未列出的改动）");
 }
 
-/// 3. 空历史：恰 system、user 两条消息；恰三个工具定义（016 起＋write_stdin）；
+/// 3. 空历史：恰 system、user 两条消息；恰四个工具定义（017 起＋update_plan）；
 ///    顶层恰 {messages, tools} 且均为 function 类型（原 s7 场景并入）；核对序列化 JSON。
 #[test]
-fn s3_empty_history_two_messages_three_tools() {
+fn s3_empty_history_two_messages_four_tools() {
     let v = build_request(&[], "你好").unwrap();
     let text = serde_json::to_string(&v).unwrap();
     let v: Value = serde_json::from_str(&text).unwrap(); // 验证真实 JSON，不只看内部结构
@@ -121,10 +115,11 @@ fn s3_empty_history_two_messages_three_tools() {
     assert_eq!(messages[1]["role"], json!("user"));
     assert_eq!(messages[1]["content"], json!("你好"));
     let tools = v["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 3, "016：用户轮三工具");
+    assert_eq!(tools.len(), 4, "017：用户轮四工具");
     assert_eq!(tools[0]["function"]["name"], json!("exec_command"));
     assert_eq!(tools[1]["function"]["name"], json!("apply_patch"));
     assert_eq!(tools[2]["function"]["name"], json!("write_stdin"));
+    assert_eq!(tools[3]["function"]["name"], json!("update_plan"));
     // 协议映射（原 s7 断言并入）：顶层恰 {messages, tools}（model 等由发送层附加）、tools 全为 function
     let mut top: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
     top.sort_unstable();
@@ -186,10 +181,11 @@ fn s4_history_preserved_no_dedup() {
     assert_eq!(msgs2[1]["content"], json!(tricky), "重复组装历史逐字正确");
     assert_eq!(msgs2[3]["content"], json!(tricky), "重复组装本轮输入逐字正确");
     let tools2 = again["tools"].as_array().unwrap();
-    assert_eq!(tools2.len(), 3, "重复组装工具数正确");
+    assert_eq!(tools2.len(), 4, "重复组装工具数正确");
     assert_eq!(tools2[0]["function"]["name"], json!("exec_command"));
     assert_eq!(tools2[1]["function"]["name"], json!("apply_patch"));
     assert_eq!(tools2[2]["function"]["name"], json!("write_stdin"));
+    assert_eq!(tools2[3]["function"]["name"], json!("update_plan"));
 
     // 组装（含重复组装）不改历史输入
     let after: Vec<(HistoryRole, String)> = history
@@ -202,12 +198,12 @@ fn s4_history_preserved_no_dedup() {
     assert_eq!(snapshot, after);
 }
 
-/// 6. 三工具白名单：名称、参数与本地 003/004/016 JSON 契约一致，无未声明字段。
+/// 6. 四工具白名单：名称、参数与本地 003/004/016/017 JSON 契约一致，无未声明字段。
 #[test]
 fn s6_tool_whitelist_matches_local_contracts() {
     let v = build_request(&[], "hi").unwrap();
     let tools = v["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 3, "016：白名单恰三项");
+    assert_eq!(tools.len(), 4, "017：白名单恰四项");
     let exec_t = &tools[0];
     assert_eq!(exec_t["type"], json!("function"));
     let f = &exec_t["function"];
@@ -273,6 +269,42 @@ fn s6_tool_whitelist_matches_local_contracts() {
         .unwrap_err()
         .contains("未知参数"), "未声明字段必须被契约拒绝");
     assert!(WS::from_value(&json!({ "session_id": "s1", "chars": "x", "yield_time_ms": 30000 })).is_ok());
+
+    // 017：update_plan 定义与上游 plan_spec.rs 对齐（Chat Completions function 映射）
+    // ——差分锚定本地解析契约：schema 声明的输入面必须被 parse_arguments 接受
+    let up = &tools[3];
+    assert_eq!(up["type"], json!("function"));
+    let f = &up["function"];
+    assert_eq!(f["name"], json!("update_plan"));
+    let desc = f["description"].as_str().unwrap();
+    assert!(desc.starts_with("Updates the task plan"), "上游描述首句：{desc}");
+    assert!(desc.contains("At most one step can be in_progress"), "至多一个进行中写在描述：{desc}");
+    let params = &f["parameters"];
+    assert_eq!(params["type"], json!("object"));
+    assert_eq!(params["required"], json!(["plan"]));
+    assert_eq!(params["additionalProperties"], json!(false));
+    let mut keys: Vec<&str> = params["properties"].as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["explanation", "plan"]);
+    let plan_schema = &params["properties"]["plan"];
+    assert_eq!(plan_schema["type"], json!("array"));
+    let item = &plan_schema["items"];
+    assert_eq!(item["type"], json!("object"));
+    assert_eq!(item["required"], json!(["step", "status"]));
+    assert_eq!(item["additionalProperties"], json!(false));
+    assert_eq!(
+        item["properties"]["status"]["enum"],
+        json!(["pending", "in_progress", "completed"]),
+        "状态枚举与上游一致"
+    );
+    use terminal_chat::plan;
+    // schema 声明面＝解析接受面：合法输入（含可省略 explanation）接受
+    assert!(plan::parse_arguments(r#"{"explanation":"e","plan":[{"step":"s","status":"in_progress"}]}"#).is_ok());
+    assert!(plan::parse_arguments(r#"{"plan":[{"step":"","status":"completed"},{"step":"t","status":"in_progress"}]}"#).is_ok(), "空步骤与多个进行中＝上游接受面");
+    // 未声明顶层字段/步骤字段、非法状态拒绝（schema additionalProperties:false 同源）
+    assert!(plan::parse_arguments(r#"{"plan":[],"reason":"x"}"#).is_err());
+    assert!(plan::parse_arguments(r#"{"plan":[{"step":"s","status":"pending","id":1}]}"#).is_err());
+    assert!(plan::parse_arguments(r#"{"plan":[{"step":"s","status":"blocked"}]}"#).is_err());
 }
 
 /// 9. 空白本轮输入：明确错误，不产生请求片段；历史不变。

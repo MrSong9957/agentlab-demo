@@ -1,6 +1,8 @@
-//! 最小模型请求组装（005 规格）：基础提示词（Codex 母本＋005 §3 四项适配）＋
-//! exec_command/apply_patch 工具定义＋文本历史 → Chat Completions 的 `{messages, tools}`。
+//! 最小模型请求组装（005 规格）：基础提示词（Codex 母本＋行内适配）＋
+//! exec_command/apply_patch/write_stdin/update_plan 工具定义＋文本历史 →
+//! Chat Completions 的 `{messages, tools}`。
 //! 母本 openai/codex@2fdf047c9631c9ed01a31b62efb7891718a931a8，仅参考 005 来源表限定文件。
+//! 017：update_plan 工具接入，母本任务计划指引两节不再剔除（原文保留）。
 //! 本模块只组装与序列化：不联网、不执行命令、不写文件。
 
 use serde::{Deserialize, Serialize};
@@ -138,61 +140,9 @@ pub(crate) fn project_history(history: &[HistoryItem]) -> Vec<Value> {
         .collect()
 }
 
-/// 移植自 Codex `prompts/src/update_plan_instructions.rs`（固定提交，纯 std 逐行移植）：
-/// 剔除未开放的 update_plan/checklist 指引节，其余原文保留。
-pub fn without_update_plan_instructions(instructions: &str) -> String {
-    let lines = instructions.split_inclusive('\n').collect::<Vec<_>>();
-    let mut rendered = String::with_capacity(instructions.len());
-    let mut index = 0;
-    while index < lines.len() {
-        let line = lines[index].trim_end();
-        if matches!(
-            line,
-            "## Planning" | "## `update_plan`" | "## Plan tool" | "## Plan Mode vs update_plan tool"
-        ) {
-            let end = (index + 1..lines.len())
-                .find(|&next| lines[next].starts_with("# ") || lines[next].starts_with("## "))
-                .unwrap_or(lines.len());
-            let is_checklist_section = line != "## Planning"
-                || lines[index..end].iter().any(|line| {
-                    line.starts_with("You have access to an `update_plan` tool")
-                        || line.starts_with("When `update_plan` is available, follow this section")
-                });
-            if is_checklist_section {
-                index = end;
-                continue;
-            }
-        }
-
-        if line == "Progress visibility:"
-            && lines
-                .get(index + 1)
-                .is_some_and(|line| line.starts_with("If update_plan is available"))
-        {
-            index += 2;
-            if lines.get(index).is_some_and(|line| line.trim().is_empty()) {
-                index += 1;
-            }
-            continue;
-        }
-
-        if line.starts_with("- Use the plan tool ")
-            || line.starts_with("- If you create a checklist or task list,")
-        {
-            index += 1;
-            while index < lines.len()
-                && (lines[index].starts_with(' ') || lines[index].starts_with('\t'))
-            {
-                index += 1;
-            }
-            continue;
-        }
-
-        rendered.push_str(lines[index]);
-        index += 1;
-    }
-    rendered
-}
+// 017 前的发送版曾剔除母本 update_plan/checklist 指引节（移植自 Codex
+// `prompts/src/update_plan_instructions.rs`，005 §3 适配①）；工具接入后该
+// 适配移除，指引按母本原文保留——历史行为见 005 规格与 git 历史。
 
 /// apply_patch 旧示例改写（005 §3 适配 2）：母本该行是 shell 包装形态
 /// `{"command":["apply_patch", "<patch 字符串>"]}`，与本地 JSON 契约冲突，
@@ -226,12 +176,11 @@ fn rewrite_agents_md_claim(text: &str) -> String {
     text.replacen(old, new, 1)
 }
 
-/// 发送版基础提示词＝母本＋005 §3 四项适配：
-/// ①剔除 update_plan 节；②apply_patch 示例改写；③AGENTS.md 声明修正；
-/// ④sandbox/审批措辞保留原文（无操作）。
+/// 发送版基础提示词＝母本＋行内适配：
+/// ①（017 移除）update_plan 指引节不再剔除；②apply_patch 示例改写；
+/// ③AGENTS.md 声明修正；④sandbox/审批措辞保留原文（无操作）。
 pub fn sent_instructions() -> String {
-    let adapted = without_update_plan_instructions(RAW_BASE_INSTRUCTIONS);
-    let adapted = rewrite_apply_patch_example(&adapted);
+    let adapted = rewrite_apply_patch_example(RAW_BASE_INSTRUCTIONS);
     rewrite_agents_md_claim(&adapted)
 }
 
@@ -340,6 +289,50 @@ fn apply_patch_tool() -> Value {
     })
 }
 
+/// update_plan 工具定义（017）：描述与参数 Schema 映射自 Codex
+/// `handlers/plan_spec.rs`（固定提交 d138398）的 ResponsesApiTool——
+/// Chat Completions function 形态（required＋additionalProperties:false 同既有工具）。
+fn update_plan_tool() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "update_plan",
+            "description": "Updates the task plan.\nProvide an optional explanation and a list of plan items, each with a step and status.\nAt most one step can be in_progress at a time.\n",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "explanation": {
+                        "type": "string",
+                        "description": "Optional explanation for this plan update."
+                    },
+                    "plan": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "step": {
+                                    "type": "string",
+                                    "description": "Task step text."
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"],
+                                    "description": "Step status."
+                                }
+                            },
+                            "required": ["step", "status"],
+                            "additionalProperties": false
+                        },
+                        "description": "The list of steps"
+                    }
+                },
+                "required": ["plan"],
+                "additionalProperties": false
+            }
+        }
+    })
+}
+
 /// 006 循环续请求：投影完整历史（已含本轮 user、调用与结果），不追加当前输入；
 /// `system`（发送版提示词）每请求恰一条。
 pub fn build_turn_request(history: &[HistoryItem]) -> Value {
@@ -358,7 +351,12 @@ pub fn build_turn_request_with_memory(history: &[HistoryItem], memory_context: O
     }
     build_turn_request_with(
         history,
-        &[exec_command_tool(), apply_patch_tool(), write_stdin_tool()],
+        &[
+            exec_command_tool(),
+            apply_patch_tool(),
+            write_stdin_tool(),
+            update_plan_tool(),
+        ],
         &system,
     )
 }
@@ -373,8 +371,8 @@ pub fn build_turn_request_with(history: &[HistoryItem], tools: &[Value], system:
     json!({ "messages": messages, "tools": tools })
 }
 
-/// 组装 `{messages, tools}`（005 §1，016 三工具）：`system(发送版提示词) → 历史 → user(当前输入)`；
-/// 当前输入只追加一次（006）。用户轮工具恰为 `exec_command、apply_patch、write_stdin`。
+/// 组装 `{messages, tools}`（005 §1，017 四工具）：`system(发送版提示词) → 历史 → user(当前输入)`；
+/// 当前输入只追加一次（006）。用户轮工具恰为 `exec_command、apply_patch、write_stdin、update_plan`。
 /// 仅组装与序列化，模型等发送层字段由调用方附加。
 pub fn build_request(history: &[HistoryItem], current_input: &str) -> Result<Value, String> {
     if current_input.trim().is_empty() {
@@ -388,41 +386,6 @@ pub fn build_request(history: &[HistoryItem], current_input: &str) -> Result<Val
     Ok(v)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::without_update_plan_instructions;
-
-    // 移植自 Codex update_plan_instructions_tests.rs（固定提交）的同三例，锚定移植保真。
-    #[test]
-    fn omits_checklist_sections_and_preserves_other_planning() {
-        let instructions = "Before.\n\n## Planning\nYou have access to an `update_plan` tool which tracks steps.\n\n### Examples\nKeep steps current.\n\n## Work\nImplement.\n\n## `update_plan`\nUpdate the checklist.\n\n# Next\n## Planning\nDiscuss architecture and inspect update_plan before editing.\n";
-        assert_eq!(
-            without_update_plan_instructions(instructions),
-            "Before.\n\n## Work\nImplement.\n\n# Next\n## Planning\nDiscuss architecture and inspect update_plan before editing.\n",
-        );
-    }
-
-    #[test]
-    fn omits_legacy_tool_and_plan_mode_cross_reference_sections() {
-        let instructions = "# Plan Mode\nKeep planning.\n\n## Plan Mode vs update_plan tool\nThe tools are separate.\n\n## Execution\nDo not edit.\n\n## Plan tool\nWhen using the planning tool:\n- Update steps.\n";
-        assert_eq!(
-            without_update_plan_instructions(instructions),
-            "# Plan Mode\nKeep planning.\n\n## Execution\nDo not edit.\n\n",
-        );
-    }
-
-    #[test]
-    fn omits_only_checklist_list_items_and_goal_guidance() {
-        let instructions = "Keep working.\n- Use the plan tool to explain the work\n    - Skip simple tasks.\n    - Keep steps current.\n- Explain discoveries.\n- If you create a checklist or task list, update its statuses.\n\nProgress visibility:\nIf update_plan is available, use it for complex work.\n\nCompletion:\nVerify the result.\n";
-        assert_eq!(
-            without_update_plan_instructions(instructions),
-            "Keep working.\n- Explain discoveries.\n\nCompletion:\nVerify the result.\n",
-        );
-    }
-
-    #[test]
-    fn plain_text_unchanged() {
-        let text = "# Title\n\n普通文本，无规划节。\n";
-        assert_eq!(without_update_plan_instructions(text), text);
-    }
-}
+// 017：原「剔除 update_plan 指引节」过滤器的移植锚定测试随过滤器一并移除
+//（工具已接入，母本指引按原文保留）；发送文本与独立重建的差分对照由
+// tests/prompt_assembly.rs s2 承担。

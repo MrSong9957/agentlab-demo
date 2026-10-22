@@ -1238,6 +1238,14 @@ pub enum HostHistoryItem {
         changed: Vec<String>,
         changes: Vec<HostPatchChange>,
     },
+    /// update_plan 终态（017）。`update`＝成功快照（**已过终端过滤的展示副本**；
+    /// 原始参数由宿主按历史契约保存）；`None`＝失败/取消——只显示原因，
+    /// 不把失败调用的参数画成成功清单。
+    Plan {
+        update: Option<codex_protocol::plan_tool::UpdatePlanArgs>,
+        cancelled: bool,
+        error: Option<String>,
+    },
 }
 
 /// 012：apply_patch 逐文件真实差异（应用时的真实前后内容）。
@@ -1306,7 +1314,9 @@ pub fn project_history(items: Vec<HostHistoryItem>) -> Vec<std::sync::Arc<dyn Hi
                     });
                 }
             }
-            tool @ (HostHistoryItem::Exec { .. } | HostHistoryItem::Patch { .. }) => {
+            tool @ (HostHistoryItem::Exec { .. }
+            | HostHistoryItem::Patch { .. }
+            | HostHistoryItem::Plan { .. }) => {
                 flush_text!();
                 out.extend(project_tool_item(&tool, &id, &cwd));
             }
@@ -1462,6 +1472,26 @@ fn project_tool_item(
                 out.push(Arc::new(degraded_patch_cell(*ok, error.as_deref(), changed)));
             }
             out
+        }
+        // 017：计划终态——成功快照经上游 PlanUpdateCell 清单渲染（活动 ID＝宿主
+        // 传入 id）；失败/取消只呈现原因，不把失败调用的参数画成成功清单。
+        HostHistoryItem::Plan { update, cancelled, error } => {
+            if let Some(args) = update {
+                return vec![Arc::new(crate::history_cell::new_plan_update(
+                    id.to_string(),
+                    args.clone(),
+                ))];
+            }
+            let mut lines = Vec::new();
+            if *cancelled {
+                lines.push(ratatui::text::Line::from("update_plan 已取消".dim()));
+            } else {
+                lines.push(ratatui::text::Line::from("update_plan 未生效".dim()));
+            }
+            if let Some(err) = error {
+                lines.push(ratatui::text::Line::from(err.clone()).dim());
+            }
+            vec![Arc::new(PlainHistoryCell::new(lines))]
         }
     }
 }
@@ -1974,5 +2004,138 @@ mod tests {
         assert!(ctrl_d(KeyModifiers::CONTROL));
         assert!(!ctrl_d(KeyModifiers::CONTROL | KeyModifiers::SHIFT));
         assert!(!ctrl_d(KeyModifiers::CONTROL | KeyModifiers::ALT));
+    }
+
+    /// 017：计划终态投影——成功快照经 PlanUpdateCell 清单渲染（说明＋三种
+    /// 状态标记＋空计划提示；活动 ID＝宿主传入 id）；失败/取消只呈现原因，
+    /// 不把失败调用的参数画成成功清单。
+    #[test]
+    fn plan_projection_success_and_failure() {
+        use codex_protocol::plan_tool::PlanItemArg;
+        use codex_protocol::plan_tool::StepStatus;
+        use codex_protocol::plan_tool::UpdatePlanArgs;
+        let mk = |expl: Option<&str>, steps: Vec<(&str, StepStatus)>| HostHistoryItem::Plan {
+            update: Some(UpdatePlanArgs {
+                explanation: expl.map(str::to_string),
+                plan: steps
+                    .into_iter()
+                    .map(|(step, status)| PlanItemArg { step: step.to_string(), status })
+                    .collect(),
+            }),
+            cancelled: false,
+            error: None,
+        };
+        // 成功：说明＋三种状态标记；窄宽换行（步骤文字跨行不丢前缀）
+        let cells = project_tool_item(
+            &mk(
+                Some("实现完成，开始验证"),
+                vec![
+                    ("接入计划工具", StepStatus::Completed),
+                    ("验证计划显示与恢复", StepStatus::InProgress),
+                    ("收尾", StepStatus::Pending),
+                ],
+            ),
+            "call-plan-1",
+            std::path::Path::new("/"),
+        );
+        assert_eq!(cells.len(), 1, "单一计划 cell");
+        assert_eq!(cells[0].activity_ids(), vec!["call-plan-1".to_string()], "活动 ID＝宿主传入");
+        let text = cells_text(&cells);
+        assert!(text.contains("Updated Plan"), "上游标题：{text}");
+        assert!(text.contains("实现完成，开始验证"), "说明：{text}");
+        assert!(text.contains("✔ 接入计划工具"), "完成标记：{text}");
+        assert!(text.contains("□ 验证计划显示与恢复"), "进行中标记：{text}");
+        assert!(text.contains("□ 收尾"), "待办标记：{text}");
+        // 窄屏换行：长步骤跨行，标记前缀保留在首行
+        let narrow = project_tool_item(
+            &mk(None, vec![("很长很长很长很长的步骤文本需要换行显示才行", StepStatus::InProgress)]),
+            "call-plan-narrow",
+            std::path::Path::new("/"),
+        );
+        let text = cells_text(&narrow);
+        assert!(text.contains("□ "), "标记保留：{text}");
+        assert!(
+            narrow[0].display_lines(12).len() > 1,
+            "窄屏下长步骤应换行：{}",
+            cells_text(&narrow)
+        );
+        // 空计划：上游无步骤提示
+        let cells = project_tool_item(
+            &mk(None, vec![]),
+            "call-plan-empty",
+            std::path::Path::new("/"),
+        );
+        let text = cells_text(&cells);
+        assert!(text.contains("(no steps provided)"), "空计划提示：{text}");
+        // 失败：原因呈现，不画清单
+        let cells = project_tool_item(
+            &HostHistoryItem::Plan {
+                update: None,
+                cancelled: false,
+                error: Some("工具参数不是有效 JSON：unknown variant".into()),
+            },
+            "call-plan-bad",
+            std::path::Path::new("/"),
+        );
+        let text = cells_text(&cells);
+        assert!(text.contains("update_plan 未生效"), "失败标题：{text}");
+        assert!(text.contains("unknown variant"), "失败原因：{text}");
+        assert!(!text.contains("Updated Plan"), "失败不得画成功清单：{text}");
+        // 取消：独立「已取消」呈现
+        let cells = project_tool_item(
+            &HostHistoryItem::Plan {
+                update: None,
+                cancelled: true,
+                error: Some("用户取消，本调用未执行".into()),
+            },
+            "call-plan-skip",
+            std::path::Path::new("/"),
+        );
+        let text = cells_text(&cells);
+        assert!(text.contains("update_plan 已取消"), "取消标题：{text}");
+        assert!(!text.contains("Updated Plan"), "取消不得画成功清单：{text}");
+    }
+
+    /// 017：/resume 投影——计划条目与其他工具/文本共存；多条计划快照按
+    /// 提交顺序保留（最近一次成功快照就是最新状态）。
+    #[test]
+    fn project_history_renders_plan_items_in_order() {
+        use codex_protocol::plan_tool::PlanItemArg;
+        use codex_protocol::plan_tool::StepStatus;
+        use codex_protocol::plan_tool::UpdatePlanArgs;
+        let items = vec![
+            HostHistoryItem::Text { assistant: false, content: "go".into() },
+            HostHistoryItem::Plan {
+                update: Some(UpdatePlanArgs {
+                    explanation: None,
+                    plan: vec![PlanItemArg {
+                        step: "第一步".into(),
+                        status: StepStatus::InProgress,
+                    }],
+                }),
+                cancelled: false,
+                error: None,
+            },
+            HostHistoryItem::Text { assistant: true, content: "进行中".into() },
+            HostHistoryItem::Plan {
+                update: Some(UpdatePlanArgs {
+                    explanation: None,
+                    plan: vec![PlanItemArg {
+                        step: "第一步".into(),
+                        status: StepStatus::Completed,
+                    }],
+                }),
+                cancelled: false,
+                error: None,
+            },
+        ];
+        let cells = super::project_history(items);
+        let text = cells_text(&cells);
+        assert!(text.contains("□ 第一步"), "第一次快照（进行中）保留：{text}");
+        assert!(text.contains("✔ 第一步"), "第二次快照（完成）保留：{text}");
+        // 快照顺序：进行中在前（历史保留），完成在后（最新）
+        let in_progress_pos = text.find("□ 第一步").unwrap();
+        let completed_pos = text.find("✔ 第一步").unwrap();
+        assert!(in_progress_pos < completed_pos, "旧快照作为历史保留在前：{text}");
     }
 }

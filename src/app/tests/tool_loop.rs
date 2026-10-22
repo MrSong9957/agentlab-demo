@@ -137,7 +137,7 @@ fn t1_plain_reply_ends_immediately() {
     assert!(body["messages"][1]["content"].as_str().unwrap().starts_with("<environment_context>"));
     assert_eq!(body["messages"][2]["content"], json!("你好"));
     let tools = body["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 3, "016：用户轮三工具");
+    assert_eq!(tools.len(), 4, "017：用户轮四工具");
     assert_eq!(tools[0]["function"]["name"], json!("exec_command"));
     assert_eq!(tools[1]["function"]["name"], json!("apply_patch"));
     assert_eq!(tools[2]["function"]["name"], json!("write_stdin"));
@@ -485,4 +485,245 @@ fn t14_eighth_request_final_reply_ends_normally() {
         "T14\n".repeat(7),
         "前 7 批各真实执行一次，最终回复不增加副作用"
     );
+}
+
+/// T15（017）：完整计划流程——创建计划 → 真实 exec_command → 更新完成 → 最终回复。
+/// 核对每次后续请求的原始参数、调用 ID 与两字段结果配对；CLI 输出说明、步骤
+/// 与状态；计划文字不产生文件副作用。
+#[test]
+fn t15_update_plan_flow_with_real_exec_and_cli_output() {
+    let dir = TempDir::new("tl-t15");
+    let made = dir.path().join("t15-made.txt");
+    let cmd = format!("echo T15-OK > {}", made.display());
+    let plan1 = json!({
+        "explanation": "开始任务",
+        "plan": [
+            { "step": "接入计划工具", "status": "completed" },
+            { "step": "验证计划显示与恢复", "status": "in_progress" },
+        ]
+    })
+    .to_string();
+    let plan2 = json!({
+        "explanation": "实现完成，开始验证",
+        "plan": [
+            { "step": "接入计划工具", "status": "completed" },
+            { "step": "验证计划显示与恢复", "status": "completed" },
+        ]
+    })
+    .to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc_response(&[call("call-plan-c1", "update_plan", plan1.clone())], None)),
+        MockResp::json(200, tc_response(&[call("call-plan-x1", "exec_command", json!({ "cmd": cmd, "workdir": dir.path().display().to_string() }).to_string())], None)),
+        MockResp::json(200, tc_response(&[call("call-plan-c2", "update_plan", plan2.clone())], None)),
+        MockResp::json(200, ok_response("任务完成-T15")),
+    ]);
+    let (out, code) = run_cli(dir.path(), &mock.url, "tl-key", "按计划执行\nexit\n");
+    assert_eq!(code, Some(0), "{out}");
+    assert_eq!(mock.count(), 4);
+    // 真实 exec 副作用（计划调用不产生文件副作用——本目录仅此一个文件）
+    assert_eq!(std::fs::read_to_string(&made).unwrap(), "T15-OK\n");
+    let entries = std::fs::read_dir(dir.path().join("user").join("sessions")).unwrap().count();
+    assert_eq!(entries, 1, "计划文字不触发文件副作用（仅自动会话）");
+    // CLI 输出：活动行＋两次清单（状态变化可见）＋说明
+    assert!(out.contains("[工具] update_plan（call-pla"), "{out}");
+    assert!(out.contains("计划已更新（1/2 步完成）"), "第一次快照：{out}");
+    assert!(out.contains("计划已更新（2/2 步完成）"), "第二次快照：{out}");
+    assert!(out.contains("说明：开始任务") && out.contains("说明：实现完成，开始验证"), "{out}");
+    let first = out.find("计划已更新（1/2").unwrap();
+    let second = out.find("计划已更新（2/2").unwrap();
+    assert!(first < second, "快照按提交顺序：{out}");
+    assert!(out.contains("[进行中] 验证计划显示与恢复"), "{out}");
+    assert!(out.contains("[已完成] 验证计划显示与恢复"), "{out}");
+    assert!(out.contains("Agent：任务完成-T15"), "{out}");
+    // 请求配对：第 2 请求携带原始参数与两字段成功结果（id 对应）
+    let body2 = req_body(&mock, 1);
+    let tools2 = tool_msgs(&body2);
+    assert_eq!(tools2.len(), 1, "第 2 请求含首批结果");
+    assert_eq!(tools2[0]["tool_call_id"], json!("call-plan-c1"));
+    assert_eq!(
+        serde_json::from_str::<Value>(tools2[0]["content"].as_str().unwrap()).unwrap(),
+        json!({ "ok": true, "error": null }),
+        "两字段成功结果"
+    );
+    let assistant2 = body2["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == json!("assistant") && m.get("tool_calls").is_some())
+        .unwrap();
+    assert_eq!(
+        assistant2["tool_calls"][0]["function"]["arguments"],
+        json!(plan1),
+        "原始参数逐字保留"
+    );
+    // 第 4 请求携带全部三条结果（计划×2＋exec×1）与最终模型回复前的完整历史
+    let body4 = req_body(&mock, 3);
+    let tools4 = tool_msgs(&body4);
+    assert_eq!(tools4.len(), 3, "第 4 请求含三批结果");
+    assert_eq!(tools4[2]["tool_call_id"], json!("call-plan-c2"));
+    let v: Value = serde_json::from_str(tools4[2]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(v, json!({ "ok": true, "error": null }));
+    // 用户轮工具面恰四项（含 update_plan）
+    let names: Vec<&str> = body2["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["exec_command", "apply_patch", "write_stdin", "update_plan"],
+        "017：用户轮四工具"
+    );
+}
+
+/// T16（017）：计划参数错误按两字段失败回传（不升级协议错误、不中断循环）；
+/// CLI 输出原因，不画清单。
+#[test]
+fn t16_update_plan_param_error_echoed_not_rendered() {
+    let dir = TempDir::new("tl-t16");
+    let bad = json!({ "plan": [{ "step": "s", "status": "blocked" }] }).to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc_response(&[call("call-plan-bad", "update_plan", bad)], None)),
+        MockResp::json(200, ok_response("继续-T16")),
+    ]);
+    let (out, code) = run_cli(dir.path(), &mock.url, "tl-key", "更新计划\nexit\n");
+    assert_eq!(code, Some(0), "{out}");
+    assert_eq!(mock.count(), 2, "参数错误不中断循环");
+    assert!(out.contains("计划更新未生效："), "{out}");
+    assert!(out.contains("blocked"), "失败原因含非法状态原文：{out}");
+    assert!(!out.contains("计划已更新"), "失败不得画成功清单：{out}");
+    assert!(out.contains("Agent：继续-T16"), "{out}");
+    let body2 = req_body(&mock, 1);
+    let tools2 = tool_msgs(&body2);
+    assert_eq!(tools2[0]["tool_call_id"], json!("call-plan-bad"));
+    let v: Value = serde_json::from_str(tools2[0]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(v["ok"], json!(false), "两字段失败：{v}");
+    assert!(v["error"].as_str().unwrap().contains("blocked"), "{v}");
+}
+
+/// T17（017）：计划调用按模型请求计数——恒返计划调用时恰 8 请求后报上限，
+/// 第 8 批计划结果保存（ok=true），无第 9 次请求、无假回复、无自动全部完成。
+#[test]
+fn t17_update_plan_request_cap_counts_model_requests() {
+    let dir = TempDir::new("tl-t17");
+    let plan = json!({ "plan": [{ "step": "唯一步骤", "status": "in_progress" }] }).to_string();
+    let mock = spawn_mock(vec![MockResp::json(200, tc_response(
+        &[call("call-plan-cap1", "update_plan", plan)],
+        None,
+    ))]);
+    let (out, code) = run_cli(dir.path(), &mock.url, "tl-key", "循环\nexit\n");
+    assert_eq!(code, Some(0), "{out}");
+    assert_eq!(mock.count(), 8, "恰 8 次请求，无第 9 次");
+    assert!(out.contains("已达本轮模型请求上限（8）"), "{out}");
+    assert!(!out.contains("Agent："), "上限错误不得伪造回复：{out}");
+    // CLI 8 次清单均显示「进行中」——额度耗尽不自动把未完成改成完成
+    assert_eq!(out.matches("[进行中] 唯一步骤").count(), 8, "{out}");
+    assert!(!out.contains("[已完成]"), "不得伪造成完成：{out}");
+    // 第 8 批结果已保存（第 8 请求只含此前 7 条结果；会话文件含 8 条 ok=true）
+    let body8 = req_body(&mock, 7);
+    assert_eq!(tool_msgs(&body8).len(), 7);
+    let session_dir = dir.path().join("user").join("sessions");
+    let file = std::fs::read_dir(&session_dir).unwrap().next().unwrap().unwrap().path();
+    let contents: Vec<Value> = std::fs::read_to_string(&file)
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let ok_results = contents
+        .iter()
+        .filter(|v| {
+            v.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+                && v.get("content").and_then(|c| c.as_str()).is_some_and(|c| c.contains(r#""ok":true"#))
+        })
+        .count();
+    assert_eq!(ok_results, 8, "第 8 批计划调用结果保存后报上限：会话含 8 条成功结果");
+}
+
+/// T18（017）：CLI 批内取消——长等待 exec 期间 SIGINT 取消本轮，批内跳过的
+/// update_plan 返回两字段失败（SKIPPED 常量）；CLI 输出取消原因、不画清单；
+/// 取消只停止等待与剩余调用（016：不终止已启动进程，退出时由宿主关闭）。
+#[test]
+fn t18_cancelled_batch_skips_plan_as_two_field_failure() {
+    use std::io::Write as _;
+    let dir = TempDir::new("tl-t18");
+    let plan = json!({ "plan": [{ "step": "被取消的步骤", "status": "in_progress" }] }).to_string();
+    let batch = tc_response(
+        &[
+            call(
+                "call-t18-exec",
+                "exec_command",
+                json!({ "cmd": "sleep 3", "yield_time_ms": 29000 }).to_string(),
+            ),
+            call("call-t18-plan", "update_plan", plan),
+        ],
+        None,
+    );
+    let mock = spawn_mock(vec![MockResp::json(200, batch)]);
+    // 与 run_cli 同环境，但保留 stdin 句柄以支持轮询后发送 SIGINT 与后续输入
+    let cfg = dir.path().join("config");
+    let user = dir.path().join("user");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::create_dir_all(&user).unwrap();
+    write_manual(&cfg, &mock.url, "env:TCHAT_TL_KEY");
+    seed_grant(&user, &catalog::origin_of(&mock.url).unwrap(), &catalog::fingerprint("tl-key"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_terminal-chat"));
+    cmd.current_dir(dir.path())
+        .env("TCHAT_CONFIG_DIR", &cfg)
+        .env("TCHAT_USER_DIR", &user)
+        .env("TCHAT_TL_KEY", "tl-key")
+        .env("TERM", "xterm")
+        .env_remove("TCHAT_PUBLIC_CATALOG_URL")
+        .env_remove("APPDATA")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("CLI 子进程启动失败");
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"go\n").unwrap();
+    stdin.flush().unwrap();
+    // 等首轮模型请求到达（turn 内 SIGINT 处理器已安装），在 exec 等待期发送 SIGINT
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while mock.count() < 1 {
+        assert!(std::time::Instant::now() < deadline, "首轮请求未到达");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGINT);
+    }
+    stdin.write_all(b"exit\n").unwrap();
+    stdin.flush().unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().expect("等待 CLI 子进程失败");
+    let out = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.contains("用户已取消"), "取消错误呈现：{out}");
+    assert!(
+        out.contains("计划更新未生效：用户取消，本调用未执行"),
+        "跳过的计划调用按两字段失败输出原因：{out}"
+    );
+    assert!(!out.contains("计划已更新"), "取消不得画成功清单：{out}");
+    // 会话落盘形状：exec＝cancelled（进程保留，016）；计划＝两字段失败
+    let session_dir = user.join("sessions");
+    let file = std::fs::read_dir(&session_dir).unwrap().next().unwrap().unwrap().path();
+    let contents: Vec<Value> = std::fs::read_to_string(&file)
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let plan_result = contents
+        .iter()
+        .find(|v| v.get("tool_call_id").and_then(|t| t.as_str()) == Some("call-t18-plan"))
+        .expect("计划调用结果已落盘");
+    assert_eq!(
+        serde_json::from_str::<Value>(plan_result["content"].as_str().unwrap()).unwrap(),
+        json!({ "ok": false, "error": "用户取消，本调用未执行" }),
+        "跳过的计划调用＝两字段失败"
+    );
+    let exec_result = contents
+        .iter()
+        .find(|v| v.get("tool_call_id").and_then(|t| t.as_str()) == Some("call-t18-exec"))
+        .expect("exec 结果已落盘");
+    let exec_v: Value = serde_json::from_str(exec_result["content"].as_str().unwrap()).unwrap();
+    assert_eq!(exec_v["status"], json!("cancelled"), "取消不终止进程（016）：{exec_v}");
 }

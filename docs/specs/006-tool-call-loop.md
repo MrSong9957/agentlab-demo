@@ -1,6 +1,6 @@
 # 规格：工具调用循环（REPL 最小闭环）
 
-> 状态：已实现（REPL 已接入并按 §5 验证；审批/并行/流式/持久化不在范围；**016 修订：用户轮工具三项、取消不再终止已启动进程**）　更新：2026-10-22（016）
+> 状态：已实现（REPL 已接入并按 §5 验证；审批/并行/流式/持久化不在范围；**016 修订：用户轮工具三项、取消不再终止已启动进程；017 修订：用户轮工具四项（＋update_plan）**）　更新：2026-10-22（017）
 > 母本：[openai/codex](https://github.com/openai/codex) 固定提交 `2fdf047c9631c9ed01a31b62efb7891718a931a8`；[Chat Completions function-calling](https://developers.openai.com/api/docs/guides/function-calling)（不迁移 Responses）
 
 ## 1. 目标 & I/O
@@ -10,7 +10,7 @@
 - **当前 user 只追加一次**：本轮开始时入历史；后续工具循环请求直接使用已含本轮 user、调用与结果的完整历史（`build_turn_request`），**不再次追加当前输入**；`system` 每个请求恰一条。
 - **输出**：终端显示最终回复（或错误）；执行工具前打印单行 `[工具] 名称（id 按字符取前 8 位）`（经现有终端输出过滤）；带调用的 `assistant.content` 暂不显示但原样保留在历史与后续请求中。
 - **消息格式（Chat Completions）**：assistant 消息原样保留 `tool_calls:[{id,type:"function",function:{name,arguments}}]`；`arguments` 为 JSON 字符串，解析为 `Value` 后交给工具入口；每个调用对应一条 `{role:"tool",tool_call_id:id,content:结果 JSON 字符串}`，`tool_call_id` 必须匹配该调用 `id`；`content` 为现有 `ExecResult`/`ApplyPatchResult` 序列化 JSON。
-- **范围**：仅循环与消息拼装。不新增并行、流式工具调用、审批、自动重试、记忆、压缩或其他工具。016 修订：用户轮白名单为 `exec_command`/`apply_patch`/`write_stdin` 三项（内部记忆合并轮仍为受限 mem 工具，分派层拒绝跨模式工具名）；exec_command 默认可续接，取消当前轮不再自动终止已启动进程。
+- **范围**：仅循环与消息拼装。不新增并行、流式工具调用、审批、自动重试、记忆、压缩或其他工具。016 修订：用户轮白名单为 `exec_command`/`apply_patch`/`write_stdin` 三项（内部记忆合并轮仍为受限 mem 工具，分派层拒绝跨模式工具名）；exec_command 默认可续接，取消当前轮不再自动终止已启动进程。017 修订：白名单增至四项（＋`update_plan`，纯解析无副作用；参数错误按两字段失败结果回传、取消跳过同形，见文末 017 修订注记）。
 
 ## 2. 边界 & 风险
 
@@ -74,3 +74,5 @@
 **在途请求取消扩展（2026-10-15，010 定点轮）**：TUI 内 turn 运行中 Ctrl+C 的取消此前仅覆盖工具批间与 exec 执行中——**在途模型请求（阻塞 ureq，总超时 180s）不轮询取消标志**，置标志后无可视变化、回复照常到达（010 §6 现场症状根因）。修复位于 TUI 宿主 sender（`src/app/src/tui_host.rs`）：请求移辅助线程执行、等待侧 100ms 粒度轮询 `HOST_CANCEL`；取消＝**停止本地等待**并返回 `Err("用户已取消本轮：已停止等待模型回复（迟到结果将被丢弃）")` 结束本轮（历史保留已发生记录，与既有错误语义一致；文案如实——当前实现未中止底层 HTTP 请求（等待侧不关 socket、不中断/不 join 辅助线程）——请求继续至响应到达或 agent 总超时后辅助线程自然结束，迟到结果经已弃 channel 丢弃，不影响后续 turn/会话/界面（S71/S72 /proc 线程数定点核查）；被弃辅助线程单请求存活 ≤180s，**并存数量无上限**（随重叠取消次数增长、各自独立回收））。`turn.rs`/`api.rs` 零改动；行式路径与 006 既有取消契约不变。e2e S69/S69b/S70/S71（PTY 真实驱动），变异双验证见 010 §6。（2026-10-15 单一职责轮：TUI 内取消**触发键**改为 Esc——驱动统一拦截后仍走同一 `set_cancel_requested`/HOST_CANCEL 链路，本节全部取消边界与语义不变；行式 REPL 的 Ctrl+C 语义不变。Ctrl+C 在 TUI 内改恒退出（退出收尾含置取消＋进程组终止）。见 012 §9）
 
 **016 修订注记（2026-10-22，待批准）**：①用户轮工具三项（新增 `write_stdin` 分派——经进程会话管理器执行，取消／上限语义与 exec_command 一致）；②取消不再终止已启动进程——`exec_command` 执行中被取消返回 `cancelled`＋`session_id`（进程存活），取消发生在启动前则不执行（cancelled＋空句柄＋零副作用）；③循环骨架、整批校验、配对、8 次请求／32 条上限、失败不重放不变。签名新增 `procs: &ProcessManager` 参数（跨轮进程会话管理器由宿主持有）。循环级验证：`tests/proc_session.rs` 工具循环集成三例（跨请求续接、MemoryMerge 拒绝 write_stdin、额度耗尽后下一轮续接）＋ `turn` 内嵌用例适配六字段结果。
+
+**017 修订注记（2026-10-22，已批准交付）**：①用户轮工具四项——新增 `update_plan` 分派（`turn.rs` 纯解析执行，结果固定两字段 `{"ok":bool,"error":string|null}`；参数错误按工具结果回传不升级协议错误，与既有失败语义一致）；②取消后跳过的 `update_plan` 调用返回同形两字段失败（错误沿用 `SKIPPED_BY_CANCEL_MESSAGE`），不产生成功计划快照；③未知工具提示与 `skipped_by_cancel` 形状同步；④每轮 8 次模型请求、单批 32 条调用上限与循环骨架不变（计划调用占用请求额度的语义见 017 §3.2，tool_loop t17 验证）。契约明细以 [017-update-plan](017-update-plan.md) 为准。

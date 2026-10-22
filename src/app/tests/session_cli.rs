@@ -1688,3 +1688,80 @@ fn e19_resume_rejects_stale_handle_without_replay() {
     assert_eq!(stale["status"], "error", "旧句柄跨重启失效：{stale}");
     assert!(stale["error"].as_str().unwrap().contains("未知或已失效"), "{stale}");
 }
+
+/// e21（017）：计划记录保存与恢复——V1 形状不变（仅既有三标签、无新持久化
+/// 变体）、原始参数逐字保留（含终端控制序列转义）、display 不落盘；/resume
+/// 零请求零执行、续聊请求携带未过滤的原始参数；行式输出经终端过滤。
+#[test]
+fn e21_plan_records_roundtrip_and_display_boundary() {
+    // 步骤/说明注入清屏与 BEL 序列（JSON \u 转义）：stdout 过滤、历史保留原文
+    let plan_args = "{\"explanation\":\"说明\\u001b[2J攻击\",\"plan\":[{\"step\":\"步骤\\u0007文本\",\"status\":\"in_progress\"}]}";
+    let tc = json!({ "choices": [{ "message": {
+        "role": "assistant", "content": null,
+        "tool_calls": [{ "id": "e21-plan", "type": "function",
+            "function": { "name": "update_plan", "arguments": plan_args } }]
+    }, "finish_reason": "tool_calls" }] })
+    .to_string();
+    let fx = Fixture::new(vec![
+        MockResp::json(200, tc),
+        MockResp::json(200, chat_body("计划完成-E21")),
+    ]);
+    let work = TempDir::new("sc-e21-run1");
+    let (out, err, code) = run_pipe(work.path(), &fx.envs(), "做计划\nexit\n");
+    assert_eq!(code, Some(0), "{out}{err}");
+    // 显示边界：控制序列不外泄，可读文字保留（说明→「说明攻击」、步骤→「步骤文本」）
+    assert!(!out.contains('\u{1b}'), "终端控制序列不得进入输出");
+    assert!(out.contains("计划已更新（0/1 步完成）"), "{out}");
+    assert!(out.contains("说明：说明攻击"), "说明过滤后可读：{out}");
+    assert!(out.contains("[进行中] 步骤文本"), "步骤过滤后可读：{out}");
+
+    // V1 形状：全部记录仅三种既有标签；计划结果无 display 字段
+    let autos = fx.autos();
+    assert_eq!(autos.len(), 1, "{autos:?}");
+    let auto_path = fx.sessions().join(&autos[0]);
+    for line in fs::read_to_string(&auto_path).unwrap().lines() {
+        let v: Value = serde_json::from_str(line).expect("每行合法 JSON");
+        if let Some(tag) = v.get("type").and_then(Value::as_str) {
+            assert!(
+                matches!(tag, "text" | "tool_calls" | "tool_result"),
+                "V1 记录形状不增加新标签：{tag}"
+            );
+        }
+    }
+    let loaded = load_session_file(&auto_path).unwrap();
+    let calls = loaded.history.iter().find_map(|h| match h {
+        HistoryItem::AssistantToolCalls { tool_calls, .. } => Some(tool_calls.clone()),
+        _ => None,
+    }).expect("含工具调用记录");
+    assert_eq!(calls[0].name, "update_plan");
+    assert_eq!(calls[0].arguments, plan_args, "原始参数逐字保留（含转义序列）");
+    match loaded.history.iter().find(|h| matches!(h, HistoryItem::ToolResult { tool_call_id, .. } if tool_call_id == "e21-plan")) {
+        Some(HistoryItem::ToolResult { content, display, .. }) => {
+            assert_eq!(
+                serde_json::from_str::<Value>(content).unwrap(),
+                json!({ "ok": true, "error": null }),
+                "两字段成功结果"
+            );
+            assert!(display.is_none(), "017：计划结果不落 display（不新增持久化变体）");
+        }
+        other => panic!("含计划结果记录：{other:?}"),
+    }
+
+    // 恢复：/resume 本身零请求零执行；续聊恰 1 次请求且携带未过滤原始参数
+    let (out2, err2, code2) = run_pipe(work.path(), &fx.envs(), "/resume\n续聊\nexit\n");
+    assert_eq!(code2, Some(0), "{out2}{err2}");
+    assert!(out2.contains("恢复"), "{out2}");
+    assert_eq!(fx.mock.count(), 3, "首运行 2 次＋续聊 1 次；恢复零请求（不重放）");
+    let body: Value = serde_json::from_str(&fx.mock.requests()[2].body).unwrap();
+    let assistant = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == json!("assistant") && m.get("tool_calls").is_some())
+        .expect("续聊请求含计划调用记录");
+    assert_eq!(
+        assistant["tool_calls"][0]["function"]["arguments"],
+        json!(plan_args),
+        "模型面原始参数保留（展示过滤不写回历史）"
+    );
+}

@@ -228,7 +228,8 @@ fn m6_d4_only_system_tail_changes_and_none_is_byte_identical() {
             .iter()
             .map(|t| t["function"]["name"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["exec_command", "apply_patch", "write_stdin"]
+        ["exec_command", "apply_patch", "write_stdin", "update_plan"],
+        "017：带记忆摘要的用户轮与普通用户轮同面（四工具）"
     );
 }
 

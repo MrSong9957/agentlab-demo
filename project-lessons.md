@@ -28,6 +28,7 @@
 - 013 记忆系统 V1：已交付（2026-10-19 用户最终批准，M1–M9）。范围七项：单会话提炼、结果与任务状态、Markdown 同步、全局合并、摘要注入、通用文件检索、引用反馈与用户修改便条；V2、双写、专用记忆工具（`memories.*`）不纳入。上游锚点 codex@`ce0323f2`；参考 `/vault/sources/agent/Codex记忆系统-框架实现与Agent执行手册.md`。范围外/暂缓/未验证项按规格 §7/§8 原登记保留。
 - 014 记忆四项最小修订：已交付（2026-10-20，提交 `463ed8f`，记录 `docs/records/2026-10-20-014-implementation.md`）。已知本地适配：§3 资格随 reset 清除**与 Codex 跨重置资格保留不同**。
 - 016 命令执行与进程交互：已实施并验证（2026-10-22，分支 feat/016-process-sessions，待批准）——默认可续接进程会话（管道＋PTY）、write_stdin 查询/输入/中断/终止、取消与寿命分开、64 条容量＋1 MiB 头尾缓存＋64 KiB 输入上限、两种宿主退出清理。记录 `docs/records/2026-10-22-016-implementation.md`。
+- 017 任务计划：已批准交付（2026-10-22，分支 feat/017-update-plan 合并入 main）——只新增 update_plan：参数/状态/解析复用 Codex（shim 三类型＋Serde 原语义），两字段结果，行式清单＋TUI 计划 cell（上游 PlanUpdateCell 最小移植），V1 会话形状不变、成功快照恢复投影；母本计划指引两节恢复保留。记录 `docs/records/2026-10-22-017-implementation.md`。
 
 ## 4. 必须保持的行为（契约明细）
 
@@ -62,6 +63,9 @@
 
 ## 7. 实现取舍与问题根因
 
+- 017 计划工具（2026-10-22）：①嵌入母本锚点不变前提下「停用剔除」即恢复指引——`without_update_plan_instructions` 过滤器与其上游锚定测试一并移除，prompt_assembly s2 的测试侧独立重建同步改写（不再剔节）即为防回归面；②TUI 计划 cell 移植保真用「008-TRIM 遗留同名快照逐字节对比」锚定（新旧 .snap 正文一致＝渲染零漂移），孤儿快照删除、等价新快照（plans_tests 名下）接管；③Owned transcript 对计划 cell 用母本**紧凑视图**（按状态排序、隐藏说明、计数头），说明只在完整视图（Ctrl+T 详情页/展开）——e2e 断言需按视图分治，s91 以 Ctrl+T 验证说明；④TUI 侧错误文本（serde 错误可内嵌模型可控变体名）同属不可信来源，展示副本一并过 sanitize（审查发现补齐）。
+- 004 与 Codex 同名工具的兼容性（2026-10-22 复核）：`{"patch":...}` 是 Chat Completions 函数工具适配，工具定义与发送版提示词已同步；不能仅为对齐上游自由文本接口更换参数。`Move to`、Unicode 标点匹配容差是已知 MVP 取舍；移植上游时须保留本地 Add 禁止覆盖及四字段结果契约。依据与按需补齐建议见 [apply_patch 差异复核](docs/records/2026-10-22-codex-apply-patch-comparison.md)。
+- update_plan 复核（2026-10-22）：上游工具接收完整计划并发布展示事件，不执行步骤或验证完成，也不等于 Plan Mode。本地遗留计划快照不能证明功能可用，计划 cell 已因无事件源被裁掉；接入须同时恢复提示词与实时／恢复投影，并评估更新次数对每轮 8 次请求额度的影响。最小方案可用已保存的成功调用参数重建展示，避免新增独立存储或贸然扩展持久化展示枚举。依据与建议见 [update_plan 差异复核](docs/records/2026-10-22-codex-update-plan-comparison.md)。
 - 007 并发与原子性：auto 续写独占锁采用「打开即锁→同 fd 装载/尾置/追加」，防止双写者；新建 auto 文件 `create_new` 后先取锁再写 meta，撞 Busy 换候选名；同名 auto 恢复复用已持锁描述符直接重装载（锁全程不离开写者，2026-10-10 第四批改为复用实现）；`/save` 快照与 `grant_origin` 授权记录均 tmp＋rename 原子替换（`write_atomic` 排他创建、仅清理本次 tmp、失败保留旧文件）。
 - 010 取消语义：turn 运行中取消扩展到在途模型请求——`tui_host` sender 辅助线程＋等待侧轮询标志；底层请求至响应/超时自然结束，迟到结果经已弃 channel 丢弃（S71 `/proc` 线程回收实证；S72 重叠取消：迟到 tool_calls 不触发、不入史）。
 - 011 滚动条：vendored `transcript_view.rs` 仅追加 mod 声明，新写 `scrollbar.rs`——RowCache 行数持久缓存（Weak 指针身份＋宽度键，命中不触 layout，2000 cell 稳定帧 70µs）；收尾轮修正端点映射：`ScrollbarState.content_length`＝最大可滚动顶行+1（总行数−视口+1）而非正文总行数。
@@ -73,6 +77,7 @@
 
 ## 8. 验证结论演进
 
+- 当前基线（2026-10-22 017 update-plan，已批准交付）：`cargo check && cargo test --workspace --no-fail-fast` exit 0，51 目标 **3103 通过/0 失败/3 既有忽略**（含补验收轮 s92 真实缩放 e2e）；净增 20 用例（新增 24：plan 7/turn 2/tui_host 2/chat_driver 2/plans_tests 4/tool_loop t15–t18/session_cli e21/e2e s91＋s92；移除 4：`without_update_plan_instructions` 锚定测试随过滤器移除），`git diff --check` 通过。同法实测 HEAD（895cd60，独立 worktree＋独立 target）＝3083/0/3，账目闭环；此前记录的 3079 为 016 三轮历史口径、与 HEAD 实测差 4。6 项可逆变异（漏注册/失败误画清单/成功判定/终端过滤/取消形状/缩放无 SIGWINCH）全部检出。记录 `docs/records/2026-10-22-017-implementation.md`。
 - 当前基线（2026-10-22 016 三轮测试加固候选，已批准交付）：`cargo test --workspace --no-fail-fast` 51 目标 **3079 通过/0 失败/3 既有忽略**（二轮 3084−净删 5：重复用例删 4＋导出合并 2→1）；三轮可逆变异 15/15 检出（七处加固 H1–H7、删除替代 D1–D4、合并 M1–M2），零生产行为改动；记录 `docs/records/2026-10-22-test-hardening-round.md`（前两轮见 `2026-10-22-016-implementation.md`，二轮 3084/0/3 与 12 项变异为历史证据）。
 - 前一基线（2026-10-21 后端回归收口）：容器内 `cargo check --locked --offline && cargo test --workspace --locked --offline --no-fail-fast` exit 0，50 个目标 **3045 通过/0 失败/3 既有忽略/0 过滤**；`e2e_acceptance` **106/0/0**。3 个忽略为 Windows AltGr 专项及两个父测试启动的子进程 helper。期间修复记忆库并发迁移竞态（见 §7），S81 修复后 20/20＋10/10 复跑通过；证据 `docs/records/2026-10-21-backend-regression.md`。
 - 当前基线（014 收口，2026-10-20）：`cargo test --workspace --no-fail-fast` 49 套件 **3019 通过/0 失败/3 既有忽略/0 过滤**；e2e `--test e2e_acceptance` **106/0/0**。来源：`docs/records/2026-10-20-014-implementation.md`。
