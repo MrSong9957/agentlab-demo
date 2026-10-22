@@ -880,49 +880,61 @@ fn exited_undrained_session_still_occupies_capacity() {
 }
 
 
-/// 016 验收：PTY 阻塞写入的取消——先用输入侧进度（cnt 文件）确认写入路径
-/// 已在实际交付且远未完成（阻塞中），再取消；验证 3 秒内返回、cancelled＋
-/// 保留句柄、进程与其他会话不受影响、取消后不再提交尚未发送的输入、
-/// 已发送部分保留且如实说明、随后仍可查询与终止。
-/// 读端为真实慢速读取器（python3，每 4 KiB 落盘计数并小睡），不靠固定睡眠
-/// 猜阻塞位置——取消时写入进度以 cnt 实测为准。
+/// 016 验收（三轮强化）：PTY 阻塞写入的取消——以**发送侧真实进度**
+/// （`session_input_written`：写线程每块成功送出的累计字节）证明写操作
+/// 已进入等待：读端收满 1024 字节后停止读取，发送侧进度随之冻结
+/// （两次采样相等且远小于 64 KiB＝正在等待底层输入通道接受数据；内核实测
+/// 无读端时主设备仅接受约 11.5 KiB）；此刻取消。
+/// 发送侧与接收侧进度分别断言：取消后**新发送**字节≤一个在途分块；
+/// 接收侧 cnt 其后的增长只是内核缓冲排空，不计为新发送。
 #[test]
 fn pty_cancel_stops_further_input_submission() {
     let dir = temp_dir("pty-cancel-stop");
     let data = dir.join("data.bin");
     let cnt = dir.join("cnt");
     let script = dir.join("reader.py");
+    // 读端：恰好消费 LIMIT 字节（落盘＋计数）后停止读取（长眠）——确定性背压
+    let release = dir.join("release");
     std::fs::write(
         &script,
         concat!(
             "import os, time, sys\n",
-            "data, cnt = sys.argv[1], sys.argv[2]\n",
+            "data, cnt, limit, release = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]\n",
             "f = open(data, \"wb\")\n",
             "n = 0\n",
+            "while n < limit:\n",
+            "    b = os.read(0, min(4096, limit - n))\n",
+            "    if not b: break\n",
+            "    f.write(b); f.flush()\n",
+            "    n += len(b)\n",
+            "    open(cnt, \"w\").write(str(n))\n",
+            "while not os.path.exists(release):\n",
+            "    time.sleep(0.02)\n",
             "while n < 65536:\n",
             "    b = os.read(0, 4096)\n",
             "    if not b: break\n",
             "    f.write(b); f.flush()\n",
             "    n += len(b)\n",
             "    open(cnt, \"w\").write(str(n))\n",
-            "    time.sleep(0.05)\n",
-            "print(\"READER-PASS-THRESHOLD\", file=sys.stderr, flush=True)\n",
+            "    time.sleep(0.02)\n",
         ),
     )
     .unwrap();
+    const LIMIT: u64 = 1024;
     let cmd = format!(
-        "stty raw -echo 2>/dev/null; python3 {script} {data} {cnt}; echo ALL-CONSUMED; sleep 30",
+        "stty raw -echo 2>/dev/null; python3 {script} {data} {cnt} {limit} {release}; sleep 30",
         script = script.display(),
         data = data.display(),
         cnt = cnt.display(),
+        limit = LIMIT,
+        release = release.display(),
     );
     let mgr = ProcessManager::new();
     // 另一会话：验证取消不误伤其他会话
-    let other = mgr
-        .start(&exec_args("sleep 30", 250), None);
+    let other = mgr.start(&exec_args("sleep 30", 250), None);
     assert_eq!(other.result.status, ExecStatus::Running);
 
-    let args = ExecArgs::from_value(&serde_json::json!({
+    let args = ExecArgs::from_value(&json!({
         "cmd": cmd, "yield_time_ms": 5000, "tty": true
     }))
     .unwrap();
@@ -930,40 +942,44 @@ fn pty_cancel_stops_further_input_submission() {
     assert_eq!(out.result.status, ExecStatus::Running, "{:?}", out.result);
     let sid = out.result.session_id.unwrap();
 
-    // 交互线程：写入 64 KiB（读端每 4 KiB 约 55ms，全程约 0.9s——取消时必然仍在写）
+    // 交互线程：写入 64 KiB（读端已停止——发送侧必然阻塞于内核容量）
     let cancel = Arc::new(AtomicBool::new(false));
     let mgr_w = mgr.clone();
     let sid_w = sid.clone();
     let cancel_w = cancel.clone();
     let handle = std::thread::spawn(move || {
-        let input = WriteStdinArgs::from_value(&serde_json::json!({
+        let input = WriteStdinArgs::from_value(&json!({
             "session_id": sid_w, "chars": "B".repeat(64 * 1024), "yield_time_ms": 30000
         }))
         .unwrap();
         mgr_w.interact(&input, Some(&cancel_w)).result
     });
 
-    // 读端进度计数：python 截断写非原子——读取失败（瞬时空/半写）沿用上次观测
-    let read_cnt = |prev: u64| -> u64 {
-        std::fs::read_to_string(&cnt)
-            .ok()
-            .and_then(|t| t.trim().parse().ok())
-            .unwrap_or(prev)
-    };
-    // 就绪信号（输入侧实测）：读端已收到至少 4096 字节——写入确在进行且远未完成
+    // 就绪与**阻塞证明**（两层实测）：
+    // ① 接收侧：读端已收满 LIMIT 字节并停止（cnt 稳定＝LIMIT）；
+    // ② 发送侧：input_written 冻结（两次采样相等）且远小于 64 KiB——
+    //    写线程正在等待底层通道接受更多数据（真实背压，非测试假状态）。
+    let sent = || mgr.session_input_written(&sid).unwrap_or(0);
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut observed = 0u64;
+    let mut prev_sent = sent();
     loop {
-        observed = read_cnt(observed);
-        if observed >= 4096 {
-            break;
+        let receiver_done = std::fs::read_to_string(&cnt)
+            .ok()
+            .and_then(|t| t.trim().parse::<u64>().ok())
+            .is_some_and(|n| n == LIMIT);
+        let now_sent = sent();
+        if receiver_done && now_sent == prev_sent && now_sent >= LIMIT {
+            break; // 发送侧进度冻结＝写操作在等待
         }
-        assert!(Instant::now() < deadline, "读端进度未就绪（cnt={observed}）");
-        std::thread::sleep(Duration::from_millis(20));
+        prev_sent = now_sent;
+        assert!(Instant::now() < deadline, "背压就绪超时（sent={now_sent}）");
+        std::thread::sleep(Duration::from_millis(200));
     }
-    // 写入仍在进行（进度远小于 64 KiB）：此刻取消
-    let at_cancel = read_cnt(observed);
-    assert!(at_cancel < 64 * 1024 - 8192, "取消时应仍有大量未发送输入（{at_cancel}）");
+    let blocked_at = sent();
+    assert!(
+        blocked_at < 64 * 1024 - 4096,
+        "取消时写操作仍在等待（发送侧 {blocked_at} < 64 KiB）"
+    );
     let cancelled_at = Instant::now();
     cancel.store(true, Ordering::SeqCst);
 
@@ -979,42 +995,71 @@ fn pty_cancel_stops_further_input_submission() {
     let err = r.error.unwrap_or_default();
     assert!(err.contains("无法撤回"), "已发送部分如实说明：{err}");
 
-    // 核心断言：取消后不再继续提交尚未发送的输入——读端进度趋于稳定
-    //（内核已缓冲与在途分块仍会送达，属已提交部分；旧实现会持续提交至
-    // 读端收满 64 KiB——稳定值恒为 65536，可确定区分）
-    let mut prev = at_cancel;
-    let settled: u64 = {
-        let deadline = Instant::now() + Duration::from_secs(8);
+    // 发送侧：取消后不再提交尚未发送的输入——新发送字节≤一个在途分块。
+    // 然后释放读端恢复消费：若取消未停止提交（缺陷），写线程会随读端恢复
+    // 继续发送直至 64 KiB；正确实现在途分块送出后即止。
+    std::fs::write(&release, "go").unwrap();
+    // 读端恢复后等待发送侧与接收侧双双稳定
+    let stable_after_release = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut ps = sent();
         loop {
-            std::thread::sleep(Duration::from_millis(400));
-            let n = read_cnt(prev);
-            if n == prev {
+            std::thread::sleep(Duration::from_millis(300));
+            let n = sent();
+            if n == ps {
                 break n;
             }
-            prev = n;
-            assert!(Instant::now() < deadline, "读端进度未稳定（{at_cancel} -> {n}）");
+            ps = n;
+            assert!(Instant::now() < deadline, "读端恢复后发送侧未稳定（{ps}）");
         }
     };
     assert!(
-        settled < 64 * 1024,
-        "取消后不得继续提交至全部送达（{at_cancel} -> {settled}）"
+        stable_after_release - blocked_at <= 4096,
+        "取消后（含读端恢复）新发送字节不得超过一个在途分块（{blocked_at} -> {stable_after_release}）"
     );
-    assert!(settled >= at_cancel, "已发送部分不回退（在途/缓冲允许送达）");
-    // 取消前已成功发送的部分保留（data.bin 与 cnt 一致且非零）
-    assert_eq!(std::fs::metadata(&data).unwrap().len(), settled);
-    assert!(settled >= 4096, "取消前已有部分送达");
+    assert!(stable_after_release < 64 * 1024, "未全量提交（{stable_after_release}）");
+    // 取消前已成功发送的部分保留；接收侧最终值＝缓冲排空结果（≥LIMIT、≤发送侧）
+    assert!(blocked_at >= LIMIT, "取消前已有部分送出（{blocked_at}）");
+    let receiver_final: u64 = {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut pc: u64 = std::fs::read_to_string(&cnt)
+            .ok()
+            .and_then(|t| t.trim().parse().ok())
+            .unwrap_or(LIMIT);
+        loop {
+            std::thread::sleep(Duration::from_millis(300));
+            let c: u64 = std::fs::read_to_string(&cnt)
+                .ok()
+                .and_then(|t| t.trim().parse().ok())
+                .unwrap_or(pc);
+            if c == pc {
+                break c;
+            }
+            pc = c;
+            assert!(Instant::now() < deadline, "接收侧未稳定（{pc}）");
+        }
+    };
+    assert!(
+        receiver_final >= LIMIT && receiver_final <= stable_after_release,
+        "接收侧＝缓冲排空结果，介于 LIMIT 与发送侧之间：{receiver_final}"
+    );
+    assert!(
+        receiver_final < 64 * 1024,
+        "读端恢复后未继续收到未提交输入（{receiver_final}）"
+    );
+    assert_eq!(std::fs::metadata(&data).unwrap().len(), receiver_final);
 
     // 进程仍存活且会话可查询；其他会话不受影响
     cancel.store(false, Ordering::SeqCst);
-    let q = WriteStdinArgs::from_value(&serde_json::json!({ "session_id": sid, "yield_time_ms": 5000 })).unwrap();
+    let q = WriteStdinArgs::from_value(&json!({ "session_id": sid, "yield_time_ms": 5000 })).unwrap();
     let rq = mgr.interact(&q, None).result;
     assert_eq!(rq.status, ExecStatus::Running, "取消后进程保留可查询：{rq:?}");
     let other_id = other.result.session_id.clone().unwrap();
-    let qo = WriteStdinArgs::from_value(&serde_json::json!({ "session_id": other_id, "yield_time_ms": 5000 })).unwrap();
+    let qo = WriteStdinArgs::from_value(&json!({ "session_id": other_id, "yield_time_ms": 5000 })).unwrap();
     assert_eq!(mgr.interact(&qo, None).result.status, ExecStatus::Running, "其他会话不受影响");
 
     // 随后仍可明确终止
-    let term = WriteStdinArgs::from_value(&serde_json::json!({ "session_id": sid, "terminate": true })).unwrap();
+    let term = WriteStdinArgs::from_value(&json!({ "session_id": sid, "terminate": true })).unwrap();
     assert_eq!(mgr.interact(&term, None).result.status, ExecStatus::Terminated);
     mgr.close();
     let _ = std::fs::remove_dir_all(&dir);

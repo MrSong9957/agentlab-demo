@@ -1,6 +1,6 @@
 # 计划：命令执行与进程交互能力补全
 
-> 状态：**已实施并验证（2026-10-22，分支 feat/016-process-sessions），待用户批准交付**。
+> 状态：**已实施并验证（2026-10-22）；一至二轮＋测试加固已合并 main（`5f6a860`），第三轮证据补齐（时限可控验证、PTY 背压取消，§8 末）已批准交付**。
 > 依据：[命令执行与进程交互调研](../records/2026-10-22-codex-command-execution-and-process-interaction.md) §9 的五项缺口与 §10 的未定边界。
 > Codex 对照沿用调研固定提交 `d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4`；本项目取舍在下文单独说明。
 > 本轮只更新计划：默认可续接、首版 Linux、取消当前轮与终止进程分开、满额拒绝新建且只保留一份待取输出缓存；总运行时限采用下文已定案规则，不保留旧的 60 秒上限。整体计划仍待审核，不修改既有生效契约，不代表功能已经具备；获准实施后再执行。
@@ -220,7 +220,7 @@ TUI 和行式输出都应明确显示“进程仍在运行／会话编号／实�
 
 **变异证明（可逆破坏，隔离副本＋独立 `--target-dir`，9/9 检出）**：等待到期杀进程（M1）、无独立时限（M2）、读取重置时限（M3）、取消误杀（M4）、满额淘汰（M5）、丢失进程记录（M6）、重复返回已取输出（M7）、只杀组长（M8）、漏掉退出清理（M9）——分别被上述对应用例检出（RED），还原后 GREEN。
 
-**流程**：TDD（行为用例先行，检出力经 9 项可逆变异证明）→ comprehensive-testing（§6 矩阵逐项补齐：exited-undrained 容量、运行中 cell 注入、跨轮/重启边界）→ 安全门禁（见实施记录 §安全）→ code-review → 全量验证（一轮）`cargo check && cargo test --workspace --no-fail-fast`＝**3078 通过／0 失败／3 既有忽略**（基线 3045＋新增 33；exec_command 重写、proc_session 29 项、session_cli 新增 2 项、e2e 适配、tui security 1 项、恢复投影回归 1 项等；含 code-review 整改复跑）。**二轮验收后重新完整验证＝3084 通过／0 失败／3 既有忽略**（＋接缝单测 4、PTY 写取消/写窗口到期集成 2；含二轮审查修复复跑）。已知抖动：`session_perf::perf_tiers_baseline_driven` 负载敏感（既有登记），隔离复跑通过。
+**流程**：TDD（行为用例先行，检出力经 9 项可逆变异证明）→ comprehensive-testing（§6 矩阵逐项补齐：exited-undrained 容量、运行中 cell 注入、跨轮/重启边界）→ 安全门禁（见实施记录 §安全）→ code-review → 全量验证（一轮）`cargo check && cargo test --workspace --no-fail-fast`＝**3078 通过／0 失败／3 既有忽略**（基线 3045＋新增 33；exec_command 重写、proc_session 29 项、session_cli 新增 2 项、e2e 适配、tui security 1 项、恢复投影回归 1 项等；含 code-review 整改复跑）。**二轮验收后重新完整验证＝3084 通过／0 失败／3 既有忽略**（＋接缝单测 4、PTY 写取消/写窗口到期集成 2；含二轮审查修复复跑）。**三轮（时间接缝时钟前移＋PTY 发送侧背压证据）后、经测试加固轮（main=`5f6a860`）完整验证＝3083 通过／0 失败／3 既有忽略**（加固轮净删 5＋时钟接缝 4；见实施记录 §11）。已知抖动：`session_perf::perf_tiers_baseline_driven` 负载敏感（既有登记），隔离复跑通过。
 
 **相对 Codex 差异（如计划 §3/§7 定案）**：保留可选 `timeout_ms` 总时限（Codex 可续接路径无）；`terminate` 参数为本项目新增；满额拒绝不淘汰（Codex 64 触发清理）；单份待取缓存取走不保留；取消当前轮不终止进程；无跨重启重连。
 

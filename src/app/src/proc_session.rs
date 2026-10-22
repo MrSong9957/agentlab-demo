@@ -123,6 +123,14 @@ impl ProcessManager {
         self.lock_mgr().sessions.get(session_id).map(|s| s.cmd.clone())
     }
 
+    /// 会话输入发送侧进度（字节；真实写线程累计，只读观测）——用于区分
+    /// 发送侧提交与接收侧消费（内核缓冲排空不增加本计数）。
+    /// `#[doc(hidden)]`：非承诺接口，仅测试/诊断观测用。
+    #[doc(hidden)]
+    pub fn session_input_written(&self, session_id: &str) -> Option<u64> {
+        self.lock_mgr().sessions.get(session_id).map(|s| s.input_written())
+    }
+
     /// 016：取消当前轮时的统一提示——有活会话则列出编号与命令（宿主共用，
     /// 行式/TUI 同一文案）；无活会话返回 None，由宿主使用无会话文案。
     pub fn live_sessions_note(&self) -> Option<String> {
@@ -376,8 +384,13 @@ impl ProcessManager {
                 // 再送达一块——块内 syscall 不可移植中断）。
                 let abort = Arc::new(AtomicBool::new(false));
                 let writer_abort = abort.clone();
+                let writer_session = session.clone();
                 std::thread::spawn(move || {
-                    let _ = tx.send(writer.write_chunked(bytes.as_bytes(), &writer_abort));
+                    let _ = tx.send(writer.write_chunked(
+                        bytes.as_bytes(),
+                        &writer_abort,
+                        &writer_session,
+                    ));
                 });
                 // 写入阶段与输出等待共用同一等待窗口（yield 本身有界）；
                 // 程序不读输入时窗口到期如实返回运行中。
@@ -480,7 +493,30 @@ thread_local! {
 static TEST_KILLPG_FAIL_PGD: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(-1);
 
-/// 测试接缝的串行锁（journal/killpg 注入类测试共用，防相互交错）。
+/// 单调时钟当前读数——监控线程**到期判定**的唯一入口（016 §3.1）。
+/// 测试接缝：`TEST_CLOCK_SHIFT_MS` 置位后读数整体前移，可稳定驱动真实
+/// 到期判定（终止真实进程、验证副作用），不依赖宽松的真实时间容差；
+/// 截止时间的**计算**（compute_deadline）仍用真实时钟。仅无时限会话
+/// 不经过本判定，故前移不影响未设 timeout 的并行用例。
+fn monotonic_now() -> Instant {
+    #[cfg(test)]
+    {
+        let shift = TEST_CLOCK_SHIFT_MS.load(Ordering::SeqCst);
+        if shift > 0 {
+            return Instant::now() + Duration::from_millis(shift);
+        }
+    }
+    Instant::now()
+}
+
+/// 测试接缝：单调读数前移量（毫秒）。进程内静态（监控线程跨线程读取）；
+/// 仅 SEAM_LOCK 串行的接缝测试在设有时限的会话上使用。
+#[cfg(test)]
+static TEST_CLOCK_SHIFT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 测试接缝的串行锁（journal/killpg/时钟前移注入类测试共用，防相互交错）。
+/// **约束**：凡创建带 `timeout_ms` 会话的单测必须持有本锁——`TEST_CLOCK_SHIFT_MS`
+/// 为进程内静态，无锁的并行限时用例会被前移读数误判到期。
 #[cfg(test)]
 static SEAM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -556,6 +592,9 @@ struct SessionState {
     kill_failed: Option<(KillReq, i32)>,
     /// PTY master（输入通道）；管道会话为 None。
     master: Option<Arc<File>>,
+    /// 输入发送侧进度（字节）：真实写线程每成功写出一块累计——区分
+    /// “发送侧已提交”与“接收侧已消费”（内核缓冲排空≠新发送）。
+    input_written: u64,
     /// 已报告 EOF 的读取线程数。
     reader_eof: usize,
     /// 读取线程总数（管道 2：stdout/stderr；PTY 1：master）。
@@ -597,6 +636,7 @@ impl Session {
                 readers_may_stop: false,
                 kill: None,
                 kill_failed: None,
+                input_written: 0,
                 master,
                 reader_eof: 0,
                 readers,
@@ -615,6 +655,16 @@ impl Session {
 
     fn is_collected(&self) -> bool {
         self.lock().collect_done
+    }
+
+    /// 写线程报告一块输入已成功送出（发送侧真实进度）。
+    fn note_input_written(&self, n: usize) {
+        self.lock().input_written += n as u64;
+    }
+
+    /// 输入发送侧进度（字节）。
+    fn input_written(&self) -> u64 {
+        self.lock().input_written
     }
 
     /// 最近一次终止失败的快照（进程仍在运行的如实说明依据）。
@@ -797,7 +847,12 @@ impl InputWriter {
     /// 分块提交输入：块间检查中止标志——取消当前轮后停止提交尚未发送的
     /// 输入（016 §3.2“停止后续写入”）；单块内的阻塞写入不可移植中断
     ///（进程终止后写入返回 EIO 自然结束，线程数量有界）。
-    fn write_chunked(&self, bytes: &[u8], abort: &AtomicBool) -> std::io::Result<()> {
+    fn write_chunked(
+        &self,
+        bytes: &[u8],
+        abort: &AtomicBool,
+        session: &Session,
+    ) -> std::io::Result<()> {
         for chunk in bytes.chunks(INPUT_CHUNK) {
             if abort.load(Ordering::SeqCst) {
                 return Err(std::io::Error::new(
@@ -807,6 +862,7 @@ impl InputWriter {
             }
             let mut f = &*self.0;
             std::io::Write::write_all(&mut f, chunk)?;
+            session.note_input_written(chunk.len());
         }
         Ok(())
     }
@@ -1096,7 +1152,7 @@ fn monitor_thread(session: Arc<Session>, mut child: Child, deadline: Option<Inst
         let mut reason = st.kill;
         if reason.is_none() {
             if let Some(dl) = deadline {
-                if Instant::now() >= dl {
+                if monotonic_now() >= dl {
                     reason = Some(KillReq::Deadline);
                     st.kill = reason;
                 }
@@ -1515,6 +1571,193 @@ fn seam_killpg_injection_deadline_not_fake_timeout() {
     let s_end = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
     std::thread::sleep(Duration::from_millis(350));
     assert_eq!(std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0), s_end, "终止后停止写入");
+    mgr.close();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------- 三轮：可控时钟驱动真实到期判定（稳定、无宽松容差）----------
+
+/// 时钟前移守卫：Drop 自动复位（断言 panic 不把前移泄漏给后续用例）。
+struct ClockShiftGuard;
+impl Drop for ClockShiftGuard {
+    fn drop(&mut self) {
+        TEST_CLOCK_SHIFT_MS.store(0, Ordering::SeqCst);
+    }
+}
+
+/// 将到期判定的单调读数前移 ms 毫秒（真实终止仍由监控线程执行）。
+fn arm_clock_shift(ms: u64) -> ClockShiftGuard {
+    TEST_CLOCK_SHIFT_MS.store(ms, Ordering::SeqCst);
+    ClockShiftGuard
+}
+
+/// 日志停止增长的有界判定（真实副作用：写入循环死亡）。
+fn wait_log_frozen(log: &std::path::Path) -> u64 {
+    let size = || std::fs::metadata(log).map(|m| m.len()).unwrap_or(0);
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut prev = size();
+    loop {
+        std::thread::sleep(Duration::from_millis(250));
+        let now = size();
+        if now == prev {
+            return now;
+        }
+        prev = now;
+        assert!(Instant::now() < deadline, "日志未停止增长（{prev}）");
+    }
+}
+
+/// 时钟前移到恰过截止：无任何后续查询，监控线程自行到期终止真实进程
+///（日志停止增长＝进程组死亡），事后一次查询确认 timeout 与记录移除。
+#[test]
+fn seam_clock_shift_expiry_without_query() {
+    let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("tchat-seam3-{}-exp", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("w.log");
+    let mgr = ProcessManager::new();
+    let a = ExecArgs::from_value(&serde_json::json!({
+        "cmd": writer_cmd(&log), "yield_time_ms": 250,
+        "timeout_ms": 3_600_000_u64
+    }))
+    .unwrap();
+    assert_eq!(mgr.start(&a, None).result.status, ExecStatus::Running);
+    // 写入循环确实在运行（有界等待日志非空——真实副作用证据）
+    {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0) == 0 {
+            assert!(Instant::now() < deadline, "写入循环未启动");
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    }
+    // 前移到截止之后（原截止＝启动+3_600_000ms；无查询参与）
+    let _shift = arm_clock_shift(3_600_500);
+    let frozen = wait_log_frozen(&log);
+    assert!(frozen > 0, "写入循环确实运行过");
+    let q = WriteStdinArgs::from_value(&serde_json::json!({ "session_id": "s1", "yield_time_ms": 5000 })).unwrap();
+    let r = mgr.interact(&q, None).result;
+    assert_eq!(r.status, ExecStatus::Timeout, "到期终止如实报告：{r:?}");
+    assert_eq!(r.exit_code, None);
+    // 记录移除
+    let again = mgr.interact(&q, None).result;
+    assert_eq!(again.status, ExecStatus::Error);
+    mgr.close();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 取消当前轮（等待被取消、进程保留）后，原截止时间仍然生效：
+/// 前移到恰过**启动时**截止即终止——若取消会重置/暂停时限则不会到期。
+#[test]
+fn seam_clock_shift_deadline_survives_cancel() {
+    let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("tchat-seam3-{}-cxl", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("w.log");
+    let mgr = ProcessManager::new();
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let c2 = cancel.clone();
+    let a = ExecArgs::from_value(&serde_json::json!({
+        "cmd": writer_cmd(&log), "yield_time_ms": 4000,
+        "timeout_ms": 3_600_000_u64
+    }))
+    .unwrap();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        c2.store(true, Ordering::SeqCst);
+    });
+    let out = mgr.start(&a, Some(&cancel)).result;
+    assert_eq!(out.status, ExecStatus::Cancelled, "{out:?}");
+    let sid = out.session_id.expect("取消后保留句柄");
+    cancel.store(false, Ordering::SeqCst);
+    // 取消后进程仍在写
+    let q = WriteStdinArgs::from_value(&serde_json::json!({ "session_id": sid, "yield_time_ms": 5000 })).unwrap();
+    assert_eq!(mgr.interact(&q, None).result.status, ExecStatus::Running);
+    // 前移恰过启动时截止：仍到期（取消不重置/不暂停）
+    let _shift = arm_clock_shift(3_600_500);
+    wait_log_frozen(&log);
+    let r = mgr.interact(&q, None).result;
+    assert_eq!(r.status, ExecStatus::Timeout, "取消不改变原截止：{r:?}");
+    mgr.close();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 查询与输入不延长截止：先查询（管道会话）并发送输入（PTY 会话），
+/// 再前移到恰过**启动时**截止——若查询/输入重置截止则不会到期。
+#[test]
+fn seam_clock_shift_query_and_input_do_not_extend_deadline() {
+    let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("tchat-seam3-{}-ext", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = ProcessManager::new();
+    let timeout = 3_600_000_u64;
+    // 管道会话：跨“轮”（不同 run_tool_turn 间等价于跨调用查询同一句柄）
+    let a1 = ExecArgs::from_value(&serde_json::json!({
+        "cmd": "sleep 60", "yield_time_ms": 250, "timeout_ms": timeout
+    }))
+    .unwrap();
+    let out1 = mgr.start(&a1, None).result;
+    assert_eq!(out1.status, ExecStatus::Running);
+    // PTY 会话：发送输入
+    let a2 = ExecArgs::from_value(&serde_json::json!({
+        "cmd": "stty raw -echo 2>/dev/null; sleep 60", "yield_time_ms": 250,
+        "tty": true, "timeout_ms": timeout
+    }))
+    .unwrap();
+    let out2 = mgr.start(&a2, None).result;
+    assert_eq!(out2.status, ExecStatus::Running);
+    let sid2 = out2.session_id.unwrap();
+    // 查询 s1（阻塞至查询窗口结束，取走输出——重置缺陷的触发点）
+    let q1 = WriteStdinArgs::from_value(&serde_json::json!({ "session_id": "s1", "yield_time_ms": 5000 })).unwrap();
+    assert_eq!(mgr.interact(&q1, None).result.status, ExecStatus::Running);
+    // 输入 s2（PTY 原样写入）
+    let input = WriteStdinArgs::from_value(&serde_json::json!({
+        "session_id": sid2, "chars": "hi\n", "yield_time_ms": 250
+    }))
+    .unwrap();
+    let r = mgr.interact(&input, None).result;
+    assert_eq!(r.status, ExecStatus::Running, "{r:?}");
+    // 前移恰过启动时截止（两会话几乎同时启动）：若查询/输入重置了截止，
+    // 有效截止将晚于前移读数——不会到期，断言失败。
+    let _shift = arm_clock_shift(timeout + 500);
+    let q2 = WriteStdinArgs::from_value(&serde_json::json!({ "session_id": "s1", "yield_time_ms": 5000 })).unwrap();
+    let q3 = WriteStdinArgs::from_value(&serde_json::json!({ "session_id": sid2, "yield_time_ms": 5000 })).unwrap();
+    let r1 = mgr.interact(&q2, None).result;
+    let r2 = mgr.interact(&q3, None).result;
+    assert_eq!(r1.status, ExecStatus::Timeout, "查询不延长截止：{r1:?}");
+    assert_eq!(r2.status, ExecStatus::Timeout, "输入不延长截止：{r2:?}");
+    mgr.close();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 省略 timeout_ms：单调读数前移一小时后进程仍存活（不套用任何固定总时限），
+/// 日志持续增长；随后明确终止成功。
+#[test]
+fn seam_clock_shift_omitted_timeout_has_no_fixed_limit() {
+    let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("tchat-seam3-{}-omit", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("w.log");
+    let mgr = ProcessManager::new();
+    let a = ExecArgs::from_value(&serde_json::json!({
+        "cmd": writer_cmd(&log), "yield_time_ms": 250
+    }))
+    .unwrap();
+    assert_eq!(mgr.start(&a, None).result.status, ExecStatus::Running);
+    // 读数前移 1 小时（远超旧 10 秒默认）：不设固定总时限＝任何时间流逝都不终止
+    let _shift = arm_clock_shift(3_600_000);
+    std::thread::sleep(Duration::from_millis(600));
+    let s1 = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+    std::thread::sleep(Duration::from_millis(400));
+    let s2 = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+    assert!(s2 > s1, "时间流逝后进程仍在运行（无固定总时限）：{s1} -> {s2}");
+    let q = WriteStdinArgs::from_value(&serde_json::json!({ "session_id": "s1", "yield_time_ms": 5000 })).unwrap();
+    assert_eq!(mgr.interact(&q, None).result.status, ExecStatus::Running);
+    let term = WriteStdinArgs::from_value(&serde_json::json!({ "session_id": "s1", "terminate": true })).unwrap();
+    assert_eq!(mgr.interact(&term, None).result.status, ExecStatus::Terminated);
     mgr.close();
     let _ = std::fs::remove_dir_all(&dir);
 }

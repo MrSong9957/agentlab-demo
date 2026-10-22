@@ -1,7 +1,7 @@
 ---
 title: 016 命令执行与进程交互——实施与验证记录
 date: 2026-10-22
-status: 二轮验收完成＋三轮测试加固，已批准交付（2026-10-22 合并入 main）
+status: 二轮验收＋测试加固已合并 main（5f6a860）；证据补齐轮（§11）已批准交付（2026-10-22）
 tags:
   - Agent
   - 命令执行
@@ -235,3 +235,33 @@ base: 9345b5299b204335f5c6dbfe3909cedecd2bf333
 
 - **陈旧二进制伪故障**：隔离副本中变异后以 `mv .bak` 还原源文件，其 mtime 早于上次变异构建 → cargo 判定无需重编，跑的是**变异后的陈旧二进制**，表现为“还原后仍失败”。`touch` 强制重编后即恢复。教训：变异框架还原后必须 touch（或以内容哈希重编），否则“还原绿”可能失真。本轮 M10–M12 的红灯均基于打补丁后的新鲜构建，有效；该坑只影响还原后的复核跑，已用强制重编复核排除。
 - 变异脚本首轮曾把 cargo 的 "error: test failed" 提示行误判为编译失败（首轮 §3 已记），二轮分类器沿用修正版。
+
+
+## 11. 三轮：最后两项证据核对与补齐（2026-10-22）
+
+**核对结论**：①时间控制——原接缝（compute_deadline 注入/记录）只覆盖参数接受、计算失败拒绝与记录，**未**控制监控线程的实际到期判定（行为用例依赖真实时间±300ms 容差）→ 本轮补齐；②PTY 写阻塞取消——原就绪证据 cnt≥4096 仅证明“输入已开始”，无发送侧背压证据，取消后断言混入内核缓冲排空 → 本轮补齐。
+
+### 11.1 时间控制补齐（monotonic_now 时钟前移，仍无通用框架/公共配置）
+
+- 接缝：`monotonic_now()`（proc_session.rs）——监控线程**到期判定**唯一入口；`#[cfg(test)] static TEST_CLOCK_SHIFT_MS`（RAII 守卫自动复位）可前移读数，稳定驱动真实终止；截止时间**计算**（compute_deadline）仍真实。生产构建零足迹（cfg(test) 不编译）。
+- 四例（lib 单测，真实进程＋副作用断言，无时间容差）：`seam_clock_shift_expiry_without_query`（无任何查询，前移即终止——日志停止增长＝进程组死亡；事后查询 Timeout＋句柄失效）、`seam_clock_shift_deadline_survives_cancel`（取消后前移恰过**启动时**截止仍到期——取消不重置/暂停）、`seam_clock_shift_query_and_input_do_not_extend_deadline`（先查询[管道]＋输入[PTY]再前移恰过启动截止——重置缺陷将漏杀，断言失败）、`seam_clock_shift_omitted_timeout_has_no_fixed_limit`（省略 timeout，前移 1 小时后日志仍增长＋查询 Running——旧 10 秒式固定上限会杀，随后 terminate 收尾）。
+- 检出力变异（隔离副本＋独立 target-dir，touch 还原纪律）：**M13** 前移被忽略→到期用例 RED；**M14** 为省略会话伪造 10 秒固定时限→省略用例 RED。真实时间验收（explicit_timeout/deadline_survives_cancel/read_does_not_reset 及 M2/M3）全部保留。
+- 依据说明（保留）：Linux Instant 秒域 i64 ＞ u64 毫秒域，数值防御分支不可自然触达（compute_deadline 文档注释）。
+
+### 11.2 PTY 写阻塞背压补齐（发送侧真实进度）
+
+- 接缝：`SessionState.input_written`——**真实写线程**每块成功送出后累计（发送侧进度）；`#[doc(hidden)] ProcessManager::session_input_written` 只读观测（非承诺接口）。内核实测（本轮探测）：PTY 主设备无读端仅接受约 11.5–16 KiB 即阻塞——64 KiB 写入配“读端收满 1024 字节后停等释放信号”可确定性制造真实背压。
+- `pty_cancel_stops_further_input_submission`（集成，强化重写）：就绪与**阻塞证明**＝读端 cnt 稳定于 LIMIT **且发送侧 input_written 两次采样相等且远小于 64 KiB**（写线程正在等待底层通道接受数据——真实状态，非测试假状态）；此刻取消。取消后**释放读端**恢复消费：若取消未停止提交（缺陷），写线程会随读端继续发送至 64 KiB——正确实现新发送≤一个在途分块（4096）。发送侧与接收侧分别断言：接收侧 cnt 的后续增长只是内核缓冲排空（≥LIMIT、≤发送侧、<64 KiB），不计为新发送。其余核对项（≤3 秒 cancelled＋句柄、进程存活、他话可操作、已发送部分保留＋如实说明、随后查询与终止）全部保留。三连跑通过。
+- 检出力变异：**M15**（取消不置中止标志）对旧版就绪设计 UNDETECTED（读端停止时无从提交——设计盲区，如实登记），补“读端释放”阶段后重试 **RED 检出**；还原后 GREEN（副本 touch 重编复核）。
+
+### 11.3 与“测试加固轮”（另一任务，同工作树）的交接事实
+
+- 加固轮在二轮候选上完成七处加固/四项条件删除（含 nonzero_exit_reported_verbatim、terminal_result_carries_last_output、discard_after_cap——**替代覆盖反证 D1–D3 成立**）并经用户批准提交合并：main＝`5f6a860`（016 一二轮＋加固轮全部内容），任务分支已删。本轮核实时发现三个 016 用例“缺失”拟恢复，读取加固轮记录后确认属**有意删除且有替代证明**——按“保护其他任务改动”不恢复，未产生任何覆盖（恢复脚本断言失败原子未写入，已验证计数未变）。
+- 当前工作树未提交改动＝本轮（三轮）两文件增量＋AGENTS.md 两处**原有非 016 修改**（项目原则复用句、文档流程句）＋四份非 016 未跟踪记录——均保持原样、不并入本轮交付。
+- 加固轮全量基线 3079；本轮在其上净增 4（时钟接缝单测）。
+
+### 11.4 三轮审查与验证
+
+- 受影响 code-review（子代理）：无硬违规；已处理——`session_input_written` 加 `#[doc(hidden)]`＋非承诺注释、删除恒真伪断言改为有界“写入循环确实运行”证明、SEAM_LOCK 处补“带 timeout 会话的单测必须持锁”约束注释；接受并登记——两会话启动时差余量（无实际风险）、`blocked_at>=LIMIT` 冗余断言（保留作意图说明）。
+- 受影响安全检查：时钟前移/写入进度均为 cfg(test)/doc(hidden) 观测面，生产行为零变化（cargo check 非测试构建不含接缝）；终止/输入取消安全面不变（11.1/11.2 用例本身即含终止与取消边界）。
+- **最终完整验证（三轮后，/workspace，覆盖当前候选）**：`cargo check` exit 0；`cargo test --workspace --no-fail-fast` 单次干净通过——**51 目标 3083 通过／0 失败／3 既有忽略**（加固轮基线 3079＋时钟接缝 4）。日志：/tmp/final3-check.log、/tmp/final3-test.log。clippy/rustfmt 未安装未运行（不计通过）。
