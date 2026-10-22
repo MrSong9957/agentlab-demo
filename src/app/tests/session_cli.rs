@@ -1542,3 +1542,149 @@ fn e26_concurrent_grant_integrity() {
         .filter(|n| n.contains(".tmp.")).collect();
     assert!(residue.is_empty(), "无本轮 tmp 残留：{residue:?}");
 }
+
+// ---------- 016：进程会话与行式宿主 E2E ----------
+
+/// 016 e18：行式宿主跨轮保留进程会话——工具先返回 running，同一进程跨用户轮
+/// 仍可查询；CLI 退出时清理全部会话（写盘停止）。
+#[test]
+fn e18_line_host_running_session_cross_turn_exit_cleans() {
+    let cfg = TempDir::new("e18-cfg");
+    let user = TempDir::new("e18-user");
+    let work = TempDir::new("e18-work");
+    let key = "e18-key";
+    let log = work.path().join("w.log");
+    let writer = format!(
+        "while true; do echo x >> {}; sleep 0.05; done",
+        log.display()
+    );
+    let r1 = json!({ "choices": [{ "message": {
+        "role": "assistant", "content": null,
+        "tool_calls": [{ "id": "e18-a", "type": "function",
+            "function": { "name": "exec_command",
+                "arguments": json!({ "cmd": writer, "yield_time_ms": 250 }).to_string() } }]
+    }, "finish_reason": "tool_calls" }] })
+    .to_string();
+    let r2 = chat_body("E18-第一轮-OK");
+    let r3 = json!({ "choices": [{ "message": {
+        "role": "assistant", "content": null,
+        "tool_calls": [{ "id": "e18-b", "type": "function",
+            "function": { "name": "write_stdin",
+                "arguments": json!({ "session_id": "s1", "yield_time_ms": 5000 }).to_string() } }]
+    }, "finish_reason": "tool_calls" }] })
+    .to_string();
+    let r4 = chat_body("E18-第二轮-OK");
+    let mock = spawn_mock(vec![
+        MockResp::json(200, r1),
+        MockResp::json(200, r2),
+        MockResp::json(200, r3),
+        MockResp::json(200, r4),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_E18_KEY");
+    seed_grant(user.path(), &catalog::origin_of(&mock.url).unwrap(), key);
+
+    let mut cli = LivePipe::spawn(work.path(), &[
+        ("TCHAT_CONFIG_DIR".into(), cfg.path().display().to_string()),
+        ("TCHAT_USER_DIR".into(), user.path().display().to_string()),
+        ("TCHAT_E18_KEY".into(), key.into()),
+    ]);
+    cli.send("go\n");
+    // 016：运行中会话明确展示（会话编号）
+    cli.wait_for("进程仍在运行（会话 s1）");
+    cli.wait_for("E18-第一轮-OK");
+    // 进程确实在跑（写盘增长）
+    wait_until(|| fs::metadata(&log).map(|m| m.len()).unwrap_or(0) > 10);
+    // 第二轮：write_stdin 查询同一句柄——不重新启动，仍运行中
+    cli.send("next\n");
+    cli.wait_for("E18-第二轮-OK");
+    assert_eq!(mock.count(), 4, "两轮各 2 请求");
+    let body: Value =
+        serde_json::from_str(&mock.requests()[3].body).unwrap();
+    let query_result = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "tool" && m["tool_call_id"] == "e18-b")
+        .and_then(|m| serde_json::from_str::<Value>(m["content"].as_str().unwrap()).ok())
+        .unwrap();
+    assert_eq!(query_result["status"], "running", "跨轮查询同一进程：{query_result}");
+    assert_eq!(query_result["session_id"], "s1");
+    // 退出（EOF）→ 宿主清理全部进程会话 → 写盘停止
+    cli.send("exit\n");
+    let (out, code) = cli.finish();
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("再见!"), "{out}");
+    let s1 = fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+    std::thread::sleep(Duration::from_millis(350));
+    assert_eq!(s1, fs::metadata(&log).map(|m| m.len()).unwrap_or(0), "退出后受管理进程必须被清理");
+}
+
+/// 016 e19：重启后旧句柄失效——/resume 装载历史（不重放、零请求），
+/// 凭旧会话编号 write_stdin 返回“未知或已失效”，不重启旧命令。
+#[test]
+fn e19_resume_rejects_stale_handle_without_replay() {
+    let cfg = TempDir::new("e19-cfg");
+    let user = TempDir::new("e19-user");
+    let work = TempDir::new("e19-work");
+    let key = "e19-key";
+    let probe = work.path().join("started.txt");
+    let r1 = json!({ "choices": [{ "message": {
+        "role": "assistant", "content": null,
+        "tool_calls": [{ "id": "e19-a", "type": "function",
+            "function": { "name": "exec_command",
+                "arguments": json!({
+                    "cmd": format!("touch {}; sleep 30", probe.display()),
+                    "yield_time_ms": 250
+                }).to_string() } }]
+    }, "finish_reason": "tool_calls" }] })
+    .to_string();
+    let mock1 = spawn_mock(vec![MockResp::json(200, r1), MockResp::json(200, chat_body("E19-R1-OK"))]);
+    write_manual(cfg.path(), &mock1.url, "env:TCHAT_E19_KEY");
+    seed_grant(user.path(), &catalog::origin_of(&mock1.url).unwrap(), key);
+
+    // 第一次运行：启动进程（running 入史），退出（清理进程）
+    let (out, _, code) = run_pipe(work.path(), &[
+        ("TCHAT_CONFIG_DIR".into(), cfg.path().display().to_string()),
+        ("TCHAT_USER_DIR".into(), user.path().display().to_string()),
+        ("TCHAT_E19_KEY".into(), key.into()),
+    ], "go\nexit\n");
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("进程仍在运行（会话 s1）"), "{out}");
+    wait_until(|| probe.exists());
+    // 进程已被宿主退出清理（不再持有 sleep 30）
+    std::thread::sleep(Duration::from_millis(300));
+    let mtime = fs::metadata(&probe).unwrap().modified().unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(mtime, fs::metadata(&probe).unwrap().modified().unwrap(), "退出清理后无新副作用");
+
+    // 第二次运行：/resume 装载历史（零重放），旧句柄 s1 查询被拒
+    let r3 = json!({ "choices": [{ "message": {
+        "role": "assistant", "content": null,
+        "tool_calls": [{ "id": "e19-b", "type": "function",
+            "function": { "name": "write_stdin",
+                "arguments": json!({ "session_id": "s1", "yield_time_ms": 5000 }).to_string() } }]
+    }, "finish_reason": "tool_calls" }] })
+    .to_string();
+    let mock2 = spawn_mock(vec![MockResp::json(200, r3), MockResp::json(200, chat_body("E19-R2-OK"))]);
+    write_manual(cfg.path(), &mock2.url, "env:TCHAT_E19_KEY");
+    seed_grant(user.path(), &catalog::origin_of(&mock2.url).unwrap(), key);
+    let (out2, _, code2) = run_pipe(work.path(), &[
+        ("TCHAT_CONFIG_DIR".into(), cfg.path().display().to_string()),
+        ("TCHAT_USER_DIR".into(), user.path().display().to_string()),
+        ("TCHAT_E19_KEY".into(), key.into()),
+    ], "/resume\ngo\nexit\n");
+    assert_eq!(code2, Some(0), "{out2}");
+    assert!(out2.contains("恢复"), "{out2}");
+    assert_eq!(mock2.count(), 2, "恢复本身零请求；go 一轮恰 2 请求（不重放）");
+    let body: Value =
+        serde_json::from_str(&mock2.requests()[1].body).unwrap();
+    let stale = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "tool" && m["tool_call_id"] == "e19-b")
+        .and_then(|m| serde_json::from_str::<Value>(m["content"].as_str().unwrap()).ok())
+        .unwrap();
+    assert_eq!(stale["status"], "error", "旧句柄跨重启失效：{stale}");
+    assert!(stale["error"].as_str().unwrap().contains("未知或已失效"), "{stale}");
+}

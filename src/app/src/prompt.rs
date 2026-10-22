@@ -67,11 +67,19 @@ pub enum PatchChangeKind {
 
 /// 012：工具调用的展示数据——**仅用于 TUI 呈现与会话恢复投影，绝不进入模型请求**
 ///（模型面结果＝`HistoryItem::ToolResult.content`，原样不变）。
+/// 016：`Stdin`＝write_stdin 的展示——关联原命令与句柄（结果 JSON 只有新输出，
+/// 不携带命令本身），不伪造一条新命令。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case")]
 pub enum ToolDisplay {
     Exec { duration_ms: u64 },
     Patch { changes: Vec<PatchChange> },
+    Stdin {
+        session_id: String,
+        /// 原命令（取自会话记录，供展示关联）。
+        command: String,
+        duration_ms: u64,
+    },
 }
 
 /// 历史条目（006）：文本轮（005 行为）或工具调用轮的调用与结果记录；原样投影进请求。
@@ -227,14 +235,14 @@ pub fn sent_instructions() -> String {
     rewrite_agents_md_claim(&adapted)
 }
 
-/// exec_command 工具定义：结构母本为 Codex `shell_spec.rs` 的函数工具
-/// （required + additionalProperties:false）；参数与描述为本地 003 契约的同步语义。
+/// exec_command 工具定义（016）：默认可续接——等待时间只决定返回时机；
+/// 结构母本为 Codex `shell_spec.rs` 的函数工具（required + additionalProperties:false）。
 fn exec_command_tool() -> Value {
     json!({
         "type": "function",
         "function": {
             "name": "exec_command",
-            "description": "Runs a shell command synchronously via /bin/sh -c, merging stdout and stderr into bounded output; the whole process group is terminated on timeout.",
+            "description": "Runs a shell command via /bin/sh -c, merging stdout and stderr into bounded output. The call returns after yield_time_ms even if the process is still running; a still-running process keeps running and is identified by session_id, so you can query new output, send input, or terminate it later with write_stdin. yield_time_ms only controls when this call returns; it never stops the process.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -246,16 +254,63 @@ fn exec_command_tool() -> Value {
                         "type": "string",
                         "description": "Working directory for the command. Defaults to the current session directory."
                     },
+                    "yield_time_ms": {
+                        "type": "integer",
+                        "description": "How long this call waits before returning, in milliseconds, 250..=30000. Defaults to 10000. Expiry returns running plus session_id; it does not terminate the process."
+                    },
                     "timeout_ms": {
                         "type": "integer",
-                        "description": "Positive timeout in milliseconds, 1..=60000. Defaults to 10000."
+                        "description": "Optional total run-time limit in milliseconds, counted from successful start; on expiry the process group is terminated and reaped and status becomes \"timeout\". Omit for no fixed limit. Reading output or sending input never resets it."
                     },
                     "max_output_chars": {
                         "type": "integer",
                         "description": "Positive output cap counted in Unicode characters, 1..=100000. Defaults to 10000."
+                    },
+                    "tty": {
+                        "type": "boolean",
+                        "description": "true to run the command in a real PTY, enabling later text input via write_stdin; defaults to false (pipes; stdin closed, only Ctrl+C interrupt is possible)."
                     }
                 },
                 "required": ["cmd"],
+                "additionalProperties": false
+            }
+        }
+    })
+}
+
+/// write_stdin 工具定义（016 新增）：对运行中的 exec_command 会话查询／输入／
+/// 中断／明确终止。
+fn write_stdin_tool() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "write_stdin",
+            "description": "Interacts with a running exec_command session: query new output (empty chars), send text (PTY sessions only), request an interrupt with Ctrl+C (chars \"\\u0003\"), or terminate it (terminate=true). Each call returns only newly collected output plus the current status.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session handle returned by exec_command; opaque, not an OS PID, valid only in the current conversation."
+                    },
+                    "chars": {
+                        "type": "string",
+                        "description": "Text to send as-is, no automatic newline. Empty or omitted means query-only. At most 64 KiB UTF-8 bytes per call; larger input is rejected without sending anything. Pipe sessions reject text and only accept exactly \"\\u0003\" as an interrupt; PTY sessions accept any text including control characters."
+                    },
+                    "yield_time_ms": {
+                        "type": "integer",
+                        "description": "Wait for this call in milliseconds: query 5000..=300000 (default 5000); with input 250..=30000 (default 250). The wait never stops the process."
+                    },
+                    "max_output_chars": {
+                        "type": "integer",
+                        "description": "Positive output cap counted in Unicode characters, 1..=100000. Defaults to 10000."
+                    },
+                    "terminate": {
+                        "type": "boolean",
+                        "description": "true to terminate and reap the managed process group, finishing within about 3 seconds; cannot be combined with non-empty chars or yield_time_ms. Defaults to false."
+                    }
+                },
+                "required": ["session_id"],
                 "additionalProperties": false
             }
         }
@@ -303,7 +358,7 @@ pub fn build_turn_request_with_memory(history: &[HistoryItem], memory_context: O
     }
     build_turn_request_with(
         history,
-        &[exec_command_tool(), apply_patch_tool()],
+        &[exec_command_tool(), apply_patch_tool(), write_stdin_tool()],
         &system,
     )
 }
@@ -318,8 +373,8 @@ pub fn build_turn_request_with(history: &[HistoryItem], tools: &[Value], system:
     json!({ "messages": messages, "tools": tools })
 }
 
-/// 组装 `{messages, tools}`（005 §1）：`system(发送版提示词) → 历史 → user(当前输入)`；
-/// 当前输入只追加一次（006）。工具恰为 `exec_command、apply_patch`。
+/// 组装 `{messages, tools}`（005 §1，016 三工具）：`system(发送版提示词) → 历史 → user(当前输入)`；
+/// 当前输入只追加一次（006）。用户轮工具恰为 `exec_command、apply_patch、write_stdin`。
 /// 仅组装与序列化，模型等发送层字段由调用方附加。
 pub fn build_request(history: &[HistoryItem], current_input: &str) -> Result<Value, String> {
     if current_input.trim().is_empty() {

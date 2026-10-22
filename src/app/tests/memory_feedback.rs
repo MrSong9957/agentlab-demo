@@ -2,6 +2,7 @@
 //! （临时记忆根）＋mock sender。断言状态与副作用，不只测解析返回值。
 
 use serde_json::{json, Value};
+use terminal_chat::proc_session::ProcessManager;
 use terminal_chat::memory::config::MemoriesConfig;
 use terminal_chat::memory::feedback::after_user_turn;
 use terminal_chat::memory::store::{memories_db_path, MemoryStore};
@@ -122,6 +123,7 @@ fn m8_turn_with_citation_records_usage_in_sqlite() {
         None,
         &mut |_| {},
         ToolMode::UserWithMemory { root: &e.root, config: &config },
+    &ProcessManager::new(),
     )
     .unwrap();
 
@@ -174,6 +176,7 @@ fn m8_tool_read_without_citation_does_not_count() {
         None,
         &mut |_| {},
         ToolMode::UserWithMemory { root: &e.root, config: &config },
+    &ProcessManager::new(),
     )
     .unwrap();
 

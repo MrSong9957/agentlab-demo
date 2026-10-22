@@ -3,6 +3,7 @@
 //! 预期上下文文本一律由测试侧按规格 §1 字节级形态**独立重建**，不调用生产组装函数。
 
 use serde_json::{json, Value};
+use terminal_chat::proc_session::ProcessManager;
 use std::path::{Path, PathBuf};
 use terminal_chat::context::{build_context_message, context_body, ContextSources};
 use terminal_chat::memory::{Clock, MemoriesConfig};
@@ -168,6 +169,7 @@ fn t01_first_turn_full_context_byte_exact() {
         &mut |h| recorded.push(h.len()),
         ToolMode::User,
         &src,
+    &ProcessManager::new(),
     )
     .unwrap();
     assert_eq!(reply, "完成");
@@ -352,6 +354,7 @@ fn t04_anomalous_sources_skipped_with_notice_no_abort() {
         &mut |_| {},
         ToolMode::User,
         &src2,
+    &ProcessManager::new(),
     )
     .unwrap();
     assert_eq!(reply, "轮未中止");
@@ -382,6 +385,7 @@ fn t05_same_content_not_reinjected() {
             &mut |_| {},
             ToolMode::User,
             &src,
+        &ProcessManager::new(),
         )
         .unwrap();
     }
@@ -420,6 +424,7 @@ fn t05_same_content_not_reinjected() {
         &mut |_| {},
         ToolMode::User,
         &src,
+    &ProcessManager::new(),
     )
     .unwrap();
     assert_eq!(bodies3.len(), 2);
@@ -463,6 +468,7 @@ fn t06_content_change_replaces_with_declaration_abb() {
         &mut history, "问一",
         &mut |_| Ok(answer("答一")), &mut |_| {}, None, &mut |_| {},
         ToolMode::User, &src,
+    &ProcessManager::new(),
     ).unwrap();
     let ctx_a = expected("版本A\n");
     match &history[0] {
@@ -481,6 +487,7 @@ fn t06_content_change_replaces_with_declaration_abb() {
         &mut |b| { bodies2.push(b.clone()); Ok(answer("答二")) },
         &mut |_| {}, None, &mut |_| {},
         ToolMode::User, &src,
+    &ProcessManager::new(),
     ).unwrap();
     let ctx_b = expected("版本B\n");
     let texts: Vec<&str> = history
@@ -503,6 +510,7 @@ fn t06_content_change_replaces_with_declaration_abb() {
         &mut history, "问三",
         &mut |_| Ok(answer("答三")), &mut |_| {}, None, &mut |_| {},
         ToolMode::User, &src,
+    &ProcessManager::new(),
     ).unwrap();
     let texts: Vec<&str> = history
         .iter()
@@ -545,6 +553,7 @@ fn t07_lookalike_not_recognized_real_forms_recognized() {
             &mut history, "新问题",
             &mut |_| Ok(answer("答")), &mut |_| {}, None, &mut |_| {},
             ToolMode::User, &src,
+        &ProcessManager::new(),
         )
         .unwrap();
         assert_eq!(history[2], HistoryItem::Text(HistoryMessage {
@@ -566,6 +575,7 @@ fn t07_lookalike_not_recognized_real_forms_recognized() {
         &mut history, "新问题",
         &mut |_| Ok(answer("答")), &mut |_| {}, None, &mut |_| {},
         ToolMode::User, &src,
+    &ProcessManager::new(),
     ).unwrap();
     assert_eq!(history[2], HistoryItem::Text(HistoryMessage {
         role: HistoryRole::User,
@@ -582,6 +592,7 @@ fn t07_lookalike_not_recognized_real_forms_recognized() {
         &mut history, "继续",
         &mut |_| Ok(answer("答")), &mut |_| {}, None, &mut |_| {},
         ToolMode::User, &src,
+    &ProcessManager::new(),
     ).unwrap();
     let texts: Vec<&str> = history
         .iter()
@@ -633,6 +644,7 @@ fn t08_serde_roundtrip_restores_dedup_baseline() {
         &mut |b| { bodies.push(b.clone()); Ok(answer("答")) },
         &mut |_| {}, None, &mut |_| {},
         ToolMode::User, &src,
+    &ProcessManager::new(),
     ).unwrap();
     let texts: Vec<&str> = history
         .iter()
@@ -786,6 +798,7 @@ fn t10_memory_merge_mode_injects_nothing() {
         &mut h1, "合并",
         &mut |b| { b1.push(b.clone()); Ok(answer("直调答")) },
         &mut |_| {}, None, &mut |_| {}, mode,
+    &ProcessManager::new(),
     ).unwrap();
     let mut h2 = Vec::new();
     let mut b2 = Vec::new();
@@ -793,6 +806,7 @@ fn t10_memory_merge_mode_injects_nothing() {
         &mut h2, "合并",
         &mut |b| { b2.push(b.clone()); Ok(answer("直调答")) },
         &mut |_| {}, None, &mut |_| {}, mode, &src,
+    &ProcessManager::new(),
     ).unwrap();
     assert_eq!(
         serde_json::to_string(&b1[0]).unwrap(),
@@ -818,6 +832,7 @@ fn t11_blank_input_rejected_before_context_write() {
             &mut |_| Ok(answer("不应到达")), &mut |_| {}, None,
             &mut |_| recorded += 1,
             ToolMode::User, &src,
+        &ProcessManager::new(),
         )
         .unwrap_err();
         assert!(err.contains("空白"), "{blank:?} 应拒绝：{err}");
@@ -857,6 +872,7 @@ fn t12_coexists_with_tool_history_and_user_with_memory() {
         &mut |b| { bodies.push(b.clone()); Ok(answer("答")) },
         &mut |_| {}, None, &mut |_| {},
         ToolMode::User, &src,
+    &ProcessManager::new(),
     ).unwrap();
     let msgs = bodies[0]["messages"].as_array().unwrap();
     let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
@@ -885,6 +901,7 @@ fn t12_coexists_with_tool_history_and_user_with_memory() {
         &mut |_| {}, None, &mut |_| {},
         ToolMode::UserWithMemory { root: mem_root.path(), config: &config },
         &src,
+    &ProcessManager::new(),
     ).unwrap();
     let msgs = bodies2[0]["messages"].as_array().unwrap();
     assert_eq!(msgs.len(), 3, "system → ctx → 输入");
@@ -967,6 +984,7 @@ fn t15_skipped_sources_never_enter_requests_and_valid_rules_coexist_with_memory(
         &mut |_| {},
         ToolMode::UserWithMemory { root: mem.path(), config: &config },
         &sources(cfg.path(), &cwd, Some("/bin/sh"), T0),
+    &ProcessManager::new(),
     ).unwrap();
 
     assert_eq!(reply, "完成");

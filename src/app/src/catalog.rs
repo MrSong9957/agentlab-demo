@@ -1633,7 +1633,9 @@ mod tests {
     fn fingerprint_rules() {
         assert_eq!(fingerprint("same"), fingerprint("same"));
         assert_ne!(fingerprint("key-A"), fingerprint("key-B"));
-        assert!(!fingerprint("sk-secret-value").contains("sk-secret"));
+        // 独立固定向量（FIPS 180-2 附录 B 例 1）：SHA-256("abc") 前 16 位十六进制。
+        // 期望值来自标准向量而非被测函数现场生成，钉死「摘要前缀」规则本身。
+        assert_eq!(fingerprint("abc"), "ba7816bf8f01cfea");
         assert_eq!(fingerprint("x").len(), 16);
     }
 

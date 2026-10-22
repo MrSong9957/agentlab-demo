@@ -149,6 +149,13 @@
 - **A9 复用率实测**：P1/P2 后按 J9 统计"原样（逐字节一致）/必要适配"逐文件清单，对照预测（核心闭包＋owned 子树 ≥90% 文件原样落地可编译，改写集中于 J5 类型位点与 D11 水合入口）；如实报告偏差，不为比例引入无用模块。
 - **A10 关键用例有效性**：按仓库规范对 A1/A2/A7 抽样"临时破坏被测行为须失败"对照，证明用例非空跑。
 
+**A7 原始输出证据补充（2026-10-22，执行准备；同日测试加固轮已验证）**：原 A7 历史记录保留，本项不改变过滤或合法终端控制契约。
+
+- 观测边界：加固 [security_untrusted_text.rs](../../src/tui/tests/security_untrusted_text.rs) 的 `a7_full_pipeline_writes_no_injected_control_sequences_to_terminal`、`a7_byte_level_writer_passthrough_check`，捕获真实渲染 writer 在进入 VT100 解析器前的原始输出，并分别检查正常文字与解析后的屏幕结果；检查 `draw`／写入成功，不能把屏幕不含 ESC 当作原始字节安全证据。
+- 复用现有 Terminal、VT100Backend 及真实 PTY S33/S46；仅允许必要的测试侧捕获 writer 辅助，不改生产过滤算法或引入新框架。以固定唯一攻击标记区分外来 CSI/OSC/DCS/nF/CR 载荷与渲染器合法的光标、样式、超链接控制；不得对全部 ESC 一律拒绝。S46 的显式用户复制可产生合法 OSC 52，渲染／拖选本身不得自发产生该载荷。
+- 反证预测：在隔离副本中临时让一份外来、带唯一标记的完整 OSC 52 载荷直通同一 writer；保持断言不变，即使 VT100 消费该序列且正常文字仍可见，原始字节检查也必须失败。恢复后通过，并以无攻击输入证明合法渲染控制未被误报；不能只在屏幕文本后附加假载荷来代替渲染边界验证。
+- 状态：**已验证（2026-10-22 测试加固轮）**——CapturingParser 先记录后转发；两层标记检查（引入符直接组合＋CSI/OSC/DCS/SOS/PM/APC 完整序列范围扫描，后者为实施中发现的补强：真实形态 OSC 52 的标记与引入符隔着参数，仅直接组合会漏检）；draw 路径正向对照断言合法 CSI 存在（不误报）。反证 H1 检出（writer 边界注入 `\x1b]52;c;…\x07` → 原始字节 RED，屏幕断言不触发），还原 GREEN；S33/S46 真实 PTY 复验通过。证据见 [加固记录](../records/2026-10-22-test-hardening-round.md)与[安全报告](../security/reports/2026-10-22-test-hardening-injection-fingerprint-security.md)。
+
 **维护验收：快照副产物清理（fix/008-snapshot-hygiene，2026-10-18 立项＋实施，实测回填；根因与判定证据见 §4 坑 19 与 `docs/records/2026-10-18-008-snapshot-hygiene.md` §2/§3）**：
 
 - 范围：`git rm`（精确路径，非 `git add -A`）5 个副产物——4 个 `.pending-snap`（markdown_render_tests/file_citations/followups/copy_mode）＋1 个 `.snap.new`（chat_composer__sparkle__…a_fresh_astra…）；`.gitignore` 增 `*.pending-snap` 与 `*.snap.new`；**保留全部已接受 `.snap`（含孤儿 `…a_fresh_astra….snap`，登记不删）**。

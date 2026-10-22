@@ -137,9 +137,10 @@ fn t1_plain_reply_ends_immediately() {
     assert!(body["messages"][1]["content"].as_str().unwrap().starts_with("<environment_context>"));
     assert_eq!(body["messages"][2]["content"], json!("你好"));
     let tools = body["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 2);
+    assert_eq!(tools.len(), 3, "016：用户轮三工具");
     assert_eq!(tools[0]["function"]["name"], json!("exec_command"));
     assert_eq!(tools[1]["function"]["name"], json!("apply_patch"));
+    assert_eq!(tools[2]["function"]["name"], json!("write_stdin"));
 }
 
 /// T2：创建文件——真实落盘字节正确；第 2 请求含原样 assistant(tool_calls)＋匹配 id 的 role=tool。

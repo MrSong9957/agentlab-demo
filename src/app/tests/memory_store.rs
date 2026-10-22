@@ -584,27 +584,80 @@ fn m1_config_empty_memories_section_defaults_to_disabled() {
 
 #[test]
 fn m1_two_store_instances_serialize_via_busy_timeout() {
-    // 跨连接并发：两实例同库交错写（BEGIN IMMEDIATE 竞争）由 busy_timeout 串行化，
-    // 不出现 SQLITE_BUSY 失败（单进程跨线程等价面；A09 的跨连接面）。
+    // 跨连接并发：独立 SQLite 连接持有同库 BEGIN IMMEDIATE 写锁，被测写者
+    //（另一真实 MemoryStore，默认连接配置——测试不补设 busy_timeout／忙处理器）
+    // 在锁释放前已进入操作且保持未完成（有界探测证实）；默认等待期内释放后
+    // 原调用成功，结果完整且跨连接可见（A09 的跨连接面）。
+    use std::sync::mpsc;
+
     let tmp = TempDir::new("concurrent");
     let root = tmp.0.join("memories");
     let clock = SteppedClock::fixed(T0);
     let a = open_store(&root, &clock);
     let b = open_store(&root, &clock);
-
     let token_a = claim(&a, "t1", 100);
     let token_b = claim(&b, "t2", 100);
-    assert!(a
-        .mark_stage1_job_succeeded("t1", &token_a, 100, "r1", "s1", None)
-        .unwrap());
+
+    // 独立连接持锁：BEGIN IMMEDIATE 即取写锁；释放信号到达（或发送端被 drop）
+    // 后回滚退出——断言失败 panic 时发送端 drop 也会放行，不泄漏持锁线程。
+    let db = memories_db_path(&root);
+    let (lock_ready_tx, lock_ready_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let blocker = std::thread::spawn(move || {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        lock_ready_tx.send(()).unwrap();
+        let _ = release_rx.recv(); // 持锁直到放行（发送端 drop 亦放行）
+        conn.execute_batch("ROLLBACK").unwrap();
+    });
+    lock_ready_rx.recv().unwrap(); // 写锁已就位
+
+    // 被测写者：store a 在持锁期间发起写（默认 busy_timeout 5s 内等待）
+    let (writer_started_tx, writer_started_rx) = mpsc::channel::<()>();
+    let writer = {
+        let a = a;
+        let started = writer_started_tx;
+        std::thread::spawn(move || {
+            started.send(()).unwrap();
+            let r = a.mark_stage1_job_succeeded("t1", &token_a, 100, "raw-1", "sum-1", Some("slug-1"));
+            (a, r)
+        })
+    };
+    writer_started_rx.recv().unwrap();
+    // 有界探测：锁仍持有时写者必须仍在等待（否则竞争未发生，测试无效）
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(!writer.is_finished(), "写锁持有期间写者应仍在等待（未发生竞争？）");
+    // 默认等待期内放行 → 原调用成功
+    release_tx.send(()).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let (a, marked) = loop {
+        if writer.is_finished() {
+            let (a, r) = writer.join().unwrap();
+            break (a, r.unwrap());
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "锁释放后写者未在期限内完成（默认等待不生效？）"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    blocker.join().unwrap();
+    assert!(marked, "锁竞争下原调用应成功写入");
+    // 第二实例交错写 + 完整结果与跨连接可见性
     assert!(b
-        .mark_stage1_job_succeeded("t2", &token_b, 100, "r2", "s2", None)
+        .mark_stage1_job_succeeded("t2", &token_b, 100, "raw-2", "sum-2", None)
         .unwrap());
-    assert!(a.stage1_output("t1").unwrap().is_some());
-    assert!(b.stage1_output("t2").unwrap().is_some());
-    // 两个实例视图一致。
-    assert!(a.stage1_output("t2").unwrap().is_some());
-    assert!(b.stage1_output("t1").unwrap().is_some());
+    let out_a = a.stage1_output("t1").unwrap().expect("t1 结果应保留");
+    assert_eq!(out_a.raw_memory, "raw-1");
+    assert_eq!(out_a.rollout_summary, "sum-1");
+    assert_eq!(out_a.rollout_slug.as_deref(), Some("slug-1"));
+    // 两连接交叉读到对方的完整值
+    let cross_b = b.stage1_output("t1").unwrap().expect("b 应读到 t1");
+    assert_eq!(cross_b.raw_memory, "raw-1");
+    assert_eq!(cross_b.rollout_slug.as_deref(), Some("slug-1"));
+    let cross_a = a.stage1_output("t2").unwrap().expect("a 应读到 t2");
+    assert_eq!(cross_a.raw_memory, "raw-2");
+    assert_eq!(cross_a.rollout_slug, None);
 }
 
 // —— D5：manual.json memories 段兼容 ——
@@ -640,9 +693,28 @@ fn m1_config_rejects_wrong_type_and_unknown_keys() {
     write_manual(&tmp.0, r#"{"memories":{"enabled":"yes"}}"#);
     assert!(terminal_chat::catalog::load_manual(&tmp.0).is_err(), "类型错误必须拒绝");
 
+    // 完整样本（enabled＋max_rollouts_per_startup＋bogus 未知键）必须拒绝
+    //（deny_unknown_fields）——覆盖自 m2_config_unknown_key_still_rejected 迁入
     let tmp2 = TempDir::new("cfg-unknown");
-    write_manual(&tmp2.0, r#"{"memories":{"enabled":true,"extra":1}}"#);
-    assert!(terminal_chat::catalog::load_manual(&tmp2.0).is_err(), "未知键必须拒绝（deny_unknown_fields）");
+    write_manual(
+        &tmp2.0,
+        r#"{"memories":{"enabled":true,"max_rollouts_per_startup":2,"bogus":1}}"#,
+    );
+    assert!(
+        terminal_chat::catalog::load_manual(&tmp2.0).is_err(),
+        "未知键必须拒绝（deny_unknown_fields）"
+    );
+
+    // 对照：完整样本去掉 bogus 后可解析且值正确（拒绝确实由未知键引起）
+    let tmp3 = TempDir::new("cfg-known");
+    write_manual(
+        &tmp3.0,
+        r#"{"memories":{"enabled":true,"max_rollouts_per_startup":2}}"#,
+    );
+    let m = terminal_chat::catalog::load_manual(&tmp3.0).expect("去掉未知键后应可解析");
+    let memories = m.memories.expect("段应存在");
+    assert!(memories.enabled);
+    assert_eq!(memories.max_rollouts_per_startup, 2);
 }
 
 // —— 014 §3：资格筛选与清理规则（验证既有正确实现，不重写）——

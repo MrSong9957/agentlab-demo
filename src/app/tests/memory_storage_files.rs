@@ -134,13 +134,23 @@ fn m4_snapshot_is_full_sorted_and_read_only() {
     assert_eq!(e.db_bytes(), before);
 }
 
+/// 同一生命周期的首次导出与重复导出（合并自 m4_a20_add_matches_golden_files 与
+/// m4_identical_snapshot_has_identical_file_set_and_bytes）：首次核对完整黄金
+/// 文件集合与逐文件字节、无通知、数据库未变；再次导出独立核对无通知、文件
+/// 集合与逐文件字节和首次一致、数据库未变。
 #[test]
-fn m4_a20_add_matches_golden_files() {
+fn m4_a20_add_matches_golden_files_then_identical_resync() {
     let e = Env::new("add");
     e.initial();
     let db = e.db_bytes();
-    assert!(e.sync().is_empty());
-    assert_eq!(files(&e.root), initial_files());
+    // 首次导出：完整黄金文件检查
+    assert!(e.sync().is_empty(), "首次导出无通知");
+    let first = files(&e.root);
+    assert_eq!(first, initial_files());
+    assert_eq!(e.db_bytes(), db);
+    // 再次导出：文件集合与逐文件字节与首次一致
+    assert!(e.sync().is_empty(), "重复导出无通知");
+    assert_eq!(files(&e.root), first, "重复导出文件集合与字节与首次一致");
     assert_eq!(e.db_bytes(), db);
 }
 
@@ -187,17 +197,6 @@ fn m4_a20_zero_writes_exact_placeholder_and_removes_all_summaries() {
     assert_eq!(files(&e.root), BTreeMap::from([("raw_memories.md".into(), gold("empty_raw.md"))]));
     assert_eq!(std::fs::read_dir(e.root.join("rollout_summaries")).unwrap().count(), 0);
     assert!(e.store.list_stage1_outputs().unwrap().is_empty());
-    assert_eq!(e.db_bytes(), db);
-}
-
-#[test]
-fn m4_identical_snapshot_has_identical_file_set_and_bytes() {
-    let e = Env::new("idempotent");
-    e.initial(); e.sync();
-    let before = files(&e.root);
-    let db = e.db_bytes();
-    assert!(e.sync().is_empty());
-    assert_eq!(files(&e.root), before);
     assert_eq!(e.db_bytes(), db);
 }
 

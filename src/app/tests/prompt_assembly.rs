@@ -107,10 +107,10 @@ fn s2_sent_prompt_only_listed_adaptations() {
     assert_eq!(sent, expected_sent(), "发送文本与独立重建不一致（存在未列出的改动）");
 }
 
-/// 3. 空历史：恰 system、user 两条消息；恰两个工具定义；顶层恰 {messages, tools} 且均为
-///    function 类型（原 s7 场景并入）；核对序列化 JSON。
+/// 3. 空历史：恰 system、user 两条消息；恰三个工具定义（016 起＋write_stdin）；
+///    顶层恰 {messages, tools} 且均为 function 类型（原 s7 场景并入）；核对序列化 JSON。
 #[test]
-fn s3_empty_history_two_messages_two_tools() {
+fn s3_empty_history_two_messages_three_tools() {
     let v = build_request(&[], "你好").unwrap();
     let text = serde_json::to_string(&v).unwrap();
     let v: Value = serde_json::from_str(&text).unwrap(); // 验证真实 JSON，不只看内部结构
@@ -121,9 +121,10 @@ fn s3_empty_history_two_messages_two_tools() {
     assert_eq!(messages[1]["role"], json!("user"));
     assert_eq!(messages[1]["content"], json!("你好"));
     let tools = v["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 2);
+    assert_eq!(tools.len(), 3, "016：用户轮三工具");
     assert_eq!(tools[0]["function"]["name"], json!("exec_command"));
     assert_eq!(tools[1]["function"]["name"], json!("apply_patch"));
+    assert_eq!(tools[2]["function"]["name"], json!("write_stdin"));
     // 协议映射（原 s7 断言并入）：顶层恰 {messages, tools}（model 等由发送层附加）、tools 全为 function
     let mut top: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
     top.sort_unstable();
@@ -185,9 +186,10 @@ fn s4_history_preserved_no_dedup() {
     assert_eq!(msgs2[1]["content"], json!(tricky), "重复组装历史逐字正确");
     assert_eq!(msgs2[3]["content"], json!(tricky), "重复组装本轮输入逐字正确");
     let tools2 = again["tools"].as_array().unwrap();
-    assert_eq!(tools2.len(), 2, "重复组装工具数正确");
+    assert_eq!(tools2.len(), 3, "重复组装工具数正确");
     assert_eq!(tools2[0]["function"]["name"], json!("exec_command"));
     assert_eq!(tools2[1]["function"]["name"], json!("apply_patch"));
+    assert_eq!(tools2[2]["function"]["name"], json!("write_stdin"));
 
     // 组装（含重复组装）不改历史输入
     let after: Vec<(HistoryRole, String)> = history
@@ -200,38 +202,36 @@ fn s4_history_preserved_no_dedup() {
     assert_eq!(snapshot, after);
 }
 
-/// 6. 两工具白名单：名称、参数与本地 003/004 JSON 契约一致，无未实现字段。
+/// 6. 三工具白名单：名称、参数与本地 003/004/016 JSON 契约一致，无未声明字段。
 #[test]
 fn s6_tool_whitelist_matches_local_contracts() {
     let v = build_request(&[], "hi").unwrap();
     let tools = v["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 2, "白名单恰两项");
+    assert_eq!(tools.len(), 3, "016：白名单恰三项");
     let exec_t = &tools[0];
     assert_eq!(exec_t["type"], json!("function"));
     let f = &exec_t["function"];
     assert_eq!(f["name"], json!("exec_command"));
-    assert!(!f["description"].as_str().unwrap().contains("PTY"), "描述应为同步语义");
+    let desc = f["description"].as_str().unwrap();
+    assert!(desc.contains("yield_time_ms"), "描述应说明可续接等待语义");
+    assert!(desc.contains("session_id"), "描述应说明运行中返回句柄");
     let params = &f["parameters"];
     assert_eq!(params["type"], json!("object"));
     assert_eq!(params["required"], json!(["cmd"]));
     assert_eq!(params["additionalProperties"], json!(false));
     let mut keys: Vec<&str> = params["properties"].as_object().unwrap().keys().map(String::as_str).collect();
     keys.sort_unstable();
-    assert_eq!(keys, vec!["cmd", "max_output_chars", "timeout_ms", "workdir"]);
-    // 差分锚定本地 003 契约：按 schema 构造最小实参必须被 ExecArgs 接受，越界字段必须拒绝
+    assert_eq!(keys, vec!["cmd", "max_output_chars", "timeout_ms", "tty", "workdir", "yield_time_ms"]);
+    // 差分锚定本地契约：按 schema 声明的全部键构造实参必须被 ExecArgs 接受，
+    // 未声明字段必须拒绝
     let mut args = serde_json::Map::new();
-    for k in ["cmd", "workdir", "timeout_ms", "max_output_chars"] {
-        args.insert(
-            k.to_string(),
-            serde_json::Value::String("/tmp".into()),
-        );
-    }
     args.insert("cmd".into(), json!("ls"));
-    args.insert("timeout_ms".into(), json!(100));
+    args.insert("yield_time_ms".into(), json!(1000));
+    args.insert("timeout_ms".into(), json!(60000));
     args.insert("max_output_chars".into(), json!(100));
-    args.remove("workdir").unwrap();
+    args.insert("tty".into(), json!(false));
     assert!(exec::ExecArgs::from_value(&Value::Object(args.clone())).is_ok());
-    args.insert("tty".into(), json!(true));
+    args.insert("shell".into(), json!("/bin/bash"));
     assert!(exec::ExecArgs::from_value(&Value::Object(args)).is_err(), "未声明字段必须被契约拒绝");
 
     let ap = &tools[1];
@@ -252,6 +252,27 @@ fn s6_tool_whitelist_matches_local_contracts() {
     assert!(r.error.unwrap().contains("未知参数"));
     let r = apply_patch::apply_patch(&json!({ "patch": "*** Begin Patch\n*** End Patch" }));
     assert!(r.error.unwrap().contains("空补丁"), "patch 为唯一有效字段（到达解析层）");
+
+    // 016：write_stdin 定义与本地契约差分锚定——schema 键集合、必填、
+    // 未声明字段拒绝、terminate 互斥与输入上限
+    let ws = &tools[2];
+    assert_eq!(ws["type"], json!("function"));
+    let f = &ws["function"];
+    assert_eq!(f["name"], json!("write_stdin"));
+    let params = &f["parameters"];
+    assert_eq!(params["type"], json!("object"));
+    assert_eq!(params["required"], json!(["session_id"]));
+    assert_eq!(params["additionalProperties"], json!(false));
+    let mut keys: Vec<&str> = params["properties"].as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["chars", "max_output_chars", "session_id", "terminate", "yield_time_ms"]);
+    use terminal_chat::exec::WriteStdinArgs as WS;
+    assert!(WS::from_value(&json!({ "session_id": "s1" })).is_ok());
+    assert!(WS::from_value(&json!({ "session_id": "s1", "terminate": true })).is_ok());
+    assert!(WS::from_value(&json!({ "session_id": "s1", "signal": 9 }))
+        .unwrap_err()
+        .contains("未知参数"), "未声明字段必须被契约拒绝");
+    assert!(WS::from_value(&json!({ "session_id": "s1", "chars": "x", "yield_time_ms": 30000 })).is_ok());
 }
 
 /// 9. 空白本轮输入：明确错误，不产生请求片段；历史不变。

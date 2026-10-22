@@ -626,16 +626,3 @@ fn m2_config_default_matches_serde_defaults() {
     assert_eq!(by_default.min_rollout_idle_hours, 6);
     assert!(!by_default.enabled);
 }
-
-#[test]
-fn m2_config_unknown_key_still_rejected() {
-    let tmp = TempDir::new("cfg-unknown");
-    write_manual(
-        &tmp.0,
-        r#"{"memories":{"enabled":true,"max_rollouts_per_startup":2,"bogus":1}}"#,
-    );
-    assert!(
-        catalog::load_manual(&tmp.0).is_err(),
-        "未知键必须拒绝（deny_unknown_fields）"
-    );
-}

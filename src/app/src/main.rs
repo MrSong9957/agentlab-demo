@@ -2,6 +2,7 @@
 //! 命令：/models 查看有效名单；/refresh 刷新目录；其余输入发送给所选模型。
 
 use terminal_chat::prompt::HistoryItem;
+use terminal_chat::proc_session::ProcessManager;
 use terminal_chat::{api, catalog, display, session, turn};
 use terminal_chat::tui_host;
 
@@ -19,7 +20,8 @@ fn say(text: &str) {
     println!("{}", display::sanitize_for_terminal(text));
 }
 
-/// 工具执行期的取消标志（N2b）：SIGINT 只置位，由 exec 轮询路径完成终止与回收。
+/// 工具执行期的取消标志（N2b）：SIGINT 只置位，由 exec 轮询路径停止本次等待；
+/// 016 起取消不再自动终止已启动进程（见 proc_session）。
 static TOOL_CANCEL: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn on_sigint(_sig: libc::c_int) {
@@ -54,10 +56,11 @@ fn main() {
             std::process::exit(1);
         }
         let exit = run_tui(host.clone(), startup_notices);
-        // 008：退出先取消仍在运行的 turn（006 N2b 语义：置标志→工具进程组终止→
-        // turn 迅速返回释放 history）——避免下方排空阻塞至工具超时
-        //（008-REVIEW 独立审查 P2-4）
+        // 008：退出先取消仍在运行的 turn（016：取消只停止等待与后续调用，
+        // 不终止已启动进程）；随后显式关闭全部进程会话并回收，再排空会话——
+        // 不依赖析构（TUI 入口使用 process::exit）。
         host.set_cancel(true);
+        host.close_process_sessions();
         // 007：退出排空——与行式路径同契约（TUI 内 on_history 写失败的滞留待写段
         // 在退出前补写；008-REVIEW 独立审查 P0-2）
         if let Err(e) = host.flush_final_session() {
@@ -83,6 +86,8 @@ fn main() {
     // 006：会话历史（内存态）；007：默认自动追加落盘，/resume 恢复继续
     let mut history: Vec<HistoryItem> = Vec::new();
     let mut autosave = session::Session::new(session::sessions_dir());
+    // 016：进程会话管理器（当前对话；/resume 成功切换后重置）
+    let procs = ProcessManager::new();
     // 013-M7：threads 登记推进器（跨轮保持缓存库连接；enabled=false 零副作用）
     let mut registrar = terminal_chat::memory::runner::ThreadRegistrar::default();
 
@@ -104,7 +109,7 @@ fn main() {
 
                 // 空输入不打印空行,直接继续循环
                 if !input.is_empty() {
-                    handle_input(&agent, &mut rl, input, &mut history, &mut autosave, &mut registrar);
+                    handle_input(&agent, &mut rl, input, &mut history, &mut autosave, &mut registrar, &procs);
                 }
             }
             // Ctrl+C:打断当前输入,直接退出
@@ -116,6 +121,8 @@ fn main() {
         }
     }
 
+    // 016：宿主退出——显式关闭全部进程会话并回收，再完成会话排空和退出。
+    procs.close();
     // 007：退出排空——主循环退出后、进程结束前补写一次；成功静默，失败明确报错
     if let Err(e) = autosave.flush_final(&history) {
         say(&format!("错误：会话退出排空失败：{e}"));
@@ -184,6 +191,7 @@ fn handle_input(
     history: &mut Vec<HistoryItem>,
     autosave: &mut session::Session,
     registrar: &mut terminal_chat::memory::runner::ThreadRegistrar,
+    procs: &ProcessManager,
 ) {
     if let Some(rest) = input.strip_prefix('/') {
         if let Some(arg) = rest.strip_prefix("save") {
@@ -194,7 +202,7 @@ fn handle_input(
         }
         if let Some(arg) = rest.strip_prefix("resume") {
             if arg.is_empty() || arg.starts_with(char::is_whitespace) {
-                cmd_resume(rl, arg, history, autosave);
+                cmd_resume(rl, arg, history, autosave, procs);
                 return;
             }
         }
@@ -220,7 +228,7 @@ fn handle_input(
         }
         return;
     }
-    cmd_chat(agent, rl, input, history, autosave, registrar);
+    cmd_chat(agent, rl, input, history, autosave, registrar, procs);
 }
 
 /// `/save <名称>`：当前全部历史整体快照到 sessions/<名称>.jsonl（原子替换）。
@@ -253,11 +261,14 @@ fn cmd_save(rl: &mut DefaultEditor, arg: &str, history: &[HistoryItem]) {
 }
 
 /// `/resume [名称]`：无参＝最近 auto 会话；有名＝指定会话（auto 续写或快照只读）。
+/// 016：切换成功后关闭旧对话的全部进程会话，新对话从空管理器开始；
+/// 恢复失败或用户放弃时不影响旧进程。
 fn cmd_resume(
     rl: &mut DefaultEditor,
     arg: &str,
     history: &mut Vec<HistoryItem>,
     autosave: &mut session::Session,
+    procs: &ProcessManager,
 ) {
     let name = arg.trim();
     let target = if name.is_empty() { None } else { Some(name) };
@@ -285,6 +296,7 @@ fn cmd_resume(
             }
             say(&info.loaded.summary());
             *history = info.loaded.history;
+            procs.reset();
         }
         Err(e) => say(&format!("错误：{e}")),
     }
@@ -319,6 +331,7 @@ fn cmd_chat(
     history: &mut Vec<HistoryItem>,
     autosave: &mut session::Session,
     registrar: &mut terminal_chat::memory::runner::ThreadRegistrar,
+    procs: &ProcessManager,
 ) {
     let Some(dict) = build_dict() else { return };
     // 调用开始：route 返回的快照固定本次使用的配置与凭证，之后的刷新不影响本次调用
@@ -362,13 +375,32 @@ fn cmd_chat(
                     let mut sender =
                         |body: &serde_json::Value| api::chat_with_body(conn, key, &model, body, agent);
                     // 012：工具活动结构化事件——行式路径保持历史输出逐字节不变
-                    //（ToolBegin 打印同一活动行；ToolEnd 仅落史不打印，与 006 一致）
+                    //（ToolBegin 打印同一活动行；ToolEnd 仅落史不打印，与 006 一致）；
+                    // 016：运行中／已取消但进程仍存活的工具，明确展示会话编号。
                     let mut notify = |n: turn::TurnNotify| match n {
                         turn::TurnNotify::Info(line) => say(&line),
                         turn::TurnNotify::ToolBegin { id, name, .. } => {
                             say(&turn::tool_activity_line(&name, &id));
                         }
-                        turn::TurnNotify::ToolEnd { .. } => {}
+                        turn::TurnNotify::ToolEnd { name, result, .. } => {
+                            // 016：运行中/终止/超时三类宿主侧生命周期状态明确展示
+                            //（自然完成含非零退出仍由模型回复承载——006 行式纪律）
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&result) {
+                                match v["status"].as_str() {
+                                    Some("running") => {
+                                        let sid = v["session_id"].as_str().unwrap_or("?");
+                                        say(&format!("[工具] {name} 进程仍在运行（会话 {sid}）"));
+                                    }
+                                    Some("terminated") => {
+                                        say(&format!("[工具] {name} 已明确终止并回收"));
+                                    }
+                                    Some("timeout") => {
+                                        say(&format!("[工具] {name} 总运行时限到期，已终止回收"));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                     };
                     // 013-M7：开启态以 UserWithMemory 接入 M6 注入（轮首读取一次、
                     // 轮内复用、不入史——读取与 None 原样语义由 turn 层承接）；关闭态
@@ -404,6 +436,7 @@ fn cmd_chat(
                         },
                         mode,
                         &context_sources,
+                        procs,
                     );
                     unsafe {
                         libc::signal(libc::SIGINT, libc::SIG_DFL);
@@ -419,7 +452,17 @@ fn cmd_chat(
                                 &reply,
                             );
                         }
-                        Err(e) => say(&format!("错误：{e}")),
+                        Err(e) => {
+                            say(&format!("错误：{e}"));
+                            // 016：取消当前轮 ≠ 终止进程——明确区分“停止 AI 工作”
+                            // 与“已启动进程仍由会话管理”，列出仍有效的编号
+                            //（012 教训：以常量为事实来源，不反解析消息文本）。
+                            if e.starts_with(turn::CANCELLED_TURN_ERROR_PREFIX) {
+                                say(procs.live_sessions_note().as_deref().unwrap_or(
+                                    "已停止当前工作；本轮没有仍在运行的进程会话。",
+                                ));
+                            }
+                        }
                     }
                 }
                 Err(e) => say(&format!("错误：{e}")),

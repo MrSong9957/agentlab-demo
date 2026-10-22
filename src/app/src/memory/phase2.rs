@@ -291,6 +291,8 @@ pub fn run_phase2_consolidation(
                 system: CONSOLIDATION_SYSTEM,
                 expected_epoch: task_epoch,
             },
+            // 016：内部合并轮不经进程会话管理器执行任何工具（分派层权限边界）
+            &crate::proc_session::ProcessManager::new(),
         )
     });
     if turn_result.is_err() {

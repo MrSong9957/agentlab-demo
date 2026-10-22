@@ -9,6 +9,7 @@
 
 use crate::apply_patch::ApplyPatchResult;
 use crate::exec::{ExecResult, ExecStatus};
+use crate::proc_session::ProcessManager;
 use crate::prompt::{
     build_turn_request, build_turn_request_with, build_turn_request_with_memory, HistoryItem,
     HistoryMessage, HistoryRole, ToolCallRecord, ToolDisplay,
@@ -21,8 +22,8 @@ pub const MAX_MODEL_REQUESTS_PER_TURN: usize = 8;
 /// 单批 tool_calls 上限（2026-10-10 安全修复 N3：入史/执行前检查，超限整批拒绝）。
 pub const MAX_TOOL_CALLS_PER_BATCH: usize = 32;
 
-/// 一轮的工具面（013-M5 D3 参数化）：`User`＝既有用户轮契约（恰
-/// `exec_command`/`apply_patch`，请求组装与取消形状逐字节不变）；
+/// 一轮的工具面（013-M5 D3 参数化；016 三工具）：`User`＝既有用户轮契约
+/// （恰 `exec_command`/`apply_patch`/`write_stdin`，后两者之外无新工具）；
 /// `MemoryMerge`＝内部合并轮（恰 `mem_read`/`mem_write`/`mem_list`，
 /// 限 `root` 记忆根；请求组装注入三项工具与合并系统提示）。**权限在执行
 /// 分派层生效**：不在当前模式注册表内的工具名（含另一模式的工具）一律按
@@ -91,6 +92,10 @@ const BLANK_INPUT_ERROR: &str = "当前用户输入不能为空或全为空白";
 /// 单一生产者 [`skipped_by_cancel`]，非模糊文本匹配）。
 pub const SKIPPED_BY_CANCEL_MESSAGE: &str = "用户取消，本调用未执行";
 
+/// 016：本轮被取消的 turn 错误统一前缀（含工具批取消与在途请求取消两条路径）；
+/// 宿主以此常量判定"取消当前轮"，不反解析消息文本（012 教训）。
+pub const CANCELLED_TURN_ERROR_PREFIX: &str = "用户已取消";
+
 fn skipped_by_cancel(name: &str, mode: &ToolMode<'_>) -> String {
     let error = SKIPPED_BY_CANCEL_MESSAGE;
     if let ToolMode::MemoryMerge { .. } = mode {
@@ -100,12 +105,14 @@ fn skipped_by_cancel(name: &str, mode: &ToolMode<'_>) -> String {
         return json!({ "error": error }).to_string();
     }
     match name {
-        "exec_command" => serde_json::to_string(&ExecResult {
+        "exec_command" | "write_stdin" => serde_json::to_string(&ExecResult {
             status: ExecStatus::Cancelled,
             exit_code: None,
             output: String::new(),
             truncated: false,
             error: Some(error.to_string()),
+            // 016：未执行调用不启动进程，返回空句柄
+            session_id: None,
         })
         .expect("ExecResult 可序列化"),
         "apply_patch" => serde_json::to_string(&ApplyPatchResult {
@@ -179,13 +186,16 @@ fn parse_tool_calls(message: &Value) -> Result<Vec<ParsedToolCall>, String> {
 /// 工具既有结果结构回传 JSON 字符串（构造结果结构体序列化，字段与工具本体
 /// 同源），保留失败/状态字段，不伪造成功；未注册工具（含跨模式工具名）不
 /// 执行——分派层即权限边界（D3）。
-/// 012：同时返回**展示数据**（exec 真实时长；apply_patch 逐文件真实差异）——随
-/// 历史记录持久、随通知回推，但不混入结果 JSON（模型契约不变）；mem 工具
-/// 为内部合并轮专用，无展示数据（None）。
+/// 016：exec_command／write_stdin 经 `procs` 执行——进程跨调用跨轮保留，
+/// 取消当前轮不再自动终止已启动进程（等待返回 cancelled＋句柄）。
+/// 012：同时返回**展示数据**（exec 真实时长；apply_patch 逐文件真实差异；
+/// write_stdin 原命令关联）——随历史记录持久、随通知回推，但不混入结果 JSON
+/// （模型契约不变）；mem 工具为内部合并轮专用，无展示数据（None）。
 fn execute_tool(
     call: &ParsedToolCall,
     cancel: Option<&std::sync::atomic::AtomicBool>,
     mode: &ToolMode<'_>,
+    procs: &ProcessManager,
 ) -> (String, Option<ToolDisplay>) {
     if let ToolMode::MemoryMerge {
         root,
@@ -200,26 +210,68 @@ fn execute_tool(
     }
     match call.name.as_str() {
         "exec_command" => match serde_json::from_str::<Value>(&call.arguments) {
-            Ok(v) => {
-                let started = std::time::Instant::now();
-                let r = crate::exec::exec_command(&v, cancel);
-                let display = ToolDisplay::Exec {
-                    duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                };
-                (
-                    serde_json::to_string(&r).expect("ExecResult 可序列化"),
-                    Some(display),
-                )
-            }
+            Ok(v) => match crate::exec::ExecArgs::from_value(&v) {
+                Ok(args) => {
+                    let started = std::time::Instant::now();
+                    let outcome = procs.start(&args, cancel);
+                    let display = ToolDisplay::Exec {
+                        duration_ms: u64::try_from(started.elapsed().as_millis())
+                            .unwrap_or(u64::MAX),
+                    };
+                    (
+                        serde_json::to_string(&outcome.result)
+                            .expect("ExecResult 可序列化"),
+                        Some(display),
+                    )
+                }
+                Err(msg) => (
+                    serde_json::to_string(&ExecResult::error(msg))
+                        .expect("ExecResult 可序列化"),
+                    None,
+                ),
+            },
             Err(e) => (
-                serde_json::to_string(&ExecResult {
-                    status: ExecStatus::Error,
-                    exit_code: None,
-                    output: String::new(),
-                    truncated: false,
-                    error: Some(format!("工具参数不是有效 JSON：{e}")),
-                })
-                .expect("ExecResult 可序列化"),
+                serde_json::to_string(&ExecResult::error(format!("工具参数不是有效 JSON：{e}")))
+                    .expect("ExecResult 可序列化"),
+                None,
+            ),
+        },
+        "write_stdin" => match serde_json::from_str::<Value>(&call.arguments) {
+            Ok(v) => match crate::exec::WriteStdinArgs::from_value(&v) {
+                Ok(args) => {
+                    let started = std::time::Instant::now();
+                    let outcome = procs.interact(&args, cancel);
+                    let duration_ms =
+                        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    let display = Some(
+                        outcome
+                            .session_cmd
+                            .map(|(session_id, command)| ToolDisplay::Stdin {
+                                session_id,
+                                command,
+                                duration_ms,
+                            })
+                            .unwrap_or_else(|| ToolDisplay::Stdin {
+                                session_id: args.session_id.clone(),
+                                command: String::new(),
+                                duration_ms,
+                            }),
+                    );
+                    (
+                        serde_json::to_string(&outcome.result)
+                            .expect("ExecResult 可序列化"),
+                        display,
+                    )
+                }
+                Err(msg) => (
+                    serde_json::to_string(&ExecResult::error(msg))
+                        .expect("ExecResult 可序列化"),
+                    None,
+                ),
+            },
+            Err(e) => (
+                serde_json::to_string(&ExecResult::error(format!("工具参数不是有效 JSON：{e}")))
+                    .expect("ExecResult 可序列化"),
                 None,
             ),
         },
@@ -244,7 +296,7 @@ fn execute_tool(
         },
         other => (
             json!({
-                "error": format!("未知工具 {other}，可用：exec_command、apply_patch")
+                "error": format!("未知工具 {other}，可用：exec_command、apply_patch、write_stdin")
             })
             .to_string(),
             None,
@@ -252,8 +304,8 @@ fn execute_tool(
     }
 }
 
-/// 运行一个用户轮（`ToolMode::User` 固定面——签名与行为与 006/012 契约
-/// 逐字节一致）。语义见 [`run_tool_turn_with_mode`]。
+/// 运行一个用户轮（`ToolMode::User` 固定面）。语义见 [`run_tool_turn_with_mode`]；
+/// `procs`＝016 进程会话管理器（跨工具调用、跨用户轮保留进程）。
 pub fn run_tool_turn(
     history: &mut Vec<HistoryItem>,
     current_input: &str,
@@ -261,6 +313,7 @@ pub fn run_tool_turn(
     notify: &mut dyn FnMut(TurnNotify),
     cancel: Option<&std::sync::atomic::AtomicBool>,
     on_record: &mut dyn FnMut(&[HistoryItem]),
+    procs: &ProcessManager,
 ) -> Result<String, String> {
     run_tool_turn_with_mode(
         history,
@@ -270,6 +323,7 @@ pub fn run_tool_turn(
         cancel,
         on_record,
         ToolMode::User,
+        procs,
     )
 }
 
@@ -288,6 +342,7 @@ pub fn run_user_turn_with_context(
     on_record: &mut dyn FnMut(&[HistoryItem]),
     mode: ToolMode<'_>,
     sources: &crate::context::ContextSources,
+    procs: &ProcessManager,
 ) -> Result<String, String> {
     if current_input.trim().is_empty() {
         return Err(BLANK_INPUT_ERROR.into());
@@ -322,6 +377,7 @@ pub fn run_user_turn_with_context(
         cancel,
         on_record,
         mode,
+        procs,
     )
 }
 
@@ -333,7 +389,10 @@ pub fn run_user_turn_with_context(
 /// 响应 JSON；`notify` 输出工具活动结构化事件（[`TurnNotify`]，过滤由调用方负责）。
 /// `on_record` 在每个入史点（user/assistant 终文/tool_calls/每条结果）随完整历史回调
 /// 一次——007 自动追加落盘的接入点，调用方负责游标与提交。
+/// `procs`＝进程会话管理器（016）：仅 `User`/`UserWithMemory` 分派使用；
+/// `MemoryMerge` 不经它执行任何工具。
 /// 返回最终回复；错误（协议/请求失败/上限）时历史保留已发生记录，不自动重发。
+/// 016：取消当前轮只停止等待与剩余调用，不终止已启动进程。
 pub fn run_tool_turn_with_mode(
     history: &mut Vec<HistoryItem>,
     current_input: &str,
@@ -342,6 +401,7 @@ pub fn run_tool_turn_with_mode(
     cancel: Option<&std::sync::atomic::AtomicBool>,
     on_record: &mut dyn FnMut(&[HistoryItem]),
     mode: ToolMode<'_>,
+    procs: &ProcessManager,
 ) -> Result<String, String> {
     if current_input.trim().is_empty() {
         return Err(BLANK_INPUT_ERROR.into());
@@ -452,7 +512,7 @@ pub fn run_tool_turn_with_mode(
                 name: call.name.clone(),
                 arguments: call.arguments.clone(),
             });
-            let (content, display) = execute_tool(call, cancel, &mode);
+            let (content, display) = execute_tool(call, cancel, &mode, procs);
             notify(TurnNotify::ToolEnd {
                 id: call.id.clone(),
                 name: call.name.clone(),
@@ -486,6 +546,19 @@ fn cap_error() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 测试包装：为 [`run_tool_turn`] 提供独立进程会话管理器（016 签名新增参数）。
+    fn run_turn(
+        history: &mut Vec<HistoryItem>,
+        current_input: &str,
+        sender: &mut dyn FnMut(&Value) -> Result<Value, String>,
+        notify: &mut dyn FnMut(TurnNotify),
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+        on_record: &mut dyn FnMut(&[HistoryItem]),
+    ) -> Result<String, String> {
+        let mgr = ProcessManager::new();
+        run_tool_turn(history, current_input, sender, notify, cancel, on_record, &mgr)
+    }
 
     fn msg_with_tool_calls(tool_calls: Value) -> Value {
         json!({ "role": "assistant", "content": null, "tool_calls": tool_calls })
@@ -551,7 +624,7 @@ mod tests {
         let mut history = Vec::new();
         let mut events: Vec<TurnNotify> = Vec::new();
         let mut sent = 0usize;
-        run_tool_turn(
+        run_turn(
             &mut history,
             "go",
             &mut |_| {
@@ -645,6 +718,7 @@ mod tests {
             },
             None,
             &ToolMode::User,
+            &ProcessManager::new(),
         );
         let v: Value = serde_json::from_str(&r.0).unwrap();
         assert!(
@@ -659,6 +733,7 @@ mod tests {
             },
             None,
             &ToolMode::User,
+            &ProcessManager::new(),
         );
         let v: Value = serde_json::from_str(&r.0).unwrap();
         assert_eq!(
@@ -674,6 +749,7 @@ mod tests {
             },
             None,
             &ToolMode::User,
+            &ProcessManager::new(),
         );
         let v: Value = serde_json::from_str(&r.0).unwrap();
         assert_eq!(
@@ -690,7 +766,7 @@ mod tests {
         let bad = json!({ "choices": [{ "message": {
             "role": "assistant", "content": ["分段"], "tool_calls": []
         } }] });
-        let err = run_tool_turn(
+        let err = run_turn(
             &mut history,
             "hi",
             &mut |_| Ok(bad.clone()),
@@ -737,7 +813,7 @@ mod tests {
                 }
                 .into(),
             );
-            let err = run_tool_turn(
+            let err = run_turn(
                 &mut history,
                 "go",
                 &mut |_| Ok(mk(n)),
@@ -763,7 +839,7 @@ mod tests {
             "finish_reason": "stop" }] });
         let mut history = Vec::new();
         let mut sent = 0;
-        let reply = run_tool_turn(
+        let reply = run_turn(
             &mut history,
             "go",
             &mut |_| {
@@ -800,7 +876,7 @@ mod tests {
             "tool_calls": [{ "id": "c", "type": "function",
             "function": { "name": "exec_command", "arguments": "{\"cmd\":\"true\"}" } }] },
             "finish_reason": "tool_calls" }] });
-        let err = run_tool_turn(
+        let err = run_turn(
             &mut history,
             "go",
             &mut |_| {
@@ -857,7 +933,7 @@ mod tests {
         "tool_calls": calls }, "finish_reason": "tool_calls" }] });
         let mut history = Vec::new();
         let mut sent = 0;
-        let reply = run_tool_turn(
+        let reply = run_turn(
             &mut history,
             "十连发",
             &mut |_| {
@@ -932,7 +1008,7 @@ mod tests {
         let mut history = Vec::new();
         let mut sent = 0;
         let mut second_body = Value::Null;
-        let reply = run_tool_turn(
+        let reply = run_turn(
             &mut history,
             "go",
             &mut |body| {
@@ -1058,7 +1134,7 @@ mod tests {
         "finish_reason": "stop" }] });
         let mut history = Vec::new();
         let mut sent = 0;
-        let reply = run_tool_turn(
+        let reply = run_turn(
             &mut history,
             "go",
             &mut |_| {
@@ -1139,7 +1215,7 @@ mod tests {
         let mut history = Vec::new();
         let mut sent = 0;
         let mut notified = 0usize;
-        let err = run_tool_turn(
+        let err = run_turn(
             &mut history,
             "go",
             &mut |_| {
@@ -1195,8 +1271,8 @@ mod tests {
         assert_eq!(
             v1,
             json!({ "status": "cancelled", "exit_code": null, "output": "", "truncated": false,
-                "error": "用户取消，本调用未执行" }),
-            "exec 未执行＝cancelled 形态：{v1}"
+                "error": "用户取消，本调用未执行", "session_id": null }),
+            "exec 未执行＝cancelled 形态（016 六字段，空句柄）：{v1}"
         );
         let v2: Value = serde_json::from_str(results[2].1).unwrap();
         assert_eq!(
@@ -1214,7 +1290,7 @@ mod tests {
         // 下一用户轮：取消状态复位、完整历史携带、正常运行
         let mut sent2 = 0;
         let mut body2 = Value::Null;
-        let reply = run_tool_turn(
+        let reply = run_turn(
             &mut history,
             "next",
             &mut |b| {

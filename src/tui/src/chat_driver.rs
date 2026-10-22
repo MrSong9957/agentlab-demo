@@ -1216,6 +1216,8 @@ pub enum HostHistoryItem {
     Text { assistant: bool, content: String },
     /// exec_command 终态。`command` 为空＝参数不可解析（降级展示，不伪造命令）；
     /// 成功＝`error` 为 None 且退出码 0；`cancelled`＝独立"已取消"呈现（非"拒绝"）。
+    /// 016：`running`＝进程仍在运行（携带会话编号，write_stdin 可续接）；
+    /// write_stdin 的结果复用本形状，`command`＝关联的原命令（不伪造新命令）。
     Exec {
         command: String,
         output: String,
@@ -1223,6 +1225,7 @@ pub enum HostHistoryItem {
         cancelled: bool,
         error: Option<String>,
         duration_ms: Option<u64>,
+        running: Option<String>,
     },
     /// apply_patch 终态。`changes` 为空＝无真实差异数据（旧会话——明确降级，
     /// 不伪造 `+0 −0`）；`changed`＝降级文件清单（结果 JSON 路径）；
@@ -1337,7 +1340,25 @@ fn project_tool_item(
     use ratatui::style::Stylize as _;
     match item {
         HostHistoryItem::Text { .. } => Vec::new(), // 文本经 thread 投影，不在此处理
-        HostHistoryItem::Exec { command, output, exit_code, cancelled, error, duration_ms } => {
+        HostHistoryItem::Exec { command, output, exit_code, cancelled, error, duration_ms, running } => {
+            if let Some(session_id) = running {
+                // 016：进程仍在运行——独立"运行中"呈现，携带可续接会话编号；
+                // 不误报完成，输出如实展示已收集部分
+                let mut lines = Vec::new();
+                if !command.trim().is_empty() {
+                    lines.push(ratatui::text::Line::from(format!("$ {command}")).dim());
+                }
+                lines.push(ratatui::text::Line::from(format!(
+                    "仍在运行（会话 {session_id}）；可用 write_stdin 查询新输出或继续交互"
+                ).dim()));
+                if let Some(err) = error {
+                    lines.push(ratatui::text::Line::from(err.clone()).dim());
+                }
+                for line in output.lines() {
+                    lines.push(ratatui::text::Line::from(format!("  {line}")).dim());
+                }
+                return vec![Arc::new(PlainHistoryCell::new(lines))];
+            }
             if *cancelled {
                 // 需求④：取消明确显示为"已取消"，不机械映射"拒绝"；输出与原因如实呈现
                 return vec![Arc::new(cancelled_exec_cell(command, error.as_deref(), output))];
@@ -1724,6 +1745,7 @@ mod tests {
                     cancelled: false,
                     error: None,
                     duration_ms: Some(3),
+                running: None,
                 },
                 "call-argv",
                 std::path::Path::new("/"),
@@ -1752,6 +1774,7 @@ mod tests {
                 cancelled: true,
                 error: Some("执行已取消，已终止进程组".into()),
                 duration_ms: None,
+                running: None,
             },
             "call-c",
             std::path::Path::new("/"),
@@ -1770,6 +1793,7 @@ mod tests {
                 cancelled: true,
                 error: Some("用户取消，本调用未执行".into()),
                 duration_ms: None,
+                running: None,
             },
             "call-s",
             std::path::Path::new("/"),
@@ -1828,6 +1852,7 @@ mod tests {
                 cancelled: false,
                 error: None,
                 duration_ms: None,
+                running: None,
             },
             "call-nc",
             std::path::Path::new("/"),
@@ -1849,6 +1874,7 @@ mod tests {
                 cancelled: false,
                 error: None,
                 duration_ms: Some(12),
+                running: None,
             },
             "call-ok",
             std::path::Path::new("/"),
@@ -1865,6 +1891,7 @@ mod tests {
                 cancelled: false,
                 error: None,
                 duration_ms: None,
+                running: None,
             },
             "call-bad",
             std::path::Path::new("/"),

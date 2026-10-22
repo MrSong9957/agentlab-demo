@@ -553,6 +553,18 @@
 | A31（重置） | M7 | M9 实跑 `memory_runner` 22/22 的重置/交错写/旧任务/新代凭证用例、e2e S82；新增 `memory_lifecycle` 的 selection→sync 闸门及模型等待闸门，断言新代资源保留、旧任务不重建库/Git/产物、sessions 不变。Windows 无 flock 实证仍暂缓 |
 | A32（资源 14 天） | M9 | `memory_retention` 7/7：UTC 前后 1 秒/等号、说明存在、非法名/非 md/直属范围、链接根外、便条、真实删除失败继续；`memory_lifecycle::resource_deletion_reaches_merge_before_baseline_reset` 与同链证明资源删除进 diff→合并→Git。见 M9 记录 §2–§6 |
 
+### 测试加固与局部精简补充（2026-10-22，已验证）
+
+复用 M1/M2/M4 的既有契约及临时目录、`SteppedClock`、真实 SQLite、黄金文件设施；只改表内用例和必要测试辅助，不改默认连接配置、Schema、配置字段或导出行为。历史通过数量不作为本轮结果。
+
+| 落点 | 验收／覆盖保留与错误检出预测 | 状态 |
+|---|---|---|
+| M1：`memory_store::m1_two_store_instances_serialize_via_busy_timeout` | 先打开两个真实 `MemoryStore` 并准备数据，再由独立 SQLite 连接持有同库 `BEGIN IMMEDIATE` 写锁；用屏障／通道使被测写者在锁释放前进入操作、保持未完成，在默认等待期内释放后原调用成功。不能只靠线程就绪或固定 sleep 推断发生争用；保留两份结果及两连接交叉读到的完整值，失败也须释放锁并回收线程。测试不得补设 `busy_timeout`／`busy_handler`，并发迁移的自定义忙处理器不能替代默认配置验证。反证：仅在隔离副本中把生产连接改为零等待／遇锁立即报 busy，原调用成功及结果检查必须失败；恢复后通过 | ✅ 已验证（反证 H2 检出，见 [加固记录](../records/2026-10-22-test-hardening-round.md)） |
+| M1/M2：删除 `memory_candidates::m2_config_unknown_key_still_rejected` | 先把含 `enabled=true`、`max_rollouts_per_startup=2`、`bogus=1` 的完整样本并入 `memory_store::m1_config_rejects_wrong_type_and_unknown_keys`；保留 `enabled="yes"` 类型错误检查，并证明完整样本去掉 bogus 后可解析。临时允许 memories 未知字段，保留用例必须失败；恢复后通过，才可删除 M2 独立用例，不能删除配置校验覆盖 | ✅ 已验证（完整样本迁入 m1＋成功对照；反证 D4 检出，m2 用例已删） |
+| M4：合并 `m4_a20_add_matches_golden_files` 与 `m4_identical_snapshot_has_identical_file_set_and_bytes` | 同一用例按首次导出→再次导出组织，首次先核对完整黄金文件集合和每份字节、无通知、数据库未变；再次导出独立核对无通知、文件集合和字节与首次一致、数据库未变。不得只比较“两次相等”而跳过首次黄金检查，也不接受更新黄金文件来过关。临时使第二次导出重复追加内容，第二阶段字节断言必须失败；恢复后通过，才合并独立用例 | ✅ 已验证（合并为 `m4_a20_add_matches_golden_files_then_identical_resync`；反证 M1 检出） |
+
+旧租约在新结果产生前提交、在新结果产生后覆盖是两种状态保护，均保留；不扩大到清理、reset、权限或其他数据一致性测试的删减。
+
 ## 8. 边界与风险
 
 - 时间可控（注入时钟/固定时间戳）、离线 mock、不虚报未运行项——沿 AGENTS.md §3–§5。

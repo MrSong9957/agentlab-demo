@@ -1,14 +1,14 @@
 # 规格：最小模型请求组装（Codex 复用版）
 
-> 状态：已实现（组装与序列化已按 §5 验证；发送层接入与工具调用循环未做）　更新：2026-10-09
+> 状态：已实现（组装与序列化已按 §5 验证；发送层接入与工具调用循环未做；**016 修订：工具定义增至三项**）　更新：2026-10-22（016）
 > 母本：[openai/codex](https://github.com/openai/codex) 固定提交 `2fdf047c9631c9ed01a31b62efb7891718a931a8`（下表链接均指向该提交；[function-calling 格式](https://developers.openai.com/api/docs/guides/function-calling)）
-> 最小组装＝基础提示词（Codex 原文＋明确列出的必要适配）＋两个工具定义（Codex 母本）＋用户消息与历史（文本结构投影）。
+> 最小组装＝基础提示词（Codex 原文＋明确列出的必要适配）＋工具定义（016 起三项：exec_command、apply_patch、write_stdin）＋用户消息与历史（文本结构投影）。
 
 ## 1. 目标 & I/O
 
-- **目标**：组装基础提示词、两个工具定义、既有文本历史和当前用户消息，交给现有 Chat Completions 发送层（`src/api.rs::chat`）；不迁移 Responses。
+- **目标**：组装基础提示词、工具定义、既有文本历史和当前用户消息，交给现有 Chat Completions 发送层（`src/api.rs::chat`）；不迁移 Responses。
 - **输入**（三种，不可混配）：①**原始 prompt.md**——固定内置资源（`assets/codex/prompt.md`，构建期 `include_str!` 嵌入，与 Codex `model_info.rs` 加载方式相同，逐字节不改）；②**发送版提示词**——由母本经第 3 节四项适配得到，不可独立配置；③**调用输入**——按时间排列的 `user / assistant` 文本历史（不含系统消息与本轮输入）＋当前用户消息。不提供两份提示词可独立配置的接口。
-- **输出**：`{messages, tools}`。`messages` 顺序固定 `system(发送版提示词) → 历史 → user(当前输入)`；`tools` 恰为 `exec_command、apply_patch` 两个 function 定义。
+- **输出**：`{messages, tools}`。`messages` 顺序固定 `system(发送版提示词) → 历史 → user(当前输入)`；`tools` 恰为 `exec_command、apply_patch、write_stdin` 三个 function 定义（016：write_stdin 为进程会话交互入口）。
 - **约束**：本轮输入不得全为空白；历史可为空；角色、顺序、原文逐字保留；同一输入产出相同结果。
 - **范围**：仅组装并序列化；发送、解析、工具执行、结果回传另立规格。不引入记忆、检索、压缩、多媒体、模板选择系统、AGENTS.md 自动注入或其他工具。
 
@@ -45,7 +45,7 @@
 
 **协议映射（Codex 结构 → Chat Completions，保持现有发送层；本地 `system` 首位属接口适配）**：Codex 将基础提示词作为 developer 消息加入 `input` 前部（见对照行）；本地适配为 `messages[0] = {role:"system", content:发送版提示词}`。`ResponseItem::Message` 文本项 → `{role, content:string}`（历史逐条、本轮置末位）。`ToolSpec::Function` → `{type:"function", function:{name, description, parameters}}`。`ToolSpec::Freeform`（apply_patch）→ 适配为 Function（唯一必填字符串 `patch`，004 契约）：为保持本地 JSON 工具契约，不增加 custom 工具支持。`Prompt` 其余字段（`parallel_tool_calls`、`output_schema` 等）不映射、不声明。
 
-**工具定义（以本地既有契约为准，不改 003/004）**：`exec_command` 参数恰为 `cmd`（必填）、`workdir`、`timeout_ms`、`max_output_chars`；Codex 的 `tty/yield_time_ms/max_output_tokens/shell/login` 未实现不声明，描述按同步执行语义改写（原文"PTY/会话 ID"不适用）。`apply_patch` 描述复用 Codex 首句"The `apply_patch` tool can be used to edit files."，删除"FREEFORM… do not wrap the patch in JSON"（与 JSON 契约相反）；语法说明不含 Move to。
+**工具定义（016 修订：以本地 003/004/016 契约为准）**：`exec_command` 参数恰为 `cmd`（必填）、`workdir`、`yield_time_ms`、`timeout_ms`、`max_output_chars`、`tty`——默认可续接语义（等待只控制返回；运行中返回 `session_id`）；Codex 的 `max_output_tokens/shell/login` 未实现不声明。`write_stdin`（016 新增）参数恰为 `session_id`（必填）、`chars`、`yield_time_ms`、`max_output_chars`、`terminate`。`apply_patch` 描述复用 Codex 首句"The `apply_patch` tool can be used to edit files."，删除"FREEFORM… do not wrap the patch in JSON"（与 JSON 契约相反）；语法说明不含 Move to。三工具仅出现在用户轮请求面；内部记忆合并轮仍为受限 mem 工具（013）。
 
 ## 4. 坑记录 → 实测后同步到个人知识库
 
@@ -60,10 +60,10 @@
 |---|---|---|
 | 来源一致性（嵌入母本） | 嵌入的原始 `prompt.md` 与固定提交逐字节一致，不含任何剔除/改写 | 通过（`s1`：20903 字节、SHA-256 与锚点一致） |
 | 提示词适配（发送文本） | 实际发送的提示词＝母本仅经第 3 节四项适配，无其他改动；与嵌入母本是两个不同文本且可分别校验 | 通过（`s2`：与测试侧独立重建逐字节一致，17068 字节；无 `update_plan`/旧示例/注入声明残留） |
-| 空历史 | 恰 `system、user` 两条消息；恰两个工具定义 | 通过（`s3`：2 消息＋2 工具＋顶层恰 `{messages, tools}` 且均为 function（原 `s7` 断言并入），序列化 JSON 复核） |
+| 空历史 | 恰 `system、user` 两条消息；恰 `system、user` 消息与三工具定义（016） | 通过（`s3`：2 消息＋3 工具＋顶层恰 `{messages, tools}` 且均为 function（原 `s7` 断言并入），序列化 JSON 复核；016 适配后含 write_stdin） |
 | 两轮既有历史 | 角色、顺序、原文逐字保留；发送版提示词与本轮输入各恰出现一次 | 通过（`s4`：`system→user→assistant→user`；与历史同文的本轮输入不去重，恰 2 次；历史快照在组装与重复组装后均不变） |
 | 中文、引号、换行 | 序列化再解析后逐字一致 | 通过（`s4`（原 `s5` 场景并入）：引号/换行/制表符/emoji/反斜杠在历史与本轮输入逐字投影，序列化再解析逐字往返一致，换行以 `\n` 转义） |
-| 两工具白名单 | 名称恰为 `exec_command/apply_patch`；参数与 003/004 JSON 接口一致（`cmd`/`patch` 必填），无未实现字段、无 Move to、无 freeform 措辞 | 通过（`s6`：schema 与 `ExecArgs::from_value`/`apply_patch` 差分锚定——按 schema 构造的最小实参被接受、`tty`/额外字段被拒） |
+| 工具白名单（016：三项） | 名称恰为 `exec_command/apply_patch/write_stdin`；参数与 003/004/016 JSON 接口一致（`cmd`/`patch`/`session_id` 必填），无未声明字段、无 Move to、无 freeform 措辞 | 通过（`s6`：schema 与 `ExecArgs::from_value`/`apply_patch`/`WriteStdinArgs::from_value` 差分锚定——按 schema 声明键构造的最小实参被接受、未声明字段被拒） |
 | 协议映射 | 请求仍发 `POST {base}/chat/completions`；`tools` 为 function 数组；`system` 在首位、本轮 `user` 在末位 | 通过（`s3`（原 `s7` 断言并入）：顶层恰 `{messages, tools}`、function 数组；`s4`：system 首位/user 末位、角色仅 system/user/assistant；端点行为未改，由既有 `llm_flow` 用例保证） |
 | 重复组装 | 同一输入组装两次，输出完全相同 | 通过（`s4`（原 `s8` 场景并入）：同一输入两次组装，对每次结果分别核对消息序列、逐字内容与两工具定义——分别核对通过即蕴含输出相同，不以“两份相等”单独作证；输入历史不变） |
 | 空白本轮输入 | 返回明确错误，不产生请求片段；历史不变 | 通过（`s9`：空串/空白/全角空格三种形态明确报错，历史原样） |
@@ -75,3 +75,5 @@
 **测试精简（2026-10-10）**：九类验收要求不变；`s5`/`s7`/`s8` 三个测试函数分别并入 `s4`/`s3`（特殊字符样本、顶层键集与 function 类型、重复组装分别核对），`tests/prompt_assembly.rs` 由 9 个函数承载同口径断言。
 
 **固定边界同步（2026-10-10，N4）**：工具定义中 `timeout_ms` 描述为 1..=60000（默认 10000）、`max_output_chars` 为 1..=100000 码点（默认 10000）；最终模型请求 JSON（含 model、messages、tools、request_params 序列化后）≤10 MiB（UTF-8 字节），发送前经限计量序列化检查（不先生成无界缓冲），超限零发送并明确报错、本轮结束保留历史。
+
+**016 修订注记（2026-10-22，待批准）**：用户轮工具面由两项增至三项（`exec_command` 可续接语义＋新增 `write_stdin`）；`exec_command` 描述改为可续接语义（等待只控制返回、运行中返回句柄），参数表加入 `yield_time_ms`/`tty`，`timeout_ms` 描述取消 1..=60000 上限。测试同步：`s3`/`s4`/`s6` 按三工具契约更新（`prompt_assembly` 6/6 通过）；`tools` 数量断言在 tool_loop/llm_flow/e2e 同步为 3。本规格其余适配与母本锚定不变。

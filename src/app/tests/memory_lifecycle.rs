@@ -2,6 +2,7 @@
 #[path = "common/memory_v1.rs"]
 mod support;
 use serde_json::json;
+use terminal_chat::proc_session::ProcessManager;
 use std::cell::Cell;
 use std::fs;
 use support::{answer, artifacts, git, tools, Env, DAY, T0};
@@ -379,6 +380,7 @@ fn same_chain_registration_to_retention_remerge_and_injection() {
             root: &e.root,
             config: &enabled(),
         },
+    &ProcessManager::new(),
     )
     .unwrap();
     user.finished();
@@ -504,6 +506,7 @@ fn same_chain_registration_to_retention_remerge_and_injection() {
             root: &e.root,
             config: &enabled(),
         },
+    &ProcessManager::new(),
     )
     .unwrap();
     // Keep the age window open: the job watermark, not age or idle rejection, prevents re-extraction.

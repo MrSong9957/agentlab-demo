@@ -9,6 +9,7 @@
 mod common;
 
 use std::path::{Path, PathBuf};
+use terminal_chat::proc_session::ProcessManager;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -776,6 +777,7 @@ fn dispatch_rejects_unregistered_tools_in_merge_mode() {
         None,
         &mut |_| {},
         ToolMode::MemoryMerge { root: &root, system, expected_epoch: 0 },
+    &ProcessManager::new(),
     )
     .unwrap();
 
@@ -828,6 +830,7 @@ fn dispatch_rejects_unregistered_tools_in_merge_mode() {
         &mut |_| {},
         None,
         &mut |_| {},
+    &ProcessManager::new(),
     )
     .unwrap();
     assert_eq!(std::fs::read_to_string(&probe).unwrap(), "USER\n", "用户轮 exec 正常");
@@ -861,6 +864,7 @@ fn merge_cancel_shapes_per_tool() {
         Some(&cancel),
         &mut |_| {},
         ToolMode::MemoryMerge { root: &root, system, expected_epoch: 0 },
+    &ProcessManager::new(),
     )
     .unwrap_err();
     assert!(err.contains("用户已取消"));
@@ -913,6 +917,7 @@ fn merge_turn_request_cap_shared() {
         None,
         &mut |_| {},
         ToolMode::MemoryMerge { root: &root, system, expected_epoch: 0 },
+    &ProcessManager::new(),
     )
     .unwrap_err();
     assert_eq!(sent, 8);
@@ -1744,6 +1749,7 @@ fn merge_turn_batch_limit_shared() {
         None,
         &mut |_| {},
         ToolMode::MemoryMerge { root: &root, system, expected_epoch: 0 },
+    &ProcessManager::new(),
     )
     .unwrap_err();
     assert!(err.contains("超过上限 32"), "{err}");

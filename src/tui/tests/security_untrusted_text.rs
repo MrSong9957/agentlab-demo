@@ -19,6 +19,112 @@ use tchat_tui::chat_driver::HostHistoryItem;
 use tchat_tui::history_cell::HistoryCell;
 use tchat_tui::test_backend::VT100Backend;
 
+/// A7 唯一攻击标记：渲染器合法的光标／样式／超链接控制不含该标记——以此
+/// 区分外来载荷与合法控制，不对全部 ESC 一律拒绝。
+const ATK: &str = "ATK7QZ";
+
+/// 原始字节检查：进入 VT100 解析器**之前**捕获的字节流不得含带攻击标记的
+/// 外来序列（CSI／OSC 52／DCS／nF／C1 CSI／CR 六类）。两层判定：
+/// 1. 直接组合——引入符紧跟标记（覆盖 nF/CR 等短序列与刻意构造形态）；
+/// 2. 序列范围扫描——CSI/OSC/DCS/SOS/PM/APC 的完整序列内部出现标记（覆盖
+///    真实形态如 OSC 52 `\x1b]52;c;…`，标记与引入符隔着参数）。
+/// 这是比屏幕断言更强的证据：即使解析器吞掉序列、屏幕不含 ESC，也必须失败。
+fn assert_no_foreign_sequences(raw: &[u8], where_: &str) {
+    let atk = ATK.as_bytes();
+    let mut foreign: Vec<String> = Vec::new();
+    // 第一层：引入符＋标记直接相邻
+    for intro in [
+        b"\x1b[" as &[u8], b"\x1b]", b"\x1bP", b"\x1b(", b"\x1b)", b"\x9b", b"\r", b"\xc2\x9b",
+    ] {
+        let mut seq = intro.to_vec();
+        seq.extend_from_slice(atk);
+        if raw.windows(seq.len()).any(|w| w == seq.as_slice()) {
+            foreign.push(format!("直接组合 {:?}", String::from_utf8_lossy(&seq)));
+        }
+    }
+    // 第二层：完整序列范围内含标记
+    let mut i = 0;
+    while i < raw.len() {
+        let start = i;
+        let end;
+        match raw[i] {
+            0x1b if i + 1 < raw.len() && raw[i + 1] == b'[' => {
+                // CSI：参数/中间字节后由 0x40..=0x7E 终止
+                let mut j = i + 2;
+                while j < raw.len() && !(0x40..=0x7E).contains(&raw[j]) {
+                    j += 1;
+                }
+                end = j.min(raw.len() - 1);
+                i = end + 1;
+            }
+            0x1b if i + 1 < raw.len() && matches!(raw[i + 1], b']' | b'P' | b'X' | b'^' | b'_') => {
+                // OSC/DCS/SOS/PM/APC：BEL 或 ST（ESC \）终止
+                let mut j = i + 2;
+                while j < raw.len() {
+                    if raw[j] == 0x07 {
+                        break;
+                    }
+                    if raw[j] == 0x1b && j + 1 < raw.len() && raw[j + 1] == b'\\' {
+                        break;
+                    }
+                    j += 1;
+                }
+                end = j.min(raw.len() - 1);
+                i = end + 1;
+            }
+            0x9b => {
+                let mut j = i + 1;
+                while j < raw.len() && !(0x40..=0x7E).contains(&raw[j]) {
+                    j += 1;
+                }
+                end = j.min(raw.len() - 1);
+                i = end + 1;
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
+        }
+        let seq = &raw[start..=end];
+        if seq.windows(atk.len()).any(|w| w == atk) {
+            foreign.push(format!("序列含标记 {:?}", String::from_utf8_lossy(seq)));
+        }
+    }
+    assert!(
+        foreign.is_empty(),
+        "{where_}：外来注入序列直通 writer：{foreign:?}（原始字节片段 {:?}）",
+        String::from_utf8_lossy(&raw[..raw.len().min(400)])
+    );
+}
+
+/// 捕获进入 VT100 解析器前的原始字节：先记录再转发（A7 原始输出证据的测试侧
+/// 辅助，与 VT100Backend 的 parser 边界等价——不改生产渲染与过滤逻辑）。
+struct CapturingParser {
+    parser: vt100::Parser,
+    raw: Vec<u8>,
+}
+
+impl std::io::Write for CapturingParser {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.raw.extend_from_slice(buf);
+        self.parser.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.parser.flush()
+    }
+}
+
+/// 六类攻击载荷（各带唯一标记）：CSI 清屏、OSC 52 写剪贴板、nF 字符集、
+/// DCS、CR 行首覆盖、C1 单字节 CSI；字母 A–G 为正常文字探针。
+const ATTACK_PAYLOAD: &str = concat!(
+    "A", "\x1b[", "ATK7QZ", "2J", "B",           // CSI 清屏
+    "\x1b]52;c;", "ATK7QZ", "\x07", "C",          // OSC 52 剪贴板
+    "\x1b(", "ATK7QZ", "D",                       // nF 字符集
+    "\x1bP", "ATK7QZ", ";2|x\x1b\\", "E",         // DCS
+    "E2", "\r", "ATK7QZ", "F",                    // CR 行首覆盖
+    "\u{9b}", "ATK7QZ", "2J", "G",                // C1 CSI
+);
+
 fn vt_backend(width: u16, height: u16) -> VT100Backend {
     VT100Backend::new(width, height)
 }
@@ -106,35 +212,40 @@ fn a7_cr_overwrite_via_insert_history_bytes_is_neutralized() {
 
 #[test]
 fn a7_full_pipeline_writes_no_injected_control_sequences_to_terminal() {
-    // 字节级＋屏幕级双查（ASCII 载荷经 vt100；CJK 见 cell_screen_text 注释）：
-    // Paragraph 渲染 → Buffer（过滤边界）→ 逐 cell 写入 vt100 解析器 → 屏幕断言。
-    use std::io::Write as _;
+    // 原始字节＋屏幕双查（ASCII 载荷；CJK 见 cell_screen_text 注释）：
+    // Paragraph 渲染 → Buffer（过滤边界）→ 逐 cell 写入**捕获 writer**
+    //（进入 VT100 解析器之前）→ 原始字节断言＋解析后屏幕断言。
+    // 屏幕不含 ESC 不能作为原始字节安全证据——解析器消费的序列必须先在此拦截。
     use ratatui::widgets::Widget as _;
-    let payload = "A\x1b[2JB\x1b]0;t\x07C\x1b(D D\x1bP1;2|x\x1b\\E\rF\u{9b}2JG";
     let cell = tchat_tui::history_cell::AgentMarkdownCell::new_with_inline_visualizations(
-        payload.to_string(),
+        ATTACK_PAYLOAD.to_string(),
         std::path::Path::new("/tmp"),
         None,
     );
     let area = ratatui::layout::Rect::new(0, 0, 80, 24);
     let mut buf = ratatui::buffer::Buffer::empty(area);
     ratatui::widgets::Paragraph::new(cell.display_lines(80)).render(area, &mut buf);
-    let mut backend = vt_backend(80, 24);
+    let mut cap = CapturingParser { parser: vt100::Parser::new(24, 80, 0), raw: Vec::new() };
     for y in 0..area.height {
         for x in 0..area.width.saturating_sub(1) {
-            let _ = backend.write(buf.cell((x, y)).unwrap().symbol().as_bytes());
+            cap.write(buf.cell((x, y)).unwrap().symbol().as_bytes())
+                .expect("写入捕获 writer 成功");
         }
         if y + 1 < area.height {
-            let _ = backend.write(b"\r\n");
+            cap.write(b"\r\n").expect("行分隔写入成功");
         }
     }
-    let text = backend.vt100().screen().contents().to_string();
+    // 原始字节：无任何外来标记序列；正常文字确实直通（非空捕获）
+    assert_no_foreign_sequences(&cap.raw, "full_pipeline");
+    assert!(cap.raw.windows(1).any(|w| w[0] == b'A'), "正常文字进入 writer");
+    // 解析后屏幕：文字保留、序列零动作
+    let text = cap.parser.screen().contents().to_string();
     for ch in ['A', 'B', 'C', 'D', 'E', 'F', 'G'] {
         assert!(text.contains(ch), "文字 {ch} 保留：{text:?}");
     }
-    // 注入序列不得直通（控制字符不进 buffer；残余为可见文本如 "[2J"）
-    assert!(!text.contains('\x1b'));
-    assert!(!text.contains('\u{9b}'));
+    assert!(!text.contains('\x1b'), "屏幕无 ESC：{text:?}");
+    assert!(!text.contains('\u{9b}'), "屏幕无 C1 CSI：{text:?}");
+    assert!(!text.contains('\r'), "屏幕无 CR：{text:?}");
     // 屏幕级：[2J 若被执行则 A-G 全部消失——上方存在性断言即防清屏
 }
 
@@ -148,6 +259,7 @@ fn a7_resume_projection_of_tool_output_with_payload_is_neutralized() {
         cancelled: false,
         error: None,
         duration_ms: None,
+        running: None,
     }]);
     let mut all = String::new();
     for cell in &cells {
@@ -159,8 +271,9 @@ fn a7_resume_projection_of_tool_output_with_payload_is_neutralized() {
 }
 
 // A10 有效性证明在本文件外的验证记录中执行（临时破坏 sanitize/渲染→目标测试失败→恢复→复测）。
-// 这里固定断言：若有人移除 ratatui 的控制字符剥离（例如直接写 symbol 含 ESC），
-// a7_full_pipeline 测试将失败（因为 text.contains('\x1b')）。
+// 这里固定断言：外来序列若直通 writer（含被解析器消费、屏幕不可见的情形），
+// a7_full_pipeline／a7_byte_level 的**原始字节检查**先行失败；屏幕断言（若有人
+// 移除 ratatui 的控制字符剥离，ESC 会出现在屏幕文本）为第二道防线。
 
 #[test]
 fn a7_error_message_cell_with_payload_is_neutralized() {
@@ -194,25 +307,39 @@ fn a7_startup_audit_notice_with_hostile_path_is_neutralized() {
 
 #[test]
 fn a7_byte_level_writer_passthrough_check() {
-    // 字节级直查：把渲染后的行经 TermWrite（backend 的 write 路径）写出，
-    // 捕获原始字节断言无 ESC 序列。
-    let payload = "X\x1b[31mY";
+    // 真实 draw 路径的原始字节直查：CrosstermBackend 写出的字节先经捕获 writer
+    // 记录、再进入 VT100 解析器——draw 产生的**合法**光标/样式控制序列（含 ESC）
+    // 必须存在（正向对照，证明捕获边界看到了真实渲染输出、检查并非一刀切拒绝
+    // ESC），而带唯一标记的外来载荷序列不得出现。
     let cell = tchat_tui::history_cell::AgentMarkdownCell::new_with_inline_visualizations(
-        payload.to_string(),
+        ATTACK_PAYLOAD.to_string(),
         std::path::Path::new("/tmp"),
         None,
     );
-    let mut backend = vt_backend(40, 10);
-    let mut term = tchat_tui::custom_terminal::Terminal::with_options(backend).expect("terminal");
-    term.set_viewport_area(ratatui::layout::Rect::new(0, 0, 40, 10)); // 008-ADAPT：同上
-    let _ = term.draw(|frame| {
-        use ratatui::widgets::Widget as _;
-        let area = frame.area();
-        ratatui::widgets::Paragraph::new(cell.display_lines(40)).render(area, frame.buffer_mut());
-    });
-    let text = term.backend_mut().vt100().screen().contents().to_string();
-    assert!(text.contains('X') && text.contains('Y'));
-    assert!(!text.contains('\x1b') && !text.contains('\u{9b}'));
+    let mut cap = CapturingParser { parser: vt100::Parser::new(10, 80, 0), raw: Vec::new() };
+    {
+        let backend = ratatui::prelude::CrosstermBackend::new(&mut cap);
+        let mut term = tchat_tui::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        term.set_viewport_area(ratatui::layout::Rect::new(0, 0, 80, 10)); // 008-ADAPT：同上
+        term.draw(|frame| {
+            use ratatui::widgets::Widget as _;
+            let area = frame.area();
+            ratatui::widgets::Paragraph::new(cell.display_lines(80)).render(area, frame.buffer_mut());
+        })
+        .expect("draw 必须成功");
+    }
+    // 正向对照：渲染器合法控制序列（ESC 引导）确实流经 writer——检查不误报
+    assert!(
+        cap.raw.windows(2).any(|w| w == b"\x1b["),
+        "渲染器合法 CSI 控制应存在于原始字节（否则捕获未生效）"
+    );
+    // 外来标记序列零直通；正常文字保留
+    assert_no_foreign_sequences(&cap.raw, "draw 路径");
+    let text = cap.parser.screen().contents().to_string();
+    for ch in ['A', 'B', 'C', 'D', 'E', 'F', 'G'] {
+        assert!(text.contains(ch), "文字 {ch} 保留：{text:?}");
+    }
+    assert!(!text.contains('\x1b') && !text.contains('\u{9b}') && !text.contains('\r'));
 }
 
 // ---------- 012 扩展：工具命令/diff 载体注入 ----------
@@ -229,6 +356,7 @@ fn a7_exec_cell_command_payload_is_neutralized() {
         cancelled: false,
         error: None,
         duration_ms: None,
+        running: None,
     }]);
     let mut all = String::new();
     for cell in &cells {
@@ -275,6 +403,7 @@ fn a7_cancelled_cell_payload_is_neutralized() {
         cancelled: true,
         error: Some("取消原因 \u{1b}(B".into()),
         duration_ms: None,
+        running: None,
     }]);
     let mut all = String::new();
     for cell in &cells {
@@ -283,3 +412,29 @@ fn a7_cancelled_cell_payload_is_neutralized() {
     assert!(all.contains("run") && all.contains("partial"), "文本可见：{all:?}");
     assert!(!all.contains('\u{1b}'), "控制序列不得出现：{all:?}");
 }
+
+/// 016 A7 扩展：运行中会话 cell（running＋会话编号＋已收集输出）携带注入序列——
+/// 经降级渲染（PlainHistoryCell 文本行）零动作，PTY 输出继续被过滤。
+#[test]
+fn a7_running_session_cell_payload_is_neutralized() {
+    let cells = tchat_tui::chat_driver::project_history(vec![HostHistoryItem::Exec {
+        command: "srv \u{1b}[2Jx".into(),
+        output: "boot \u{1b}]52;c;evil\u{07} ready".into(),
+        exit_code: None,
+        cancelled: false,
+        error: None,
+        duration_ms: Some(12),
+        running: Some("s7\u{1b}(B".into()),
+    }]);
+    let mut all = String::new();
+    for cell in &cells {
+        all.push_str(&cell_screen_text(cell.as_ref(), 80));
+    }
+    // 宽度渲染会插入空格：以去空白视图断言
+    let compact: String = all.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(compact.contains("仍在运行"), "运行中独立呈现：{all:?}");
+    assert!(compact.contains("write_stdin"), "提示可续接：{all:?}");
+    assert!(compact.contains("boot") && compact.contains("ready"), "输出文本可见：{all:?}");
+    assert!(!all.contains('\u{1b}'), "控制序列不得出现（含会话编号载荷）：{all:?}");
+}
+

@@ -279,11 +279,19 @@ fn tool_child_mode() {
     let spec: Value =
         serde_json::from_str(&std::fs::read_to_string(&input_path).unwrap()).unwrap();
     let result = match spec["tool"].as_str().unwrap() {
-        "exec_command" => serde_json::to_value(terminal_chat::exec::exec_command(
-            &spec["input"],
-            None,
-        ))
-        .unwrap(),
+        "exec_command" => {
+            // 016：经进程会话管理器执行（短命令在等待窗口内完成；子进程退出即关）
+            let mgr = terminal_chat::proc_session::ProcessManager::new();
+            let outcome = match terminal_chat::exec::ExecArgs::from_value(&spec["input"]) {
+                Ok(args) => mgr.start(&args, None),
+                Err(msg) => terminal_chat::proc_session::ToolOutcome::from(
+                    terminal_chat::exec::ExecResult::error(msg),
+                ),
+            };
+            let result = outcome.result;
+            mgr.close();
+            serde_json::to_value(result).unwrap()
+        }
         "apply_patch" => serde_json::to_value(terminal_chat::apply_patch::apply_patch(
             &spec["input"],
         ))
@@ -501,7 +509,7 @@ fn s1_pty_normal_session_full_roundtrip() {
     );
     assert_eq!(body["messages"][2]["role"], "user");
     assert_eq!(body["messages"][2]["content"], "你好");
-    assert_eq!(body["tools"].as_array().unwrap().len(), 2);
+    assert_eq!(body["tools"].as_array().unwrap().len(), 3, "016：三工具");
     // 凭证明文不回显；已授权命中不改写授权记录
     assert!(!out.contains(key), "密钥明文不得出现在终端输出");
     assert_eq!(
@@ -1007,7 +1015,7 @@ fn s6_json_host_exec_command_streams_exit_and_pgroup_timeout() {
     }));
     assert_eq!(r["status"], json!("timeout"), "{r}");
     assert_eq!(r["exit_code"], json!(null), "被信号终止无整数退出码：{r}");
-    assert!(r["error"].as_str().unwrap().contains("超时"), "{r}");
+    assert!(r["error"].as_str().unwrap().contains("时限"), "016 错误措辞：{r}");
     // 写入循环确实运行过
     let s = fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
     assert!(s > 0, "后台孙进程应已写入日志");
@@ -1154,7 +1162,7 @@ fn auth_n04_refresh_first_use_authorization_via_repl() {
 /// 后代停止写盘；同批剩余调用不执行且每个已记录调用都有匹配 tool 结果（下一次
 /// 请求携带完整历史核验）；取消后不自动请求模型；下一用户轮正常。
 #[test]
-fn n2b_esc_interrupt_cancels_tool_group_cli_alive() {
+fn n2b_esc_cancel_keeps_process_cli_alive_cleans_on_exit() {
     let cfg = TempDir::new("n2b-cfg");
     let user = TempDir::new("n2b-user");
     let work = TempDir::new("n2b-work");
@@ -1195,16 +1203,17 @@ fn n2b_esc_interrupt_cancels_tool_group_cli_alive() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert_eq!(grew, 1, "写盘探针应已运行");
-    // Ctrl+C：取消命令进程组，CLI 必须存活并在 3 秒内回到聊天入口
-    // 008-ADAPT：取消错误经 Failed 路径渲染为 "错误：" 屏幕单元（3 秒 SLA 不变）
+    // 016：Esc＝取消当前轮——停止 AI 工作与等待，已启动进程仍由会话管理；
+    // CLI 必须存活并在 3 秒内回到聊天入口（错误经 Failed 路径渲染）
     pty.send_raw(b"\x1b"); // 单一职责轮：Esc＝取消
     pty.wait_screen_timeout("错误：", std::time::Duration::from_secs(3))
         .expect("取消后应报错并返回聊天入口");
+    pty.wait_screen("仍由会话管理").expect("016：取消消息列出仍有效的会话编号");
     let s1 = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
     assert!(s1 > 0);
     std::thread::sleep(std::time::Duration::from_millis(300));
     let s2 = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
-    assert_eq!(s1, s2, "取消后写盘停止");
+    assert!(s2 > s1, "016：取消当前轮不终止已启动进程，写盘继续");
     assert!(!second.exists(), "同批剩余调用不得执行");
     assert_eq!(mock.count(), 1, "取消后不得自动请求模型");
     // 下一用户轮正常，且下一个请求携带完整取消历史
@@ -1221,20 +1230,31 @@ fn n2b_esc_interrupt_cancels_tool_group_cli_alive() {
     let r1: serde_json::Value = serde_json::from_str(msgs[4]["content"].as_str().unwrap()).unwrap();
     assert_eq!(msgs[4]["tool_call_id"], json!("call-n2b-writer"));
     assert_eq!(r1["status"], json!("cancelled"), "执行中调用按 cancelled 结构记录：{r1}");
+    assert!(r1["session_id"].is_string(), "016：取消后保留可续接句柄：{r1}");
     let r2: serde_json::Value = serde_json::from_str(msgs[5]["content"].as_str().unwrap()).unwrap();
     assert_eq!(msgs[5]["tool_call_id"], json!("call-n2b-second"));
     assert_eq!(r2["status"], json!("cancelled"), "未执行调用记录未执行原因：{r2}");
+    assert!(r2["session_id"].is_null(), "016：未执行调用＝空句柄：{r2}");
     assert!(r2["error"].as_str().unwrap().contains("未执行"), "{r2}");
     pty.send_line("/exit"); // 008-ADAPT：TUI 退出走 /exit
     pty.wait_output("再见!", WATCHDOG).unwrap();
     let (out, status) = pty.finish();
     assert_eq!(status.code(), Some(0), "CLI 必须存活并干净退出：{out}");
+    // 016：宿主退出清理——全部进程会话关闭，写盘停止
+    let s3 = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+    std::thread::sleep(std::time::Duration::from_millis(350));
+    assert_eq!(
+        s3,
+        std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0),
+        "退出后受管理进程必须被清理"
+    );
 }
 
-/// N2b-混合批（验收轮）：执行中的 exec_command＋待执行的 apply_patch——取消后
-/// exec 进程组停止、apply_patch 目标无变化；每个 call_id 恰一条结果且结构符合
-/// 各自工具契约（exec：cancelled；apply_patch：ok=false＋未执行原因）；
-/// 无自动续请求；下一用户轮携带完整历史并正常运行。
+/// N2b-混合批（016 语义）：执行中的 exec_command＋待执行的 apply_patch——取消后
+/// exec 进程保留并由会话管理（继续写盘）、apply_patch 目标无变化；每个 call_id
+/// 恰一条结果且结构符合各自工具契约（exec：cancelled＋句柄；apply_patch：
+/// ok=false＋未执行原因）；无自动续请求；下一用户轮携带完整历史并正常运行；
+/// 退出时宿主清理全部进程会话。
 #[test]
 fn n2b2_mixed_batch_cancel_per_tool_result_shapes() {
     let cfg = TempDir::new("n2b2-cfg");
@@ -1295,7 +1315,10 @@ fn n2b2_mixed_batch_cancel_per_tool_result_shapes() {
     pty.wait_screen_timeout("错误：", std::time::Duration::from_secs(3)).unwrap();
     let s1 = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
     std::thread::sleep(std::time::Duration::from_millis(300));
-    assert_eq!(s1, std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0), "exec 进程组停止写盘");
+    assert!(
+        std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0) > s1,
+        "016：取消当前轮不终止已启动进程，写盘继续"
+    );
     assert!(!target.exists(), "apply_patch 未执行：目标不得被创建/修改");
     assert_eq!(mock.count(), 1, "无自动续请求");
     pty.send_line("next");
@@ -1311,6 +1334,7 @@ fn n2b2_mixed_batch_cancel_per_tool_result_shapes() {
     assert_eq!(msgs[4]["tool_call_id"], json!("call-mix-exec"));
     let re: serde_json::Value = serde_json::from_str(msgs[4]["content"].as_str().unwrap()).unwrap();
     assert_eq!(re["status"], json!("cancelled"), "exec 结果用其 cancelled 结构：{re}");
+    assert!(re["session_id"].is_string(), "016：取消后保留可续接句柄：{re}");
     assert_eq!(msgs[5]["tool_call_id"], json!("call-mix-patch"));
     let rp: serde_json::Value = serde_json::from_str(msgs[5]["content"].as_str().unwrap()).unwrap();
     assert_eq!(rp["ok"], json!(false), "apply_patch 结果用其契约结构：{rp}");
@@ -1320,6 +1344,14 @@ fn n2b2_mixed_batch_cancel_per_tool_result_shapes() {
     pty.wait_output("再见!", WATCHDOG).unwrap();
     let (out, status) = pty.finish();
     assert_eq!(status.code(), Some(0), "{out}");
+    // 016：宿主退出清理——全部进程会话关闭，写盘停止
+    let s3 = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+    std::thread::sleep(std::time::Duration::from_millis(350));
+    assert_eq!(
+        s3,
+        std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0),
+        "退出后受管理进程必须被清理"
+    );
 }
 
 // ---------- S10：TUI 内 /resume 投影渲染（008 P3 真实调用链）----------
@@ -3720,6 +3752,32 @@ impl PtySession {
         std::thread::sleep(std::time::Duration::from_millis(60));
         self.send_raw(&sgr_up(5, row));
     }
+
+    /// 012 §7 辅助：needle 所在行是否存在粗体格。聚焦态披露行被加粗去暗
+    ///（render_disclosure：accent＋bold），未聚焦为暗淡——F4 聚焦在位的
+    /// **非清焦**屏幕证据（不经 Enter 打开详情页）。
+    fn needle_row_bold(&mut self, needle: &str) -> Option<bool> {
+        self.feed_screen();
+        let screen = self.vt.vt100().screen();
+        for row in 0..PTY_ROWS {
+            let mut line = String::new();
+            let mut bolds: Vec<bool> = Vec::new();
+            for col in 0..PTY_COLS {
+                if let Some(cell) = screen.cell(row, col) {
+                    for ch in cell.contents().chars() {
+                        line.push(ch);
+                        bolds.push(cell.bold());
+                    }
+                }
+            }
+            if let Some(pos) = line.find(needle) {
+                let idx = line[..pos].chars().count();
+                let len = needle.chars().count();
+                return Some(bolds[idx..idx + len].iter().any(|b| *b));
+            }
+        }
+        None
+    }
 }
 
 /// S40：左键拖选历史文字＋右键复制——裸流出现 OSC 52 载荷且解码＝针文本；
@@ -4907,22 +4965,43 @@ fn s60_draft_then_f4_enter_still_controls_tool() {
 }
 
 /// S61（D5）：F4 聚焦后重新键入或粘贴 → Enter 正常提交（两路径各一会话）。
+/// 聚焦在位证据（不清焦）：聚焦态披露行被加粗去暗（render_disclosure 的
+/// accent＋bold），F4 前后屏幕样式可区分且请求计数未增加——F4 事件本身不算
+/// 证据。随后**不打开详情页清焦**（open_tool_detail 会清焦，K-D），直接键入／
+/// 粘贴（输入动作本身必须解除聚焦），Enter 提交。
 #[test]
 fn s61_f4_then_retype_or_paste_then_enter_submits() {
-    // 会话一：F4 → 逐字键入（字符清焦＝vendored「Ordinary text resumes composing」）
+    // 会话一：F4（披露行加粗＝聚焦证据）→ 直接逐字键入（字符清焦＝vendored
+    // 「Ordinary text resumes composing」）→ Enter 提交
     let (mut pty, mock, _keep) = focus_session57("S61", "S61-新回复已收到");
     pty.wait_screen("? for shortcuts").unwrap();
     pty.send_line("跑");
     pty.wait_screen("S61-第一段完成").unwrap();
     pty.dwell(300);
+    // 基线对照：未聚焦时披露行不加粗（区分聚焦／未聚焦的屏幕证据）
+    assert_ne!(
+        pty.needle_row_bold("for details"),
+        Some(true),
+        "F4 前披露行不应加粗：\n{}",
+        pty.screen()
+    );
     pty.send_raw(b"\x1bOS");
-    pty.dwell(300);
-    // 聚焦在位证明：此刻 Enter＝打开详情页（而非提交）
-    pty.send_raw(b"\r");
-    pty.wait_screen("back to conversation").expect("聚焦态 Enter＝打开详情页（证明）");
-    pty.send_raw(b"q"); // 单一职责轮：q 关页
-    pty.dwell(300);
-    // 重新逐字键入（打开页即清焦）→ Enter 提交
+    // 聚焦在位证据：披露行加粗（有界等待）。不经 Enter 打开详情页
+    //（那会清焦，沿用已清焦状态不算证明）。
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        pty.read_once(60);
+        if pty.needle_row_bold("for details") == Some(true) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "F4 聚焦证据超时（披露行未加粗）：\n{}",
+            pty.screen()
+        );
+    }
+    assert_eq!(mock.count(), 2, "聚焦本身不得发送请求");
+    // 直接逐字键入：输入动作必须解除聚焦（不先开详情页清焦）
     for ch in "键入后提交".chars() {
         let mut buf = [0u8; 4];
         pty.send_raw(ch.encode_utf8(&mut buf).as_bytes());
@@ -4931,33 +5010,73 @@ fn s61_f4_then_retype_or_paste_then_enter_submits() {
     pty.dwell(200);
     pty.send_raw(b"\r");
     wait_submitted_then_show_reply(&mut pty, &mock, 3, "S61-新回复已收到");
+    assert_eq!(mock.count(), 3, "恰好三轮请求");
+    // 实际提交文本逐字完整（按内容定位用户轮请求，不假设请求序）
+    assert!(
+        mock.requests().iter().any(|r| {
+            let b: Value = serde_json::from_str(&r.body).unwrap();
+            b["messages"].as_array().is_some_and(|m| {
+                m.iter()
+                    .any(|x| x["role"] == "user" && x["content"].as_str() == Some("键入后提交"))
+            })
+        }),
+        "新请求的实际用户文本必须逐字完整"
+    );
+    // Enter 未被旧工具吞掉打开详情页
+    assert!(!pty.screen().contains("back to conversation"), "旧详情页未被打开");
     pty.send_line("/exit");
     pty.wait_output("再见!", WATCHDOG).unwrap();
-    let _ = pty.finish();
+    let (out, status) = pty.finish();
+    assert_eq!(status.code(), Some(0), "{out}");
 
-    // 会话二：F4 → 粘贴（012 §7 Paste 清焦修复路径）
+    // 会话二：F4（披露行加粗＝聚焦证据）→ 直接粘贴（012 §7 Paste 清焦修复
+    // 路径）→ Enter 提交
     let (mut pty, mock, _keep) = focus_session57("S61b", "S61b-新回复已收到");
     pty.wait_screen("? for shortcuts").unwrap();
     pty.send_line("跑");
     pty.wait_screen("S61b-第一段完成").unwrap();
     pty.dwell(300);
+    assert_ne!(
+        pty.needle_row_bold("for details"),
+        Some(true),
+        "F4 前披露行不应加粗：\n{}",
+        pty.screen()
+    );
     pty.send_raw(b"\x1bOS");
-    pty.dwell(300);
-    // 聚焦在位证明：此刻 Enter＝打开详情页（而非提交）
-    pty.send_raw(b"\r");
-    pty.wait_screen("back to conversation").expect("聚焦态 Enter＝打开详情页（证明）");
-    pty.send_raw(b"q"); // 单一职责轮：q 关页
-    pty.dwell(300);
-    // 重新粘贴（打开页即清焦；Paste 清焦修复路径仍在）→ Enter 提交
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        pty.read_once(60);
+        if pty.needle_row_bold("for details") == Some(true) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "F4 聚焦证据超时（披露行未加粗）：\n{}",
+            pty.screen()
+        );
+    }
+    assert_eq!(mock.count(), 2, "聚焦本身不得发送请求");
+    // 直接粘贴：Paste 事件必须解除聚焦
     pty.send_raw(b"\x1b[200~\xe7\xb2\x98\xe8\xb4\xb4\xe5\x90\x8e\xe6\x8f\x90\xe4\xba\xa4\x1b[201~");
     pty.dwell(300);
     pty.send_raw(b"\r");
     wait_submitted_then_show_reply(&mut pty, &mock, 3, "S61b-新回复已收到");
+    assert_eq!(mock.count(), 3, "恰好三轮请求");
+    assert!(
+        mock.requests().iter().any(|r| {
+            let b: Value = serde_json::from_str(&r.body).unwrap();
+            b["messages"].as_array().is_some_and(|m| {
+                m.iter()
+                    .any(|x| x["role"] == "user" && x["content"].as_str() == Some("粘贴后提交"))
+            })
+        }),
+        "粘贴文本必须逐字完整提交"
+    );
+    assert!(!pty.screen().contains("back to conversation"), "旧详情页未被打开");
     pty.send_line("/exit");
     pty.wait_output("再见!", WATCHDOG).unwrap();
     let (out, status) = pty.finish();
     assert_eq!(status.code(), Some(0), "{out}");
-    assert_eq!(mock.count(), 3);
 }
 
 /// S62（D7，用户 03 场景）：工具 `for i in $(seq 1 30); do echo E$i; done; exit 4`

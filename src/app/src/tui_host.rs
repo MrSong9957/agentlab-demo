@@ -26,6 +26,7 @@ use tchat_tui::chat_driver::ToolBeginKind;
 
 use crate::prompt::HistoryItem;
 use crate::prompt::ToolDisplay;
+use crate::proc_session::ProcessManager;
 use crate::{api, catalog, session, turn};
 
 /// 是否应进入 TUI 模式。
@@ -51,12 +52,19 @@ pub struct TuiHost {
     authorized: Arc<Mutex<Option<(String, String)>>>,
     /// 013-M7：threads 登记推进器（缓存库连接；在 autosave 锁内串行访问）。
     registrar: Arc<Mutex<crate::memory::runner::ThreadRegistrar>>,
+    /// 016：进程会话管理器（当前对话；跨轮保留进程，TUI Ctrl+C 退出时关闭）。
+    procs: ProcessManager,
 }
 
 impl TuiHost {
     /// 驱动取消钩子直连（006 N2b：置标志→工具线程终止进程组）。
     pub fn set_cancel(&self, requested: bool) {
         HOST_CANCEL.store(requested, Ordering::SeqCst);
+    }
+
+    /// 016：宿主退出（TUI Ctrl+C）——显式关闭全部进程会话并回收。
+    pub fn close_process_sessions(&self) {
+        self.procs.close();
     }
 
     pub fn new(agent: ureq::Agent, autosave: session::Session) -> Self {
@@ -68,6 +76,7 @@ impl TuiHost {
             registrar: Arc::new(Mutex::new(
                 crate::memory::runner::ThreadRegistrar::default(),
             )),
+            procs: ProcessManager::new(),
         }
     }
 
@@ -124,6 +133,7 @@ impl TuiHost {
         let agent = self.agent.clone();
         let authorized_guard = self.authorized.clone();
         let registrar = self.registrar.clone();
+        let procs = self.procs.clone();
         let tx_panic = tx.clone();
         std::thread::spawn(move || {
             // 008：线程异常终止（如毒锁 panic）不得静默——回推 Failed 让驱动恢复
@@ -218,11 +228,19 @@ impl TuiHost {
             };
             // 012：工具活动结构化事件→驱动工具 cell；Info 保持单行提示通道。
             // 参数不可解析（exec 无 cmd）或未知工具回退原活动行（Info）。
+            // 016：write_stdin 的 Begin/End 关联原命令（会话记录），不伪造新命令；
+            // 运行中状态携带会话编号，独立呈现。
+            let procs_for_notify = procs.clone();
             let mut notify = |n: turn::TurnNotify| {
                 let ev: Option<DriverEvent> = match n {
                     turn::TurnNotify::Info(line) => Some(DriverEvent::Info(line)),
                     turn::TurnNotify::ToolBegin { id, name, arguments } => {
-                        Some(tool_begin_event(&name, &id, &arguments).unwrap_or_else(|| {
+                        let ev = if name == "write_stdin" {
+                            stdin_begin_event(&procs_for_notify, &id, &arguments)
+                        } else {
+                            tool_begin_event(&name, &id, &arguments)
+                        };
+                        Some(ev.unwrap_or_else(|| {
                             DriverEvent::Info(turn::tool_activity_line(&name, &id))
                         }))
                     }
@@ -276,6 +294,7 @@ impl TuiHost {
                 &mut on_record,
                 mode,
                 &context_sources,
+                &procs,
             );
             unsafe {
                 libc::signal(libc::SIGINT, libc::SIG_DFL);
@@ -297,7 +316,19 @@ impl TuiHost {
                     crate::memory::feedback::after_user_turn(&mem_user_dir, &mem_config, &reply);
                 }
                 Err(e) => {
-                    let _ = tx.send(DriverEvent::Failed(e));
+                    // 016：取消当前轮 ≠ 终止进程——Failed 消息明确区分“停止 AI
+                    // 工作”与“已启动进程仍由会话管理”，并列出仍有效的编号
+                    //（以 turn 常量为事实来源，不反解析消息文本）。
+                    let mut msg = e;
+                    if msg.starts_with(turn::CANCELLED_TURN_ERROR_PREFIX) {
+                        msg.push('\n');
+                        msg.push_str(
+                            procs.live_sessions_note().as_deref().unwrap_or(
+                                "已停止当前工作；本轮没有仍在运行的进程会话。",
+                            ),
+                        );
+                    }
+                    let _ = tx.send(DriverEvent::Failed(msg));
                 }
             }
             }));
@@ -480,6 +511,8 @@ impl TuiHost {
         match resume_result {
             Ok((summary, loaded)) => {
                 *self.history.lock().unwrap_or_else(|e| e.into_inner()) = loaded;
+                // 016：对话切换成功——关闭旧对话全部进程会话，新对话从空管理器开始。
+                self.procs.reset();
                 // 投影历史为 cells 交驱动渲染（不重放工具）
                 let cells = self.resumed_projection();
                 CommandOutcome::ReplaceCells { output: summary, cells }
@@ -533,10 +566,16 @@ fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
             }
             HistoryItem::ToolResult { tool_call_id, content, display } => {
                 // 无配对或未知工具：按普通文本投影结果内容（不丢失历史）
-                let item = pending
-                    .remove(tool_call_id)
+                let paired = pending.remove(tool_call_id);
+                // 016：恢复历史中的 running 只表示当时状态——不作为当前活会话
+                // 展示（/resume 已重置管理器，旧句柄失效），按事实文本呈现。
+                let item = paired
                     .and_then(|(name, arguments)| {
-                        tool_end_item(&name, &arguments, content, display.as_ref(), false)
+                        if result_was_running(content) {
+                            restored_running_text(&name, &arguments, content, display.as_ref())
+                        } else {
+                            tool_end_item(&name, &arguments, content, display.as_ref(), false)
+                        }
                     })
                     .unwrap_or(HostHistoryItem::Text {
                         assistant: true,
@@ -582,10 +621,73 @@ fn tool_begin_event(
     }
 }
 
+/// 016：write_stdin 的 Begin——关联原命令（取自会话记录），不伪造一条新命令；
+/// 句柄未知或参数不可解析返回 None（回退原活动行）。
+fn stdin_begin_event(
+    procs: &ProcessManager,
+    id: &str,
+    arguments: &str,
+) -> Option<DriverEvent> {
+    let sid = serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()
+        .and_then(|v| {
+            v.get("session_id")
+                .and_then(|s| s.as_str())
+                .map(str::to_string)
+        })?;
+    let command = procs.session_command(&sid)?;
+    Some(DriverEvent::ToolBegin {
+        id: id.to_string(),
+        kind: ToolBeginKind::Exec { command },
+    })
+}
+
+/// 016：结果 JSON 的 status 是否为 running（恢复投影识别“当时仍在运行”）。
+fn result_was_running(result: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(result)
+        .ok()
+        .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(|s| s == "running"))
+        .unwrap_or(false)
+}
+
+/// 016：恢复历史中“当时仍在运行”的记录——按事实文本呈现（命令关联＋已收集
+/// 输出＋明确“恢复后不再受管理”），不渲染为可交互的活会话 cell。
+fn restored_running_text(
+    name: &str,
+    arguments: &str,
+    result: &str,
+    display: Option<&ToolDisplay>,
+) -> Option<HostHistoryItem> {
+    let v: serde_json::Value = serde_json::from_str(result).ok()?;
+    let command = if name == "write_stdin" {
+        match display {
+            Some(ToolDisplay::Stdin { command, .. }) => command.clone(),
+            _ => String::new(),
+        }
+    } else {
+        arg_cmd(arguments).unwrap_or_default()
+    };
+    let sid = v.get("session_id").and_then(|s| s.as_str()).unwrap_or("?");
+    let output = v.get("output").and_then(|o| o.as_str()).unwrap_or_default();
+    let mut content = if command.trim().is_empty() {
+        format!("{name} 记录时仍在运行（会话 {sid}；恢复后进程不再受本会话管理）。")
+    } else {
+        format!("{name}（{command}）记录时仍在运行（会话 {sid}；恢复后进程不再受本会话管理）。")
+    };
+    if !output.is_empty() {
+        content.push_str("已收集输出：\n");
+        content.push_str(output);
+    }
+    Some(HostHistoryItem::Text { assistant: true, content })
+}
+
 /// 012：工具终态 → HostHistoryItem（实时 ToolEnd 与 /resume 投影共用）。
-/// 取消判定：exec＝结果 JSON `status=="cancelled"`（被杀执行，新旧会话通用）；
-/// patch＝事件旗标（实时）或 [`turn::SKIPPED_BY_CANCEL_MESSAGE`] 精确匹配（恢复
-/// 路径——单一生产者常量）。解析失败返回 None（调用方按普通文本处理）。
+/// 取消判定：exec＝结果 JSON `status=="cancelled"`（等待被取消，进程可能仍在，
+/// 016 起不再等同“已终止”）；patch＝事件旗标（实时）或
+/// [`turn::SKIPPED_BY_CANCEL_MESSAGE`] 精确匹配（恢复路径——单一生产者常量）。
+/// 016：write_stdin 复用 Exec 形状——`command`＝关联原命令（优先取展示数据，
+/// 旧记录缺失时留空降级），运行中携带会话编号（running）。
+/// 解析失败返回 None（调用方按普通文本处理）。
 fn tool_end_item(
     name: &str,
     arguments: &str,
@@ -595,12 +697,30 @@ fn tool_end_item(
 ) -> Option<HostHistoryItem> {
     let v: serde_json::Value = serde_json::from_str(result).ok()?;
     match name {
-        "exec_command" => {
-            let command = arg_cmd(arguments).unwrap_or_default();
-            let duration_ms = match display {
-                Some(ToolDisplay::Exec { duration_ms }) => Some(*duration_ms),
-                _ => None,
+        "exec_command" | "write_stdin" => {
+            let (command, duration_ms) = if name == "write_stdin" {
+                match display {
+                    Some(ToolDisplay::Stdin { command, duration_ms, .. }) => {
+                        (command.clone(), Some(*duration_ms))
+                    }
+                    _ => (String::new(), None),
+                }
+            } else {
+                (
+                    arg_cmd(arguments).unwrap_or_default(),
+                    match display {
+                        Some(ToolDisplay::Exec { duration_ms }) => Some(*duration_ms),
+                        _ => None,
+                    },
+                )
             };
+            let running = v
+                .get("status")
+                .and_then(|s| s.as_str())
+                .filter(|s| *s == "running")
+                .and_then(|_| v.get("session_id"))
+                .and_then(|s| s.as_str())
+                .map(str::to_string);
             Some(HostHistoryItem::Exec {
                 command,
                 output: v
@@ -619,6 +739,7 @@ fn tool_end_item(
                     .is_some_and(|s| s == "cancelled"),
                 error: v.get("error").and_then(|e| e.as_str()).map(str::to_string),
                 duration_ms,
+                running,
             })
         }
         "apply_patch" => {
@@ -701,7 +822,8 @@ mod tests {
         match tool_end_item("exec_command", exec_args, exec_result, Some(&ToolDisplay::Exec {
             duration_ms: 42,
         }), false) {
-            Some(H::Exec { command, output, exit_code, cancelled, error, duration_ms }) => {
+            Some(H::Exec { command, output, exit_code, cancelled, error, duration_ms, running }) => {
+                assert!(running.is_none(), "终态无运行会话");
                 assert_eq!(command, "echo hi", "命令取自 arguments.cmd（旧会话亦然）");
                 assert_eq!(output, "hi\n");
                 assert_eq!(exit_code, Some(0));
@@ -717,6 +839,28 @@ mod tests {
         match tool_end_item("exec_command", exec_args, cancelled_result, None, false) {
             Some(H::Exec { cancelled, .. }) => assert!(cancelled),
             other => panic!("cancelled 形状：{other:?}"),
+        }
+        // 016：运行中携带会话编号；write_stdin 关联原命令（不伪造新命令）
+        let running_result = r#"{"status":"running","exit_code":null,"output":"partial","truncated":false,"error":null,"session_id":"s7"}"#;
+        match tool_end_item("exec_command", exec_args, running_result, None, false) {
+            Some(H::Exec { running, .. }) => assert_eq!(running.as_deref(), Some("s7")),
+            other => panic!("running 形状：{other:?}"),
+        }
+        let stdin_result = r#"{"status":"running","exit_code":null,"output":"问：","truncated":false,"error":null,"session_id":"s7"}"#;
+        match tool_end_item(
+            "write_stdin",
+            r#"{"session_id":"s7","chars":"y
+"}"#,
+            stdin_result,
+            Some(&ToolDisplay::Stdin { session_id: "s7".into(), command: "read ans".into(), duration_ms: 5 }),
+            false,
+        ) {
+            Some(H::Exec { command, running, duration_ms, .. }) => {
+                assert_eq!(command, "read ans", "write_stdin 展示关联原命令");
+                assert_eq!(running.as_deref(), Some("s7"));
+                assert_eq!(duration_ms, Some(5));
+            }
+            other => panic!("stdin 形状：{other:?}"),
         }
         // patch：changed_files 为对象数组（{path, action}——原按字符串提取恒空）
         let patch_result = r#"{"ok":true,"changed_files":[{"path":"/w/a.txt","action":"add"}],"state_known":true,"error":null}"#;
@@ -778,6 +922,43 @@ mod tests {
                 assert_eq!(content, "孤儿结果");
             }
             other => panic!("孤儿结果按文本：{other:?}"),
+        }
+    }
+
+    /// 016：恢复历史中的 running 记录——按“当时状态”文本呈现，不渲染为
+    /// 当前活会话 cell（/resume 已重置管理器，旧句柄失效）。
+    #[test]
+    fn project_history_items_renders_running_as_past_state() {
+        use tchat_tui::chat_driver::HostHistoryItem as H;
+        let history = vec![
+            HistoryItem::Text(crate::prompt::HistoryMessage {
+                role: crate::prompt::HistoryRole::User,
+                content: "go".into(),
+            }),
+            HistoryItem::AssistantToolCalls {
+                tool_calls: vec![crate::prompt::ToolCallRecord {
+                    id: "r1".into(),
+                    name: "exec_command".into(),
+                    arguments: r#"{"cmd":"python server.py"}"#.into(),
+                }],
+                content: None,
+            },
+            HistoryItem::ToolResult {
+                tool_call_id: "r1".into(),
+                content: r#"{"status":"running","exit_code":null,"output":"listening","truncated":false,"error":null,"session_id":"s1"}"#.into(),
+                display: None,
+            },
+        ];
+        let items = project_history_items(&history);
+        match &items[1] {
+            H::Text { assistant, content } => {
+                assert!(*assistant, "工具记录以事实文本呈现");
+                assert!(content.contains("python server.py"), "命令关联：{content}");
+                assert!(content.contains("记录时仍在运行"), "当时状态措辞：{content}");
+                assert!(content.contains("恢复后进程不再受本会话管理"), "不展示为活会话：{content}");
+                assert!(content.contains("listening"), "已收集输出保留：{content}");
+            }
+            other => panic!("running 记录不得渲染为活会话 cell：{other:?}"),
         }
     }
 

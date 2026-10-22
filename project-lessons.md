@@ -19,14 +19,15 @@
 
 - 001 CLI REPL：已验收，交互验收历史完成。
 - 002 LLM 配置与模型目录：已实现（`config/` 手动＋自动目录、`/refresh`、非流式对话）；**重试机制截至 014 未实现**——006 turn 契约明示「不新增并行/流式/审批/重试」，如需重试须先修订契约。
-- 003 exec_command：已实现（2026-10-08）。
+- 003 exec_command：已实现（2026-10-08）；**016 修订（2026-10-22，待批准）**——默认可续接（yield 只控返回）、独立可选 timeout_ms 总时限（无 60000 上限）、tty PTY、六字段六状态（含 session_id/running/terminated）。
 - 004 apply_patch：已实现（2026-10-08）；F2 修复（2026-10-09）Update 仅允许常规文件（FIFO/设备/目录拒绝）。
-- 005 最小模型请求组装（`prompt.rs`）、006 工具调用循环（`turn.rs`）：已实现，均标注 Codex 上游锚点提交。
+- 005 最小模型请求组装（`prompt.rs`）、006 工具调用循环（`turn.rs`）：已实现，均标注 Codex 上游锚点提交；016 起用户轮工具三项（＋write_stdin）。
 - 007 会话保存与恢复：已实现（2026-10-10，四批整改，记录 `docs/records/2026-10-10-007-implementation.md`）。
 - 008 TUI 渲染层移植：**实现中——A6 Windows ConPTY 未闭合**（无已授权 Windows 环境，验收规则：未闭合保持「实现中」）；A1–A5、A7–A10 已实测通过。
 - 010 备用屏选择/复制、011 滚动条、012 工具详情：已实现并本地验证（2026-10-15 起，012 另有 2026-10-16 三轮迭代：展开态状态头、Enter 提交修复、独立详情页）。008 规格头部（2026-10-16 快照）将三者登记为「待审阅候选」，其后的审阅收口状态**待核实**。
 - 013 记忆系统 V1：已交付（2026-10-19 用户最终批准，M1–M9）。范围七项：单会话提炼、结果与任务状态、Markdown 同步、全局合并、摘要注入、通用文件检索、引用反馈与用户修改便条；V2、双写、专用记忆工具（`memories.*`）不纳入。上游锚点 codex@`ce0323f2`；参考 `/vault/sources/agent/Codex记忆系统-框架实现与Agent执行手册.md`。范围外/暂缓/未验证项按规格 §7/§8 原登记保留。
 - 014 记忆四项最小修订：已交付（2026-10-20，提交 `463ed8f`，记录 `docs/records/2026-10-20-014-implementation.md`）。已知本地适配：§3 资格随 reset 清除**与 Codex 跨重置资格保留不同**。
+- 016 命令执行与进程交互：已实施并验证（2026-10-22，分支 feat/016-process-sessions，待批准）——默认可续接进程会话（管道＋PTY）、write_stdin 查询/输入/中断/终止、取消与寿命分开、64 条容量＋1 MiB 头尾缓存＋64 KiB 输入上限、两种宿主退出清理。记录 `docs/records/2026-10-22-016-implementation.md`。
 
 ## 4. 必须保持的行为（契约明细）
 
@@ -34,8 +35,8 @@
 
 - REPL（001）：回显 `Agent：`（全角冒号）、空输入不回显；`exit`/Ctrl+C/Ctrl+D 打印 `再见!` 且退出码 0（动画期间 Ctrl+C 仍为默认 SIGINT 退出码 130，按规格保留）；非法 UTF-8 不 panic、回显无 U+FFFD；管道等非终端输出跳过动画帧；rustyline 必须保留 `buffer-redux` 特性（关闭会丢多行粘贴输入）；TERM 为 `dumb`/未设置时交互退化属已知限制。
 - 配置（002）：`config/` 存手动配置与自动目录、`/refresh` 刷新、普通非流式对话；重试机制未实现。
-- 工具执行（003/004）：exec_command 固定 `/bin/sh -c`、超时/取消用 SIGKILL 终止整个进程组并回收、输出双流按码点有界截断、非法字节替换 U+FFFD；apply_patch 仅 Add/Update/Delete（Update 仅常规文件）、完整解析后按序执行失败不回滚、写入/删除类失败 `state_known=false` 须重读、未改行保留原行尾。
-- 工具调用（006）：`id`/`name` 原样保留（trim 仅用于全空白判断，存储/唯一性判断/分派均用原始值）；取消时已知工具的未执行调用按各自结果结构、未知工具回传单 `error` 字段通用结构。
+- 工具执行（003/004/016）：exec_command 固定 `/bin/sh -c`、**默认可续接**——等待（yield 250..=30000）只控返回，运行中返回 session_id；可选 timeout_ms 总时限（正整数无上限，从启动按单调时钟独立计时，到期 SIGKILL 整组回收）；tty=true 分配真实 PTY；输出双流按码点有界截断、非法字节替换 U+FFFD、待取缓存单份 1 MiB 头尾保留；write_stdin：空查询／PTY 文字输入（超 64 KiB 整次拒绝）／管道仅 Ctrl+C（\u0003）中断／terminate=true 三秒有界收尾；句柄仅当前对话有效，64 条满额拒绝不淘汰。apply_patch 仅 Add/Update/Delete（Update 仅常规文件）、完整解析后按序执行失败不回滚、写入/删除类失败 `state_known=false` 须重读、未改行保留原行尾。
+- 工具调用（006/016）：用户轮白名单三项 exec_command/apply_patch/write_stdin（记忆内部轮仍仅 mem 工具）；`id`/`name` 原样保留（trim 仅用于全空白判断，存储/唯一性判断/分派均用原始值）；取消只停止等待与剩余调用**不终止已启动进程**（016）；取消时已知工具的未执行调用按各自结果结构（空句柄）、未知工具回传单 `error` 字段通用结构。
 - 安全边界（003 安全修复及后续加固）：凭证外发须过 origin 授权门（重定向一律拒绝）；`file:` 凭证仅可引用专用凭证目录内文件；公共目录一律强制 HTTPS；远端文本显示前经 `display::sanitize_for_terminal` 过滤、服务端回显凭证值须脱敏；响应体与最终模型请求 JSON 上限各 10 MiB；timeout_ms 1..=60000、max_output_chars 1..=100000、单批 tool_calls ≤32、patch ≤1 MiB、单文件读入/生成内容 ≤4 MiB 且 ≤100000 逻辑行；`.env`/配置文件 0600 且 `.env` 不得注入信任根控制变量（名单见 §6）。
 - 会话（007）：默认自动追加＋`/save`/`/resume`/`/sessions`；恢复的工具调用只作历史投影绝不重放；坏 meta 唯一整拒、行损坏跳行＋计数＋配对修复；auto 续写独占锁、获锁失败降级只读零修改；行 64 MiB 上限超限停用不截断；sessions 目录 0700/文件 0600。
 - TUI 按键单一职责（010/012，定案）：Ctrl+C 一律退出（含运行中，完整收尾）；Esc 仅取消（空闲无动作、不清选区/不回底/不关页、绝不退搜索）；q 关详情页；清选区＝点击输入区；回底＝Ctrl+End；键盘永不复制；搜索出口＝Enter。
@@ -66,11 +67,14 @@
 - 011 滚动条：vendored `transcript_view.rs` 仅追加 mod 声明，新写 `scrollbar.rs`——RowCache 行数持久缓存（Weak 指针身份＋宽度键，命中不触 layout，2000 cell 稳定帧 70µs）；收尾轮修正端点映射：`ScrollbarState.content_length`＝最大可滚动顶行+1（总行数−视口+1）而非正文总行数。
 - 012 投影一致性：工具展示实时终态与 `/resume` 走同一投影 `chat_driver::project_tool_item`；apply_patch 差异＝执行时真实前后缓冲的 diffy 统一 diff；鼠标 Down 清滚动条 RowCache（详情展开首次可达）。
 - 013/014 存储：rusqlite bundled（DDL 逐字取自 codex `state/memory_migrations/*.sql`，SQL/事务语义移植自 `memories.rs`，sqlx→rusqlite 适配见 `store.rs` 头注释）；用户目录 `memories/`＋manual.json memories 段（D1/D5 用户确认 2026-10-18）。
+- 016 进程会话（2026-10-22）：等待/寿命/取消三者分开——yield 只控返回、timeout_ms 由监控线程独立计时（读取/输入/跨轮/取消均不重置）、取消保留进程；满额（64 含已退出未取走）拒绝新建不淘汰；每进程固定 1 监控＋1–2 读取线程，等待不持管理器全局锁；PTY 用 pre_exec setsid＋TIOCSCTTY（不能与 process_group(0) 并用——坑004）；管道/PTY 终止一律 killpg 整组；宿主退出显式 close 全部会话再排空（TUI process::exit 不走析构）。本平台 Instant（秒域 i64）下 u64 毫秒全域可表示截止时间，“无法安全表示→拒绝”为防御分支。
+- 2026-10-22 测试加固（016 候选三轮）：A7 原始字节检查的"唯一标记"若只判**引入符直接相邻**会漏检真实形态序列（OSC 52 的标记隔着 `52;c;` 参数）——须按 VT 序列语法做**范围扫描**（CSI 至 0x40..=0x7E 终止符、OSC/DCS 至 BEL/ST），另保留直接组合层覆盖 nF/CR 短序列；正向对照（断言合法渲染控制确实存在）防一刀切误报。S61 类"输入动作清焦"证明可用聚焦态样式差异（披露行加粗，`vt100` Cell::bold）作非清焦证据，替代"Enter 开详情页"式清焦证明。
 - 2026-10-21 记忆迁移并发：`run_migrations` 的事务外快检不能作为唯一判据；TUI 登记器与后台管线同时打开新库时，两连接都可读到「0001 未应用」，先拿写锁者完成后，后到者若直接重放无 `IF NOT EXISTS` 的 DDL 会报 `table stage1_outputs already exists`，管线静默退出。修复为 `apply_migration` 在 `BEGIN IMMEDIATE` 事务内复核 `schema_migrations`，已应用则提交跳过；回归 `memory::store::tests::migration_rechecks_after_concurrent_apply`，详见 `docs/records/2026-10-21-backend-regression.md`。
 
 ## 8. 验证结论演进
 
-- 当前基线（2026-10-21 后端回归收口）：容器内 `cargo check --locked --offline && cargo test --workspace --locked --offline --no-fail-fast` exit 0，50 个目标 **3045 通过/0 失败/3 既有忽略/0 过滤**；`e2e_acceptance` **106/0/0**。3 个忽略为 Windows AltGr 专项及两个父测试启动的子进程 helper。期间修复记忆库并发迁移竞态（见 §7），S81 修复后 20/20＋10/10 复跑通过；证据 `docs/records/2026-10-21-backend-regression.md`。
+- 当前基线（2026-10-22 016 三轮测试加固候选，已批准交付）：`cargo test --workspace --no-fail-fast` 51 目标 **3079 通过/0 失败/3 既有忽略**（二轮 3084−净删 5：重复用例删 4＋导出合并 2→1）；三轮可逆变异 15/15 检出（七处加固 H1–H7、删除替代 D1–D4、合并 M1–M2），零生产行为改动；记录 `docs/records/2026-10-22-test-hardening-round.md`（前两轮见 `2026-10-22-016-implementation.md`，二轮 3084/0/3 与 12 项变异为历史证据）。
+- 前一基线（2026-10-21 后端回归收口）：容器内 `cargo check --locked --offline && cargo test --workspace --locked --offline --no-fail-fast` exit 0，50 个目标 **3045 通过/0 失败/3 既有忽略/0 过滤**；`e2e_acceptance` **106/0/0**。3 个忽略为 Windows AltGr 专项及两个父测试启动的子进程 helper。期间修复记忆库并发迁移竞态（见 §7），S81 修复后 20/20＋10/10 复跑通过；证据 `docs/records/2026-10-21-backend-regression.md`。
 - 当前基线（014 收口，2026-10-20）：`cargo test --workspace --no-fail-fast` 49 套件 **3019 通过/0 失败/3 既有忽略/0 过滤**；e2e `--test e2e_acceptance` **106/0/0**。来源：`docs/records/2026-10-20-014-implementation.md`。
 - 已知抖动：e2e s44（TUI 滚轮时序）在全量并行下偶发失败、单独运行通过（014 首轮 105/1，判定既有 PTY 抖动，双跑如实登记）。
 - 验证摘要与原件索引：`docs/testing/verification-history.md`（最新 v14；014 收口未另立索引条目，以 014 记录为准）。

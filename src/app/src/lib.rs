@@ -7,6 +7,7 @@ pub mod context;
 pub mod display;
 pub mod exec;
 pub mod memory;
+pub mod proc_session;
 pub mod prompt;
 pub mod session;
 pub mod turn;

@@ -4,6 +4,7 @@
 mod common;
 
 use common::TempDir;
+use terminal_chat::proc_session::ProcessManager;
 use serde_json::{json, Value};
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -227,7 +228,7 @@ fn m6_d4_only_system_tail_changes_and_none_is_byte_identical() {
             .iter()
             .map(|t| t["function"]["name"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["exec_command", "apply_patch"]
+        ["exec_command", "apply_patch", "write_stdin"]
     );
 }
 
@@ -277,6 +278,7 @@ fn m6_round_snapshot_survives_changes_and_next_turn_refreshes() {
             root: dir.path(),
             config: &config,
         },
+    &ProcessManager::new(),
     )
     .unwrap();
 
@@ -315,6 +317,7 @@ fn m6_round_snapshot_survives_changes_and_next_turn_refreshes() {
             root: dir.path(),
             config: &config,
         },
+    &ProcessManager::new(),
     )
     .unwrap();
     assert_eq!(next.len(), 1);
@@ -409,6 +412,7 @@ fn m6_missing_summary_is_also_cached_until_next_round() {
             root: dir.path(),
             config: &config,
         },
+    &ProcessManager::new(),
     )
     .unwrap();
     assert_eq!(requests.len(), 2);
@@ -432,6 +436,7 @@ fn m6_missing_summary_is_also_cached_until_next_round() {
             root: dir.path(),
             config: &config,
         },
+    &ProcessManager::new(),
     )
     .unwrap();
 }
@@ -452,6 +457,7 @@ fn m6_disabled_turn_requests_and_history_match_default_byte_for_byte() {
         &mut |_| {},
         None,
         &mut |_| {},
+    &ProcessManager::new(),
     )
     .unwrap();
     for (total, read) in [(false, false), (false, true), (true, false)] {
@@ -476,6 +482,7 @@ fn m6_disabled_turn_requests_and_history_match_default_byte_for_byte() {
                 root: dir.path(),
                 config: &config,
             },
+        &ProcessManager::new(),
         )
         .unwrap();
         assert_eq!(
@@ -520,6 +527,7 @@ fn m6_save_resume_reloads_latest_summary_and_never_persists_injection() {
             root: &root,
             config: &config,
         },
+    &ProcessManager::new(),
     )
     .unwrap();
     assert_eq!(saves, 2, "真实入史点均执行持久化回调");
@@ -559,6 +567,7 @@ fn m6_save_resume_reloads_latest_summary_and_never_persists_injection() {
             root: &root,
             config: &config,
         },
+    &ProcessManager::new(),
     )
     .unwrap();
     assert_eq!(
@@ -623,6 +632,7 @@ fn m6_merge_stays_uninjected_and_keeps_three_restricted_tools() {
             system: terminal_chat::memory::CONSOLIDATION_SYSTEM,
             expected_epoch: 0,
         },
+    &ProcessManager::new(),
     )
     .unwrap();
     assert_eq!(requests.len(), 2);
@@ -707,6 +717,7 @@ fn rg_flow(needle: &str, expected_exit: i32, expected_output: &str) {
             root: dir.path(),
             config: &config,
         },
+    &ProcessManager::new(),
     )
     .unwrap();
     assert_eq!(reply, "检索结束");
@@ -766,6 +777,7 @@ fn m6_read_failure_does_not_block_current_task() {
             root: dir.path(),
             config: &config,
         },
+    &ProcessManager::new(),
     )
     .unwrap();
     assert_eq!(reply, "继续成功");
