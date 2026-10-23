@@ -2,7 +2,7 @@
 
 实施契约：[018-user-input §8](../specs/018-user-input.md)（2026-10-23 用户确认 §8.10 三项取舍后实施）。分支 `feat/018-user-input-async`（自 `main@dc7a4f1747b9670ed048aa37f63f5a8ddefc3e23` 建立，携带上轮 §8 调查的 4 份文档未提交改动）；合并目标本地 `main`。本轮未提交、未合并、未推送。无新增第三方依赖与版本升级。
 
-当前状态：**已获用户批准交付本地 main（2026-10-23）：提交本候选→合并本地 main→核验→删除任务分支；不推送、不发布、不删除远程分支。交付执行结果由后续文档提交补记于 §9。**全量 `cargo check && cargo test --workspace --no-fail-fast`＝**3171 通过、0 失败、3 原有忽略**（相对阶段 A 交付基线 **3142/0/3** 净增 **29** 项，统计口径见 §8；日志 `/tmp/018b-verify-final.log`，SHA-256 `f3763112b42625750f7b9aa1c6a6b7d07fed625c541d728d68b1413c7e03c132`）；`git diff --check` 通过；lint 见 §5（两处旧测试错误沿用阶段 A 保留，无新增）。
+当前状态：**已批准并交付本地 main（2026-10-23）：任务提交 `49060bf` 快进合入、核验通过、本地任务分支已删除；未推送、未发布、未删除远程分支。交付事实见 §9。**全量 `cargo check && cargo test --workspace --no-fail-fast`＝**3171 通过、0 失败、3 原有忽略**（相对阶段 A 交付基线 **3142/0/3** 净增 **29** 项，统计口径见 §8；日志 `/tmp/018b-verify-final.log`，SHA-256 `f3763112b42625750f7b9aa1c6a6b7d07fed625c541d728d68b1413c7e03c132`）；`git diff --check` 通过；lint 见 §5（两处旧测试错误沿用阶段 A 保留，无新增）。
 
 ## 1. 实际改动面
 
@@ -87,6 +87,15 @@
 - `git diff --check` 通过。
 - 未运行：Windows ConPTY/目标宿主终端（008 A6 边界保持）；真实模型/生产端点。环境 Linux，全部用本地 mock＋PTY＋隔离目录。
 
-## 9. 待用户决定
+## 9. 已批准的本地交付（2026-10-23）
 
-候选已就绪：批准后提交至 `feat/018-user-input-async`、合并本地 `main`、删除任务分支；不推送、不发布。三个原有无关未跟踪记录保持原样。
+用户已明确批准：提交阶段 B 候选及必要文档至 `feat/018-user-input-async`，合并到本地 `main`，核验后删除本地任务分支；不推送、不发布、不删除远程分支。三个原有无关未跟踪记录不纳入提交、保持原样。
+
+以下记录已经发生的提交、合并、核验与清理：
+
+- 任务提交：`49060bf4992496179bd4d253655a25ebd50d8eac`，`feat: 018 异步问询最小接入（阶段 B）`；父提交为 `dc7a4f1747b9670ed048aa37f63f5a8ddefc3e23`，范围恰为 31 个核定文件（27 修改＋4 新增：`src/app/src/user_input_async.rs`、`src/app/tests/user_input_async.rs`、本记录、[变异证据](../testing/evidence/018b-mutations.json)）。统计核对轮后仅文档变化，源码/测试/依赖与最终验证候选逐字节一致（提交前 `cargo check --workspace --lib --bins --tests` 通过，沿用 §8 终验 3171/0/3，不重复全量）。
+- 暂存采用明确文件白名单逐文件 `git add`；暂存内容与工作树逐字节一致（无未暂存的已跟踪差异）、`git diff --cached --check` 通过；变异证据 JSON 补末尾换行后入提交；三份无关未跟踪记录未暂存。
+- 执行 `git switch main`、`git merge --ff-only feat/018-user-input-async`，**Fast-forward** 成功；合并完成时 `main` 与任务提交 SHA 均为 `49060bf4992496179bd4d253655a25ebd50d8eac`，树均为 `c56b47e272f90449484fa5789cceb941b8d9951b`。
+- 核验（均在删除分支前执行）：`git merge-base --is-ancestor 49060bf main` 通过；`git diff --exit-code 49060bf main` 退出 0（main 与批准候选树一致）；`git diff --check dc7a4f1 main` 通过；`git diff --name-only dc7a4f1 main` 恰 31 项与白名单一致；工作树无已跟踪差异；三份无关未跟踪记录保持未跟踪原样。
+- 仅在上述核验成功后执行 `git branch -d feat/018-user-input-async`，实际输出 `Deleted branch feat/018-user-input-async (was 49060bf).`；`git show-ref --verify --quiet refs/heads/feat/018-user-input-async` 返回 1，确认本地分支已不存在。远程引用未动，未调用 pull/push 或发布操作。
+- 后续文档提交（含本节）只保存交付事实与必要状态收口，不改程序、测试或验证结论。
