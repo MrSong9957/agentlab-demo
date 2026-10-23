@@ -53,8 +53,6 @@ use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::McpAuthStatus;
 use codex_app_server_protocol::McpServerStatus;
 use codex_app_server_protocol::McpServerStatusDetail;
-use codex_app_server_protocol::ToolRequestUserInputAnswer;
-use codex_app_server_protocol::ToolRequestUserInputQuestion;
 use codex_app_server_protocol::WebSearchAction;
 // 008-TRIM: use codex_config::types::McpServerTransportConfig（MCP cell 测试裁剪残留，008 §1）
 // 008-TRIM: use codex_mcp::qualified_mcp_tool_name_prefix（MCP cell 测试裁剪残留，008 §1）
@@ -114,7 +112,7 @@ mod plans; // 017 恢复（update_plan 事件源已接入，008 §1 曾裁剪）
 #[cfg(test)]
 #[path = "plans_tests.rs"]
 mod plans_tests;
-// 008-TRIM: mod request_user_input（008 §1 裁剪清单：无本地事件源）
+mod request_user_input; // 018 同步问答结果
 // 008-TRIM: mod search（008 §1 裁剪清单：无本地事件源）
 mod separators;
 mod session;
@@ -137,7 +135,7 @@ pub use messages::*; // 008-ADAPT：pub（A7：AgentMarkdownCell 公开）
 pub(crate) use notices::*;
 pub(crate) use patches::*;
 pub(crate) use plans::*; // 017 恢复（update_plan 事件源已接入）
-// 008-TRIM: pub(crate) use request_user_input::*;（裁剪 cell，008 §1）
+pub(crate) use request_user_input::*;
 // 008-TRIM: pub(crate) use search::*;（裁剪 cell，008 §1）
 pub(crate) use separators::*;
 pub(crate) use session::*;

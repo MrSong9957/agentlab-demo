@@ -11,8 +11,8 @@ use crate::apply_patch::ApplyPatchResult;
 use crate::exec::{ExecResult, ExecStatus};
 use crate::proc_session::ProcessManager;
 use crate::prompt::{
-    build_turn_request, build_turn_request_with, build_turn_request_with_memory, HistoryItem,
-    HistoryMessage, HistoryRole, ToolCallRecord, ToolDisplay,
+    build_turn_request_with, build_turn_request_with_input_host, HistoryItem, HistoryMessage,
+    HistoryRole, ToolCallRecord, ToolDisplay,
 };
 use serde_json::{json, Value};
 use std::path::Path;
@@ -90,15 +90,19 @@ const BLANK_INPUT_ERROR: &str = "当前用户输入不能为空或全为空白";
 /// 其他名称（未知工具）与未知工具回传通道一致：单 `error` 字段通用结构，
 /// 不伪装成 exec 结果。
 /// 取消跳过的固定消息（012：恢复投影以此常量精确识别"未执行取消"——
-/// 单一生产者 [`skipped_by_cancel`]，非模糊文本匹配）。
+/// 单一生产者 [`skipped_without_execution`]，非模糊文本匹配）。
 pub const SKIPPED_BY_CANCEL_MESSAGE: &str = "用户取消，本调用未执行";
 
 /// 016：本轮被取消的 turn 错误统一前缀（含工具批取消与在途请求取消两条路径）；
 /// 宿主以此常量判定"取消当前轮"，不反解析消息文本（012 教训）。
 pub const CANCELLED_TURN_ERROR_PREFIX: &str = "用户已取消";
 
-fn skipped_by_cancel(name: &str, mode: &ToolMode<'_>) -> String {
-    let error = SKIPPED_BY_CANCEL_MESSAGE;
+fn skipped_without_execution(
+    name: &str,
+    mode: &ToolMode<'_>,
+    error: &str,
+    cancelled: bool,
+) -> String {
     if let ToolMode::MemoryMerge { .. } = mode {
         if let Some(shape) = crate::memory::mem_tools::skipped_by_cancel_shape(name) {
             return shape;
@@ -107,7 +111,11 @@ fn skipped_by_cancel(name: &str, mode: &ToolMode<'_>) -> String {
     }
     match name {
         "exec_command" | "write_stdin" => serde_json::to_string(&ExecResult {
-            status: ExecStatus::Cancelled,
+            status: if cancelled {
+                ExecStatus::Cancelled
+            } else {
+                ExecStatus::Error
+            },
             exit_code: None,
             output: String::new(),
             truncated: false,
@@ -350,6 +358,33 @@ pub fn run_user_turn_with_context(
     sources: &crate::context::ContextSources,
     procs: &ProcessManager,
 ) -> Result<String, String> {
+    run_user_turn_with_context_and_host(
+        history,
+        current_input,
+        sender,
+        notify,
+        cancel,
+        on_record,
+        mode,
+        sources,
+        procs,
+        None,
+    )
+}
+
+/// 018：原上下文入口保留无宿主行为；只在交互宿主传入问答接口。
+pub fn run_user_turn_with_context_and_host(
+    history: &mut Vec<HistoryItem>,
+    current_input: &str,
+    sender: &mut dyn FnMut(&Value) -> Result<Value, String>,
+    notify: &mut dyn FnMut(TurnNotify),
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    on_record: &mut dyn FnMut(&[HistoryItem]),
+    mode: ToolMode<'_>,
+    sources: &crate::context::ContextSources,
+    procs: &ProcessManager,
+    input_host: Option<&mut crate::user_input::InputHost<'_>>,
+) -> Result<String, String> {
     if current_input.trim().is_empty() {
         return Err(BLANK_INPUT_ERROR.into());
     }
@@ -375,7 +410,7 @@ pub fn run_user_turn_with_context(
             on_record(history);
         }
     }
-    run_tool_turn_with_mode(
+    run_tool_turn_with_host(
         history,
         current_input,
         sender,
@@ -384,6 +419,7 @@ pub fn run_user_turn_with_context(
         on_record,
         mode,
         procs,
+        input_host,
     )
 }
 
@@ -409,8 +445,36 @@ pub fn run_tool_turn_with_mode(
     mode: ToolMode<'_>,
     procs: &ProcessManager,
 ) -> Result<String, String> {
+    run_tool_turn_with_host(
+        history,
+        current_input,
+        sender,
+        notify,
+        cancel,
+        on_record,
+        mode,
+        procs,
+        None,
+    )
+}
+
+/// 018：同步宿主等待接口。MemoryMerge 即使误传接口也不会声明或调用它。
+pub fn run_tool_turn_with_host(
+    history: &mut Vec<HistoryItem>,
+    current_input: &str,
+    sender: &mut dyn FnMut(&Value) -> Result<Value, String>,
+    notify: &mut dyn FnMut(TurnNotify),
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    on_record: &mut dyn FnMut(&[HistoryItem]),
+    mode: ToolMode<'_>,
+    procs: &ProcessManager,
+    mut input_host: Option<&mut crate::user_input::InputHost<'_>>,
+) -> Result<String, String> {
     if current_input.trim().is_empty() {
         return Err(BLANK_INPUT_ERROR.into());
+    }
+    if matches!(mode, ToolMode::MemoryMerge { .. }) {
+        input_host = None;
     }
     // 取消状态不跨用户轮（006：每轮开始复位）
     if let Some(c) = cancel {
@@ -436,10 +500,14 @@ pub fn run_tool_turn_with_mode(
         }
         // 续请求使用完整历史（含本轮 user 与已有结果），不再次追加当前输入
         let body = match &mode {
-            ToolMode::User => build_turn_request(history),
-            ToolMode::UserWithMemory { .. } => {
-                build_turn_request_with_memory(history, memory_context.as_deref())
+            ToolMode::User => {
+                build_turn_request_with_input_host(history, None, input_host.is_some())
             }
+            ToolMode::UserWithMemory { .. } => build_turn_request_with_input_host(
+                history,
+                memory_context.as_deref(),
+                input_host.is_some(),
+            ),
             ToolMode::MemoryMerge { system, .. } => build_turn_request_with(
                 history,
                 &crate::memory::mem_tools::tool_definitions(),
@@ -492,17 +560,27 @@ pub fn run_tool_turn_with_mode(
         });
         on_record(history);
         let mut cancelled_batch = false;
+        let mut input_end: Option<crate::user_input::InputError> = None;
+        let mut answered_in_batch = false;
         for call in &calls {
-            if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst)) {
+            if input_end.is_some()
+                || cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst))
+            {
                 // N2b：取消后剩余调用不执行，但每个已记录调用都要有匹配 tool 结果
-                let content = skipped_by_cancel(&call.name, &mode);
+                let (error, cancelled) = match &input_end {
+                    Some(reason) if !matches!(reason, crate::user_input::InputError::Cancelled) => {
+                        (format!("{}；本调用未执行", reason.message()), false)
+                    }
+                    _ => (SKIPPED_BY_CANCEL_MESSAGE.to_string(), true),
+                };
+                let content = skipped_without_execution(&call.name, &mode, &error, cancelled);
                 notify(TurnNotify::ToolEnd {
                     id: call.id.clone(),
                     name: call.name.clone(),
                     arguments: call.arguments.clone(),
                     result: content.clone(),
                     display: None,
-                    cancelled: true,
+                    cancelled,
                 });
                 history.push(HistoryItem::ToolResult {
                     tool_call_id: call.id.clone(),
@@ -518,7 +596,34 @@ pub fn run_tool_turn_with_mode(
                 name: call.name.clone(),
                 arguments: call.arguments.clone(),
             });
-            let (content, display) = execute_tool(call, cancel, &mode, procs);
+            let (content, display) = if call.name == "request_user_input"
+                && !matches!(mode, ToolMode::MemoryMerge { .. })
+            {
+                let result = match input_host.as_mut() {
+                    None => json!({"error":"request_user_input 不可用：当前宿主没有回答接口"})
+                        .to_string(),
+                    Some(host) => match crate::user_input::parse_arguments(&call.arguments) {
+                        Err(error) => json!({"error":error}).to_string(),
+                        Ok(questions) => match host(call, &questions).and_then(|answer| {
+                            crate::user_input::validate_response(&questions, &answer)?;
+                            Ok(answer)
+                        }) {
+                            Ok(answer) => {
+                                answered_in_batch = true;
+                                serde_json::to_string(&answer).expect("问答结果可序列化")
+                            }
+                            Err(reason) => {
+                                let result = json!({"error":reason.message()}).to_string();
+                                input_end = Some(reason);
+                                result
+                            }
+                        },
+                    },
+                };
+                (result, None)
+            } else {
+                execute_tool(call, cancel, &mode, procs)
+            };
             notify(TurnNotify::ToolEnd {
                 id: call.id.clone(),
                 name: call.name.clone(),
@@ -534,9 +639,16 @@ pub fn run_tool_turn_with_mode(
             });
             on_record(history);
         }
+        if let Some(reason) = input_end {
+            return Err(reason.message().into());
+        }
         if cancelled_batch {
             // 取消：结束本轮，保留已发生结果与历史，不自动请求模型、不重复已执行工具
             return Err("用户已取消本轮工具执行：已执行结果保留，剩余调用未执行".into());
+        }
+        if answered_in_batch && cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            return Err("用户已取消本轮：已保存问询结果，不再请求模型".into());
         }
         if requests == MAX_MODEL_REQUESTS_PER_TURN {
             // 第 8 批：保存全部结果后报上限，不发第 9 次请求，不生成假回复
@@ -776,7 +888,12 @@ mod tests {
     /// SKIPPED_BY_CANCEL_MESSAGE；该结果不得恢复为成功快照。
     #[test]
     fn update_plan_cancelled_skip_is_two_field_failure() {
-        let shape = skipped_by_cancel("update_plan", &ToolMode::User);
+        let shape = skipped_without_execution(
+            "update_plan",
+            &ToolMode::User,
+            SKIPPED_BY_CANCEL_MESSAGE,
+            true,
+        );
         assert_eq!(
             serde_json::from_str::<Value>(&shape).unwrap(),
             json!({ "ok": false, "error": SKIPPED_BY_CANCEL_MESSAGE }),

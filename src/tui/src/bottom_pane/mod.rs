@@ -88,7 +88,7 @@ mod empty_state_policy;
 // 008-TRIM(孤儿属性随被裁声明一并移除): #[path = "questions_tests.rs"]
 // 008-TRIM: mod question_tests（008 §1 裁剪清单：无本地事件源）
 // 008-TRIM: mod questions（008 §1 裁剪清单：无本地事件源）
-// 008-TRIM: mod request_user_input（008 §1 裁剪清单：无本地事件源）
+mod request_user_input; // 018：恢复同步问答必要子集
 // 008-TRIM: mod status_line_setup（008 §1 裁剪清单：无本地事件源）
 // 008-TRIM: mod status_line_style（008 §1 裁剪清单：无本地事件源）
 // 008-TRIM: mod status_surface_preview（008 §1 裁剪清单：无本地事件源）
@@ -1674,6 +1674,40 @@ impl BottomPane {
 
     pub(crate) fn show_view(&mut self, view: Box<dyn BottomPaneView>) {
         self.push_view(view);
+    }
+
+    pub(crate) fn show_user_input(
+        &mut self,
+        questions: Vec<codex_protocol::request_user_input::RequestUserInputQuestion>,
+        reply: crate::chat_driver::UserInputReply,
+        live: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        display_filter: fn(&str) -> String,
+    ) {
+        self.show_view(Box::new(
+            request_user_input::RequestUserInputOverlay::new_with_keymap(
+                questions,
+                reply,
+                live,
+                display_filter,
+                self.app_event_tx.clone(),
+                self.disable_paste_burst,
+                self.keymap.clone(),
+            ),
+        ));
+    }
+
+    pub(crate) fn end_user_input(
+        &mut self,
+        reason: codex_protocol::request_user_input::RequestUserInputError,
+    ) {
+        if let Some(view) = self
+            .view_stack
+            .iter_mut()
+            .find(|v| v.view_id() == Some("user-input"))
+        {
+            view.finish_user_input(reason);
+        }
+        self.dismiss_active_view_if_id("user-input");
     }
 
     pub(crate) fn suppress_current_view_key_until_release(

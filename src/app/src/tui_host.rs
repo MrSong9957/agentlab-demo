@@ -241,7 +241,7 @@ impl TuiHost {
                             tool_begin_event(&name, &id, &arguments)
                         };
                         Some(ev.unwrap_or_else(|| {
-                            DriverEvent::Info(turn::tool_activity_line(&name, &id))
+                            DriverEvent::Info(crate::display::sanitize_for_terminal(&turn::tool_activity_line(&name, &id)))
                         }))
                     }
                     turn::TurnNotify::ToolEnd { id, name, arguments, result, display, cancelled } => {
@@ -285,7 +285,18 @@ impl TuiHost {
             };
             // 015：用户轮上下文来源（轮线程内解析：全局规则目录、cwd、SHELL、时钟）
             let context_sources = crate::context::ContextSources::from_env();
-            let result = turn::run_user_turn_with_context(
+            let mut input_host = |_: &turn::ParsedToolCall, questions: &[crate::user_input::Question]| {
+                let (reply, receiver) = std_mpsc::channel();
+                let live = Arc::new(AtomicBool::new(true));
+                let _ = tx.send(DriverEvent::UserInput {
+                    questions: questions.to_vec(),
+                    reply: tchat_tui::chat_driver::UserInputReply::new(reply),
+                    live: live.clone(),
+                    display_filter: crate::display::sanitize_for_terminal,
+                });
+                crate::user_input::wait_for_response(receiver, &HOST_CANCEL, &live)
+            };
+            let result = turn::run_user_turn_with_context_and_host(
                 &mut history.lock().unwrap(),
                 &input,
                 &mut sender,
@@ -295,6 +306,7 @@ impl TuiHost {
                 mode,
                 &context_sources,
                 &procs,
+                Some(&mut input_host),
             );
             unsafe {
                 libc::signal(libc::SIGINT, libc::SIG_DFL);
@@ -811,6 +823,20 @@ fn tool_end_item(
                         error: Some(error),
                     }
                 })
+        }
+        "request_user_input" => {
+            let questions = crate::user_input::parse_arguments(arguments).ok()?;
+            let response = serde_json::from_str::<crate::user_input::Response>(result)
+                .ok()
+                .filter(|r| crate::user_input::validate_response(&questions, r).is_ok());
+            let error = v.get("error").and_then(|e| e.as_str())
+                .map(crate::display::sanitize_for_terminal);
+            if response.is_none() && error.is_none() { return None; }
+            Some(HostHistoryItem::UserInput {
+                questions: crate::user_input::sanitized_questions(&questions),
+                response: response.as_ref().map(crate::user_input::sanitized_response),
+                error,
+            })
         }
         _ => None,
     }

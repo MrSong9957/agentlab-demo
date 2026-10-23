@@ -109,7 +109,17 @@ fn main() {
 
                 // 空输入不打印空行,直接继续循环
                 if !input.is_empty() {
-                    handle_input(&agent, &mut rl, input, &mut history, &mut autosave, &mut registrar, &procs);
+                    if handle_input(
+                        &agent,
+                        &mut rl,
+                        input,
+                        &mut history,
+                        &mut autosave,
+                        &mut registrar,
+                        &procs,
+                    ) {
+                        break;
+                    }
                 }
             }
             // Ctrl+C:打断当前输入,直接退出
@@ -184,6 +194,167 @@ fn prompt_y_n(rl: &mut DefaultEditor, question: &str) -> bool {
     }
 }
 
+/// 018：唯一终端读取者仍是主线程；问答不写入 readline 聊天历史。
+fn ask_cli(
+    rl: &mut DefaultEditor,
+    questions: &[terminal_chat::user_input::Question],
+) -> Result<terminal_chat::user_input::Response, terminal_chat::user_input::InputError> {
+    use terminal_chat::user_input::{Answer, InputError, Response};
+    fn read(rl: &mut DefaultEditor, prompt: &str) -> Result<String, InputError> {
+        if TOOL_CANCEL.load(Ordering::SeqCst) {
+            return Err(InputError::Cancelled);
+        }
+        // Rustyline 18 的 unsupported TERM 路径使用 Stdin::read_line，遇 SIGINT
+        // 会继续阻塞。仅在这个退化路径复用同一主线程的可取消行读取。
+        if std::env::var("TERM")
+            .is_ok_and(|term| matches!(term.to_ascii_lowercase().as_str(), "dumb" | "cons25" | "emacs"))
+        {
+            return read_question_line(prompt);
+        }
+        match rl.readline(prompt) {
+            Ok(line) => Ok(line),
+            Err(ReadlineError::Interrupted) => {
+                TOOL_CANCEL.store(true, Ordering::SeqCst);
+                Err(InputError::Cancelled)
+            }
+            Err(ReadlineError::Eof) => Err(InputError::HostExited),
+            Err(_) => Err(InputError::Closed),
+        }
+    }
+    let mut response = Response {
+        answers: Default::default(),
+    };
+    loop {
+        for (idx, q) in questions.iter().enumerate() {
+            if response
+                .answers
+                .get(&q.id)
+                .is_some_and(|a| !a.answers.is_empty())
+            {
+                continue;
+            }
+            say(&format!(
+                "[问询 {}/{}] {}\n{}",
+                idx + 1,
+                questions.len(),
+                q.header,
+                q.question
+            ));
+            let options = q.options.as_ref().expect("问询已通过非空选项校验");
+            for (i, option) in options.iter().enumerate() {
+                say(&format!(
+                    "{}. {} — {}",
+                    i + 1,
+                    option.label,
+                    option.description
+                ));
+            }
+            say(&format!("{}. 其他（文字补充）", options.len() + 1));
+            let selected = loop {
+                let line = read(rl, "选择编号（Enter 跳过）> ")?;
+                if line.trim().is_empty() {
+                    break None;
+                }
+                match line.trim().parse::<usize>() {
+                    Ok(n) if n >= 1 && n <= options.len() + 1 => break Some(n - 1),
+                    _ => say("编号无效，请重新输入。"),
+                }
+            };
+            let mut answers = Vec::new();
+            if let Some(index) = selected {
+                answers.push(
+                    options
+                        .get(index)
+                        .map(|o| o.label.clone())
+                        .unwrap_or_else(|| "None of the above".into()),
+                );
+                let notes = read(rl, "补充（可留空）> ")?;
+                if !notes.trim().is_empty() {
+                    answers.push(format!("user_note: {}", notes.trim()));
+                }
+            }
+            response.answers.insert(q.id.clone(), Answer { answers });
+        }
+        if response.answers.values().all(|a| !a.answers.is_empty()) {
+            return Ok(response);
+        }
+        let confirmation = read(rl, "仍有未答题，确认提交？[y/N] ")?;
+        if matches!(
+            confirmation.trim().to_ascii_lowercase().as_str(),
+            "y" | "yes"
+        ) {
+            return Ok(response);
+        }
+    }
+}
+
+/// 不支持行编辑的终端仍使用内核行规程（回显/退格）；主线程 poll 后非阻塞读取。
+/// O_NONBLOCK 防止 poll 就绪后恰逢 Ctrl+C 清空输入造成再次阻塞；退出恢复原标志。
+fn read_question_line(prompt: &str) -> Result<String, terminal_chat::user_input::InputError> {
+    use terminal_chat::user_input::InputError;
+    struct RestoreFlags(libc::c_int);
+    impl Drop for RestoreFlags {
+        fn drop(&mut self) {
+            unsafe {
+                libc::fcntl(libc::STDIN_FILENO, libc::F_SETFL, self.0);
+            }
+        }
+    }
+    let flags = unsafe { libc::fcntl(libc::STDIN_FILENO, libc::F_GETFL) };
+    if flags < 0
+        || unsafe { libc::fcntl(libc::STDIN_FILENO, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+    {
+        return Err(InputError::Closed);
+    }
+    let _restore = RestoreFlags(flags);
+    print!("{prompt}");
+    io::stdout().flush().map_err(|_| InputError::Closed)?;
+    loop {
+        if TOOL_CANCEL.load(Ordering::SeqCst) {
+            return Err(InputError::Cancelled);
+        }
+        let mut fd = libc::pollfd {
+            fd: libc::STDIN_FILENO,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut fd, 1, 50) };
+        if ready < 0 {
+            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(InputError::Closed);
+        }
+        if ready == 0 {
+            continue;
+        }
+        let mut bytes = [0u8; 4096];
+        let len = unsafe { libc::read(libc::STDIN_FILENO, bytes.as_mut_ptr().cast(), bytes.len()) };
+        if len == 0 {
+            return Err(InputError::HostExited);
+        }
+        if len < 0 {
+            if matches!(
+                io::Error::last_os_error().kind(),
+                io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+            ) {
+                continue;
+            }
+            return Err(InputError::Closed);
+        }
+        let mut line = bytes[..len as usize].to_vec();
+        if line.ends_with(b"\n") {
+            line.pop();
+            if line.ends_with(b"\r") {
+                line.pop();
+            }
+            return String::from_utf8(line).map_err(|_| InputError::Closed);
+        }
+        // canonical tty 的非换行短读来自 VEOF：带草稿 Ctrl+D 也退出，不把草稿当答案。
+        return Err(InputError::HostExited);
+    }
+}
+
 fn handle_input(
     agent: &ureq::Agent,
     rl: &mut DefaultEditor,
@@ -192,18 +363,18 @@ fn handle_input(
     autosave: &mut session::Session,
     registrar: &mut terminal_chat::memory::runner::ThreadRegistrar,
     procs: &ProcessManager,
-) {
+) -> bool {
     if let Some(rest) = input.strip_prefix('/') {
         if let Some(arg) = rest.strip_prefix("save") {
             if arg.is_empty() || arg.starts_with(char::is_whitespace) {
                 cmd_save(rl, arg, history);
-                return;
+                return false;
             }
         }
         if let Some(arg) = rest.strip_prefix("resume") {
             if arg.is_empty() || arg.starts_with(char::is_whitespace) {
                 cmd_resume(rl, arg, history, autosave, procs);
-                return;
+                return false;
             }
         }
         if let Some(arg) = rest.strip_prefix("memory-reset") {
@@ -212,7 +383,7 @@ fn handle_input(
                     &catalog::user_dir(),
                     arg,
                 ));
-                return;
+                return false;
             }
         }
         match rest.trim() {
@@ -226,9 +397,9 @@ fn handle_input(
                 "未知命令 /{other}，可用：/models、/refresh、/save <名称>、/resume [名称]、/sessions、/memory-status、/memory-reset confirm"
             )),
         }
-        return;
+        return false;
     }
-    cmd_chat(agent, rl, input, history, autosave, registrar, procs);
+    cmd_chat(agent, rl, input, history, autosave, registrar, procs)
 }
 
 /// `/save <名称>`：当前全部历史整体快照到 sessions/<名称>.jsonl（原子替换）。
@@ -332,8 +503,11 @@ fn cmd_chat(
     autosave: &mut session::Session,
     registrar: &mut terminal_chat::memory::runner::ThreadRegistrar,
     procs: &ProcessManager,
-) {
-    let Some(dict) = build_dict() else { return };
+) -> bool {
+    let Some(dict) = build_dict() else {
+        return false;
+    };
+    let mut exit_host = false;
     // 调用开始：route 返回的快照固定本次使用的配置与凭证，之后的刷新不影响本次调用
     match catalog::route(&dict) {
         Ok((prov, cred, model)) => {
@@ -440,7 +614,15 @@ fn cmd_chat(
                     }
                     // 015：用户轮上下文来源（每轮解析：全局规则目录、cwd、SHELL、时钟）
                     let context_sources = terminal_chat::context::ContextSources::from_env();
-                    let outcome = turn::run_user_turn_with_context(
+                    let mut input_host = |_: &turn::ParsedToolCall,
+                                          questions: &[terminal_chat::user_input::Question]| {
+                        let result = ask_cli(rl, questions);
+                        if matches!(result, Err(terminal_chat::user_input::InputError::HostExited)) {
+                            exit_host = true;
+                        }
+                        result
+                    };
+                    let outcome = turn::run_user_turn_with_context_and_host(
                         history,
                         input,
                         &mut sender,
@@ -458,6 +640,11 @@ fn cmd_chat(
                         mode,
                         &context_sources,
                         procs,
+                        if interactive {
+                            Some(&mut input_host)
+                        } else {
+                            None
+                        },
                     );
                     unsafe {
                         libc::signal(libc::SIGINT, libc::SIG_DFL);
@@ -491,6 +678,7 @@ fn cmd_chat(
         }
         Err(e) => say(&format!("错误：{e}")),
     }
+    exit_host
 }
 
 fn cmd_models() {

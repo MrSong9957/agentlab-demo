@@ -213,3 +213,7 @@ git show 9e32a63:docs/records/v14-verification/cargo-test-workspace.log
 <a id="archive-62f014dc4d16d64e"></a>
 
 - 原路径：`docs/records/v14-verification/cargo-test-workspace.log`；SHA-256：`136fd2db0b9e856bc4e754686c55fa3c53e7778c20aed8f5709a9f4258125df0`。
+
+## 018 同步问询（2026-10-22）
+
+[实施与门禁记录](2026-10-22-018-user-input-implementation.md)汇总固定复用来源、CLI/PTY 验收与全量验证；[五类关键回归有效性](../testing/evidence/018-mutations.json)保留实际可逆破坏补丁、目标失败与恢复哈希。本条为新增证据，不改变上方历史整理的 734 份原件清单。

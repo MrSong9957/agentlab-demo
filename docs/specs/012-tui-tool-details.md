@@ -238,3 +238,5 @@
 ## 017 补充说明（2026-10-22，已批准交付）
 
 `update_plan` 终态加入同一「实时 ToolEnd 与 /resume 同一投影」通道：`HostHistoryItem` 增 `Plan` 变体（成功快照＝上游 `PlanUpdateCell` 渲染，失败/取消＝原因 cell），实时替换与恢复投影共用 `project_tool_item`；计划 cell 的完整视图（说明＋原文顺序）经 Ctrl+T 详情页/展开可见，Owned transcript 紧凑视图按母本语义排序并隐藏说明。见 [017-update-plan](017-update-plan.md)。
+
+**018 修订注记（2026-10-22）**：018 同步问询补充：问答终态经 `HostHistoryItem::UserInput` 加入实时/恢复同源投影，复用 Codex 结果 cell；不新增持久化变体或活动通道。Esc 取消问询当前轮、Ctrl+C 退出；等待期间 UI 仍处理粘贴、窗口 resize 和渲染。详见 [018](018-user-input.md)。

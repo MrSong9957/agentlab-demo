@@ -25,6 +25,12 @@ pub(crate) enum ViewPresentation {
 
 /// Trait implemented by every view that can be shown in the bottom pane.
 pub(crate) trait BottomPaneView: Renderable {
+    /// 018：当前同步问询的终态直送；不借用会话历史或普通输入队列。
+    fn finish_user_input(
+        &mut self,
+        _reason: codex_protocol::request_user_input::RequestUserInputError,
+    ) {
+    }
     /// Centered views preserve the preceding view as their backdrop.
     fn presentation(&self) -> ViewPresentation {
         ViewPresentation::Inline

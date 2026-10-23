@@ -12,6 +12,7 @@ pub mod proc_session;
 pub mod prompt;
 pub mod session;
 pub mod turn;
+pub mod user_input;
 pub mod tui_host;
 
 /// 串行化使用进程级环境变量的测试（TCHAT_* 为进程全局；catalog 与 tui_host 的

@@ -79,3 +79,5 @@
 **016 修订注记（2026-10-22，待批准）**：用户轮工具面由两项增至三项（`exec_command` 可续接语义＋新增 `write_stdin`）；`exec_command` 描述改为可续接语义（等待只控制返回、运行中返回句柄），参数表加入 `yield_time_ms`/`tty`，`timeout_ms` 描述取消 1..=60000 上限。测试同步：`s3`/`s4`/`s6` 按三工具契约更新（`prompt_assembly` 6/6 通过）；`tools` 数量断言在 tool_loop/llm_flow/e2e 同步为 3。本规格其余适配与母本锚定不变。
 
 **017 修订注记（2026-10-22，已批准交付）**：用户轮工具面由三项增至四项（新增 `update_plan`，定义与解析契约见 [017-update-plan](017-update-plan.md)）；适配①（剔除计划指引节）停用，母本 `## Planning`/`## `update_plan`` 两节按原文保留，嵌入母本锚点（字节数＋SHA-256）不变。测试同步：`s2`（指引保留＋独立重建不再剔节）、`s3`/`s4`（四工具）、`s6`（update_plan Schema 与解析差分锚定）；`tools` 数量断言在 tool_loop/llm_flow/e2e/memory_inject 同步为 4。
+
+**018 修订注记（2026-10-22）**：018 同步问询补充：用户轮工具数按宿主回答能力区分。有交互回答接口的普通轮/带记忆摘要轮为五项（增加 `request_user_input`）；无接口调用方及非交互管道仍四项，执行层拒绝伪造问询。内部记忆轮保持受限 mem 工具。Schema 与成功 `answers`/失败 `error` 结构见 [018](018-user-input.md)。

@@ -26,6 +26,772 @@ use terminal_chat::catalog;
 
 const WATCHDOG: Duration = Duration::from_secs(30);
 
+fn input_pty_cmd(cfg: &Path, user: &Path, key_name: &str, key: &str, tui: bool) -> Command {
+    let work = user.join("work");
+    let home = user.join("home");
+    fs::create_dir_all(&work).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    let mut cmd = pty_cli(
+        Some(&work),
+        &[
+            ("TCHAT_CONFIG_DIR", cfg.to_str().unwrap()),
+            ("TCHAT_USER_DIR", user.to_str().unwrap()),
+            (key_name, key),
+        ],
+    );
+    cmd.env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &home)
+        .env("APPDATA", &home)
+        .env("CODEX_HOME", &home)
+        .env("TZ", "UTC")
+        .env("LC_ALL", "C.UTF-8")
+        .env("SHELL", "/bin/sh")
+        .env("TCHAT_SESSION_TS", "20260101T000000")
+        .env_remove("TCHAT_PUBLIC_CATALOG_URL");
+    if !tui {
+        cmd.env("TERM", "dumb");
+    }
+    cmd
+}
+
+/// 018：真实 TUI 收到问题后，只有明确提交才能续请求，回答不成为聊天轮。
+#[test]
+fn s93_tui_user_input_submit_and_continue() {
+    let cfg = TempDir::new("s93-cfg");
+    let user = TempDir::new("s93-user");
+    let args = json!({"questions":[{"id":"direction","header":"方向","question":"S93-请选择方向",
+        "options":[{"label":"保留密码","description":"兼容账号"},{"label":"验证码","description":"修改流程"}]}]});
+    let tc =
+        json!({"choices":[{"message":{"tool_calls":[{"id":"s93-ask","type":"function","function":{
+        "name":"request_user_input","arguments":args.to_string()}}]}}]})
+        .to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc),
+        MockResp::json(200, chat_body("S93-继续完成")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S93_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s93"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S93_KEY",
+        "fake-s93",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.send_line("先确认方向");
+    pty.wait_screen_timeout("S93-请选择方向", Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(mock.count(), 1, "预选不算提交");
+    pty.send_raw(b"\r");
+    pty.wait_screen("S93-继续完成").unwrap();
+    pty.wait_screen("Questions 1/1 answered").unwrap();
+    pty.send_raw(b"\x03");
+    assert_eq!(pty.finish().1.code(), Some(0));
+    assert_eq!(mock.count(), 2, "答案不成为下一轮聊天");
+    let body: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
+    let result = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["tool_call_id"] == "s93-ask")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(result["content"].as_str().unwrap()).unwrap(),
+        json!({"answers":{"direction":{"answers":["保留密码"]}}})
+    );
+    assert_eq!(body["tools"].as_array().unwrap().len(), 5);
+}
+
+#[test]
+fn s94_line_user_input_choice_notes_and_eof() {
+    let cfg = TempDir::new("s94-cfg");
+    let user = TempDir::new("s94-user");
+    let ask = |id: &str| {
+        json!({"id":id,"type":"function","function":{"name":"request_user_input","arguments":json!({"questions":[{
+        "id":"q","header":"方式","question":"S94-请选择","options":[{"label":"保持","description":"保持兼容"}]}]}).to_string()}})
+    };
+    let tc = |id| json!({"choices":[{"message":{"tool_calls":[ask(id)]}}]}).to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc("first")),
+        MockResp::json(200, chat_body("S94-回答完成")),
+        MockResp::json(200, tc("eof")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S94_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s94"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S94_KEY",
+        "fake-s94",
+        false,
+    ));
+    pty.wait_output("你> ", WATCHDOG).unwrap();
+    pty.send_line("确认方式");
+    pty.wait_output("选择编号", Duration::from_secs(5)).unwrap();
+    pty.send_line("无效");
+    pty.wait_output("编号无效", WATCHDOG).unwrap();
+    pty.send_line("1");
+    pty.wait_output("补充", WATCHDOG).unwrap();
+    pty.send_line("中文说明");
+    pty.wait_output("S94-回答完成", WATCHDOG).unwrap();
+    pty.wait_output("你> ", WATCHDOG).unwrap();
+    pty.send_line("再次确认");
+    pty.wait_output("选择编号", WATCHDOG).unwrap();
+    pty.send_raw(b"\x04");
+    let (out, status) = pty.finish();
+    assert!(status.success(), "{out}");
+    assert!(out.contains("宿主退出：问询未完成"), "{out}");
+    assert_eq!(mock.count(), 3, "EOF 后不续请求");
+    let body: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
+    let tool = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["tool_call_id"] == "first")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(tool["content"].as_str().unwrap()).unwrap(),
+        json!({"answers":{"q":{"answers":["保持","user_note: 中文说明"]}}})
+    );
+}
+
+#[test]
+fn s95_tui_multi_question_other_paste_unanswered_resize_and_restore() {
+    let cfg = TempDir::new("s95-cfg");
+    let user = TempDir::new("s95-user");
+    let long = "S95-长问题-一二三四五六七八九十甲乙丙丁戊己庚辛壬癸-尾段";
+    let args = json!({"questions":(1..=3).map(|n|json!({"id":format!("q{n}"),"header":format!("题{n}"),
+        "question":if n==1 {long.to_string()}else{format!("S95-问题{n}")},
+        "options":[{"label":format!("A{n}"),"description":"兼容"},{"label":format!("B{n}"),"description":"调整"}]})).collect::<Vec<_>>()});
+    let tc =
+        json!({"choices":[{"message":{"tool_calls":[{"id":"s95-ask","type":"function","function":{
+        "name":"request_user_input","arguments":args.to_string()}}]}}]})
+        .to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc),
+        MockResp::json(200, chat_body("S95-完成")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S95_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s95"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S95_KEY",
+        "fake-s95",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.send_line("多题确认");
+    pty.wait_screen(long).unwrap();
+    pty.resize_and_sync(40, PTY_ROWS);
+    pty.wait_screen_pred("问题按新窗口折行", |s| {
+        s.contains("S95-长问题") && s.contains("尾段") && !s.contains(long)
+    })
+    .unwrap();
+    pty.resize_and_sync(PTY_COLS, PTY_ROWS);
+    pty.wait_screen(long).unwrap();
+    pty.send_raw(b"\x1b[C");
+    pty.wait_screen("S95-问题2").unwrap(); // 第一题预选尚未提交
+    pty.send_raw(b"\x1b[B\x1b[B\t");
+    pty.send_raw("\x1b[200~中文粘贴补充\x1b[201~".as_bytes());
+    pty.wait_screen("中文粘贴补充").unwrap();
+    let deadline=Instant::now()+WATCHDOG;
+    loop {
+        if let Some((col,row))=pty.screen_find("中文粘贴补充") {
+            if pty.vt.vt100().screen().cursor_position()==(row,col+12) {break;}
+        }
+        assert!(Instant::now()<deadline,"中文补充光标未对齐：{:?}",pty.vt.vt100().screen().cursor_position());
+        pty.read_once(50);
+    }
+    pty.send_raw(b"\r");
+    pty.wait_screen("S95-问题3").unwrap();
+    pty.send_raw(b"\r");
+    pty.wait_screen("Submit with unanswered questions?")
+        .unwrap();
+    assert_eq!(mock.count(), 1);
+    pty.send_raw(b"2\r");
+    pty.wait_screen(long).unwrap();
+    pty.send_raw(b"\r");
+    pty.wait_screen("S95-问题2").unwrap();
+    pty.send_raw(b"\t\r");
+    pty.wait_screen("S95-问题3").unwrap();
+    pty.send_raw(b"\r");
+    pty.wait_screen("S95-完成").unwrap();
+    pty.wait_screen("Questions 3/3 answered").unwrap();
+    pty.send_line("/save s95");
+    pty.wait_screen("已保存").unwrap();
+    pty.send_raw(b"\x03");
+    assert!(pty.finish().1.success());
+    assert_eq!(mock.count(), 2);
+    let body: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
+    let result = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["tool_call_id"] == "s95-ask")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(result["content"].as_str().unwrap()).unwrap(),
+        json!({"answers":{
+        "q1":{"answers":["A1"]},"q2":{"answers":["None of the above","user_note: 中文粘贴补充"]},"q3":{"answers":["A3"]}}})
+    );
+    let mut resumed = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S95_KEY",
+        "fake-s95",
+        true,
+    ));
+    resumed.wait_screen("? for shortcuts").unwrap();
+    resumed.send_line("/resume s95");
+    resumed.wait_screen("Questions 3/3 answered").unwrap();
+    resumed.wait_screen("note: 中文粘贴补充").unwrap();
+    resumed.send_raw(b"\x03");
+    assert!(resumed.finish().1.success());
+    assert_eq!(mock.count(), 2, "恢复只展示");
+}
+
+#[test]
+fn s96_tui_question_keeps_queued_chat_and_composer_draft_separate() {
+    let cfg = TempDir::new("s96-cfg");
+    let user = TempDir::new("s96-user");
+    let tc=json!({"choices":[{"message":{"tool_calls":[{"id":"s96-ask","type":"function","function":{
+        "name":"request_user_input","arguments":json!({"questions":[{"id":"q","header":"选择","question":"S96-当前问询",
+        "options":[{"label":"S96-回答选项","description":"确认方向"}]}]}).to_string()}}]}}]}).to_string();
+    let (first, gate) = MockResp::gated(200, tc);
+    let mock = spawn_mock(vec![
+        first,
+        MockResp::json(200, chat_body("S96-本轮完成")),
+        MockResp::json(200, chat_body("S96-队列完成")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S96_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s96"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S96_KEY",
+        "fake-s96",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.send_line("先执行");
+    wait_request_count(&mut pty, &mock, 1);
+    pty.send_line("S96-排队聊天");
+    pty.wait_screen("S96-排队聊天").unwrap();
+    pty.send_raw("\x1b[200~S96-未发草稿\x1b[201~".as_bytes());
+    pty.wait_screen("S96-未发草稿").unwrap();
+    gate.release();
+    pty.wait_screen("S96-当前问询").unwrap();
+    assert_eq!(mock.count(), 1);
+    pty.send_raw(b"\r");
+    pty.wait_screen("S96-队列完成").unwrap();
+    pty.wait_screen("S96-未发草稿").unwrap();
+    pty.send_raw(b"\x03");
+    assert!(pty.finish().1.success());
+    assert_eq!(mock.count(), 3);
+    let bodies: Vec<Value> = mock
+        .requests()
+        .iter()
+        .map(|r| serde_json::from_str(&r.body).unwrap())
+        .collect();
+    let last_user = bodies[2]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|m| m["role"] == "user")
+        .unwrap();
+    assert_eq!(last_user["content"], "S96-排队聊天");
+    assert!(bodies.iter().all(|b| b["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "user")
+        .all(|m| m["content"] != "S96-回答选项" && m["content"] != "S96-未发草稿")));
+}
+
+#[test]
+fn s97_question_cancel_exit_and_eof_save_one_terminal_result_and_pair_batch() {
+    use terminal_chat::prompt::HistoryItem;
+    for (tui, key, exits, expected) in [
+        (
+            true,
+            b"\x1b".as_slice(),
+            false,
+            "用户已取消本轮：问询未完成",
+        ),
+        (true, b"\x03".as_slice(), true, "宿主退出：问询未完成"),
+        (
+            false,
+            b"\x03".as_slice(),
+            false,
+            "用户已取消本轮：问询未完成",
+        ),
+        (false, b"\x04".as_slice(), true, "宿主退出：问询未完成"),
+    ] {
+        let cfg = TempDir::new("s97-cfg");
+        let user = TempDir::new("s97-user");
+        let forbidden = user.path().join("must-not-execute.txt");
+        let tc=json!({"choices":[{"message":{"tool_calls":[
+            {"id":"s97-ask","type":"function","function":{"name":"request_user_input","arguments":json!({"questions":[{
+                "id":"q","header":"确认","question":"S97-请选择","options":[{"label":"允许后续任务","description":"普通任务数据"}]}]}).to_string()}},
+            {"id":"s97-after","type":"function","function":{"name":"apply_patch","arguments":json!({"patch":format!("*** Begin Patch\n*** Add File: {}\n+wrong\n*** End Patch",forbidden.display())}).to_string()}}
+        ]}}]}).to_string();
+        let mock = spawn_mock(vec![MockResp::json(200, tc)]);
+        write_manual(cfg.path(), &mock.url, "env:TCHAT_S97_KEY");
+        seed_grant(
+            user.path(),
+            &catalog::origin_of(&mock.url).unwrap(),
+            &catalog::fingerprint("fake-s97"),
+        );
+        let mut pty = PtySession::spawn(input_pty_cmd(
+            cfg.path(),
+            user.path(),
+            "TCHAT_S97_KEY",
+            "fake-s97",
+            tui,
+        ));
+        if tui {
+            pty.wait_screen("? for shortcuts").unwrap();
+        } else {
+            pty.wait_output("你> ", WATCHDOG).unwrap();
+        }
+        pty.send_line("等待中结束");
+        if tui {
+            pty.wait_screen("S97-请选择").unwrap();
+        } else {
+            pty.wait_output("选择编号", WATCHDOG).unwrap();
+        }
+        if !tui {
+            pty.send_raw("未提交草稿".as_bytes());
+        }
+        pty.send_raw(key);
+        if !exits {
+            if tui {
+                pty.wait_screen("问询未完成").unwrap();
+                pty.send_raw(b"\x03");
+            } else {
+                pty.wait_output("问询未完成", WATCHDOG).unwrap();
+                pty.send_line("exit");
+            }
+        }
+        let (out, status) = pty.finish();
+        assert!(status.success(), "{out}");
+        assert_eq!(mock.count(), 1, "等待结束后不续请求");
+        assert!(!forbidden.exists(), "同批后续工具不得执行");
+        let autos: Vec<_> = fs::read_dir(user.path().join("sessions"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+            .collect();
+        assert_eq!(autos.len(), 1);
+        let loaded = terminal_chat::session::load_session_file(&autos[0]).unwrap();
+        assert_eq!(loaded.repairs, 0, "必须保存完整配对");
+        let results: Vec<_> = loaded
+            .history
+            .iter()
+            .filter_map(|h| {
+                if let HistoryItem::ToolResult {
+                    tool_call_id,
+                    content,
+                    display,
+                } = h
+                {
+                    assert!(display.is_none());
+                    Some((
+                        tool_call_id,
+                        serde_json::from_str::<Value>(content).unwrap(),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "s97-ask");
+        assert_eq!(results[0].1, json!({"error":expected}));
+        assert_eq!(results[1].0, "s97-after");
+        assert!(results[1].1["error"]
+            .as_str()
+            .unwrap()
+            .contains("本调用未执行"));
+        if expected.starts_with("宿主退出") {
+            assert!(results[1].1["error"].as_str().unwrap().contains("宿主退出"));
+        }
+    }
+}
+
+#[test]
+fn s98_untrusted_question_and_answer_are_display_copies_and_never_commands() {
+    let cfg = TempDir::new("s98-cfg");
+    let user = TempDir::new("s98-user");
+    let target = user.path().join("answer-must-not-execute");
+    let id = " q\u{1b}[2J ";
+    let call_id = "s98\u{1b}]52;c;SUQtQVRUQUNL\u{7}";
+    let label = "保留\u{1b}[2J原标签";
+    let note = format!(
+        "S98-补充\u{1b}]52;c;Tk9URS1BVFRBQ0s=\u{7}$(touch {})",
+        target.display()
+    );
+    let args=json!({"questions":[{"id":id,"header":"标题\u{1b}]0;HEADER-ATTACK\u{7}",
+        "question":"S98-安全问题\u{1b}]0;QUESTION-ATTACK\u{7}","options":[{"label":label,"description":"说明\u{1b}Ppayload\u{1b}\\"}]}]}).to_string();
+    let tc=json!({"choices":[{"message":{"tool_calls":[{"id":call_id,"type":"function","function":{"name":"request_user_input","arguments":args}}]}}]}).to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc),
+        MockResp::json(200, chat_body("S98-完成")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S98_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s98"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S98_KEY",
+        "fake-s98",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.send_line("安全展示");
+    pty.wait_screen("S98-安全问题").unwrap();
+    pty.wait_screen("保留原标签").unwrap();
+    pty.send_raw(format!("\x1b[200~{note}\x1b[201~").as_bytes());
+    pty.wait_screen("S98-补充").unwrap();
+    pty.send_raw(b"\r");
+    pty.wait_screen("S98-完成").unwrap();
+    pty.send_raw(b"\x03");
+    let (out, status) = pty.finish();
+    assert!(status.success());
+    assert!(
+        osc52_payloads(&out).is_empty(),
+        "回答与关联 ID 不得控制剪贴板"
+    );
+    assert!(!out.contains("QUESTION-ATTACK") && !out.contains("HEADER-ATTACK"));
+    assert!(!target.exists());
+    assert_eq!(mock.count(), 2);
+    let body: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
+    let tool = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["tool_call_id"] == call_id)
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(tool["content"].as_str().unwrap()).unwrap(),
+        json!({"answers":{id:{"answers":[label,format!("user_note: {note}")]}}})
+    );
+    let assistant = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m.get("tool_calls").is_some())
+        .unwrap();
+    assert_eq!(assistant["tool_calls"][0]["id"], call_id);
+    assert_eq!(assistant["tool_calls"][0]["function"]["arguments"], args);
+}
+
+#[test]
+fn s99_line_multi_question_other_and_confirmed_unanswered() {
+    let cfg = TempDir::new("s99-cfg");
+    let user = TempDir::new("s99-user");
+    let tc=json!({"choices":[{"message":{"tool_calls":[{"id":"s99-ask","type":"function","function":{
+        "name":"request_user_input","arguments":json!({"questions":(1..=2).map(|n|json!({"id":format!("q{n}"),"header":"确认",
+            "question":format!("S99-问题{n}"),"options":[{"label":"保留","description":"兼容"}]})).collect::<Vec<_>>()}).to_string()}}]}}]}).to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc),
+        MockResp::json(200, chat_body("S99-完成")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S99_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s99"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S99_KEY",
+        "fake-s99",
+        false,
+    ));
+    pty.wait_output("你> ", WATCHDOG).unwrap();
+    pty.send_line("多题");
+    pty.wait_output("S99-问题1", WATCHDOG).unwrap();
+    pty.send_raw(b"\r");
+    pty.wait_output("S99-问题2", WATCHDOG).unwrap();
+    pty.send_line("2");
+    pty.wait_output("补充（可留空）", WATCHDOG).unwrap();
+    pty.send_line("其他中文回答");
+    pty.wait_output("仍有未答题，确认提交？", WATCHDOG).unwrap();
+    assert_eq!(mock.count(), 1);
+    pty.send_line("y");
+    pty.wait_output("S99-完成", WATCHDOG).unwrap();
+    pty.send_line("exit");
+    assert!(pty.finish().1.success());
+    assert_eq!(mock.count(), 2);
+    let body: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
+    let tool = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["tool_call_id"] == "s99-ask")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(tool["content"].as_str().unwrap()).unwrap(),
+        json!({"answers":{
+        "q1":{"answers":[]},"q2":{"answers":["None of the above","user_note: 其他中文回答"]}}})
+    );
+}
+
+#[test]
+fn s100_tui_two_calls_with_same_question_id_wait_serially_then_execute_patch() {
+    let cfg = TempDir::new("s100-cfg");
+    let user = TempDir::new("s100-user");
+    let target = user.path().join("after-both.txt");
+    let mut calls:Vec<_>=(1..=2).map(|n|json!({"id":format!("ask{n}"),"type":"function","function":{"name":"request_user_input",
+        "arguments":json!({"questions":[{"id":"same-id","header":"确认","question":format!("S100-当前问题{n}"),
+        "options":[{"label":format!("答案{n}"),"description":"本次回答"}]}]}).to_string()}})).collect();
+    calls.push(json!({"id":"after-both","type":"function","function":{"name":"apply_patch","arguments":json!({
+        "patch":format!("*** Begin Patch\n*** Add File: {}\n+both answered\n*** End Patch",target.display())}).to_string()}}));
+    let mock = spawn_mock(vec![
+        MockResp::json(
+            200,
+            json!({"choices":[{"message":{"tool_calls":calls}}]}).to_string(),
+        ),
+        MockResp::json(200, chat_body("S100-完成")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S100_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s100"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S100_KEY",
+        "fake-s100",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.send_line("串行问询");
+    pty.wait_screen("S100-当前问题1").unwrap();
+    assert_eq!(mock.count(), 1);
+    assert!(!target.exists());
+    pty.send_raw(b"\r");
+    pty.wait_screen("S100-当前问题2").unwrap();
+    assert_eq!(mock.count(), 1);
+    assert!(!target.exists());
+    pty.send_raw(b"\r");
+    pty.wait_screen("S100-完成").unwrap();
+    pty.send_raw(b"\x03");
+    assert!(pty.finish().1.success());
+    assert_eq!(fs::read_to_string(&target).unwrap(), "both answered\n");
+    assert_eq!(mock.count(), 2);
+    let body: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
+    for n in 1..=2 {
+        let tool = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["tool_call_id"] == format!("ask{n}"))
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(tool["content"].as_str().unwrap()).unwrap(),
+            json!({"answers":{"same-id":{"answers":[format!("答案{n}")]}}})
+        );
+    }
+}
+
+#[test]
+fn s101_restore_unfinished_question_only_displays_unknown_result() {
+    use terminal_chat::prompt::{HistoryItem, HistoryMessage, HistoryRole, ToolCallRecord};
+    let cfg = TempDir::new("s101-cfg");
+    let user = TempDir::new("s101-user");
+    let sessions = user.path().join("sessions");
+    let args=json!({"questions":[{"id":"q","header":"方向","question":"S101-未完成问题","options":[{"label":"原选择","description":"未提交"}]}]}).to_string();
+    terminal_chat::session::save_snapshot(
+        &sessions,
+        "unfinished",
+        &[
+            HistoryItem::Text(HistoryMessage {
+                role: HistoryRole::User,
+                content: "崩溃前用户轮".into(),
+            }),
+            HistoryItem::AssistantToolCalls {
+                content: None,
+                tool_calls: vec![ToolCallRecord {
+                    id: "old-call".into(),
+                    name: "request_user_input".into(),
+                    arguments: args.clone(),
+                }],
+            },
+        ],
+    )
+    .unwrap();
+    let original = fs::read(sessions.join("unfinished.jsonl")).unwrap();
+    let mock = spawn_mock(vec![]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S101_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s101"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S101_KEY",
+        "fake-s101",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.send_line("/resume unfinished");
+    pty.wait_screen("Questions 0/1 answered (interrupted)")
+        .unwrap();
+    pty.wait_screen(terminal_chat::session::UNKNOWN_RESULT_ERROR)
+        .unwrap();
+    assert!(
+        !pty.screen().contains("Question 1/1"),
+        "恢复不能显示活动问答"
+    );
+    pty.send_line("/save restored");
+    pty.wait_screen("已保存").unwrap();
+    pty.send_raw(b"\x03");
+    assert!(pty.finish().1.success());
+    assert_eq!(mock.count(), 0, "恢复与保存都不发模型请求");
+    assert_eq!(
+        fs::read(sessions.join("unfinished.jsonl")).unwrap(),
+        original
+    );
+    let restored =
+        terminal_chat::session::load_session_file(&sessions.join("restored.jsonl")).unwrap();
+    assert_eq!(restored.repairs, 0);
+    assert!(
+        matches!(&restored.history[1],HistoryItem::AssistantToolCalls {tool_calls,..} if tool_calls[0].arguments==args && tool_calls[0].id=="old-call")
+    );
+    assert!(
+        matches!(&restored.history[2],HistoryItem::ToolResult {content,display:None,..} if content.contains(terminal_chat::session::UNKNOWN_RESULT_ERROR) && !content.contains("answers"))
+    );
+}
+
+/// 018：stdin 是终端、stdout 重定向时，TERM 大小写变体仍须能直接 Ctrl+C 取消。
+#[test]
+fn s102_redirected_line_cli_uppercase_term_cancels_without_another_line() {
+    let cfg = TempDir::new("s102-cfg");
+    let user = TempDir::new("s102-user");
+    let output = user.path().join("stdout.txt");
+    let mock = spawn_mock(vec![MockResp::json(
+        200,
+        json!({"choices":[{"message":{"tool_calls":[{"id":"s102-ask","type":"function","function":{
+            "name":"request_user_input","arguments":json!({"questions":[{"id":"q","header":"方向",
+            "question":"S102-请选择","options":[{"label":"保留","description":"兼容"}]}]}).to_string()}}]}}]}).to_string(),
+    )]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S102_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s102"),
+    );
+    let original = input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S102_KEY",
+        "fake-s102",
+        false,
+    );
+    // 使用已有 PTY 宿主；shell 只负责 exec 前的真实 stdout 重定向，路径均通过参数传递。
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", "exec \"$1\" > \"$2\"", "018-redirect"])
+        .arg(original.get_program())
+        .arg(&output)
+        .current_dir(original.get_current_dir().unwrap())
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin");
+    for (key, value) in original.get_envs() {
+        if let Some(value) = value {
+            command.env(key, value);
+        }
+    }
+    command.env("TERM", "DUMB");
+    let mut pty = PtySession::spawn(command);
+    let wait = |pty: &mut PtySession, needle: &str| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let text = fs::read_to_string(&output).unwrap_or_default();
+            if text.contains(needle) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "等待重定向输出 {needle:?} 超时：{text}"
+            );
+            pty.read_once(50);
+        }
+    };
+    wait(&mut pty, "你> ");
+    pty.send_line("确认方式");
+    wait(&mut pty, "选择编号");
+    assert_eq!(mock.count(), 1);
+    pty.send_raw(b"\x03");
+    wait(&mut pty, "用户已取消本轮：问询未完成");
+    // 不补换行解除等待；Ctrl+D 从恢复后的普通 CLI 输入中退出宿主。
+    pty.send_raw(b"\x04");
+    assert!(pty.finish().1.success());
+    assert_eq!(mock.count(), 1, "取消后不续请求");
+    assert!(fs::read_to_string(output).unwrap().contains("再见!"));
+    let sessions: Vec<_> = fs::read_dir(user.path().join("sessions"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+        .collect();
+    assert_eq!(sessions.len(), 1);
+    let loaded = terminal_chat::session::load_session_file(&sessions[0]).unwrap();
+    assert_eq!(loaded.repairs, 0);
+    let results: Vec<_> = loaded
+        .history
+        .iter()
+        .filter_map(|h| match h {
+            terminal_chat::prompt::HistoryItem::ToolResult {
+                tool_call_id,
+                content,
+                display,
+            } => {
+                assert!(display.is_none());
+                Some((
+                    tool_call_id,
+                    serde_json::from_str::<Value>(content).unwrap(),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, "s102-ask");
+    assert_eq!(results[0].1, json!({"error":"用户已取消本轮：问询未完成"}));
+}
+
 // ---------- PTY 基础设施 ----------
 
 /// 真实伪终端会话：master 留在本测试，slave 作为子进程的 stdin/stdout/stderr，
@@ -543,7 +1309,11 @@ fn s1_pty_normal_session_full_roundtrip() {
     );
     assert_eq!(body["messages"][2]["role"], "user");
     assert_eq!(body["messages"][2]["content"], "你好");
-    assert_eq!(body["tools"].as_array().unwrap().len(), 4, "017：四工具");
+    assert_eq!(
+        body["tools"].as_array().unwrap().len(),
+        5,
+        "018：具备回答宿主的交互轮五工具"
+    );
     // 凭证明文不回显；已授权命中不改写授权记录
     assert!(!out.contains(key), "密钥明文不得出现在终端输出");
     assert_eq!(
@@ -4035,7 +4805,11 @@ fn s44_tui_wheel_keeps_selection_gutter_unchallenged() {
     pty.resize(PTY_COLS, PTY_ROWS);
     for _ in 0..6 { pty.read_once(60); }
     pty.send_raw(&sgr_right_down(10, 10));
-    for _ in 0..10 { pty.read_once(60); }
+    // 与上面的第二次复制同源：等实际载荷到达，固定读次数会在并行编译负载下早退。
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while osc52_payloads(&pty.output()).len() < 3 && Instant::now() < deadline {
+        pty.read_once(60);
+    }
     let payloads = osc52_payloads(&pty.output());
     assert_eq!(payloads.len(), 3, "resize 后选区仍在：{payloads:?}");
     assert_eq!(payloads[2], sel_b64_encode(b"Word02SelKt"), "resize 后载荷一致");

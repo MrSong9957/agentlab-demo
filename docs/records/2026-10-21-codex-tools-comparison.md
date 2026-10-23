@@ -18,7 +18,7 @@
 | 命令执行、进程交互 | `exec_command`、`write_stdin` | 已有同步执行；缺少进程会话、后续取输出和输入能力。**优先补齐** |
 | 文件补丁 | `apply_patch` | 已有，继续复用；JSON 参数为主动适配，`Move to` 与 Unicode 匹配容差暂缺，无需紧急改造（[2026-10-22 复核](2026-10-22-codex-apply-patch-comparison.md)） |
 | 任务计划 | `update_plan` | 确实缺少；已制定仅覆盖该功能的 [017 接入方案](../specs/017-update-plan.md)，尚未实施，保留 8 次请求额度（[2026-10-22 复核](2026-10-22-codex-update-plan-comparison.md)） |
-| 用户问询 | `request_user_input`、`request_user_input_async` | 缺少。可先做同步问询，异步版本后置 |
+| 用户问询 | `request_user_input`、`request_user_input_async` | [018](../specs/018-user-input.md) 阶段 A 同步问答已获批准（2026-10-23），正在本地交付；独立回答通道、关闭自动空答。异步工具未注册、运行机制未实施（[实施证据](2026-10-22-018-user-input-implementation.md)） |
 | 工作中主动通知 | `send_message_to_user_async` | 缺少。需要持续运行和异步交互场景再补 |
 | 查看图片 | `view_image` | 缺少。处理截图、UI 验收时有价值，但需要多模态消息支持 |
 | MCP 外部工具 | 按服务器动态注册工具 | 未接入用户轮。适合成为外部能力的统一入口 |
@@ -46,7 +46,7 @@ Codex 还包含 `clock.curr_time`、`clock.sleep`、`wait_for_environment`、`li
 
 2. **再补 `update_plan`。** 它不增加系统执行权限，接入成本相对较低，能直接改善多步骤任务的进度展示。项目目前还会主动移除基础提示词中的计划工具指引，接入时需同步调整。[现有适配](../../src/app/src/prompt.rs)
 
-3. **补结构化问询。** 先让模型能提出选项、等待用户回答并继续原任务。异步问询可以等宿主具备持续工作和接收新输入的能力后再做。
+3. **补结构化问询。** 先复用 Codex 同步工具的选项和回答结构，接通界面及专用回答回送，等待用户提交后继续原任务；需明确适配上游普通模式的自动空答行为。异步问询后置，不能把当前普通输入排队当作已具备晚到回答能力。详见[问询复核](2026-10-22-codex-user-input-comparison.md)。
 
 4. **接入 MCP，再按实际用途增加搜索、网页读取等工具。** 本项目当前采用 Chat Completions；通过 MCP 或普通函数工具接入外部服务，更容易保留现有多提供方架构。初期工具少时，可直接提供完整定义，暂不引入 `tool_search`。
 

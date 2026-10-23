@@ -48,10 +48,52 @@ use crate::streaming::controller::StreamController;
 use crate::markdown_render::ListSpacing;
 use crate::transcript_view::TranscriptView;
 use crate::tui::Tui;
+use codex_protocol::request_user_input::{
+    RequestUserInputError, RequestUserInputQuestion, RequestUserInputResponse,
+};
+
+/// 018：每个请求只回送一次。尚未显示的事件随宿主退出而释放时也带真实结束原因。
+#[derive(Debug)]
+pub struct UserInputReply {
+    sender: Option<std_mpsc::Sender<Result<RequestUserInputResponse, RequestUserInputError>>>,
+    drop_reason: RequestUserInputError,
+}
+impl UserInputReply {
+    pub fn new(
+        sender: std_mpsc::Sender<Result<RequestUserInputResponse, RequestUserInputError>>,
+    ) -> Self {
+        Self {
+            sender: Some(sender),
+            drop_reason: RequestUserInputError::HostExited,
+        }
+    }
+    pub(crate) fn displayed(&mut self) {
+        self.drop_reason = RequestUserInputError::Closed;
+    }
+    pub(crate) fn send(mut self, result: Result<RequestUserInputResponse, RequestUserInputError>) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(result);
+        }
+    }
+}
+impl Drop for UserInputReply {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(Err(self.drop_reason.clone()));
+        }
+    }
+}
 
 /// 宿主→驱动事件（一轮 turn 的回推流）。
 #[derive(Debug)]
 pub enum DriverEvent {
+    /// 018：每次调用独立通道；live 拒绝已取消请求的迟到显示事件。
+    UserInput {
+        questions: Vec<RequestUserInputQuestion>,
+        reply: UserInputReply,
+        live: Arc<std::sync::atomic::AtomicBool>,
+        display_filter: fn(&str) -> String,
+    },
     /// 增量文本（按宿主确定性切分）。
     Delta(String),
     /// 一轮成功完成：最终完整回复文本。
@@ -195,6 +237,7 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
     let (turn_tx, turn_rx) = std_mpsc::channel::<DriverEvent>();
     let mut turn_rx = Some(turn_rx);
     let mut turn_running = false;
+    let mut turn_cancelled = false;
     // 本轮流式 cell 的下标集合（008-REVIEW 收敛：Final/Failed 仅移除这些 cell——
     // turn 期间推入的 Info/错误 cell（工具活动行、落盘告警——006/007 通知契约）
     // 必须保留；倒序 remove 免受下标漂移，也不保留跨事件窗口的绝对下标）
@@ -264,6 +307,27 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                     while let Ok(event) = rx.try_recv() {
                         changed = true;
                         match event {
+                            DriverEvent::UserInput {
+                                questions,
+                                reply,
+                                live,
+                                display_filter,
+                            } => {
+                                if turn_running
+                                    && !turn_cancelled
+                                    && live.load(std::sync::atomic::Ordering::SeqCst)
+                                    && pane.active_view_id() != Some("user-input")
+                                {
+                                    tool_detail = None;
+                                    pane.show_user_input(questions, reply, live, display_filter);
+                                } else {
+                                    reply.send(Err(if turn_cancelled {
+                                        RequestUserInputError::Cancelled
+                                    } else {
+                                        RequestUserInputError::Closed
+                                    }));
+                                }
+                            }
                             DriverEvent::Delta(delta) => {
                                 let controller = stream.get_or_insert_with(|| new_stream(&cwd));
                                 controller.push(&delta);
@@ -276,6 +340,7 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                 }
                             }
                             DriverEvent::Final(text) => {
+                                pane.end_user_input(RequestUserInputError::Closed);
                                 // 008-REVIEW：仅移除本轮流式 cell（倒序），以完整回复
                                 // 建单一 cell；turn 期间推入的 Info/错误 cell 保留
                                 for idx in stream_indices.drain(..).rev() {
@@ -289,6 +354,7 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                 (hooks.set_cancel_requested)(false);
                             }
                             DriverEvent::Failed(text) => {
+                                pane.end_user_input(RequestUserInputError::Closed);
                                 for idx in stream_indices.drain(..).rev() {
                                     cells.remove(idx);
                                 }
@@ -376,6 +442,9 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                 }
                 // 011 §7：粘贴突发冲刷有产出才置脏（composer 冲刷定时亦经 Draw
                 // 通知请求；此处为 tick 兜底路径）
+                if pane.active_view_id() == Some("user-input") {
+                    pane.pre_draw_tick();
+                }
                 if pane.flush_paste_burst_if_due() {
                     changed = true;
                 }
@@ -393,6 +462,7 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                         Some(IdleSubmission::Exit) => return Ok(DriverExit::Quit),
                         Some(IdleSubmission::Command { name, full }) => {
                             if handle_builtin_exit(&name) {
+                                pane.end_user_input(RequestUserInputError::HostExited);
                                 return Ok(DriverExit::Quit);
                             }
                             if apply_command_outcome(
@@ -400,12 +470,14 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                 &mut cells,
                                 &mut transcript,
                             ) {
+                                pane.end_user_input(RequestUserInputError::HostExited);
                                 return Ok(DriverExit::Quit);
                             }
                         }
                         Some(IdleSubmission::Turn(text)) => {
                             spawn_turn_cells(&mut cells, &mut stream_indices, &text);
                             turn_running = true;
+                            turn_cancelled = false;
                             pane.set_task_running(true);
                             (hooks.spawn_turn)(text, turn_tx.clone());
                         }
@@ -440,6 +512,8 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                     }
                     AppEvent::Interrupt => {
                         if turn_running {
+                            pane.end_user_input(RequestUserInputError::Cancelled);
+                            turn_cancelled = true;
                             (hooks.set_cancel_requested)(true);
                         }
                     }
@@ -455,17 +529,21 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                 if tool_detail.is_some() {
                     if let CrosstermEvent::Key(key) = &term_event {
                         if key.kind == KeyEventKind::Press && is_ctrl_c(key) {
+                            pane.end_user_input(RequestUserInputError::HostExited);
                             return Ok(DriverExit::Quit);
                         } else if key.kind == KeyEventKind::Press
                             && is_ctrl_d(key)
                             && pane.composer_text_with_pending().trim().is_empty()
                         {
+                            pane.end_user_input(RequestUserInputError::HostExited);
                             return Ok(DriverExit::Quit);
                         } else if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
                             && key.code == KeyCode::Esc
                             && key.modifiers.is_empty()
                         {
                             if turn_running {
+                                pane.end_user_input(RequestUserInputError::Cancelled);
+                                turn_cancelled = true;
                                 (hooks.set_cancel_requested)(true);
                                 if let Some(detail) = tool_detail.as_mut() {
                                     detail.overlay.set_notice(
@@ -521,6 +599,7 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                             // 聚焦/任务态；运行中退出走宿主完整收尾（置取消→
                             // SIGKILL 工具进程组并回收→会话排空→终端恢复），不在
                             // 此取消（取消归 Esc）。
+                            pane.end_user_input(RequestUserInputError::HostExited);
                             return Ok(DriverExit::Quit);
                         } else if key.code == KeyCode::Esc && key.modifiers.is_empty() {
                             // 单一职责轮（012 §9）：Esc＝仅取消——运行中一次按键
@@ -531,6 +610,8 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                             // 选区冻结视口下反馈行可能暂不可见——用户点击输入区
                             // 或 Ctrl+End 后可见（登记取舍）。
                             if turn_running {
+                                pane.end_user_input(RequestUserInputError::Cancelled);
+                                turn_cancelled = true;
                                 (hooks.set_cancel_requested)(true);
                                 // 011 §7：取消请求无可视变化，保持「任意按键即时
                                 // 反馈」惯例（尾条件绘制）
@@ -544,6 +625,7 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                             if is_ctrl_d(&key)
                                 && pane.composer_text_with_pending().trim().is_empty()
                             {
+                                pane.end_user_input(RequestUserInputError::HostExited);
                                 return Ok(DriverExit::Quit);
                             }
                             // 010-K5（单一职责轮修订）：选区是鼠标覆盖层，键盘永不
@@ -635,6 +717,7 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                     // 语义是「按搜索规则处理」，不得触发裸退出
                                     && !pane.history_search_active();
                                 if is_bare_exit {
+                                    pane.end_user_input(RequestUserInputError::HostExited);
                                     return Ok(DriverExit::Quit);
                                 }
                                 match pane.handle_key_event(key) {
@@ -656,6 +739,7 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                                 &text,
                                             );
                                             turn_running = true;
+                                            turn_cancelled = false;
                                             pane.set_task_running(true);
                                             (hooks.spawn_turn)(text, turn_tx.clone());
                                             needs_draw = true;
@@ -665,6 +749,7 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                         pane.clear_composer_for_command();
                                         let name = command.command().to_string();
                                         if handle_builtin_exit(&name) {
+                                            pane.end_user_input(RequestUserInputError::HostExited);
                                             return Ok(DriverExit::Quit);
                                         }
                                         if apply_command_outcome(
@@ -672,6 +757,7 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                             &mut cells,
                                             &mut transcript,
                                         ) {
+                                            pane.end_user_input(RequestUserInputError::HostExited);
                                             return Ok(DriverExit::Quit);
                                         }
                                         needs_draw = true;
@@ -687,6 +773,7 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                             format!("{name} {}", args.trim())
                                         };
                                         if handle_builtin_exit(&name) {
+                                            pane.end_user_input(RequestUserInputError::HostExited);
                                             return Ok(DriverExit::Quit);
                                         }
                                         if apply_command_outcome(
@@ -694,6 +781,7 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                             &mut cells,
                                             &mut transcript,
                                         ) {
+                                            pane.end_user_input(RequestUserInputError::HostExited);
                                             return Ok(DriverExit::Quit);
                                         }
                                         needs_draw = true;
@@ -1246,6 +1334,12 @@ pub enum HostHistoryItem {
         cancelled: bool,
         error: Option<String>,
     },
+    /// 018：宿主已过滤展示副本，关联 ID 保持原值；不包含活动问询通道。
+    UserInput {
+        questions: Vec<RequestUserInputQuestion>,
+        response: Option<RequestUserInputResponse>,
+        error: Option<String>,
+    },
 }
 
 /// 012：apply_patch 逐文件真实差异（应用时的真实前后内容）。
@@ -1316,7 +1410,8 @@ pub fn project_history(items: Vec<HostHistoryItem>) -> Vec<std::sync::Arc<dyn Hi
             }
             tool @ (HostHistoryItem::Exec { .. }
             | HostHistoryItem::Patch { .. }
-            | HostHistoryItem::Plan { .. }) => {
+            | HostHistoryItem::Plan { .. }
+            | HostHistoryItem::UserInput { .. }) => {
                 flush_text!();
                 out.extend(project_tool_item(&tool, &id, &cwd));
             }
@@ -1492,6 +1587,27 @@ fn project_tool_item(
                 lines.push(ratatui::text::Line::from(err.clone()).dim());
             }
             vec![Arc::new(PlainHistoryCell::new(lines))]
+        }
+        HostHistoryItem::UserInput {
+            questions,
+            response,
+            error,
+        } => {
+            let mut out: Vec<Arc<dyn HistoryCell>> =
+                vec![Arc::new(crate::history_cell::RequestUserInputResultCell {
+                    questions: questions.clone(),
+                    answers: response
+                        .as_ref()
+                        .map(|r| r.answers.clone())
+                        .unwrap_or_default(),
+                    interrupted: response.is_none(),
+                })];
+            if let Some(error) = error {
+                out.push(Arc::new(PlainHistoryCell::new(vec![
+                    ratatui::text::Line::from(error.clone()),
+                ])));
+            }
+            out
         }
     }
 }

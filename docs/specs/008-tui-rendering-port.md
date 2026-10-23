@@ -170,3 +170,5 @@
   - [x] code-review（Skill 双轴）完成，发现与处置见记录 §4。
   - [x] verify:full＝L3 合理范围：`cargo check` 通过＋上述受影响测试＋一致性/忽略检查；**未重跑整个 workspace**（无代码路径变化，2026-10-18 合并门禁全量退出码 0 仍为有效全量基线，不重复运行未变化候选的已通过测试）。
 - 残留登记（本轮范围外，不扩权处理）：3 个同类 `.snap.new` 仍被跟踪（`sparkle__shortcut_help_hides…`/`sparkle__shortcut_help_preserves…`/`status_surface__activity_shortcut_help…`，属主测试均 008-TRIM 裁剪，路径见记录 §5）；新忽略规则已覆盖其模式，删除属后续新决定。
+
+**018 修订注记（2026-10-22）**：018 同步问询补充：恢复固定 Codex 基线的 `bottom_pane/request_user_input/{mod,layout,render}.rs` 必要子集及 `history_cell/request_user_input.rs`；用本地独立通道替代 App Server，保留选项/Other/notes/切题/未答确认，去掉异步队列、倒计时、自动空答和图片。主 composer 草稿与普通排队输入独立保留；实时/恢复同源。详见 [018](018-user-input.md) 和[实施证据](../records/2026-10-22-018-user-input-implementation.md)。

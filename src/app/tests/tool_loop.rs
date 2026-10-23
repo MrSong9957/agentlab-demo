@@ -143,6 +143,43 @@ fn t1_plain_reply_ends_immediately() {
     assert_eq!(tools[2]["function"]["name"], json!("write_stdin"));
 }
 
+#[test]
+fn t19_pipeline_does_not_declare_questions_or_consume_chat_as_answers() {
+    let dir = TempDir::new("tl-t19");
+    let args=json!({"questions":[{"id":"q","header":"方向","question":"选择？","options":[{"label":"A","description":"默认"}]}]}).to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(
+            200,
+            tc_response(&[call("forged", "request_user_input", args)], None),
+        ),
+        MockResp::json(200, ok_response("无回答接口")),
+        MockResp::json(200, ok_response("普通第二轮")),
+    ]);
+    let (out, code) = run_cli(dir.path(), &mock.url, "fake-t19", "第一次\n选项 A\nexit\n");
+    assert_eq!(code, Some(0), "{out}");
+    assert_eq!(mock.count(), 3);
+    for i in 0..3 {
+        assert_eq!(req_body(&mock, i)["tools"].as_array().unwrap().len(), 4);
+    }
+    let result: Value = serde_json::from_str(
+        tool_msgs(&req_body(&mock, 1))[0]["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(result["error"].as_str().unwrap().contains("没有回答接口"));
+    let body = req_body(&mock, 2);
+    let user = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|m| m["role"] == "user")
+        .unwrap();
+    assert_eq!(user["content"], "选项 A");
+    assert!(out.contains("普通第二轮"));
+}
+
 /// T2：创建文件——真实落盘字节正确；第 2 请求含原样 assistant(tool_calls)＋匹配 id 的 role=tool。
 #[test]
 fn t2_apply_patch_creates_file_and_echoes_result() {

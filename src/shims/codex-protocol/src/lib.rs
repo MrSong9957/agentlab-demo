@@ -176,6 +176,7 @@ pub mod permissions {
 }
 
 pub mod plan_tool; // 017：真实三类型（008 桩被计划 cell 裁剪时移除，见 history_cell/mod.rs 登记）
+pub mod request_user_input;
 
 pub mod parse_command {
     /// 母本 protocol/src/parse_command.rs ParsedCommand——原样变体集。
