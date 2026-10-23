@@ -79,3 +79,7 @@
 3. **规格引用**：[018 规格 §9](../specs/018-user-input.md) 追加审计修复轮段（复现、修复、实测与证据链接）；契约与原交付历史未改。
 
 收尾轮验证：`user_input_async` 19/19（含双问新回归）。最终全量（收尾候选，`cargo check && cargo test --workspace --no-fail-fast`）退出 0，54 套件 **3175 通过、0 失败、3 原有忽略**（相对基线净增 4＝四条审计回归；日志 `/tmp/018-audit-fix-wrapup-verify2.log`）；`git diff --check` 通过；rustfmt 对 `tests/user_input_async.rs` 通过。首次全量运行中既有性能用例 `session_perf::perf_tiers_baseline_driven` 因并行 I/O 抖动超阈值一次（56ms>50ms，该路径本轮未触碰），定向复跑与重跑全量均通过，单列为环境敏感项而非本轮问题。
+
+## 已批准的本地交付（2026-10-23）
+
+用户批准后执行。任务提交：`1d63698`（`fix: 018 修复异步问询审计缺陷（批末绕过/协议错误丢答案/已答再等待）`），父提交 `8c60b10`，范围恰为核定 7 文件（651 插入／31 删除）。`project-lessons.md` 与外部 019 规划存在混合改动：按 hunk 区分，仅 018 两行入提交，019 段留在工作区。合并采用引用快进（`main` 自 `8c60b10` 前进至 `1d63698`，先确认祖先关系，等价 ff-only 且不触碰工作区——直接 `git switch` 会因该工作区修改被拒）；核验：`1d63698 ∈ main`、main 树与任务提交逐字节一致、`git diff --check 8c60b10 main` 通过、`src` 与已验证候选逐字节一致（`turn.rs` SHA-256 前缀 `924d86d2`）且依赖未动，故沿用终验 **3175/0/3** 不重复全量。核验后删除本地任务分支（`git branch -d`，实际指向 `1d63698`）。外部修改完整保留于工作区：`docs/records/2026-10-21-codex-tools-comparison.md`（019 引用）、`project-lessons.md` 019 段、`docs/specs/019-view-image.md`、`docs/records/2026-10-23-view-image-plan-research.md` 及三份既有无关未跟踪记录。未推送、未发布、未改写既有提交。
