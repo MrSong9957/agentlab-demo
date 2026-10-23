@@ -1,6 +1,6 @@
 # 规格：TUI 工具调用详情展示（命令与文件差异）
 
-> 状态：**已实现并本地验证（2026-10-15 实施轮，待审阅候选）**　分支 `feat/008-codex-tui-port`，未提交。全量 `cargo check --workspace && cargo test --workspace --no-fail-fast`＝**2712 通过 / 0 失败 / 3 忽略**（基线 2688＋24 新增；e2e 46/46 含 S27–S34）。
+> 状态：**已实现并本地验证（2026-10-15 实施轮，待审阅候选）；019 修订：新增宿主图片项（`HostHistoryItem::ViewImage`）——实时 ToolEnd 与 /resume 恢复共用同一成功/失败转换；成功经 ViewImageHistoryCell（摘要文件名、详情路径、尺寸说明），失败/取消/历史缺图内容不生成正常"已查看"卡片；`ToolEnd` 通知与日志不携带图片载荷，展示路径/错误经 `sanitize_for_terminal` 只过滤显示副本**　分支 `feat/008-codex-tui-port`，未提交。全量 `cargo check --workspace && cargo test --workspace --no-fail-fast`＝**2712 通过 / 0 失败 / 3 忽略**（基线 2688＋24 新增；e2e 46/46 含 S27–S34）。
 > **2026-10-15 审计修订**（详见 `docs/records/2026-10-15-012-implementation.md` §7）：终验数字经日志逐行复核无误；分项修正为 e2e 9＋A7 3＋apply_patch 4＋turn 1＋tui_host 2＋chat_driver 5＋session 0（原稿 chat_driver 6/session 1 与总数 24 不闭合，session 1 实为从未运行的嵌套死测试，审计已激活并按真实装载契约修正夹具）；另修复既有测试竞态（探针 fork 的 fd 继承窗口，测试设施级，生产无对等问题）。
 > 需求来源：用户明确要求"工具调用显示实际内容：终端命令至少显示命令；文件修改显示修改前后的差异"。
 > **契约归属**：008 §1"输入"原契约已列"工具活动（exec_command 运行中/输出/结束、apply_patch 结果）"，且 §1 移植范围已含 `history_cell/dynamic（exec 输出）、patches（apply_patch diff）`——本能力＝**008 既有契约的实现缺口补回**（当前实现只回推单行 Info），本规格细化其行为与验收，008 头部登记引用。

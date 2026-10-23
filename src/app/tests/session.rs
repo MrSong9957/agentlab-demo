@@ -24,7 +24,12 @@ fn batch(id: &str, name: &str, arguments: &str) -> HistoryItem {
 }
 
 fn result(id: &str, content: &str) -> HistoryItem {
-    HistoryItem::ToolResult { tool_call_id: id.into(), content: content.into(), display: None }
+    HistoryItem::ToolResult {
+        tool_call_id: id.into(),
+        content: content.into(),
+        display: None,
+        image: None,
+    }
 }
 
 fn line(item: &HistoryItem) -> String {
@@ -47,7 +52,12 @@ const META: &str = r#"{"v":1}"#;
 const UNKNOWN_MSG: &str = "会话中断，该调用可能已执行，执行结果未知";
 
 fn synth(id: &str) -> HistoryItem {
-    HistoryItem::ToolResult { tool_call_id: id.into(), content: format!("{{\"error\":\"{UNKNOWN_MSG}\"}}"), display: None }
+    HistoryItem::ToolResult {
+        tool_call_id: id.into(),
+        content: format!("{{\"error\":\"{UNKNOWN_MSG}\"}}"),
+        display: None,
+        image: None,
+    }
 }
 
 // ---------- 装载：meta 门（§6-A：唯一整文件拒绝情形） ----------
@@ -445,6 +455,7 @@ fn serialization_representation_roundtrip() {
             content: Some("先改文件".into(),
         )},
         HistoryItem::ToolResult {
+            image: None,
             tool_call_id: " id-a ".into(),
             content: "{\"status\":\"completed\",\"output\":\"ok\"}".into(),
             display: None,
@@ -1401,6 +1412,7 @@ fn tool_result_display_roundtrip_and_legacy_default_none() {
             content: None,
         },
         HistoryItem::ToolResult {
+            image: None,
             tool_call_id: "call-x".into(),
             content: r#"{"status":"completed","exit_code":0,"output":"o"}"#.into(),
             display: Some(ToolDisplay::Patch {
@@ -1424,7 +1436,7 @@ fn tool_result_display_roundtrip_and_legacy_default_none() {
     assert_eq!(loaded.history.len(), 3, "配对装载不丢记录：{:?}", loaded.history);
     assert_eq!(loaded.repairs, 0, "真实形状零修复：{}", loaded.repairs);
     match &loaded.history[2] {
-        HistoryItem::ToolResult { tool_call_id, content, display } => {
+        HistoryItem::ToolResult { tool_call_id, content, display, .. } => {
             assert_eq!(tool_call_id, "call-x");
             assert!(content.starts_with("{\"status\""));
             assert!(matches!(display, Some(ToolDisplay::Patch { changes }) if changes.len() == 1),
@@ -1447,4 +1459,131 @@ fn tool_result_display_roundtrip_and_legacy_default_none() {
         HistoryItem::ToolResult { display, .. } => assert!(display.is_none(), "旧记录→None"),
         other => panic!("旧记录形状：{other:?}"),
     }
+}
+
+// ---------- 019：图片载荷字段的保存与恢复 ----------
+
+use terminal_chat::prompt::ToolResultImage;
+
+fn img_result(id: &str, content: &str, url: &str) -> HistoryItem {
+    HistoryItem::ToolResult {
+        tool_call_id: id.into(),
+        content: content.into(),
+        display: None,
+        image: Some(ToolResultImage { image_url: url.into(), detail: "high".into() }),
+    }
+}
+
+/// 图片载荷内联结果行往返：快照保存→装载字节等同（不重读原文件）。
+#[test]
+fn image_payload_roundtrip_inline_in_result_row() {
+    let dir = TempDir::new("s-img-rt");
+    let history = vec![
+        text(HistoryRole::User, "看图"),
+        batch("vi-1", "view_image", r#"{"path":"a.png"}"#),
+        img_result(
+            "vi-1",
+            r#"{"ok":true,"path":"/w/a.png","width":2,"height":2}"#,
+            "data:image/png;base64,QUJDRA==",
+        ),
+        text(HistoryRole::Assistant, "完成"),
+    ];
+    let path = dir.path().join("snap.jsonl");
+    seed(&path, &format!("{META}\n"));
+    let n = terminal_chat::session::save_snapshot(dir.path(), "snap", &history).unwrap();
+    assert_eq!(n, 4);
+    let loaded = load_session_file(&path).unwrap();
+    assert_eq!(loaded.history.len(), 4, "不增不减");
+    match &loaded.history[2] {
+        HistoryItem::ToolResult { tool_call_id, content, image, .. } => {
+            assert_eq!(tool_call_id, "vi-1");
+            assert!(content.contains("\"ok\":true"));
+            let img = image.as_ref().expect("载荷随结果行恢复");
+            assert_eq!(img.image_url, "data:image/png;base64,QUJDRA==");
+            assert_eq!(img.detail, "high");
+        }
+        other => panic!("形状：{other:?}"),
+    }
+    // 原始行内联（同一结果行携带 image 字段，无独立附件行）
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(raw.contains("\"image\":{\"image_url\":\"data:image/png;base64,QUJDRA==\""), "{raw}");
+    assert_eq!(raw.lines().count(), 5, "meta＋4 行");
+}
+
+/// 非法图片载荷行按坏行处理：错误 MIME／错误 detail／非法 base64／远程 URL／
+/// 超限额字段——跳过该行并补未知结果。
+#[test]
+fn invalid_image_payload_rows_are_bad_lines() {
+    let dir = TempDir::new("s-img-bad");
+    let path = session_path(&dir);
+    let good_summary = r#"{"ok":true,"path":"/w/a.png"}"#;
+    for (tag, image_field) in [
+        ("错误 MIME", "\"image\":{\"image_url\":\"data:image/tiff;base64,QUJD\",\"detail\":\"high\"}"),
+        ("错误 detail", "\"image\":{\"image_url\":\"data:image/png;base64,QUJD\",\"detail\":\"low\"}"),
+        ("非法 base64", "\"image\":{\"image_url\":\"data:image/png;base64,!!!!\",\"detail\":\"high\"}"),
+        ("远程 URL", "\"image\":{\"image_url\":\"https://evil/x.png\",\"detail\":\"high\"}"),
+        ("超限额", &format!("\"image\":{{\"image_url\":\"data:image/png;base64,{}\",\"detail\":\"high\"}}", "Q".repeat(6 * 1024 * 1024))),
+    ] {
+        let body = format!(
+            "{META}\n{}\n{}\n{}\n",
+            line(&text(HistoryRole::User, "看")),
+            line(&batch("vi-x", "view_image", r#"{"path":"a.png"}"#)),
+            format!(
+                r#"{{"type":"tool_result","tool_call_id":"vi-x","content":{}}},{}"#,
+                serde_json::to_string(good_summary).unwrap(),
+                image_field
+            ),
+        );
+        seed(&path, &body);
+        let loaded = load_session_file(&path).unwrap();
+        assert_eq!(loaded.skipped_lines, 1, "{tag}：坏行 {loaded:?}");
+        match &loaded.history.last().unwrap() {
+            HistoryItem::ToolResult { content, .. } => {
+                assert!(content.contains(UNKNOWN_MSG), "{tag} 补未知结果：{content}");
+            }
+            other => panic!("{tag} 形状：{other:?}"),
+        }
+    }
+}
+
+/// 旧程序降级夹具（019 §5.1）：
+/// ①旧程序读含 image 的会话行——旧形状解析器（无 image 字段的变体）忽略该
+///   字段并解析成功，重存即丢图（不可宣称无损兼容，已确认降级）；
+/// ②旧程序读含 input_modalities 的模型配置——deny_unknown_fields 拒绝
+///   （回退旧程序前需移除该字段）。
+#[test]
+fn downgrade_fixtures_old_reader_drops_image_and_rejects_new_config() {
+    // ①旧形状会话行解析器：无 image 字段的 ToolResult（serde 默认忽略未知字段）
+    #[derive(serde::Deserialize, serde::Serialize, Debug)]
+    #[serde(tag = "type")]
+    enum OldShape {
+        #[serde(rename = "tool_result")]
+        ToolResult { tool_call_id: String, content: String },
+    }
+    let new_line = serde_json::to_string(&img_result(
+        "vi-1",
+        r#"{"ok":true}"#,
+        "data:image/png;base64,QUJDRA==",
+    ))
+    .unwrap();
+    let old: OldShape = serde_json::from_str(&new_line).expect("旧程序可读（忽略新字段）");
+    match &old {
+        OldShape::ToolResult { tool_call_id, content } => {
+            assert_eq!(tool_call_id, "vi-1");
+            assert!(content.contains("\"ok\":true"), "文本摘要保留");
+        }
+    }
+    // 旧程序重存＝按旧形状序列化，载荷丢失（降级事实由夹具钉死）
+    let rewritten = serde_json::to_string(&old).unwrap();
+    assert!(!rewritten.contains("image"), "重存丢图：{rewritten}");
+    // ②旧形状模型配置解析器（deny_unknown_fields，同 catalog::ModelInfo 旧版）
+    #[derive(serde::Deserialize, Debug)]
+    #[serde(deny_unknown_fields)]
+    struct OldModel {
+        id: String,
+    }
+    let err = serde_json::from_str::<OldModel>(
+        r#"{"id":"m","input_modalities":["text","image"]}"#,
+    );
+    assert!(err.is_err(), "旧程序拒绝新配置字段：{err:?}");
 }

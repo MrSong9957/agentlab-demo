@@ -568,6 +568,24 @@ fn cmd_chat(
                             result,
                             ..
                         } => {
+                            // 019：view_image——输出已加载路径与实际尺寸；失败/取消
+                            // 显示原因；不输出 data URL（say 统一终端过滤）。
+                            if name == "view_image" {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&result) {
+                                    if v["ok"] == serde_json::json!(true) {
+                                        say(&format!(
+                                            "[工具] view_image 已加载 {}（发送尺寸 {}×{}，源 {}×{}）",
+                                            v["path"].as_str().unwrap_or("?"),
+                                            v["width"].as_u64().unwrap_or(0),
+                                            v["height"].as_u64().unwrap_or(0),
+                                            v["source_width"].as_u64().unwrap_or(0),
+                                            v["source_height"].as_u64().unwrap_or(0),
+                                        ));
+                                    } else if let Some(err) = v["error"].as_str() {
+                                        say(&format!("[工具] view_image 失败：{err}"));
+                                    }
+                                }
+                            }
                             // 017：计划更新成功——输出说明与步骤清单（say 经终端过滤；
                             // 失败/取消输出原因，不把失败调用画成清单；结果未知不打印）
                             if name == "update_plan" {
@@ -650,6 +668,8 @@ fn cmd_chat(
                         } else {
                             None
                         },
+                        // 019：每用户轮固定能力快照（声明与执行共用）
+                        catalog::supports_image_input(&model),
                     );
                     unsafe {
                         libc::signal(libc::SIGINT, libc::SIG_DFL);

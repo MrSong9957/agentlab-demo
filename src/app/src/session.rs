@@ -9,6 +9,7 @@
 
 use crate::catalog;
 use crate::prompt::{HistoryItem, HistoryMessage, HistoryRole};
+use base64::Engine as _;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -128,6 +129,35 @@ enum Entry {
     Bad,
 }
 
+/// 019 §5.1：`tool_result.image` 载荷校验（无图片字段的记录恒通过）。
+/// 只接受 `data:image/(png|jpeg|gif|webp);base64,` 形态、可解码 base64、
+/// detail 恰为 `high`、解码字节不超过准备后图片上限的本地图片 data URL。
+fn image_payload_ok(item: &HistoryItem) -> bool {
+    let HistoryItem::ToolResult { image: Some(img), .. } = item else {
+        return true;
+    };
+    if img.detail != "high" {
+        return false;
+    }
+    let Some(rest) = img.image_url.strip_prefix("data:") else {
+        return false; // 远程 URL 或其他前缀
+    };
+    let Some((meta, b64)) = rest.split_once(',') else {
+        return false;
+    };
+    let parts: Vec<&str> = meta.split(';').collect();
+    if !parts.iter().any(|p| p.eq_ignore_ascii_case("base64")) {
+        return false;
+    }
+    if !matches!(parts[0], "image/png" | "image/jpeg" | "image/gif" | "image/webp") {
+        return false;
+    }
+    match base64::engine::general_purpose::STANDARD.decode(b64) {
+        Ok(bytes) => bytes.len() <= crate::view_image::MAX_PREPARED_IMAGE_BYTES,
+        Err(_) => false,
+    }
+}
+
 /// 批内/跨批 id 校验：同一 id 在行内或更早批出现 → 该行按坏行（§3 加载规则 3）。
 fn batch_line_ok(item: &HistoryItem, seen: &mut HashSet<String>) -> bool {
     let HistoryItem::AssistantToolCalls { tool_calls, .. } = item else {
@@ -191,7 +221,10 @@ pub fn load_from_reader<R: Read>(reader: R) -> Result<Loaded, String> {
         } else {
             serde_json::from_slice::<HistoryItem>(&line_buf).ok()
         };
-        match parsed.filter(|item| batch_line_ok(item, &mut seen)) {
+        // 019 §5.1：图片载荷校验——只接受有界且有效的本地图片 data URL；
+        // 远程 URL、非法 base64、错误 MIME、错误 detail 或超限额按坏行处理
+        //（配对修复补未知结果；不为校验加载原路径或访问网络）。
+        match parsed.filter(|item| batch_line_ok(item, &mut seen) && image_payload_ok(item)) {
             Some(item) => {
                 entries.push(Entry::Item(item));
                 last_accepted = true;
@@ -233,6 +266,7 @@ fn finalize_open_batch(
         for (id, filled) in calls {
             if !filled {
                 out.push(HistoryItem::ToolResult {
+                    image: None,
                     tool_call_id: id,
                     content: format!("{{\"error\":\"{UNKNOWN_RESULT_ERROR}\"}}"),
                     display: None,
@@ -264,7 +298,7 @@ fn repair_pairs(entries: Vec<Entry>) -> (usize, Vec<HistoryItem>) {
                 open = Some(tool_calls.iter().map(|c| (c.id.clone(), false)).collect());
                 out.push(HistoryItem::AssistantToolCalls { tool_calls, content });
             }
-            Entry::Item(HistoryItem::ToolResult { tool_call_id, content, display }) => {
+            Entry::Item(HistoryItem::ToolResult { tool_call_id, content, display, image }) => {
                 let keep = match &mut open {
                     None => false, // 无所属批：孤儿
                     Some(calls) => match calls.iter_mut().find(|(id, _)| *id == tool_call_id) {
@@ -277,7 +311,7 @@ fn repair_pairs(entries: Vec<Entry>) -> (usize, Vec<HistoryItem>) {
                     },
                 };
                 if keep {
-                    out.push(HistoryItem::ToolResult { tool_call_id, content, display });
+                    out.push(HistoryItem::ToolResult { tool_call_id, content, display, image });
                 } else {
                     repairs += 1;
                 }

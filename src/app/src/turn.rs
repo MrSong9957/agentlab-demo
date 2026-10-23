@@ -387,10 +387,12 @@ pub fn run_user_turn_with_context(
         sources,
         procs,
         None,
+        false,
     )
 }
 
 /// 018：原上下文入口保留无宿主行为；只在交互宿主传入问答接口。
+/// 019：`image_input`＝本轮模型图片能力快照（声明与执行分派共用，轮内固定）。
 pub fn run_user_turn_with_context_and_host(
     history: &mut Vec<HistoryItem>,
     current_input: &str,
@@ -402,6 +404,7 @@ pub fn run_user_turn_with_context_and_host(
     sources: &crate::context::ContextSources,
     procs: &ProcessManager,
     input_host: Option<&mut crate::user_input::InputHost<'_>>,
+    image_input: bool,
 ) -> Result<String, String> {
     run_user_turn_with_context_and_hosts(
         history,
@@ -415,11 +418,13 @@ pub fn run_user_turn_with_context_and_host(
         procs,
         input_host,
         None,
+        image_input,
     )
 }
 
 /// 018 阶段 B：TUI 用户轮同时传入同步与异步问答宿主（七工具）；
 /// CLI 仍走 [`run_user_turn_with_context_and_host`]（五工具，仅同步）。
+/// 019：`image_input`＝本轮模型图片能力快照；MemoryMerge 内部轮不经本入口。
 pub fn run_user_turn_with_context_and_hosts(
     history: &mut Vec<HistoryItem>,
     current_input: &str,
@@ -432,6 +437,7 @@ pub fn run_user_turn_with_context_and_hosts(
     procs: &ProcessManager,
     input_host: Option<&mut crate::user_input::InputHost<'_>>,
     async_host: Option<&mut crate::user_input_async::AsyncInputHost<'_>>,
+    image_input: bool,
 ) -> Result<String, String> {
     if current_input.trim().is_empty() {
         return Err(BLANK_INPUT_ERROR.into());
@@ -470,6 +476,7 @@ pub fn run_user_turn_with_context_and_hosts(
         procs,
         input_host,
         async_host,
+        image_input,
     )
 }
 
@@ -509,6 +516,7 @@ pub fn run_tool_turn_with_mode(
 }
 
 /// 018：同步宿主等待接口。MemoryMerge 即使误传接口也不会声明或调用它。
+/// 019：不声明 view_image（图片能力快照固定 false 的兼容入口）。
 pub fn run_tool_turn_with_host(
     history: &mut Vec<HistoryItem>,
     current_input: &str,
@@ -521,7 +529,17 @@ pub fn run_tool_turn_with_host(
     input_host: Option<&mut crate::user_input::InputHost<'_>>,
 ) -> Result<String, String> {
     run_tool_turn_with_hosts(
-        history, current_input, sender, notify, cancel, on_record, mode, procs, input_host, None,
+        history,
+        current_input,
+        sender,
+        notify,
+        cancel,
+        on_record,
+        mode,
+        procs,
+        input_host,
+        None,
+        false,
     )
 }
 
@@ -652,6 +670,8 @@ fn close_pending_on_model_error(
 /// - `wait_for_user_input` 必须是批内最后一条调用（入史/执行前整批拒绝）；
 /// - 第 8 次请求不再发布新问题、不为未答问题开始阻塞等待；
 /// - 结束/取消/额度耗尽路径原子处理已受理回答并关闭未决项。
+/// 019：`image_input`＝本轮模型图片能力快照（用户轮开始时固定，声明与
+/// view_image 执行分派共用；MemoryMerge 内部轮不声明也不执行 view_image）。
 pub fn run_tool_turn_with_hosts(
     history: &mut Vec<HistoryItem>,
     current_input: &str,
@@ -663,6 +683,7 @@ pub fn run_tool_turn_with_hosts(
     procs: &ProcessManager,
     mut input_host: Option<&mut crate::user_input::InputHost<'_>>,
     mut async_host: Option<&mut crate::user_input_async::AsyncInputHost<'_>>,
+    image_input: bool,
 ) -> Result<String, String> {
     if current_input.trim().is_empty() {
         return Err(BLANK_INPUT_ERROR.into());
@@ -706,12 +727,14 @@ pub fn run_tool_turn_with_hosts(
                 None,
                 input_host.is_some(),
                 async_host.is_some(),
+                image_input,
             ),
             ToolMode::UserWithMemory { .. } => build_turn_request_with_async_host(
                 history,
                 memory_context.as_deref(),
                 input_host.is_some(),
                 async_host.is_some(),
+                image_input,
             ),
             ToolMode::MemoryMerge { system, .. } => build_turn_request_with(
                 history,
@@ -842,6 +865,7 @@ pub fn run_tool_turn_with_hosts(
                     cancelled,
                 });
                 history.push(HistoryItem::ToolResult {
+                    image: None,
                     tool_call_id: call.id.clone(),
                     content,
                     display: None,
@@ -855,7 +879,9 @@ pub fn run_tool_turn_with_hosts(
                 name: call.name.clone(),
                 arguments: call.arguments.clone(),
             });
-            let (content, display) = if call.name == "request_user_input"
+            // 019：三元组＝（模型面结果 JSON，展示数据，可选图片载荷）；图片
+            // 载荷只入史，不进 ToolEnd 通知（§3.3）。
+            let (content, display, image) = if call.name == "request_user_input"
                 && !matches!(mode, ToolMode::MemoryMerge { .. })
             {
                 // 018-B（§8.2）：异步未决时的新同步问询返回占用错误，不暗中
@@ -885,7 +911,7 @@ pub fn run_tool_turn_with_hosts(
                         },
                     }
                 };
-                (result, None)
+                (result, None, None)
             } else if call.name == "request_user_input_async"
                 && !matches!(mode, ToolMode::MemoryMerge { .. })
             {
@@ -922,6 +948,7 @@ pub fn run_tool_turn_with_hosts(
                         Ok(content) => content,
                         Err(error) => json!({"error":error}).to_string(),
                     },
+                    None,
                     None,
                 )
             } else if call.name == "wait_for_user_input"
@@ -997,9 +1024,24 @@ pub fn run_tool_turn_with_hosts(
                         Err(error) => json!({"error":error}).to_string(),
                     },
                     None,
+                    None,
                 )
+            } else if call.name == "view_image"
+                && !matches!(mode, ToolMode::MemoryMerge { .. })
+            {
+                // 019：图片能力快照决定执行分派——能力关闭（text/未知）时
+                // 返回能力错误且不读取文件；MemoryMerge 不执行任何用户工具。
+                let outcome = if image_input {
+                    let cwd =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    crate::view_image::execute(&call.arguments, &cwd, cancel)
+                } else {
+                    crate::view_image::unsupported_outcome()
+                };
+                (outcome.summary, None, outcome.image)
             } else {
-                execute_tool(call, cancel, &mode, procs)
+                let (content, display) = execute_tool(call, cancel, &mode, procs);
+                (content, display, None)
             };
             notify(TurnNotify::ToolEnd {
                 id: call.id.clone(),
@@ -1013,6 +1055,7 @@ pub fn run_tool_turn_with_hosts(
                 tool_call_id: call.id.clone(),
                 content,
                 display,
+                image,
             });
             on_record(history);
             // 018-B 工具完成检查点：收取回执只暂存（入史固定在批末）

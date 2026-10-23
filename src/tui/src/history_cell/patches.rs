@@ -159,16 +159,55 @@ impl HistoryCell for PatchFailureCell {
 
 #[derive(Debug)]
 pub(crate) struct ViewImageHistoryCell {
+    activity_id: String,
     filename: String,
     path_label: String,
+    /// 019：发送尺寸（W×H）；`None`＝记录缺失尺寸（降级展示，不伪造）。
+    dims: Option<(u64, u64)>,
+}
+
+/// 019 恢复构造入口（上游 `new_view_image_tool_call` 的本地适配，008 §1 曾裁剪）：
+/// 摘要显示文件名，详情/转录保留完整路径；`dims` 已知时附文本尺寸说明。
+pub(crate) fn new_view_image_event(
+    filename: String,
+    path_label: String,
+    dims: Option<(u64, u64)>,
+) -> ViewImageHistoryCell {
+    ViewImageHistoryCell {
+        activity_id: format!("view-image:{}", uuid::Uuid::new_v4()),
+        filename,
+        path_label,
+        dims,
+    }
+}
+
+impl ViewImageHistoryCell {
+    fn dims_label(&self) -> String {
+        match self.dims {
+            Some((w, h)) => format!(" · {w}×{h}"),
+            None => String::new(),
+        }
+    }
+
+    /// 019：以工具调用 ID 作为活动 ID（disclosure 关联稳定，对齐 Patch/Plan cell；
+    /// 缺省用随机 UUID 供无 ID 场景）。
+    pub(crate) fn with_activity_id(mut self, id: String) -> Self {
+        self.activity_id = format!("view-image:{id}");
+        self
+    }
 }
 
 impl HistoryCell for ViewImageHistoryCell {
+    fn activity_ids(&self) -> Vec<String> {
+        vec![self.activity_id.clone()]
+    }
+
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let line = vec![
             "• ".dim(),
             "Viewed image ".bold(),
             self.filename.replace(['\n', '\r', '\t'], " ").dim(),
+            self.dims_label().dim(),
         ]
         .into();
         vec![truncate_line_with_ellipsis_if_overflow(
@@ -179,7 +218,11 @@ impl HistoryCell for ViewImageHistoryCell {
 
     fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
         PrefixedWrappedHistoryCell::new(
-            Line::from(vec!["Viewed image ".bold(), self.path_label.clone().dim()]),
+            Line::from(vec![
+                "Viewed image ".bold(),
+                self.path_label.replace(['\n', '\r', '\t'], " ").dim(),
+                self.dims_label().dim(),
+            ]),
             vec!["• ".dim()],
             "  ",
         )
@@ -187,11 +230,14 @@ impl HistoryCell for ViewImageHistoryCell {
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
-        vec![Line::from(format!("Viewed image {}", self.path_label))]
+        vec![Line::from(format!(
+            "Viewed image {}{}",
+            self.path_label, self.dims_label()
+        ))]
     }
 }
 
-// 008-TRIM: new_view_image_tool_call（ImageView 工具 cell，无本地事件源，008 §1）}
+// 019 恢复：new_view_image_event（原上游 new_view_image_tool_call 的本地适配，008 §1 曾裁剪）
 
 pub(crate) fn new_image_generation_call(
     call_id: String,

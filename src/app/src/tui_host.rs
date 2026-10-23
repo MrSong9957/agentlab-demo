@@ -353,6 +353,8 @@ impl TuiHost {
                 &procs,
                 Some(&mut input_host),
                 Some(&mut async_input_host),
+                // 019：每用户轮固定能力快照（声明与执行共用）
+                catalog::supports_image_input(&model),
             );
             unsafe {
                 libc::signal(libc::SIGINT, libc::SIG_DFL);
@@ -681,7 +683,7 @@ fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
                     pending.insert(call.id.clone(), (call.name.clone(), call.arguments.clone()));
                 }
             }
-            HistoryItem::ToolResult { tool_call_id, content, display } => {
+            HistoryItem::ToolResult { tool_call_id, content, display, image } => {
                 // 无配对或未知工具：按普通文本投影结果内容（不丢失历史）
                 let paired = pending.remove(tool_call_id);
                 // 016：恢复历史中的 running 只表示当时状态——不作为当前活会话
@@ -704,6 +706,19 @@ fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
                     } else {
                         tool_end_item(&name, tool_call_id, &arguments, content, display.as_ref(), false)
                     }
+                });
+                // 019 §5.1：成功摘要但无图片载荷＝旧版本保存的记录——明确显示
+                // 历史图片内容不可用，不当成已附图。
+                let restored = restored.map(|mut item| {
+                    if image.is_none() {
+                        if let HostHistoryItem::ViewImage { ok: true, error, .. } = &mut item {
+                            *error = Some(
+                                "历史图片内容不可用（旧版本保存的记录，图片未随会话保存）"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    item
                 });
                 let item = restored.unwrap_or(HostHistoryItem::Text {
                     assistant: true,
@@ -986,6 +1001,55 @@ fn tool_end_item(
                     }
                 })
         }
+        // 019：查看图片终态——成功（结果 ok=true）转 ViewImage 卡片输入；失败/取消
+        // 带原因。路径与错误经终端过滤（只过滤显示副本）。
+        "view_image" => {
+            let ok = v.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false);
+            let path = v
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let path = crate::display::sanitize_for_terminal(path).to_string();
+            if ok {
+                let filename = path.rsplit('/').next().unwrap_or(&path).to_string();
+                let dims = match (
+                    v.get("width").and_then(serde_json::Value::as_u64),
+                    v.get("height").and_then(serde_json::Value::as_u64),
+                ) {
+                    (Some(w), Some(h)) => Some((w, h)),
+                    _ => None,
+                };
+                Some(HostHistoryItem::ViewImage {
+                    ok: true,
+                    filename,
+                    path,
+                    dims,
+                    error: None,
+                })
+            } else {
+                let error = v
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|e| {
+                        if e == turn::SKIPPED_BY_CANCEL_MESSAGE {
+                            e.to_string()
+                        } else {
+                            crate::display::sanitize_for_terminal(e).to_string()
+                        }
+                    })
+                    .or_else(|| {
+                        cancelled_event
+                            .then(|| turn::SKIPPED_BY_CANCEL_MESSAGE.to_string())
+                    });
+                Some(HostHistoryItem::ViewImage {
+                    ok: false,
+                    filename: String::new(),
+                    path,
+                    dims: None,
+                    error,
+                })
+            }
+        }
         "request_user_input" => {
             let questions = crate::user_input::parse_arguments(arguments).ok()?;
             let response = serde_json::from_str::<crate::user_input::Response>(result)
@@ -1034,6 +1098,96 @@ fn _deny_new_catalog_origin() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    /// 019：view_image 终态转换——成功带文件名/路径/尺寸；失败带原因（已过滤）；
+    /// 恢复路径的成功摘要无载荷时标注历史图片内容不可用。
+    #[test]
+    fn tool_end_item_parses_view_image_results() {
+        use tchat_tui::chat_driver::HostHistoryItem as H;
+        let ok_result = r#"{"ok":true,"path":"/w/a b.png","source_width":2304,"source_height":864,"width":2048,"height":768}"#;
+        match tool_end_item("view_image", "c1", r#"{"path":"a b.png"}"#, ok_result, None, false) {
+            Some(H::ViewImage { ok, filename, path, dims, error }) => {
+                assert!(ok);
+                assert_eq!(filename, "a b.png");
+                assert_eq!(path, "/w/a b.png");
+                assert_eq!(dims, Some((2048, 768)));
+                assert!(error.is_none());
+            }
+            other => panic!("形状：{other:?}"),
+        }
+        // 失败：原因进入 error
+        match tool_end_item(
+            "view_image",
+            "c2",
+            r#"{"path":"x"}"#,
+            r#"{"ok":false,"error":"文件不存在"}"#,
+            None,
+            false,
+        ) {
+            Some(H::ViewImage { ok, error, .. }) => {
+                assert!(!ok);
+                assert_eq!(error.as_deref(), Some("文件不存在"));
+            }
+            other => panic!("形状：{other:?}"),
+        }
+        // 恢复投影：成功摘要无载荷 → 历史图片内容不可用（project_history_items
+        // 的后处理，见下方投影测试）
+        let history = vec![
+            HistoryItem::AssistantToolCalls {
+                tool_calls: vec![crate::prompt::ToolCallRecord {
+                    id: "c3".into(),
+                    name: "view_image".into(),
+                    arguments: r#"{"path":"a.png"}"#.into(),
+                }],
+                content: None,
+            },
+            HistoryItem::ToolResult {
+                tool_call_id: "c3".into(),
+                content: ok_result.into(),
+                display: None,
+                image: None,
+            },
+        ];
+        let items = project_history_items(&history);
+        match &items[0] {
+            H::ViewImage { ok, error, .. } => {
+                assert!(ok, "仍按成功呈现");
+                assert!(
+                    error.as_deref().unwrap_or_default().contains("历史图片内容不可用"),
+                    "缺图说明：{error:?}"
+                );
+            }
+            other => panic!("形状：{other:?}"),
+        }
+        // 有载荷的恢复项：无缺图说明
+        let with_image = HistoryItem::ToolResult {
+            tool_call_id: "c3".into(),
+            content: ok_result.into(),
+            display: None,
+            image: Some(crate::prompt::ToolResultImage {
+                image_url: "data:image/png;base64,QUJD".into(),
+                detail: "high".into(),
+            }),
+        };
+        let items = project_history_items(&[
+            HistoryItem::AssistantToolCalls {
+                tool_calls: vec![crate::prompt::ToolCallRecord {
+                    id: "c3".into(),
+                    name: "view_image".into(),
+                    arguments: r#"{"path":"a.png"}"#.into(),
+                }],
+                content: None,
+            },
+            with_image,
+        ]);
+        match &items[0] {
+            H::ViewImage { ok, error, .. } => {
+                assert!(ok);
+                assert!(error.is_none(), "有载荷不标缺图：{error:?}");
+            }
+            other => panic!("形状：{other:?}"),
+        }
+    }
+
     /// 012：终态转换——结果 JSON＋arguments＋display → HostHistoryItem。
     /// 覆盖两处旧缺陷的回归：exec 成功判定（原 status=="success" 恒 false）与
     /// patch changed_files 对象数组的路径提取（原按字符串提取恒空）。
@@ -1130,11 +1284,13 @@ mod tests {
                 content: None,
             },
             HistoryItem::ToolResult {
+                image: None,
                 tool_call_id: "c1".into(),
                 content: r#"{"status":"completed","exit_code":0,"output":"","truncated":false,"error":null}"#.into(),
                 display: None,
             },
             HistoryItem::ToolResult {
+                image: None,
                 tool_call_id: "orphan".into(),
                 content: "孤儿结果".into(),
                 display: None,
@@ -1174,6 +1330,7 @@ mod tests {
                 content: None,
             },
             HistoryItem::ToolResult {
+                image: None,
                 tool_call_id: "r1".into(),
                 content: r#"{"status":"running","exit_code":null,"output":"listening","truncated":false,"error":null,"session_id":"s1"}"#.into(),
                 display: None,
@@ -1325,6 +1482,7 @@ mod tests {
             content: None,
         };
         let accepted = |id: &str| HistoryItem::ToolResult {
+            image: None,
             tool_call_id: id.into(),
             content: crate::user_input_async::accepted_result(id),
             display: None,
@@ -1493,17 +1651,20 @@ mod tests {
                 content: None,
             },
             HistoryItem::ToolResult {
+                image: None,
                 tool_call_id: "plan-ok".into(),
                 content: r#"{"ok":true,"error":null}"#.into(),
                 display: None,
             },
             HistoryItem::ToolResult {
+                image: None,
                 tool_call_id: "plan-bad".into(),
                 content: r#"{"ok":false,"error":"工具参数不是有效 JSON：oops"}"#.into(),
                 display: None,
             },
             // 未配对孤儿结果：按文本投影不丢失
             HistoryItem::ToolResult {
+                image: None,
                 tool_call_id: "orphan-plan".into(),
                 content: r#"{"ok":true,"error":null}"#.into(),
                 display: None,

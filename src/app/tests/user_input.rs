@@ -297,6 +297,7 @@ fn unfinished_question_pairs_remaining_calls_and_never_requests_again() {
             .iter()
             .filter_map(|h| {
                 if let HistoryItem::ToolResult {
+                    image,
                     tool_call_id,
                     content,
                     display,
@@ -403,7 +404,7 @@ fn eighth_question_result_saved_and_oversized_batch_never_opened() {
     assert_eq!(sent, 8);
     assert_eq!(asks, 1);
     assert!(
-        matches!(history.last(),Some(HistoryItem::ToolResult {tool_call_id,content,display:None}) if tool_call_id=="eighth" && content.contains("answers"))
+        matches!(history.last(),Some(HistoryItem::ToolResult {tool_call_id,content,display:None,..}) if tool_call_id=="eighth" && content.contains("answers"))
     );
     let mut history = Vec::new();
     let mut asks = 0;

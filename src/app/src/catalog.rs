@@ -36,6 +36,35 @@ pub struct ModelInfo {
     /// 手动确认支持的请求参数名；None 表示能力未知。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supported_params: Option<Vec<String>>,
+    /// 019：输入模态（仅 `text`/`image` 子集）。None＝未知（关闭 view_image）；
+    /// 只含 `text` 同样关闭。用户在模型配置对象内手动确认，不按名称猜测。
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "parse_input_modalities"
+    )]
+    pub input_modalities: Option<Vec<String>>,
+}
+
+/// 019：模态字段解析——未知值（如 audio）按配置格式错误拒绝，不静默忽略。
+fn parse_input_modalities<'de, D>(d: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<Vec<String>>::deserialize(d)?;
+    match raw {
+        None => Ok(None),
+        Some(list) => {
+            for m in &list {
+                if m != "text" && m != "image" {
+                    return Err(serde::de::Error::custom(format!(
+                        "input_modalities 只支持 text/image，未知值 {m}"
+                    )));
+                }
+            }
+            Ok(Some(list))
+        }
+    }
 }
 
 /// 手动配置：铺开保存，只写需要覆盖或新增的内容。
@@ -656,6 +685,9 @@ fn overlay_model(dst: &mut ModelInfo, src: &ModelInfo) {
     if src.supported_params.is_some() {
         dst.supported_params = src.supported_params.clone();
     }
+    if src.input_modalities.is_some() {
+        dst.input_modalities = src.input_modalities.clone();
+    }
     dst.id = src.id.clone();
 }
 
@@ -795,6 +827,16 @@ pub fn route(dict: &FinalDict) -> Result<(Resolved, Credential, ModelInfo), Stri
 }
 
 // ---------- 参数能力 ----------
+
+/// 019：模型图片输入能力判断——只有用户在配置中明确声明 `input_modalities`
+/// 含 `image` 才开放（缺字段＝未知、只 text＝关闭，均返回 false）；
+/// 不按模型名称猜测、不做网络探测。
+pub fn supports_image_input(model: &ModelInfo) -> bool {
+    model
+        .input_modalities
+        .as_ref()
+        .is_some_and(|list| list.iter().any(|m| m == "image"))
+}
 
 /// 参数能力检查：能力未知不算不支持（不带可选参数的基础对话照常发送）；
 /// 显式使用的参数必须先确认能力；已确认不支持的发送前报错。
@@ -1553,6 +1595,85 @@ mod tests {
         assert_eq!(p.conn.base_url, "https://proxy.example.com/v1");
         assert_eq!(p.conn.protocol, SUPPORTED_PROTOCOL);
         assert_eq!(p.conn.key_ref.as_deref(), Some("env:DEEPSEEK_API_KEY"));
+    }
+
+    /// 019：input_modalities 字段——手动确认值经逐字段覆盖进入最终字典；
+    /// 缺字段（未知）与只 text 均关闭图片能力；能力判断不按名称猜测。
+    #[test]
+    fn input_modalities_overlay_and_capability() {
+        let auto = AutoCatalog { providers: builtin(), ..Default::default() };
+        // 手动声明 text+image → 保留并开放
+        let mut models = BTreeMap::new();
+        models.insert(
+            "deepseek-flash".to_string(),
+            ModelInfo {
+                input_modalities: Some(vec!["text".into(), "image".into()]),
+                ..Default::default()
+            },
+        );
+        let manual = manual_with(None, models);
+        let dict = merge_final(&manual, &auto);
+        let m = &dict.providers["deepseek"].models["deepseek-flash"];
+        assert_eq!(
+            m.input_modalities,
+            Some(vec!["text".to_string(), "image".to_string()])
+        );
+        assert!(crate::catalog::supports_image_input(m));
+        // 只 text → 关闭
+        let mut models = BTreeMap::new();
+        models.insert(
+            "deepseek-flash".to_string(),
+            ModelInfo { input_modalities: Some(vec!["text".into()]), ..Default::default() },
+        );
+        let dict = merge_final(&manual_with(None, models), &auto);
+        assert!(!crate::catalog::supports_image_input(
+            &dict.providers["deepseek"].models["deepseek-flash"]
+        ));
+        // 未声明（内置/自动侧无该字段）＝未知 → 关闭
+        let dict = merge_final(&manual_with(None, BTreeMap::new()), &auto);
+        assert!(!crate::catalog::supports_image_input(
+            &dict.providers["deepseek"].models["deepseek-flash"]
+        ));
+        // 手动覆盖未写模态字段时不抹掉自动侧已有值（逐字段覆盖语义）
+        let mut auto2 = AutoCatalog { providers: builtin(), ..Default::default() };
+        let mut base_models = BTreeMap::new();
+        base_models.insert(
+            "deepseek-flash".to_string(),
+            ModelInfo {
+                input_modalities: Some(vec!["text".into(), "image".into()]),
+                ..Default::default()
+            },
+        );
+        auto2.providers.get_mut("deepseek").unwrap().base.models = base_models;
+        let mut manual_ov = BTreeMap::new();
+        manual_ov.insert(
+            "deepseek-flash".to_string(),
+            ModelInfo { display_name: Some("仅改名".into()), ..Default::default() },
+        );
+        let dict = merge_final(&manual_with(None, manual_ov), &auto2);
+        assert!(crate::catalog::supports_image_input(
+            &dict.providers["deepseek"].models["deepseek-flash"]
+        ));
+    }
+
+    /// 019：input_modalities 只接受 text/image 子集；audio 等未知值明确报错。
+    #[test]
+    fn input_modalities_rejects_unknown_values() {
+        let dir = std::env::temp_dir().join(format!("tchat-modality-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("manual.json");
+        std::fs::write(
+            &path,
+            r#"{"selected_provider":"deepseek","selected_model":"deepseek-flash","providers":{"deepseek":{"models":{"deepseek-flash":{"id":"deepseek-flash","input_modalities":["text","audio"]}}}}}"#,
+        )
+        .unwrap();
+        let err = load_manual(&dir).unwrap_err();
+        assert!(
+            err.contains("input_modalities") || err.contains("audio"),
+            "实际错误：{err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

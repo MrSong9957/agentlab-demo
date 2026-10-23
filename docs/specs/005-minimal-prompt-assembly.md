@@ -1,6 +1,6 @@
 # 规格：最小模型请求组装（Codex 复用版）
 
-> 状态：已实现（组装与序列化已按 §5 验证；发送层接入与工具调用循环未做；**016 修订：工具定义增至三项**）　更新：2026-10-22（016）
+> 状态：已实现（组装与序列化已按 §5 验证；发送层接入与工具调用循环未做；**016 修订：工具定义增至三项；019 修订：图片能力确认的用户轮条件性加 `view_image`，历史投影改按批输出、批末附图片附件 user 消息（005 无 image 历史的请求形状/内容/顺序不变）**）　更新：2026-10-23（019）
 > 母本：[openai/codex](https://github.com/openai/codex) 固定提交 `2fdf047c9631c9ed01a31b62efb7891718a931a8`（下表链接均指向该提交；[function-calling 格式](https://developers.openai.com/api/docs/guides/function-calling)）
 > 最小组装＝基础提示词（Codex 原文＋明确列出的必要适配）＋工具定义（016 起三项：exec_command、apply_patch、write_stdin）＋用户消息与历史（文本结构投影）。
 

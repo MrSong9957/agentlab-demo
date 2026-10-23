@@ -99,6 +99,8 @@ fn describe_status_error(status: u16, body: &str, secret: Option<&str>) -> Strin
         Some(s) => redact_credential(msg, s),
         None => msg,
     };
+    // 019：图片载荷先遮蔽再截断（同因：截断后残留无法整串匹配）
+    let msg = redact_data_urls(msg);
     let msg = crate::display::truncate_chars(&msg, 300);
     match status {
         401 => format!("鉴权失败（401）：Key 无效或未授权。服务返回：{msg}"),
@@ -164,6 +166,48 @@ fn redact_credential(msg: String, secret: &str) -> String {
     } else {
         msg.replace(secret, "***")
     }
+}
+
+/// 019：错误回显中的图片载荷遮蔽——服务端错误可能回显请求里的 data URL，
+/// 先替换载荷（保留 MIME 提示）再截断，避免 base64 大段进入用户可见输出。
+fn redact_data_urls(msg: String) -> String {
+    let mut out = String::with_capacity(msg.len());
+    let bytes = msg.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if msg[i..].starts_with("data:") {
+            let rest = &msg[i + 5..];
+            // 形如 <mime>[;base64],<载荷>；载荷＝到下一个非 base64/非 URL 安全字符
+            if let Some((meta, payload_start)) = split_data_url_meta(rest) {
+                let payload = &rest[payload_start..];
+                let payload_len = payload
+                    .find(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '=' | '/' | '+' | '-' | '_'))
+                    .unwrap_or(payload.len());
+                out.push_str("data:");
+                out.push_str(meta);
+                out.push_str(&format!("<图片载荷已遮蔽：{} 字符>", payload_len));
+                i += 5 + payload_start + payload_len;
+                continue;
+            }
+        }
+        let ch = msg[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// data URL 元数据段（含结尾逗号前的 `;base64` 等参数）：返回 (meta, 载荷起始偏移)。
+fn split_data_url_meta(rest: &str) -> Option<(&str, usize)> {
+    let comma = rest.find(',')?;
+    let meta = &rest[..comma];
+    if meta.is_empty() || meta.len() > 64 {
+        return None;
+    }
+    if !meta.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b';' | b'-' | b'+')) {
+        return None;
+    }
+    Some((meta, comma + 1))
 }
 
 /// 出站请求体上限（2026-10-10 安全修复 N4）：含 model/messages/tools/request_params
@@ -283,6 +327,25 @@ pub(crate) fn reply_text(v: &Value) -> Result<String, String> {
     Ok(content.to_string())
 }
 
+/// 019：请求消息面是否含图片内容（user 部件 `image_url`）。只做形态检查，
+/// 不解码载荷——发送前的能力门与 10 MiB 计量各自独立。
+fn request_has_image_content(request: &Value) -> bool {
+    request
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|m| {
+                m.get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|parts| {
+                        parts
+                            .iter()
+                            .any(|p| p.get("type").and_then(Value::as_str) == Some("image_url"))
+                    })
+            })
+        })
+}
+
 /// 完整请求体对话（006 工具循环）：`request` 为 005 组装产物 `{messages, tools}`，
 /// 附上 `model` 与已校验的 request_params 后发送，返回完整响应 JSON（含 tool_calls）。
 /// 协议检查、鉴权、重定向拒绝与错误映射与 `chat` 完全一致；`chat` 原行为不变。
@@ -307,6 +370,17 @@ pub fn chat_with_body(
         .find(|k| matches!(k.as_str(), "model" | "messages" | "tools"))
     {
         return Err(format!("request_params 不能包含保留字段 {k}"));
+    }
+    // 019 §3.2：发送前再次检查图片消息与所选模型能力——恢复图片历史后切到
+    // 文本/能力未知模型时明确本地拒绝（零发送），不静默丢图、不发不支持的请求。
+    if request_has_image_content(request)
+        && !crate::catalog::supports_image_input(model)
+    {
+        return Err(format!(
+            "当前模型 {} 未确认支持图片输入（input_modalities 缺少 image）：已拒绝发送含图片的请求；\
+             请改用支持图片的模型（在模型配置中声明 input_modalities 含 image）或新建会话",
+            model.id
+        ));
     }
     let mut body = request.clone();
     body["model"] = json!(model.id);

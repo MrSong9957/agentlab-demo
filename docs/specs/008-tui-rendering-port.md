@@ -1,6 +1,6 @@
 # 规格：终端 UI 渲染层移植（Codex TUI 同源）
 
-> 状态：**实现中（A6 Windows ConPTY 未闭合）**　主体已并入 main @ `59c7e18`（2026-10-18 合并，原分支 `feat/008-codex-tui-port` 合并后删除）；维护任务分支 `fix/008-snapshot-hygiene`（快照副产物清理，见 §5 维护验收与 §4 坑 19）。
+> 状态：**实现中（A6 Windows ConPTY 未闭合）**　主体已并入 main @ `59c7e18`（2026-10-18 合并，原分支 `feat/008-codex-tui-port` 合并后删除）；维护任务分支 `fix/008-snapshot-hygiene`（快照副产物清理，见 §5 维护验收与 §4 坑 19）。019：恢复 `ViewImageHistoryCell` 构造入口（`new_view_image_event`，008 §1 曾裁剪）并补活动 ID、路径与尺寸说明。
 > **验收规则**：验收未闭合保持"实现中"；A1–A5、A7–A10 已实测通过，A6 无已授权 Windows 环境未实测——全部通过后才标"待批准"。
 > 验收状态：A1–A5、A7–A10 全部通过实测（§5 各项＋证据 logs/2026-10-14-008-spec-revision.md §11-16）；**A6 Windows ConPTY 未闭合**（无已授权 Windows 环境——以真实验收阻断返回，不宣称完整验收通过）。
 > 已知缺口（登记，2026-10-14 最终收敛轮更新）：~~Ctrl+D 退出~~（已闭合：驱动空输入 Ctrl+D＝Quit，非空交 composer 编辑域——rustyline 语义；S12 e2e）；~~Queued 输入／turn 期间提交~~（已闭合：turn 运行中 Enter（母本 steer 位点）与 queue_keys 均入驱动队列，turn 结束按空闲语义逐条重放（裸 exit/斜杠解析/turn），排队项经 pending_input_preview 显示；S11 e2e）；~~chat_composer_history 上/下键检索回填通道~~（已闭合：会话内回溯由 composer local_history 即时承接（S13 e2e，光标行断言）——001 rustyline 内存历史等价（均无跨会话持久化）；持久查找 `LookupMessageHistoryEntry` 不可达（驱动未调 `set_history_metadata`→persistent_entry_count 恒 0），非交互源按范围裁剪；驱动 draw 补光标定位（A1，S13 前红灯））。~~/resume 会话中投影不可达~~（已闭合：CommandOutcome::ReplaceCells 通道＋S10 e2e 验证）。

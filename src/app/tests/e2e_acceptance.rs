@@ -410,6 +410,7 @@ fn s97_question_cancel_exit_and_eof_save_one_terminal_result_and_pair_batch() {
             .iter()
             .filter_map(|h| {
                 if let HistoryItem::ToolResult {
+                    image,
                     tool_call_id,
                     content,
                     display,
@@ -775,6 +776,7 @@ fn s102_redirected_line_cli_uppercase_term_cancels_without_another_line() {
         .iter()
         .filter_map(|h| match h {
             terminal_chat::prompt::HistoryItem::ToolResult {
+                image,
                 tool_call_id,
                 content,
                 display,
@@ -1424,6 +1426,37 @@ fn write_manual_with_memories(
             catalog::ManualProvider {
                 base_url: Some(base_url.into()),
                 key_ref: Some(key_ref.into()),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+    };
+    std::fs::write(dir.join("manual.json"), serde_json::to_string_pretty(&m).unwrap())
+        .unwrap();
+}
+
+/// 019：声明 input_modalities 含 image 的 manual（view_image e2e 用）。
+fn write_manual_image_capable(dir: &Path, base_url: &str, key_ref: &str) {
+    let m = catalog::ManualRoot {
+        selected_provider: Some("deepseek".into()),
+        selected_model: Some("deepseek-flash".into()),
+        memories: None,
+        providers: [(
+            "deepseek".to_string(),
+            catalog::ManualProvider {
+                base_url: Some(base_url.into()),
+                key_ref: Some(key_ref.into()),
+                models: [(
+                    "deepseek-flash".to_string(),
+                    catalog::ModelInfo {
+                        id: "deepseek-flash".into(),
+                        input_modalities: Some(vec!["text".into(), "image".into()]),
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
                 ..Default::default()
             },
         )]
@@ -8588,4 +8621,94 @@ fn s92_tui_update_plan_resize_reflow_integrity() {
     let (out, status) = pty.finish();
     assert_eq!(status.code(), Some(0), "退出码契约，输出：{out}");
     assert_eq!(mock.requests().len(), 2, "恰两次模型请求（resize 不触发请求）");
+}
+
+/// 019 S95：真实 TUI 看图——成功卡片（文件名＋尺寸）、失败行、下一请求协议边界
+/// 携带真实图片、/resume 恢复同一卡片（不重放工具）。
+#[test]
+fn s95_tui_view_image_card_failure_and_resume() {
+    let cfg = TempDir::new("s95-cfg");
+    let user = TempDir::new("s95-user");
+    // 夹具图写入 TUI 工作目录（相对路径按 cwd 解析）
+    let work = user.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let shot = work.join("截图 s95.png");
+    let img = image::ImageBuffer::from_pixel(
+        2304,
+        864,
+        image::Rgba([210u8, 40, 60, 255]),
+    );
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    use image::GenericImageView as _;
+    img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+    std::fs::write(&shot, cursor.into_inner()).unwrap();
+    let vi_call = |path: &str, id: &str| {
+        json!({"choices":[{"message":{"tool_calls":[{"id":id,"type":"function","function":{
+        "name":"view_image","arguments":json!({"path":path}).to_string()}}]}}]}).to_string()
+    };
+    let mock = spawn_mock(vec![
+        MockResp::json(200, vi_call("截图 s95.png", "s95-img")),
+        MockResp::json(200, chat_body("S95-完成")),
+        MockResp::json(200, vi_call("definitely-missing.png", "s95-miss")),
+        MockResp::json(200, chat_body("S95-失败已知")),
+    ]);
+    write_manual_image_capable(cfg.path(), &mock.url, "env:TCHAT_S95_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s95"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S95_KEY",
+        "fake-s95",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.send_line("看图");
+    pty.wait_screen_timeout("Viewed image", Duration::from_secs(10)).unwrap();
+    pty.wait_screen("截图 s95.png").unwrap();
+    pty.wait_screen("2048×768").unwrap();
+    pty.wait_screen("S95-完成").unwrap();
+    // 协议边界：下一请求携带可解码图片（格式/尺寸）
+    assert_eq!(mock.count(), 2);
+    let body: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
+    let url = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["content"].as_array())
+        .flatten()
+        .filter_map(|p| p["image_url"]["url"].as_str())
+        .next()
+        .expect("请求含 image_url");
+    let b64 = url.strip_prefix("data:image/png;base64,").unwrap();
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+    let decoded = image::load_from_memory(&bytes).unwrap();
+    use image::GenericImageView;
+    assert_eq!(decoded.dimensions(), (2048, 768), "2304×864 → 2048×768");
+    // 失败行：缺失文件按原因降级，不生成"已查看"卡片
+    pty.send_line("再看缺失文件");
+    pty.wait_screen_timeout("view_image 失败", Duration::from_secs(10)).unwrap();
+    pty.wait_screen("S95-失败已知").unwrap();
+    assert_eq!(mock.count(), 4);
+    pty.send_raw(b"\x03");
+    assert_eq!(pty.finish().1.code(), Some(0));
+    // /resume：空历史新进程装载同一会话——恢复同一成功卡片（不重新执行工具）
+    let mut pty2 = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S95_KEY",
+        "fake-s95",
+        true,
+    ));
+    pty2.wait_screen("? for shortcuts").unwrap();
+    pty2.send_line("/resume");
+    pty2.wait_screen_timeout("Viewed image", Duration::from_secs(10)).unwrap();
+    pty2.wait_screen("截图 s95.png").unwrap();
+    assert_eq!(mock.count(), 4, "恢复只投影，不重放工具、不续请求");
+    pty2.send_raw(b"\x03");
+    assert_eq!(pty2.finish().1.code(), Some(0));
 }

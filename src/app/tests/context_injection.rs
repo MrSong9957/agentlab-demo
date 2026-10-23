@@ -866,6 +866,7 @@ fn t12_coexists_with_tool_history_and_user_with_memory() {
             content: None,
         },
         HistoryItem::ToolResult {
+            image: None,
             tool_call_id: "call-1".into(),
             content: r#"{"status":"completed"}"#.into(),
             display: None,

@@ -69,6 +69,7 @@ fn assistant_msg(content: &str) -> HistoryItem {
 
 fn tool_result(id: &str, content: &str) -> HistoryItem {
     HistoryItem::ToolResult {
+        image: None,
         tool_call_id: id.to_string(),
         content: content.to_string(),
         display: None,
@@ -505,6 +506,7 @@ fn m3_context_injections_stripped_from_input() {
             user_msg(skill),
             user_msg("真实用户输入"),
             HistoryItem::ToolResult {
+                image: None,
                 tool_call_id: "c1".into(),
                 content: "tool 输出".into(),
                 display: Some(ToolDisplay::Exec { duration_ms: 42 }),

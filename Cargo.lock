@@ -3354,10 +3354,12 @@ dependencies = [
 name = "terminal-chat"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "codex-protocol",
  "codex-utils-string",
  "diffy",
+ "image",
  "libc",
  "regex-lite",
  "rusqlite",

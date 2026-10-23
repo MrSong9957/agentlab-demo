@@ -185,6 +185,7 @@ fn m6_d4_only_system_tail_changes_and_none_is_byte_identical() {
             content: None,
         },
         HistoryItem::ToolResult {
+            image: None,
             tool_call_id: "pair-1".into(),
             content: r#"{"status":"completed","exit_code":0,"output":"evidence"}"#.into(),
             display: Some(ToolDisplay::Exec { duration_ms: 42 }),

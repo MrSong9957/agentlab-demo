@@ -21,3 +21,5 @@ codex-protocol = { path = "../shims/codex-protocol" }  # 017：update_plan 参�
 codex-utils-string = { path = "../shims/codex-utils-string" }  # 013-M3 D11：截断/近似换算复用 008 shim（上游同文件逐字节）
 chrono = { version = "0.4", default-features = false, features = ["std"] } # 013-M4：复用锁定版本，固定 UTC 格式
 uuid = { version = "1", default-features = false } # 013-M4：上游文件名的 UUID 解析/时间戳；不生成随机 UUID
+base64 = "0.22"  # 019：view_image data URL 编解码（工作区已锁 0.22.1，与 tui 同款）
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }  # 019：图片解码/缩放/编码（上游 codex-utils-image 函数级移植；特性沿用 tui）

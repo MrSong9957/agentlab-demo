@@ -172,6 +172,17 @@ pub fn sanitize_history_item_for_memories(item: &HistoryItem) -> Option<HistoryI
         {
             None
         }
+        // 019 §5.2：图片载荷先剥离再走记忆投影——base64 不进入提炼文本、
+        // 记忆 Markdown 或摘要注入；工具文本摘要保留。读取预算不变（超单条
+        // 上限的内联图片记录仍按既有规则在读取侧整条跳过）。
+        HistoryItem::ToolResult { tool_call_id, content, display, image } if image.is_some() => {
+            Some(HistoryItem::ToolResult {
+                tool_call_id: tool_call_id.clone(),
+                content: content.clone(),
+                display: display.clone(),
+                image: None,
+            })
+        }
         _ => Some(item.clone()),
     }
 }
@@ -268,6 +279,53 @@ mod tests {
         assert!(!is_memory_excluded_fragment("<environment_context>普通粘贴"));
         let kept = user("真实用户输入");
         assert_eq!(sanitize_history_item_for_memories(&kept), Some(kept.clone()));
+    }
+
+    /// 019 §5.2：图片载荷剥离——记忆输入保留工具文本摘要但无 data URL；
+    /// 也不为图片记录新增图片提炼轮。
+    #[test]
+    fn image_payload_stripped_from_memory_input() {
+        use crate::prompt::{HistoryItem, ToolResultImage};
+        let item = HistoryItem::ToolResult {
+            tool_call_id: "c1".into(),
+            content: r#"{"ok":true,"path":"/x/a.png"}"#.into(),
+            display: None,
+            image: Some(ToolResultImage {
+                image_url: "data:image/png;base64,QUJDREVGRw==".into(),
+                detail: "high".into(),
+            }),
+        };
+        let stripped = sanitize_history_item_for_memories(&item).expect("摘要保留");
+        match stripped {
+            HistoryItem::ToolResult { content, image, .. } => {
+                assert!(image.is_none(), "载荷必须剥离");
+                assert!(content.contains(r#""ok":true"#), "摘要保留：{content}");
+            }
+            other => panic!("形状：{other:?}"),
+        }
+        let text = serialize_filtered_history_items(&[item]).unwrap();
+        assert!(text.contains("a.png"), "摘要进入提炼输入：{text}");
+        assert!(!text.contains("base64"), "提炼输入不得含 base64：{text}");
+        assert!(!text.contains("QUJDREVGRw"), "载荷不得进入提炼输入：{text}");
+    }
+
+    /// 019 §5.2：超单条上限的内联图片记录仍按既有规则整条跳过（连同摘要）。
+    #[test]
+    fn oversize_inline_image_record_skipped_entirely() {
+        use crate::prompt::{HistoryItem, ToolResultImage};
+        let t = Tmp::new("big-img");
+        let p = t.0.join("g.jsonl");
+        let big_b64 = "Q".repeat(MAX_RECORD_BYTES + 64);
+        let line = serde_json::to_string(&HistoryItem::ToolResult {
+            tool_call_id: "c9".into(),
+            content: r#"{"ok":true}"#.into(),
+            display: None,
+            image: Some(ToolResultImage { image_url: format!("data:image/png;base64,{big_b64}"), detail: "high".into() }),
+        })
+        .unwrap();
+        std::fs::write(&p, format!("{{\"v\":1}}\n{line}\n")).unwrap();
+        let items = read_recent_rollout_items(&p).unwrap();
+        assert!(items.is_empty(), "超限记录整条跳过（不参与提炼）");
     }
 
     #[test]

@@ -1535,6 +1535,16 @@ pub enum HostHistoryItem {
         response: Option<RequestUserInputResponse>,
         error: Option<String>,
     },
+    /// 019：view_image 终态。成功＝ViewImageHistoryCell（摘要文件名、详情路径、
+    /// 尺寸说明）；失败/缺图内容＝`error` 说明（不生成正常"已查看"卡片）。
+    /// `dims`＝(宽, 高) 发送尺寸；`error` 含"历史图片内容不可用"降级说明。
+    ViewImage {
+        ok: bool,
+        filename: String,
+        path: String,
+        dims: Option<(u64, u64)>,
+        error: Option<String>,
+    },
     /// 018-B：异步问询终态（发布确认/已答/关闭同一 cell 的三个状态）。
     /// `answerable`＝实时未决（显示 F6 提示）；恢复投影恒为 false（不重开问询）。
     UserInputAsync {
@@ -1614,6 +1624,7 @@ pub fn project_history(items: Vec<HostHistoryItem>) -> Vec<std::sync::Arc<dyn Hi
             tool @ (HostHistoryItem::Exec { .. }
             | HostHistoryItem::Patch { .. }
             | HostHistoryItem::Plan { .. }
+            | HostHistoryItem::ViewImage { .. }
             | HostHistoryItem::UserInput { .. }
             | HostHistoryItem::UserInputAsync { .. }) => {
                 flush_text!();
@@ -1649,6 +1660,37 @@ fn project_tool_item(
     use ratatui::style::Stylize as _;
     match item {
         HostHistoryItem::Text { .. } => Vec::new(), // 文本经 thread 投影，不在此处理
+        // 019：查看图片终态——成功经 ViewImageHistoryCell 渲染（与恢复投影同源）；
+        // 失败/取消/历史缺图内容不生成正常"已查看"卡片，按原因降级呈现
+        //（§5.3：成功摘要但无载荷＝明确显示"历史图片内容不可用"）。
+        HostHistoryItem::ViewImage { ok, filename, path, dims, error } => {
+            if *ok && error.is_none() {
+                return vec![Arc::new(
+                    crate::history_cell::new_view_image_event(
+                        filename.clone(),
+                        path.clone(),
+                        *dims,
+                    )
+                    .with_activity_id(id.to_string()),
+                )];
+            }
+            let mut lines = if *ok {
+                vec![ratatui::text::Line::from(
+                    "⚠ Viewed image（历史图片内容不可用）".yellow().bold(),
+                )]
+            } else {
+                vec![ratatui::text::Line::from("✗ view_image 失败".red().bold())]
+            };
+            if !path.trim().is_empty() {
+                lines.push(ratatui::text::Line::from(path.clone()).dim());
+            }
+            if let Some(err) = error {
+                if !err.trim().is_empty() {
+                    lines.push(ratatui::text::Line::from(err.clone()).dim());
+                }
+            }
+            vec![Arc::new(PlainHistoryCell::new(lines))]
+        }
         HostHistoryItem::Exec { command, output, exit_code, cancelled, error, duration_ms, running } => {
             if let Some(session_id) = running {
                 // 016：进程仍在运行——独立"运行中"呈现，携带可续接会话编号；
@@ -2462,6 +2504,64 @@ mod tests {
         let text = cells_text(&cells);
         assert!(text.contains("已发布问询，等待用户回答"), "{text}");
         assert!(!text.contains("F6"), "恢复态不提示 F6：{text}");
+    }
+
+    /// 019：查看图片终态投影——成功经 ViewImageHistoryCell（文件名＋尺寸，详情
+    /// 保留路径）；失败/历史缺图内容不生成正常卡片，按原因降级。
+    #[test]
+    fn view_image_projection_success_and_failure() {
+        let cells = project_tool_item(
+            &HostHistoryItem::ViewImage {
+                ok: true,
+                filename: "shot.png".into(),
+                path: "/tmp/w/shot.png".into(),
+                dims: Some((2048, 768)),
+                error: None,
+            },
+            "call-vi-1",
+            std::path::Path::new("/"),
+        );
+        assert_eq!(cells.len(), 1, "单一卡片");
+        let text = cells_text(&cells);
+        assert!(text.contains("Viewed image"), "标题：{text}");
+        assert!(text.contains("shot.png"), "文件名：{text}");
+        assert!(text.contains("2048×768"), "尺寸：{text}");
+        let transcript = ratatui::text::Text::from(cells[0].transcript_lines(100)).to_string();
+        assert!(transcript.contains("/tmp/w/shot.png"), "详情保留路径：{transcript}");
+        // 失败与历史缺图内容：降级行，不生成"已查看"卡片（缺图＝恢复投影的
+        // 真实组合：ok:true 且 error=Some（历史图片内容不可用））
+        for (label, item) in [
+            (
+                "失败",
+                HostHistoryItem::ViewImage {
+                    ok: false,
+                    filename: String::new(),
+                    path: String::new(),
+                    dims: None,
+                    error: Some("文件不存在".into()),
+                },
+            ),
+            (
+                "缺图",
+                HostHistoryItem::ViewImage {
+                    ok: true,
+                    filename: "old.png".into(),
+                    path: "/w/old.png".into(),
+                    dims: Some((2, 2)),
+                    error: Some("历史图片内容不可用（旧版本保存的记录）".into()),
+                },
+            ),
+        ] {
+            let cells = project_tool_item(&item, "call-vi-x", std::path::Path::new("/"));
+            let text = cells_text(&cells);
+            if label == "缺图" {
+                assert!(text.contains("历史图片内容不可用"), "{label}：{text}");
+                assert!(!text.contains("Viewed image "), "{label} 不生成正常卡片：{text}");
+            } else {
+                assert!(text.contains("view_image 失败"), "{label}：{text}");
+                assert!(!text.contains("Viewed image"), "{label} 不生成正常卡片：{text}");
+            }
+        }
     }
 
     /// 017：计划终态投影——成功快照经 PlanUpdateCell 清单渲染（说明＋三种

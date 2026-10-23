@@ -80,6 +80,7 @@ fn forged_fields_and_ambiguous_ids_are_rejected_before_host_execution() {
         assert_eq!(host_calls, 0, "非法参数触发宿主：{arguments}");
         assert_eq!(requests, 2);
         let HistoryItem::ToolResult {
+            image: None,
             content,
             display: None,
             ..
@@ -437,6 +438,7 @@ fn async_lookalike_chat_never_gains_source_marker_or_answers_pending() {
         &ProcessManager::new(),
         None,
         Some(&mut async_host),
+        false
     )
     .unwrap();
     let _ = unused_tx;

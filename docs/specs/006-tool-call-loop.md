@@ -1,6 +1,6 @@
 # 规格：工具调用循环（REPL 最小闭环）
 
-> 状态：已实现（REPL 已接入并按 §5 验证；审批/并行/流式/持久化不在范围；**016 修订：用户轮工具三项、取消不再终止已启动进程；017 修订：用户轮工具四项（＋update_plan）**）　更新：2026-10-22（017）
+> 状态：已实现（REPL 已接入并按 §5 验证；审批/并行/流式/持久化不在范围；**016 修订：用户轮工具三项、取消不再终止已启动进程；017 修订：用户轮工具四项（＋update_plan）；019 修订：模型图片能力确认（`input_modalities` 含 image）的用户轮条件性加第五项 `view_image`——声明与执行分派共用每轮固定能力快照，能力未知/text-only 时伪造调用不读文件只回能力错误；成功结果携带可选图片载荷入史（`ToolEnd` 通知仍只传文本摘要）；MemoryMerge 合并轮仍不开放**）　更新：2026-10-23（019）
 > 母本：[openai/codex](https://github.com/openai/codex) 固定提交 `2fdf047c9631c9ed01a31b62efb7891718a931a8`；[Chat Completions function-calling](https://developers.openai.com/api/docs/guides/function-calling)（不迁移 Responses）
 
 ## 1. 目标 & I/O
