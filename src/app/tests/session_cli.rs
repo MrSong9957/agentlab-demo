@@ -292,6 +292,8 @@ fn e1_auto_save_default_and_resume_roundtrip() {
     assert_eq!(serde_json::to_string(&loaded.history[1]).unwrap(),
         serde_json::to_string(&terminal_chat::prompt::HistoryItem::Text(
             terminal_chat::prompt::HistoryMessage {
+                images: None,
+                text_elements: Vec::new(),
                 role: terminal_chat::prompt::HistoryRole::User,
                 content: "你好".into(),
                 user_input_event: None,
@@ -332,6 +334,8 @@ fn e1_auto_save_default_and_resume_roundtrip() {
     assert_eq!(loaded2.history.len(), 9);
     assert_eq!(loaded2.history[7],
         terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: terminal_chat::prompt::HistoryRole::User,
             content: "续聊".into(),
             user_input_event: None,
@@ -840,6 +844,8 @@ fn e17_two_process_concurrent_save_same_snapshot() {
     // 两份大历史种子（经生产 save_snapshot 生成，字节即期望快照内容）
     let hist_a: Vec<HistoryItem> = (0..1500)
         .map(|i| HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: HistoryRole::User,
             content: format!("A-user-{i:05}-{}", "填充".repeat(120)),
             user_input_event: None,
@@ -847,6 +853,8 @@ fn e17_two_process_concurrent_save_same_snapshot() {
         .collect();
     let hist_b: Vec<HistoryItem> = (0..1500)
         .map(|i| HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: HistoryRole::User,
             content: format!("B-user-{i:05}-{}", "填充".repeat(120)),
             user_input_event: None,
@@ -907,6 +915,8 @@ fn e17_two_process_concurrent_save_same_snapshot() {
     assert_eq!(
         loaded.history[0],
         HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: HistoryRole::User,
             content: format!("{}-user-00000-{}", if winner_is_a { "A" } else { "B" }, "填充".repeat(120)),
             user_input_event: None,

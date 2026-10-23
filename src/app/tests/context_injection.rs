@@ -119,6 +119,8 @@ fn tool_reply(id: &str, name: &str, arguments: &Value) -> Value {
 
 fn user(content: &str) -> HistoryItem {
     HistoryItem::Text(HistoryMessage {
+        images: None,
+        text_elements: Vec::new(),
         role: HistoryRole::User,
         content: content.to_string(),
         user_input_event: None,
@@ -127,6 +129,8 @@ fn user(content: &str) -> HistoryItem {
 
 fn assistant(content: &str) -> HistoryItem {
     HistoryItem::Text(HistoryMessage {
+        images: None,
+        text_elements: Vec::new(),
         role: HistoryRole::Assistant,
         content: content.to_string(),
         user_input_event: None,
@@ -201,11 +205,13 @@ fn t01_first_turn_full_context_byte_exact() {
                 role: r1,
                 content: c1,
                 user_input_event: None,
+                ..
             }),
             HistoryItem::Text(HistoryMessage {
                 role: r2,
                 content: c2,
                 user_input_event: None,
+                ..
             }),
         ) => {
             assert_eq!(*r1, HistoryRole::User);
@@ -561,6 +567,8 @@ fn t07_lookalike_not_recognized_real_forms_recognized() {
         )
         .unwrap();
         assert_eq!(history[2], HistoryItem::Text(HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: HistoryRole::User,
             content: ctx_now.clone(),
             user_input_event: None,
@@ -583,6 +591,8 @@ fn t07_lookalike_not_recognized_real_forms_recognized() {
     &ProcessManager::new(),
     ).unwrap();
     assert_eq!(history[2], HistoryItem::Text(HistoryMessage {
+        images: None,
+        text_elements: Vec::new(),
         role: HistoryRole::User,
         content: format!("{DECL}\n\n{ctx_now}"),
         user_input_event: None,

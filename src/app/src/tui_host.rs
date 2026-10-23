@@ -52,6 +52,7 @@ pub struct TuiHost {
     authorized: Arc<Mutex<Option<(String, String)>>>,
     /// 013-M7：threads 登记推进器（缓存库连接；在 autosave 锁内串行访问）。
     registrar: Arc<Mutex<crate::memory::runner::ThreadRegistrar>>,
+
     /// 016：进程会话管理器（当前对话；跨轮保留进程，TUI Ctrl+C 退出时关闭）。
     procs: ProcessManager,
 }
@@ -119,13 +120,14 @@ impl TuiHost {
     }
 
     /// 驱动 spawn_turn 钩子的直连（公开给 main 组装）。
-    pub fn spawn_turn(&self, input: String, tx: std_mpsc::Sender<DriverEvent>) {
-        self.run_turn_inner(input, tx);
+    /// 020：完整提交（文本＋附件路径＋元素）——线程内正式准备图片。
+    pub fn spawn_turn(&self, submission: tchat_tui::chat_driver::SubmittedTurn, tx: std_mpsc::Sender<DriverEvent>) {
+        self.run_turn_inner(submission, tx);
     }
 
     fn run_turn_inner(
         &self,
-        input: String,
+        submission: tchat_tui::chat_driver::SubmittedTurn,
         tx: std_mpsc::Sender<DriverEvent>,
     ) {
         let history = self.history.clone();
@@ -155,6 +157,33 @@ impl TuiHost {
                     return;
                 }
             };
+            // 020：用户附件正式准备（能力检查先于文件打开；入队阶段未读取）。
+            // 失败＝SubmissionRejected：消息不入史、零请求，驱动恢复草稿。
+            let user_payload: Option<crate::prompt::UserImagePayload> =
+                if submission.local_images.is_empty() {
+                    None
+                } else {
+                    let paths: Vec<std::path::PathBuf> =
+                        submission.local_images.iter().map(|a| a.path.clone()).collect();
+                    match crate::view_image::prepare_user_images(
+                        &paths,
+                        catalog::supports_image_input(&model),
+                        Some(&HOST_CANCEL),
+                    ) {
+                        Ok(data_urls) => Some(crate::prompt::UserImagePayload {
+                            data_urls,
+                            text_elements: submission.text_elements.clone(),
+                        }),
+                        Err(reason) => {
+                            let _ = tx.send(DriverEvent::SubmissionRejected {
+                                text: submission.text.clone(),
+                                image_paths: paths,
+                                reason,
+                            });
+                            return;
+                        }
+                    }
+                };
             // 003 origin 门：会话中 origin 或凭证与启动授权不一致时按非交互契约拒绝
             if let Ok(origin) = catalog::origin_of(&prov.conn.base_url) {
                 let fp = catalog::fingerprint(&cred.value);
@@ -343,7 +372,7 @@ impl TuiHost {
                 };
             let result = turn::run_user_turn_with_context_and_hosts(
                 &mut history.lock().unwrap(),
-                &input,
+                &submission.text,
                 &mut sender,
                 &mut notify,
                 Some(&HOST_CANCEL),
@@ -355,6 +384,8 @@ impl TuiHost {
                 Some(&mut async_input_host),
                 // 019：每用户轮固定能力快照（声明与执行共用）
                 catalog::supports_image_input(&model),
+                // 020：用户附件载荷（切片4 接线 SubmittedTurn 后携带）
+                user_payload.as_ref(),
             );
             unsafe {
                 libc::signal(libc::SIGINT, libc::SIG_DFL);
@@ -1271,6 +1302,8 @@ mod tests {
         use tchat_tui::chat_driver::HostHistoryItem as H;
         let history = vec![
             HistoryItem::Text(crate::prompt::HistoryMessage {
+                images: None,
+                text_elements: Vec::new(),
                 role: crate::prompt::HistoryRole::User,
                 content: "go".into(),
                 user_input_event: None,
@@ -1317,6 +1350,8 @@ mod tests {
         use tchat_tui::chat_driver::HostHistoryItem as H;
         let history = vec![
             HistoryItem::Text(crate::prompt::HistoryMessage {
+                images: None,
+                text_elements: Vec::new(),
                 role: crate::prompt::HistoryRole::User,
                 content: "go".into(),
                 user_input_event: None,
@@ -1360,16 +1395,22 @@ mod tests {
         );
         let history = vec![
             HistoryItem::Text(crate::prompt::HistoryMessage {
+                images: None,
+                text_elements: Vec::new(),
                 role: crate::prompt::HistoryRole::User,
                 content: declared,
                 user_input_event: None,
             }),
             HistoryItem::Text(crate::prompt::HistoryMessage {
+                images: None,
+                text_elements: Vec::new(),
                 role: crate::prompt::HistoryRole::User,
                 content: "真实输入".into(),
                 user_input_event: None,
             }),
             HistoryItem::Text(crate::prompt::HistoryMessage {
+                images: None,
+                text_elements: Vec::new(),
                 role: crate::prompt::HistoryRole::Assistant,
                 content: "答".into(),
                 user_input_event: None,
@@ -1387,6 +1428,8 @@ mod tests {
         assert!(matches!(&items[1], H::Text { assistant: true, .. }));
         // 环境块裸消息（无规则形态）同样跳过
         let history2 = vec![HistoryItem::Text(crate::prompt::HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: crate::prompt::HistoryRole::User,
             content: env_block.to_string(),
             user_input_event: None,
@@ -1493,6 +1536,8 @@ mod tests {
             publish("a1"),
             accepted("a1"),
             HistoryItem::Text(crate::prompt::HistoryMessage {
+                images: None,
+                text_elements: Vec::new(),
                 role: crate::prompt::HistoryRole::User,
                 content: answer_body.into(),
                 user_input_event: Some(UserInputEvent::Answer {
@@ -1514,6 +1559,8 @@ mod tests {
             publish("c1"),
             accepted("c1"),
             HistoryItem::Text(crate::prompt::HistoryMessage {
+                images: None,
+                text_elements: Vec::new(),
                 role: crate::prompt::HistoryRole::User,
                 content: r#"{"request_id":"c1","reason":"task_completed"}"#.into(),
                 user_input_event: Some(UserInputEvent::Closed {
@@ -1539,6 +1586,8 @@ mod tests {
         // 孤儿标记（无对应发布调用）与矛盾标记（正文 request_id 不一致）：
         // 不合并、按普通文本保留，不伪造已答
         let orphan = HistoryItem::Text(crate::prompt::HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: crate::prompt::HistoryRole::User,
             content: answer_body.into(),
             user_input_event: Some(UserInputEvent::Answer {
@@ -1546,6 +1595,8 @@ mod tests {
             }),
         });
         let mismatch = HistoryItem::Text(crate::prompt::HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: crate::prompt::HistoryRole::User,
             content: r#"{"request_id":"someone-else","answers":{}}"#.into(),
             user_input_event: Some(UserInputEvent::Answer {
@@ -1568,6 +1619,8 @@ mod tests {
         );
         // 旧程序重存丢标记：同一正文按普通用户文本展示（降级不丢内容）
         let degraded = HistoryItem::Text(crate::prompt::HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: crate::prompt::HistoryRole::User,
             content: answer_body.into(),
             user_input_event: None,
@@ -1589,6 +1642,8 @@ mod tests {
             publish("f1"),
             accepted("f1"),
             HistoryItem::Text(crate::prompt::HistoryMessage {
+                images: None,
+                text_elements: Vec::new(),
                 role: crate::prompt::HistoryRole::User,
                 content: foreign_body.into(),
                 user_input_event: Some(UserInputEvent::Answer {
@@ -1609,6 +1664,8 @@ mod tests {
         );
         // 重复 answer 标记：首条合并，第二条按普通文本保留
         let dup = HistoryItem::Text(crate::prompt::HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: crate::prompt::HistoryRole::User,
             content: answer_body.into(),
             user_input_event: Some(UserInputEvent::Answer {
@@ -1631,6 +1688,8 @@ mod tests {
         let plan_args = r#"{"explanation":"说明","plan":[{"step":"步骤一","status":"completed"}]}"#;
         let history = vec![
             HistoryItem::Text(crate::prompt::HistoryMessage {
+                images: None,
+                text_elements: Vec::new(),
                 role: crate::prompt::HistoryRole::User,
                 content: "go".into(),
                 user_input_event: None,
@@ -1753,7 +1812,14 @@ mod tests {
         std::panic::set_hook(prev_hook);
 
         let (tx, rx) = std_mpsc::channel();
-        host.spawn_turn("hello".into(), tx);
+        host.spawn_turn(
+            tchat_tui::chat_driver::SubmittedTurn {
+                text: "hello".into(),
+                local_images: Vec::new(),
+                text_elements: Vec::new(),
+            },
+            tx,
+        );
         let event = rx
             .recv_timeout(Duration::from_secs(5))
             .expect("turn 线程异常死亡也必须回推终止事件（不得静默挂起驱动）");
@@ -1768,6 +1834,8 @@ mod tests {
         // 定点复核 P2-新1：毒锁下 /resume 也不得 panic（resumed_projection 曾裸
         // unwrap——主线程 panic 跳过终端恢复）。修复前本调用 panic＝测试红。
         let msg = crate::prompt::HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: crate::prompt::HistoryRole::User,
             content: "快照记录".into(),
             user_input_event: None,

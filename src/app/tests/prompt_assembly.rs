@@ -15,7 +15,13 @@ const RAW_LEN: usize = 20903;
 const RAW_SHA256: &str = "ac8ae107a0d72fe3476b430afb161ea4e67da2e446d778aefc44828160559807";
 
 fn msg(role: HistoryRole, content: &str) -> HistoryItem {
-    HistoryItem::Text(HistoryMessage { role, content: content.to_string(), user_input_event: None })
+    HistoryItem::Text(HistoryMessage {
+        role,
+        content: content.to_string(),
+        user_input_event: None,
+        images: None,
+        text_elements: Vec::new(),
+    })
 }
 
 /// 1. 来源一致性（嵌入母本）：字节数与 SHA-256 独立锚定，非实现自我比较。
@@ -524,4 +530,112 @@ fn s13_view_image_tool_declared_only_when_capable() {
     let def = &on["tools"][4];
     assert_eq!(def["function"]["parameters"]["required"], json!(["path"]));
     assert_eq!(def["function"]["parameters"]["additionalProperties"], json!(false));
+}
+
+// ---------- 020：用户消息图片字段（images/text_elements）与投影 ----------
+
+use codex_protocol::user_input::{ByteRange, TextElement};
+
+fn img_msg(content: &str, images: Vec<String>, elements: Vec<TextElement>) -> HistoryItem {
+    HistoryItem::Text(HistoryMessage {
+        role: HistoryRole::User,
+        content: content.to_string(),
+        user_input_event: None,
+        images: (!images.is_empty()).then_some(images),
+        text_elements: elements,
+    })
+}
+
+fn small_data_url(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
+}
+
+/// 14.（020 §2.2）序列化：images 按附件顺序为准备后 data URL 数组；
+/// text_elements 复用 Codex byte_range/placeholder；纯文本消息零新增字段；
+/// 旧记录（无新字段）读回为 None/空。
+#[test]
+fn s14_user_image_fields_serialization_and_compat() {
+    let png = small_data_url(b"\x89PNG\r\n\x1a\n");
+    let m = img_msg(
+        "[Image #1] 请检查",
+        vec![png.clone()],
+        vec![TextElement::new(ByteRange { start: 0, end: 10 }, Some("[Image #1]".into()))],
+    );
+    let text = serde_json::to_string(&m).unwrap();
+    assert!(text.contains(r#""images":["#), "{text}");
+    assert!(text.contains(r#""byte_range":{"start":0,"end":10}"#), "{text}");
+    assert!(text.contains(r#""placeholder":"[Image #1]""#), "{text}");
+    // 纯文本消息：无新字段（旧形状不变）
+    let plain = msg(HistoryRole::User, "纯文本");
+    let text = serde_json::to_string(&plain).unwrap();
+    assert!(!text.contains("images"), "{text}");
+    assert!(!text.contains("text_elements"), "{text}");
+    // 旧记录读回
+    let old: HistoryMessage =
+        serde_json::from_str(r#"{"role":"user","content":"旧"}"#).unwrap();
+    assert_eq!(old.images, None);
+    assert!(old.text_elements.is_empty());
+}
+
+/// 15.（020 §2.2）投影：有图用户消息在同一条 user 消息内用 text＋按顺序的
+/// image_url 部件（detail=high）；无文字可省略 text 部件；text_elements
+/// 是 UI 元数据不发送；无图消息保持原字符串 content。
+#[test]
+fn s15_user_image_projection_shape() {
+    let u1 = small_data_url(b"AAA");
+    let u2 = small_data_url(b"BBB");
+    let history = vec![
+        img_msg(
+            "[Image #1] [Image #2] 看这两张",
+            vec![u1.clone(), u2.clone()],
+            vec![
+                TextElement::new(ByteRange { start: 0, end: 10 }, Some("[Image #1]".into())),
+                TextElement::new(ByteRange { start: 11, end: 21 }, Some("[Image #2]".into())),
+            ],
+        ),
+        img_msg("", vec![u1.clone()], vec![]),
+        msg(HistoryRole::User, "纯文本"),
+    ];
+    let body = build_turn_request_with_async_host(&history, None, false, false, false);
+    let msgs = body["messages"].as_array().unwrap();
+    // system + user(数组) + user(数组) + user(字符串)
+    let m0 = &msgs[1];
+    assert_eq!(m0["role"], json!("user"));
+    let parts = m0["content"].as_array().expect("有图消息 content 为部件数组");
+    assert_eq!(parts.len(), 3, "text + 2 image_url：{parts:?}");
+    assert_eq!(parts[0]["type"], json!("text"));
+    assert_eq!(parts[0]["text"], json!("[Image #1] [Image #2] 看这两张"));
+    assert_eq!(parts[1]["type"], json!("image_url"));
+    assert_eq!(parts[1]["image_url"]["url"], json!(u1));
+    assert_eq!(parts[1]["image_url"]["detail"], json!("high"));
+    assert_eq!(parts[2]["image_url"]["url"], json!(u2));
+    // 纯图：无 text 部件
+    let m1 = &msgs[2];
+    let parts = m1["content"].as_array().unwrap();
+    assert_eq!(parts.len(), 1, "纯图省略 text 部件：{parts:?}");
+    assert_eq!(parts[0]["type"], json!("image_url"));
+    // 纯文本：原字符串 content
+    assert!(msgs[3]["content"].is_string());
+    // text_elements 不出现在请求
+    let raw = serde_json::to_string(&body).unwrap();
+    assert!(!raw.contains("text_elements"), "UI 元数据不发送：检查前 200 字 {}…", &raw[..raw.len().min(200)]);
+    assert!(!raw.contains("byte_range"));
+}
+
+/// 16.（020 A08/安全）手写 `[Image #1]` 无 images 载荷＝普通文字：投影不附图、
+/// 不读文件、不产生 image_url 部件——伪造来源标记不能骗取上传。
+#[test]
+fn s16_handwritten_marker_without_payload_projects_plain_text() {
+    let history = vec![
+        img_msg("[Image #1] 手写的标记", Vec::new(), Vec::new()),
+        msg(HistoryRole::User, "另一条 [Image #9] 也一样"),
+    ];
+    let body = build_turn_request_with_async_host(&history, None, false, false, false);
+    let raw = serde_json::to_string(&body).unwrap();
+    assert!(!raw.contains("image_url"), "无载荷标记不产生图片部件：{raw}");
+    assert!(!raw.contains("data:"), "无 data URL：{raw}");
 }

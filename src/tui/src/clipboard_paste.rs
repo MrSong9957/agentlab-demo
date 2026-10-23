@@ -124,24 +124,31 @@ pub fn paste_image_as_png() -> Result<(Vec<u8>, PastedImageInfo), PasteImageErro
     ))
 }
 
+/// 020 A24：剪贴板 PNG 的临时写入与 keep（生产写入路径的唯一实现——
+/// `paste_image_to_temp_png` 与测试共用）。写入唯一临时文件（`codex-clipboard-`
+/// 前缀、`.png` 后缀）后 keep 持久化：keep 成功的文件不随句柄丢弃而清理
+///（删附件、取消、发送、退出都不新增自动删除——020 §2.1）；keep 前的任何
+/// 失败由 tempfile 生命周期自动清理。
+pub fn write_png_keep_temp(png: &[u8]) -> Result<PathBuf, PasteImageError> {
+    let tmp = Builder::new()
+        .prefix("codex-clipboard-")
+        .suffix(".png")
+        .tempfile()
+        .map_err(|e| PasteImageError::IoError(e.to_string()))?;
+    std::fs::write(tmp.path(), png).map_err(|e| PasteImageError::IoError(e.to_string()))?;
+    let (_file, path) = tmp
+        .keep()
+        .map_err(|e| PasteImageError::IoError(e.error.to_string()))?;
+    Ok(path)
+}
+
 /// Convenience: write to a temp file and return its path + info.
 #[cfg(not(target_os = "android"))]
 pub fn paste_image_to_temp_png() -> Result<(PathBuf, PastedImageInfo), PasteImageError> {
     // First attempt: read image from system clipboard via arboard (native paths or image data).
     match paste_image_as_png() {
         Ok((png, info)) => {
-            // Create a unique temporary file with a .png suffix to avoid collisions.
-            let tmp = Builder::new()
-                .prefix("codex-clipboard-")
-                .suffix(".png")
-                .tempfile()
-                .map_err(|e| PasteImageError::IoError(e.to_string()))?;
-            std::fs::write(tmp.path(), &png)
-                .map_err(|e| PasteImageError::IoError(e.to_string()))?;
-            // Persist the file (so it remains after the handle is dropped) and return its PathBuf.
-            let (_file, path) = tmp
-                .keep()
-                .map_err(|e| PasteImageError::IoError(e.error.to_string()))?;
+            let path = write_png_keep_temp(&png)?;
             Ok((path, info))
         }
         Err(e) => {
@@ -572,5 +579,58 @@ mod pasted_paths_tests {
             result,
             PathBuf::from("/mnt/c/Users/Alice/Pictures/example image.png")
         );
+    }
+}
+
+#[cfg(test)]
+mod a24_keep_tests {
+    use super::*;
+
+    /// A24（L2）：keep 后 PNG 文件存在、字节与写入一致、可重新打开——
+    /// 且在函数返回后（无句柄持有）持续存在：删附件／取消／发送／退出的
+    /// 任何时点都不会被自动清理（生产 keep 语义）。
+    #[test]
+    fn write_png_keep_temp_persists_after_return() {
+        let png = fixed_png();
+        let path = write_png_keep_temp(&png).expect("写入+keep 成功");
+        // 返回后立即存在
+        assert!(path.exists(), "keep 后文件存在：{}", path.display());
+        // 字节与写入一致，且是可解码 PNG
+        assert_eq!(std::fs::read(&path).unwrap(), png);
+        assert!(image::load_from_memory(&png).is_ok());
+        // 文件名形态：codex-clipboard- 前缀 + .png 后缀（tempfile Builder 参数）
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        assert!(name.starts_with("codex-clipboard-") && name.ends_with(".png"), "{name}");
+        // 持续存在（模拟后续时点：附件删除/取消/发送/退出之后）
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(path.exists(), "后续时点仍存在（无自动清理）");
+        // 测试框架最后清理：验证完由测试删除（生产路径无人删除）
+        let _ = std::fs::remove_file(&path);
+        assert!(!path.exists());
+    }
+
+    /// A24（L2）：keep 前失败由 tempfile 生命周期清理——生产写入路径用的
+    /// 同一 Builder 形态，句柄丢弃（未 keep）时文件被自动删除。
+    #[test]
+    fn tempfile_without_keep_is_auto_removed() {
+        let png = fixed_png();
+        let probe = Builder::new()
+            .prefix("codex-clipboard-")
+            .suffix(".png")
+            .tempfile()
+            .expect("tempfile 创建");
+        std::fs::write(probe.path(), &png).unwrap();
+        let path = probe.path().to_path_buf();
+        assert!(path.exists());
+        // 未 keep 即丢弃（模拟 keep 前失败：write/keep 任一步失败时句柄析构）
+        drop(probe);
+        assert!(!path.exists(), "keep 前失败由 tempfile 生命周期清理");
+    }
+
+    fn fixed_png() -> Vec<u8> {
+        let img = image::ImageBuffer::from_pixel(3, 2, image::Rgba([11u8, 22, 33, 255]));
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+        cursor.into_inner()
     }
 }

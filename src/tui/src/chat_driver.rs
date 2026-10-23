@@ -87,6 +87,13 @@ impl Drop for UserInputReply {
 /// 宿主→驱动事件（一轮 turn 的回推流）。
 #[derive(Debug)]
 pub enum DriverEvent {
+    /// 020：用户提交被拒（能力／坏图／准备失败）——消息未入史、零请求。
+    /// 驱动按 §2.3 恢复草稿（已有新草稿时 D0 后接 Dnew 合并并重编号附件）。
+    SubmissionRejected {
+        text: String,
+        image_paths: Vec<std::path::PathBuf>,
+        reason: String,
+    },
     /// 018：每次调用独立通道；live 拒绝已取消请求的迟到显示事件。
     UserInput {
         questions: Vec<RequestUserInputQuestion>,
@@ -158,11 +165,29 @@ pub enum ToolBeginKind {
     Patch,
 }
 
+/// 020：一次用户提交的完整消息（文本＋本地附件路径＋结构化元素）——
+/// 输入框→驱动→宿主→队列全程不退化为纯文本；纯图消息文本可为空。
+#[derive(Debug, Clone)]
+pub struct SubmittedTurn {
+    pub text: String,
+    pub local_images: Vec<crate::bottom_pane::LocalImageAttachment>,
+    pub text_elements: Vec<codex_protocol::user_input::TextElement>,
+}
+
+impl SubmittedTurn {
+    /// 是否构成可提交消息：非空文本或有附件（020 A05 纯图合法）。
+    pub fn is_submittable(&self) -> bool {
+        !self.text.trim().is_empty() || !self.local_images.is_empty()
+    }
+}
+
 /// 驱动→宿主钩子。宿主实现全部业务（turn 执行、命令、会话、退出清理）。
 pub struct DriverHooks {
-    /// 提交用户文本：宿主在独立线程运行一轮，经 sender 回推 DriverEvent。
-    /// 驱动保证同一时刻至多一个未完成 turn。
-    pub spawn_turn: Box<dyn FnMut(String, std_mpsc::Sender<DriverEvent>) + Send>,
+    /// 提交用户完整消息：宿主在独立线程运行一轮（含图片准备），经 sender 回推
+    /// DriverEvent。驱动保证同一时刻至多一个未完成 turn。
+    pub spawn_turn: Box<dyn FnMut(SubmittedTurn, std_mpsc::Sender<DriverEvent>) + Send>,
+    /// 020：-i/--image 启动图片（驱动就绪后随首次提交一次；None＝无）。
+    pub initial_submission: Option<SubmittedTurn>,
     /// 斜杠命令分发（/models /refresh /save /resume /sessions 等）。返回值经 Info 回显；
     /// `ShouldExit` 表示命令请求退出（/exit）。
     pub run_command: Box<dyn FnMut(&str) -> CommandOutcome + Send>,
@@ -306,12 +331,28 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
     let mut async_cells: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     // 008：turn 运行中提交的排队输入（母本排队语义；一次重放一条，至多一个在飞 turn）
-    let mut queued_inputs: VecDeque<String> = VecDeque::new();
+    let mut queued_inputs: VecDeque<SubmittedTurn> = VecDeque::new();
+    // 020 §2.3：入史前拒绝／入史后失败后剩余队列暂停自动发送，等待用户
+    // 处理；用户再次提交任意新输入即视为已处理，恢复出队。
+    // user_cell_base＝本轮用户 cell 推入前的 cells 长度（拒绝时回收）。
+    let mut queue_paused = false;
+    let mut user_cell_base: Option<usize> = None;
     // 012 §8：独立工具详情页槽位（母本 app.overlay 同构；打开期间终端事件全路由页）
     let mut tool_detail: Option<ToolDetail> = None;
 
     // 首帧
     draw(&mut tui, &pane, &mut transcript, &mut scrollbar_rows, &cells, stream.as_ref())?;
+    // 020 A04：-i/--image 启动图片——驱动就绪（保护性输入尚未开始）后提交
+    // 一次；空消息无附件时不产生任何 turn
+    let mut initial_submission = hooks.initial_submission;
+    if let Some(submission) = initial_submission.take().filter(|s| s.is_submittable()) {
+        user_cell_base = Some(cells.len());
+        spawn_turn_cells(&mut cells, &mut stream_indices, &submission);
+        turn_running = true;
+        turn_cancelled = false;
+        pane.set_task_running(true);
+        (hooks.spawn_turn)(submission, turn_tx.clone());
+    }
     let mut events = EventStream::new();
     let mut ticker = tokio::time::interval(FRAME_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -482,6 +523,7 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                             }
                             DriverEvent::Final(text) => {
                                 pane.end_user_input(RequestUserInputError::Closed);
+                                user_cell_base = None;
                                 // 008-REVIEW：仅移除本轮流式 cell（倒序），以完整回复
                                 // 建单一 cell；turn 期间推入的 Info/错误 cell 保留
                                 for idx in stream_indices.drain(..).rev() {
@@ -497,6 +539,27 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                 pane.set_task_running(false);
                                 (hooks.set_cancel_requested)(false);
                             }
+                            DriverEvent::SubmissionRejected { text, image_paths, reason } => {
+                                // 020 §2.3：入史前拒绝——消息未入史：恢复草稿（合
+                                // 并新草稿）、回收本轮已推入 transcript 的用户 cell
+                                //（终态只在输入框一份）、剩余队列暂停自动发送等待
+                                // 用户处理；原因按提示行显示。
+                                turn_running = false;
+                                pane.set_task_running(false);
+                                if let Some(pre) = user_cell_base {
+                                    cells.truncate(pre);
+                                }
+                                stream_indices.clear();
+                                user_cell_base = None;
+                                queue_paused = true;
+                                pane.restore_rejected_submission(text, image_paths);
+                                push_info_lines(&mut cells, &format!("提交被拒：{reason}"));
+                                push_info_lines(
+                                    &mut cells,
+                                    "已恢复到输入框；处理完成后重新提交即可继续发送。",
+                                );
+                                needs_draw = true;
+                            }
                             DriverEvent::Failed(text) => {
                                 pane.end_user_input(RequestUserInputError::Closed);
                                 for idx in stream_indices.drain(..).rev() {
@@ -507,6 +570,9 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                 async_cells.clear();
                                 finish_stream(&mut stream, &mut cells, &cwd, text, true);
                                 turn_running = false;
+                                // 020 §2.3：入史后请求失败——剩余队列暂停自动发送
+                                queue_paused = true;
+                                user_cell_base = None;
                                 pane.set_task_running(false);
                                 (hooks.set_cancel_requested)(false);
                             }
@@ -607,15 +673,16 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                 }
                 // 008：turn 空闲且有排队输入→按空闲提交同语义重放一条（不丢输入；
                 // 母本排队语义：当前 turn 结束后依次处理）
-                if !turn_running && !queued_inputs.is_empty() {
+                if !turn_running && !queue_paused && !queued_inputs.is_empty() {
                     changed = true;
-                    let text = queued_inputs.pop_front().unwrap();
+                    let submission = queued_inputs.pop_front().unwrap();
                     pane.set_pending_input_preview(
-                        queued_inputs.iter().cloned().collect(),
+                        // 020：预览仍按文本行（附件路径不展开为多行）
+                        queued_inputs.iter().map(|s| s.text.clone()).collect(),
                         Vec::new(),
                         Vec::new(),
                     );
-                    match classify_idle_submission(&text) {
+                    match classify_idle_submission(&submission) {
                         Some(IdleSubmission::Exit) => return Ok(DriverExit::Quit),
                         Some(IdleSubmission::Command { name, full }) => {
                             if handle_builtin_exit(&name) {
@@ -631,12 +698,14 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                 return Ok(DriverExit::Quit);
                             }
                         }
-                        Some(IdleSubmission::Turn(text)) => {
-                            spawn_turn_cells(&mut cells, &mut stream_indices, &text);
+                        Some(IdleSubmission::Turn) => {
+                            queue_paused = false;
+                            user_cell_base = Some(cells.len());
+                            spawn_turn_cells(&mut cells, &mut stream_indices, &submission);
                             turn_running = true;
                             turn_cancelled = false;
                             pane.set_task_running(true);
-                            (hooks.spawn_turn)(text, turn_tx.clone());
+                            (hooks.spawn_turn)(submission, turn_tx.clone());
                         }
                         None => {}
                     }
@@ -893,28 +962,78 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                     pane.end_user_input(RequestUserInputError::HostExited);
                                     return Ok(DriverExit::Quit);
                                 }
+                                // 020 入口1：Ctrl+V／Ctrl+Alt+V 剪贴板图片粘贴
+                                //（keymap `fixed.paste_image` 固定保留键位）——同步
+                                // 有界读取（arboard 快照），成功生成 keep 临时 PNG 并
+                                // 转附件；失败如实提示（Docker 内通常无 Windows 剪贴板
+                                // 桥接——H01 真实宿主验证另列，不冒称成功）。
+                                // 活动视图（问询/搜索等）期间不拦截：普通问询窗口
+                                // 不接图片附件（020 §2.4）。
+                                if !owned_by_view
+                                    && !pane.has_active_view()
+                                    && matches!(key.code, KeyCode::Char('v'))
+                                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && key
+                                        .modifiers
+                                        .difference(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                                        .is_empty()
+                                {
+                                    match crate::clipboard_paste::paste_image_to_temp_png() {
+                                        Ok((path, info)) => {
+                                            pane.attach_image(path.clone());
+                                            push_info_lines(
+                                                &mut cells,
+                                                &format!(
+                                                    "已附上剪贴板图片（{}×{}）：{}",
+                                                    info.width, info.height,
+                                                    path.display()
+                                                ),
+                                            );
+                                        }
+                                        Err(e) => {
+                                            push_info_lines(
+                                                &mut cells,
+                                                &format!(
+                                                    "剪贴板图片不可用：{e}；可改用粘贴图片路径或 -i 启动参数"
+                                                ),
+                                            );
+                                        }
+                                    }
+                                    needs_draw = true;
+                                } else {
                                 match pane.handle_key_event(key) {
-                                    InputResult::Submitted { text, .. } => {
-                                        if text.trim().is_empty() {
+                                    InputResult::Submitted { text, text_elements } => {
+                                        // 020：提交即取走附件（占位符＋路径），
+                                        // 完整消息不退化为纯文本
+                                        let submission = SubmittedTurn {
+                                            local_images: pane
+                                                .take_recent_submission_images_with_placeholders(),
+                                            text_elements,
+                                            text,
+                                        };
+                                        if !submission.is_submittable() {
                                             // 空输入不提交（001）——无状态变化，不置脏
                                         } else if turn_running {
                                             // 008：turn 运行中提交（母本为 steer 注入
                                             // 当前 turn；本地同步 turn 不支持）→ 排队待
                                             // 重放——至多一个在飞 turn（J11），不丢输入
-                                            queue_input(&mut queued_inputs, &mut pane, &text);
+                                            queue_input(&mut queued_inputs, &mut pane, submission);
                                             // 011 §7：排队预览是可见变化
                                             // （set_pending_input_preview 不自请求，坑 1）
                                             needs_draw = true;
                                         } else {
+                                            // 020 §2.3：用户重新提交＝已处理，恢复队列
+                                            queue_paused = false;
+                                            user_cell_base = Some(cells.len());
                                             spawn_turn_cells(
                                                 &mut cells,
                                                 &mut stream_indices,
-                                                &text,
+                                                &submission,
                                             );
                                             turn_running = true;
                                             turn_cancelled = false;
                                             pane.set_task_running(true);
-                                            (hooks.spawn_turn)(text, turn_tx.clone());
+                                            (hooks.spawn_turn)(submission, turn_tx.clone());
                                             needs_draw = true;
                                         }
                                     }
@@ -959,15 +1078,23 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                         }
                                         needs_draw = true;
                                     }
-                                    InputResult::Queued { text, .. } => {
+                                    InputResult::Queued { text, text_elements, .. } => {
                                         // 008：queue_keys 提交（母本排队路径；turn 期间
                                         // Enter 走上面的 Submitted）。排队项经
                                         // pending_input_preview 显示在 composer 上方
                                         // （母本行为），turn 结束后由 Tick 重放。
-                                        queue_input(&mut queued_inputs, &mut pane, &text);
+                                        // 020：排队保存完整消息（文本＋附件路径＋元素）。
+                                        let queued_submission = SubmittedTurn {
+                                            local_images: pane
+                                                .take_recent_submission_images_with_placeholders(),
+                                            text_elements,
+                                            text,
+                                        };
+                                        queue_input(&mut queued_inputs, &mut pane, queued_submission);
                                         needs_draw = true;
                                     }
                                     _ => {}
+                                }
                                 }
                                 // 011 §7：其余 composer 结果（None/突发缓冲）不自置脏——
                                 // composer 在状态变化时自请求（request_redraw），突发缓冲
@@ -1230,14 +1357,16 @@ fn transcript_owns_key(
 #[derive(Debug)]
 enum IdleSubmission {
     Exit,
-    Turn(String),
+    /// 020：完整提交（含附件）随调用方作用域持有；变体自身不再携带文本
+    Turn,
     Command { name: String, full: String },
 }
 
-fn classify_idle_submission(text: &str) -> Option<IdleSubmission> {
-    let trimmed = text.trim();
+fn classify_idle_submission(submission: &SubmittedTurn) -> Option<IdleSubmission> {
+    let trimmed = submission.text.trim();
+    // 020：纯图消息（空文本＋附件）不构成退出/命令——按 Turn 重放
     if trimmed.is_empty() {
-        return None;
+        return (!submission.local_images.is_empty()).then_some(IdleSubmission::Turn);
     }
     if trimmed == "exit" {
         return Some(IdleSubmission::Exit);
@@ -1245,7 +1374,7 @@ fn classify_idle_submission(text: &str) -> Option<IdleSubmission> {
     // 斜杠判定用原文（前导空格＝普通文本，对齐 composer 空闲解析语义）。
     // 已知与否一律派发命令：宿主 run_command 对未知命令输出提示（与空闲按键
     // 路径的拒绝语义一致——不发给模型；008-REVIEW 独立审查 P1-2）
-    if let Some(body) = text.strip_prefix('/') {
+    if let Some(body) = submission.text.strip_prefix('/') {
         let name = body.split_whitespace().next().unwrap_or("");
         if !name.is_empty() {
             return Some(IdleSubmission::Command {
@@ -1254,7 +1383,7 @@ fn classify_idle_submission(text: &str) -> Option<IdleSubmission> {
             });
         }
     }
-    Some(IdleSubmission::Turn(trimmed.to_string()))
+    Some(IdleSubmission::Turn)
 }
 
 /// 008：turn 开始时的 cell 记账——推入用户消息 cell（母本 transcript 含用户
@@ -1263,28 +1392,40 @@ fn classify_idle_submission(text: &str) -> Option<IdleSubmission> {
 fn spawn_turn_cells(
     cells: &mut Vec<Arc<dyn HistoryCell>>,
     stream_indices: &mut Vec<usize>,
-    text: &str,
+    submission: &SubmittedTurn,
 ) {
     stream_indices.clear();
-    if !text.trim().is_empty() {
+    // 020：纯图消息（空文本＋附件）也推用户 cell（本地图片路径供展示）
+    if !submission.text.trim().is_empty() || !submission.local_images.is_empty() {
         cells.push(Arc::new(crate::history_cell::UserHistoryCell {
             spoken: false,
-            message: text.to_string(),
-            text_elements: Vec::new(),
-            local_image_paths: Vec::new(),
+            message: submission.text.clone(),
+            text_elements: submission.text_elements.clone(),
+            local_image_paths: submission.local_images.iter().map(|a| a.path.clone()).collect(),
             remote_image_urls: Vec::new(),
         }));
     }
 }
 
 /// 008：入队一条 turn 期间提交的输入并更新 composer 上方的排队预览（母本行为）。
-fn queue_input(queued: &mut VecDeque<String>, pane: &mut BottomPane, text: &str) {
-    if text.trim().is_empty() {
+fn queue_input(queued: &mut VecDeque<SubmittedTurn>, pane: &mut BottomPane, submission: SubmittedTurn) {
+    // 020 §2.3：队列保存完整消息与附件路径（入队不读取、不冻结图片）
+    if !submission.is_submittable() {
         return;
     }
-    queued.push_back(text.trim().to_string());
+    queued.push_back(submission);
     pane.set_pending_input_preview(
-        queued.iter().cloned().collect(),
+        // 预览按文本行；纯图排队项显示附件占位提示
+        queued
+            .iter()
+            .map(|s| {
+                if s.text.trim().is_empty() {
+                    format!("（图片 ×{}）", s.local_images.len())
+                } else {
+                    s.text.trim().to_string()
+                }
+            })
+            .collect(),
         Vec::new(),
         Vec::new(),
     );
@@ -1980,6 +2121,30 @@ pub use crate::test_backend::VT100Backend;
 #[cfg(test)]
 mod tests {
     use super::classify_idle_submission;
+    use super::SubmittedTurn;
+
+    fn classify(text: &str) -> Option<super::IdleSubmission> {
+        classify_idle_submission(&SubmittedTurn {
+            text: text.to_string(),
+            local_images: Vec::new(),
+            text_elements: Vec::new(),
+        })
+    }
+
+    fn crate_path() -> std::path::PathBuf {
+        std::path::PathBuf::from("/tmp/x.png")
+    }
+
+    fn classify_pure_image() -> Option<super::IdleSubmission> {
+        classify_idle_submission(&SubmittedTurn {
+            text: String::new(),
+            local_images: vec![crate::bottom_pane::LocalImageAttachment {
+                placeholder: String::new(),
+                path: crate_path(),
+            }],
+            text_elements: Vec::new(),
+        })
+    }
     use super::HostHistoryItem;
     use super::HostPatchChange;
     use super::HostPatchKind;
@@ -1991,24 +2156,26 @@ mod tests {
     /// 008-J10：裸 exit 与空输入分类。
     #[test]
     fn classify_bare_exit_and_empty() {
-        assert!(matches!(classify_idle_submission("exit"), Some(IdleSubmission::Exit)));
-        assert!(matches!(classify_idle_submission("  exit  "), Some(IdleSubmission::Exit)));
-        assert!(classify_idle_submission("").is_none());
-        assert!(classify_idle_submission("   ").is_none());
+        assert!(matches!(classify("exit"), Some(IdleSubmission::Exit)));
+        assert!(matches!(classify("  exit  "), Some(IdleSubmission::Exit)));
+        assert!(classify("").is_none());
+        assert!(classify("   ").is_none());
+        // 020：纯图（空文本＋附件）不构成退出/命令——分类为 Turn
+        assert!(matches!(classify_pure_image(), Some(IdleSubmission::Turn)));
     }
 
     /// 已知斜杠命令（含带参与尾随空白）分类为命令派发；full 保留 trim 后原文。
     /// 前导空格的斜杠文本＝普通文本（对齐 composer 空闲解析语义）。
     #[test]
     fn classify_known_slash_command() {
-        match classify_idle_submission("/save seed") {
+        match classify("/save seed") {
             Some(IdleSubmission::Command { name, full }) => {
                 assert_eq!(name, "save");
                 assert_eq!(full, "/save seed");
             }
             other => panic!("expect Command, got {other:?}"),
         }
-        match classify_idle_submission("/models  ") {
+        match classify("/models  ") {
             Some(IdleSubmission::Command { name, full }) => {
                 assert_eq!(name, "models");
                 assert_eq!(full, "/models");
@@ -2016,8 +2183,8 @@ mod tests {
             other => panic!("expect Command, got {other:?}"),
         }
         assert!(matches!(
-            classify_idle_submission(" /models"),
-            Some(IdleSubmission::Turn(_))
+            classify(" /models"),
+            Some(IdleSubmission::Turn)
         ));
     }
 
@@ -2025,7 +2192,7 @@ mod tests {
     /// 与空闲按键路径的拒绝语义一致：不发给模型（008-REVIEW 独立审查 P1-2）。
     #[test]
     fn classify_unknown_slash_routes_to_command_not_model() {
-        match classify_idle_submission("/definitely-not-a-command arg") {
+        match classify("/definitely-not-a-command arg") {
             Some(IdleSubmission::Command { name, full }) => {
                 assert_eq!(name, "definitely-not-a-command");
                 assert_eq!(full, "/definitely-not-a-command arg");
@@ -2038,10 +2205,10 @@ mod tests {
     #[test]
     fn classify_plain_text_and_bare_quit_are_turns() {
         assert!(matches!(
-            classify_idle_submission("你好 world"),
-            Some(IdleSubmission::Turn(_))
+            classify("你好 world"),
+            Some(IdleSubmission::Turn)
         ));
-        assert!(matches!(classify_idle_submission("quit"), Some(IdleSubmission::Turn(_))));
+        assert!(matches!(classify("quit"), Some(IdleSubmission::Turn)));
     }
 
     /// A3/012＋§9（单一职责轮）：键路由契约——分页/跳转/F4 归 transcript；

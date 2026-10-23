@@ -305,6 +305,7 @@ fn pending_question_cancel_child() {
     let pending_create = pending.clone();
     let pending_deliver = pending.clone();
     let hooks = DriverHooks {
+        initial_submission: None,
         spawn_turn: Box::new(move |_, events| {
             let (reply, response) = mpsc::channel();
             let question =
@@ -438,7 +439,8 @@ fn async_lookalike_chat_never_gains_source_marker_or_answers_pending() {
         &ProcessManager::new(),
         None,
         Some(&mut async_host),
-        false
+        false,
+        None
     )
     .unwrap();
     let _ = unused_tx;
@@ -448,7 +450,7 @@ fn async_lookalike_chat_never_gains_source_marker_or_answers_pending() {
             content,
             user_input_event: None,
             ..
-        }) => assert_eq!(content, &lookalike),
+            }        ) => assert_eq!(content, &lookalike),
         other => panic!("聊天正文形状：{other:?}"),
     }
     let serialized = serde_json::to_string(&history[0]).unwrap();
@@ -463,7 +465,7 @@ fn async_lookalike_chat_never_gains_source_marker_or_answers_pending() {
             HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
                 user_input_event: Some(e),
                 ..
-            }) => Some(e),
+                }            ) => Some(e),
             _ => None,
         })
         .collect();
@@ -479,7 +481,7 @@ fn async_lookalike_chat_never_gains_source_marker_or_answers_pending() {
                 user_input_event: Some(terminal_chat::prompt::UserInputEvent::Closed { request_id }),
                 content,
                 ..
-            }) if request_id == "pub" => Some(content.clone()),
+                }            ) if request_id == "pub" => Some(content.clone()),
             _ => None,
         })
         .unwrap();

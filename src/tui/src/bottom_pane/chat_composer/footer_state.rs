@@ -234,7 +234,8 @@ impl super::ChatComposer {
         };
         match &self.popups.active {
             ActivePopup::None => composer,
-            // 008-TRIM: 弹窗变体（首批无弹窗，008 §1）
+            // 020 A02：文件搜索弹窗打开时不做空态动画（footer 显示常规提示）
+            ActivePopup::File(_) => None,
         }
     }
 

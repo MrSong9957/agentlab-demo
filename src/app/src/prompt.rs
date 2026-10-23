@@ -53,7 +53,21 @@ impl UserInputEvent {
     }
 }
 
+/// 020：一次用户提交的已准备图片载荷（由宿主在正式提交时构造，随用户消息
+/// 入史）：`data_urls`＝准备后 data URL（顺序即附件顺序）；
+/// `text_elements`＝composer/CLI 生成的结构化标记区间（UI 元数据）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UserImagePayload {
+    pub data_urls: Vec<String>,
+    pub text_elements: Vec<codex_protocol::user_input::TextElement>,
+}
+
 /// 一条历史消息：`ResponseItem::Message { role, content }` 的文本投影（role＋纯文本 content）。
+/// 020 §2.2：普通用户消息可携带图片——`images`＝准备后的真实本地图片 data URL
+///（数组顺序即附件编号顺序，首版 detail 固定 high）；`text_elements` 复用 Codex
+/// `user_input::TextElement`（byte_range/placeholder，区间为 content 的有效 UTF-8
+/// 字节边界，结构化 `[Image #N]` 指向 `images[N-1]`）。两者缺省/为空不序列化，
+/// 旧记录读回为 None/空；旧程序读新字段重存丢附件（已确认降级）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryMessage {
     pub role: HistoryRole,
@@ -61,6 +75,16 @@ pub struct HistoryMessage {
     /// 018 阶段 B 可选来源标记（见 [`UserInputEvent`]）；旧记录缺字段→None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_input_event: Option<UserInputEvent>,
+    /// 020 用户附件（仅 User 角色合法；None/空＝无图）。
+    #[serde(default, skip_serializing_if = "user_images_is_empty")]
+    pub images: Option<Vec<String>>,
+    /// 020 结构化标记（UI 元数据，不进模型请求；空＝无结构化标记）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub text_elements: Vec<codex_protocol::user_input::TextElement>,
+}
+
+fn user_images_is_empty(images: &Option<Vec<String>>) -> bool {
+    images.as_ref().is_none_or(|v| v.is_empty())
 }
 
 /// assistant 消息中的工具调用记录（006）：原样保存 id、工具名与 arguments JSON 字符串。
@@ -170,7 +194,29 @@ pub(crate) fn project_history(history: &[HistoryItem]) -> Vec<Value> {
         match h {
             HistoryItem::Text(m) => {
                 flush(&mut out, &mut pending_attachments);
-                out.push(json!({ "role": m.role.as_str(), "content": m.content }));
+                // 020 §2.2：有图用户消息在同一条 user 消息内用 text＋按 images
+                // 顺序的 image_url 部件（detail 固定 high）；原文字保留，无文字
+                // 省略 text 部件；text_elements 是 UI 元数据不发送。无图消息
+                //（含 assistant）保持原字符串 content。
+                let has_images = m
+                    .images
+                    .as_ref()
+                    .is_some_and(|v| !v.is_empty() && m.role == HistoryRole::User);
+                if has_images {
+                    let mut parts = Vec::new();
+                    if !m.content.is_empty() {
+                        parts.push(json!({ "type": "text", "text": m.content }));
+                    }
+                    for url in m.images.as_ref().expect("已确认非空") {
+                        parts.push(json!({
+                            "type": "image_url",
+                            "image_url": { "url": url, "detail": "high" }
+                        }));
+                    }
+                    out.push(json!({ "role": "user", "content": parts }));
+                } else {
+                    out.push(json!({ "role": m.role.as_str(), "content": m.content }));
+                }
             }
             HistoryItem::AssistantToolCalls { tool_calls, content } => {
                 flush(&mut out, &mut pending_attachments);

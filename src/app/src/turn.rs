@@ -388,6 +388,7 @@ pub fn run_user_turn_with_context(
         procs,
         None,
         false,
+        None,
     )
 }
 
@@ -405,6 +406,7 @@ pub fn run_user_turn_with_context_and_host(
     procs: &ProcessManager,
     input_host: Option<&mut crate::user_input::InputHost<'_>>,
     image_input: bool,
+    user_images: Option<&crate::prompt::UserImagePayload>,
 ) -> Result<String, String> {
     run_user_turn_with_context_and_hosts(
         history,
@@ -419,6 +421,7 @@ pub fn run_user_turn_with_context_and_host(
         input_host,
         None,
         image_input,
+        user_images,
     )
 }
 
@@ -438,8 +441,11 @@ pub fn run_user_turn_with_context_and_hosts(
     input_host: Option<&mut crate::user_input::InputHost<'_>>,
     async_host: Option<&mut crate::user_input_async::AsyncInputHost<'_>>,
     image_input: bool,
+    user_images: Option<&crate::prompt::UserImagePayload>,
 ) -> Result<String, String> {
-    if current_input.trim().is_empty() {
+    // 020 A05：空白校验与底层一致（纯图合法）
+    let has_user_images = user_images.is_some_and(|p| !p.data_urls.is_empty());
+    if current_input.trim().is_empty() && !has_user_images {
         return Err(BLANK_INPUT_ERROR.into());
     }
     if !matches!(mode, ToolMode::MemoryMerge { .. }) {
@@ -458,6 +464,8 @@ pub fn run_user_turn_with_context_and_hosts(
         };
         if let Some(text) = inject_text {
             history.push(HistoryItem::Text(HistoryMessage {
+                images: None,
+                text_elements: Vec::new(),
                 role: HistoryRole::User,
                 content: text,
                 user_input_event: None,
@@ -477,6 +485,7 @@ pub fn run_user_turn_with_context_and_hosts(
         input_host,
         async_host,
         image_input,
+        user_images,
     )
 }
 
@@ -540,6 +549,7 @@ pub fn run_tool_turn_with_host(
         input_host,
         None,
         false,
+        None,
     )
 }
 
@@ -600,6 +610,8 @@ fn record_async_answer(
         .as_ref()
         .expect("入史前必已有已受理回答");
     history.push(HistoryItem::Text(HistoryMessage {
+        images: None,
+        text_elements: Vec::new(),
         role: HistoryRole::User,
         content: crate::user_input_async::answer_event_content(&pending.request_id, response),
         user_input_event: Some(UserInputEvent::Answer {
@@ -626,6 +638,8 @@ fn close_pending_async(
     if let Some(p) = pending.take() {
         if p.answer.is_none() {
             history.push(HistoryItem::Text(HistoryMessage {
+                images: None,
+                text_elements: Vec::new(),
                 role: HistoryRole::User,
                 content: crate::user_input_async::close_event_content(&p.request_id, reason),
                 user_input_event: Some(UserInputEvent::Closed {
@@ -684,8 +698,11 @@ pub fn run_tool_turn_with_hosts(
     mut input_host: Option<&mut crate::user_input::InputHost<'_>>,
     mut async_host: Option<&mut crate::user_input_async::AsyncInputHost<'_>>,
     image_input: bool,
+    user_images: Option<&crate::prompt::UserImagePayload>,
 ) -> Result<String, String> {
-    if current_input.trim().is_empty() {
+    // 020 A05：空文字＋有图＝合法纯图消息；空文字＋无图仍拒绝
+    let has_user_images = user_images.is_some_and(|p| !p.data_urls.is_empty());
+    if current_input.trim().is_empty() && !has_user_images {
         return Err(BLANK_INPUT_ERROR.into());
     }
     if matches!(mode, ToolMode::MemoryMerge { .. }) {
@@ -697,6 +714,11 @@ pub fn run_tool_turn_with_hosts(
         c.store(false, std::sync::atomic::Ordering::SeqCst);
     }
     history.push(HistoryItem::Text(HistoryMessage {
+        // 020：准备后的用户附件随同一用户消息入史（纯图消息 content 可为标记/空）
+        images: has_user_images.then(|| user_images.expect("已确认存在").data_urls.clone()),
+        text_elements: has_user_images
+            .then(|| user_images.expect("已确认存在").text_elements.clone())
+            .unwrap_or_default(),
         role: HistoryRole::User,
         content: current_input.to_string(),
         user_input_event: None,
@@ -810,6 +832,8 @@ pub fn run_tool_turn_with_hosts(
             // 不把该终文提前交付为任务完成（§8.4）。
             if let Some(p) = pending_async.as_ref().filter(|p| p.answer.is_some()) {
                 history.push(HistoryItem::Text(HistoryMessage {
+                    images: None,
+                    text_elements: Vec::new(),
                     role: HistoryRole::Assistant,
                     content: reply.clone(),
                     user_input_event: None,
@@ -820,6 +844,8 @@ pub fn run_tool_turn_with_hosts(
                 continue;
             }
             history.push(HistoryItem::Text(HistoryMessage {
+                images: None,
+                text_elements: Vec::new(),
                 role: HistoryRole::Assistant,
                 content: reply.clone(),
                 user_input_event: None,
@@ -1424,10 +1450,7 @@ mod tests {
         assert_eq!(history.len(), 1, "协议错误不得写入 assistant/工具记录");
         assert!(matches!(
             &history[0],
-            HistoryItem::Text(HistoryMessage {
-                role: HistoryRole::User,
-                ..
-            })
+            HistoryItem::Text(HistoryMessage { role: HistoryRole::User, .. })
         ));
     }
 
@@ -1453,6 +1476,8 @@ mod tests {
             let mut history = Vec::new();
             history.push(
                 HistoryMessage {
+                    images: None,
+                    text_elements: Vec::new(),
                     role: HistoryRole::User,
                     content: "u".into(),
                     user_input_event: None,
@@ -1549,10 +1574,7 @@ mod tests {
                 .iter()
                 .filter(|h| matches!(
                     h,
-                    HistoryItem::Text(HistoryMessage {
-                        role: HistoryRole::User,
-                        ..
-                    })
+                    HistoryItem::Text(HistoryMessage { role: HistoryRole::User, .. })
                 ))
                 .count(),
             1,

@@ -111,12 +111,7 @@ pub fn execute(arguments: &str, cwd: &Path, cancel: Option<&AtomicBool>) -> View
         if cancelled(cancel) {
             return Err("用户已取消：本调用未完成".into());
         }
-        let mut file = open_regular_file(&resolved)?;
-        let bytes = read_bounded(&mut file, &resolved)?;
-        if cancelled(cancel) {
-            return Err("用户已取消：本调用未完成".into());
-        }
-        let encoded = prepare_image(&resolved, bytes)?;
+        let encoded = prepare_from_path(&resolved, cancel)?;
         if cancelled(cancel) {
             return Err("用户已取消：本调用未完成".into());
         }
@@ -132,6 +127,79 @@ pub fn execute(arguments: &str, cwd: &Path, cancel: Option<&AtomicBool>) -> View
         },
         Err(error) => ViewImageOutcome { summary: error_summary(&error), image: None },
     }
+}
+
+/// 从已解析路径准备单张图片（020：与工具共用核心——普通文件检查、
+/// 有界读取、HIGH_DETAIL 准备与 4 MiB 上限；无参数解析与取消点归调用方组合）。
+pub(crate) fn prepare_from_path(
+    resolved: &Path,
+    cancel: Option<&AtomicBool>,
+) -> Result<EncodedImage, String> {
+    // 读取前检查点（A12：能力门通过后的第一个取消点）
+    if cancelled(cancel) {
+        return Err("用户已取消：本调用未完成".into());
+    }
+    let mut file = open_regular_file(resolved)?;
+    let bytes = read_bounded(&mut file, resolved)?;
+    if cancelled(cancel) {
+        return Err("用户已取消：本调用未完成".into());
+    }
+    prepare_image(resolved, bytes)
+}
+
+/// 020 §2.1：用户附件提交准备——能力检查先于任何文件打开（A11），随后逐图
+/// 读取并准备（正式提交时才读：入队不冻结）。返回准备后的 data URL 列表
+///（顺序即附件顺序）。任一失败即整体失败（消息不入史，由调用方恢复草稿）。
+pub fn prepare_user_images(
+    paths: &[PathBuf],
+    image_input_capable: bool,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<String>, String> {
+    // A12：能力门→逐图准备（读取前/后取消检查点；准备取消＝消息不入史恢复草稿）
+    if !image_input_capable {
+        return Err(
+            "当前模型未确认支持图片输入（input_modalities 缺少 image）：已拒绝附加图片"
+                .into(),
+        );
+    }
+    let mut urls = Vec::with_capacity(paths.len());
+    for path in paths {
+        let encoded = prepare_from_path(path, cancel)?;
+        urls.push(data_url_from_bytes(&encoded.mime, &encoded.bytes));
+    }
+    Ok(urls)
+}
+
+/// 020：无 composer 场景（CLI `-i`）的用户消息合成——按图片数生成前置
+/// 结构化标记 `[Image #N]` 与对应 `text_elements` 区间；文本非空时以空格
+/// 接续在标记之后；无图返回原文与空元素。
+pub fn compose_cli_user_message(
+    text: &str,
+    image_count: usize,
+) -> (String, Vec<codex_protocol::user_input::TextElement>) {
+    use codex_protocol::user_input::{ByteRange, TextElement};
+    if image_count == 0 {
+        return (text.to_string(), Vec::new());
+    }
+    let mut content = String::new();
+    let mut elements = Vec::with_capacity(image_count);
+    for n in 1..=image_count {
+        let start = content.len();
+        let marker = format!("[Image #{n}]");
+        content.push_str(&marker);
+        elements.push(TextElement::new(
+            ByteRange { start, end: content.len() },
+            Some(marker),
+        ));
+        if n < image_count {
+            content.push(' ');
+        }
+    }
+    if !text.trim().is_empty() {
+        content.push(' ');
+        content.push_str(text);
+    }
+    (content, elements)
 }
 
 /// 相对路径以会话工作目录解析；绝对路径按原义使用。

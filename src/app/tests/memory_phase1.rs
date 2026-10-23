@@ -56,7 +56,13 @@ fn env(tag: &str) -> Env {
 }
 
 fn text(role: HistoryRole, content: &str) -> HistoryItem {
-    HistoryItem::Text(HistoryMessage { role, content: content.to_string(), user_input_event: None })
+    HistoryItem::Text(HistoryMessage {
+        role,
+        content: content.to_string(),
+        user_input_event: None,
+        images: None,
+        text_elements: Vec::new(),
+    })
 }
 
 fn user_msg(content: &str) -> HistoryItem {

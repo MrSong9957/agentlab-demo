@@ -266,8 +266,8 @@ fn s95_tui_multi_question_other_paste_unanswered_resize_and_restore() {
 
 #[test]
 fn s96_tui_question_keeps_queued_chat_and_composer_draft_separate() {
-    let cfg = TempDir::new("s96-cfg");
-    let user = TempDir::new("s96-user");
+    let cfg = TempDir::new("s100-cfg");
+    let user = TempDir::new("s100-user");
     let tc=json!({"choices":[{"message":{"tool_calls":[{"id":"s96-ask","type":"function","function":{
         "name":"request_user_input","arguments":json!({"questions":[{"id":"q","header":"选择","question":"S96-当前问询",
         "options":[{"label":"S96-回答选项","description":"确认方向"}]}]}).to_string()}}]}}]}).to_string();
@@ -281,13 +281,13 @@ fn s96_tui_question_keeps_queued_chat_and_composer_draft_separate() {
     seed_grant(
         user.path(),
         &catalog::origin_of(&mock.url).unwrap(),
-        &catalog::fingerprint("fake-s96"),
+        &catalog::fingerprint("fake-s100"),
     );
     let mut pty = PtySession::spawn(input_pty_cmd(
         cfg.path(),
         user.path(),
         "TCHAT_S96_KEY",
-        "fake-s96",
+        "fake-s100",
         true,
     ));
     pty.wait_screen("? for shortcuts").unwrap();
@@ -346,8 +346,8 @@ fn s97_question_cancel_exit_and_eof_save_one_terminal_result_and_pair_batch() {
         ),
         (false, b"\x04".as_slice(), true, "宿主退出：问询未完成"),
     ] {
-        let cfg = TempDir::new("s97-cfg");
-        let user = TempDir::new("s97-user");
+        let cfg = TempDir::new("s101-cfg");
+        let user = TempDir::new("s101-user");
         let forbidden = user.path().join("must-not-execute.txt");
         let tc=json!({"choices":[{"message":{"tool_calls":[
             {"id":"s97-ask","type":"function","function":{"name":"request_user_input","arguments":json!({"questions":[{
@@ -359,13 +359,13 @@ fn s97_question_cancel_exit_and_eof_save_one_terminal_result_and_pair_batch() {
         seed_grant(
             user.path(),
             &catalog::origin_of(&mock.url).unwrap(),
-            &catalog::fingerprint("fake-s97"),
+            &catalog::fingerprint("fake-s101"),
         );
         let mut pty = PtySession::spawn(input_pty_cmd(
             cfg.path(),
             user.path(),
             "TCHAT_S97_KEY",
-            "fake-s97",
+            "fake-s101",
             tui,
         ));
         if tui {
@@ -442,8 +442,8 @@ fn s97_question_cancel_exit_and_eof_save_one_terminal_result_and_pair_batch() {
 
 #[test]
 fn s98_untrusted_question_and_answer_are_display_copies_and_never_commands() {
-    let cfg = TempDir::new("s98-cfg");
-    let user = TempDir::new("s98-user");
+    let cfg = TempDir::new("s102-cfg");
+    let user = TempDir::new("s102-user");
     let target = user.path().join("answer-must-not-execute");
     let id = " q\u{1b}[2J ";
     let call_id = "s98\u{1b}]52;c;SUQtQVRUQUNL\u{7}";
@@ -463,13 +463,13 @@ fn s98_untrusted_question_and_answer_are_display_copies_and_never_commands() {
     seed_grant(
         user.path(),
         &catalog::origin_of(&mock.url).unwrap(),
-        &catalog::fingerprint("fake-s98"),
+        &catalog::fingerprint("fake-s102"),
     );
     let mut pty = PtySession::spawn(input_pty_cmd(
         cfg.path(),
         user.path(),
         "TCHAT_S98_KEY",
-        "fake-s98",
+        "fake-s102",
         true,
     ));
     pty.wait_screen("? for shortcuts").unwrap();
@@ -513,8 +513,8 @@ fn s98_untrusted_question_and_answer_are_display_copies_and_never_commands() {
 
 #[test]
 fn s99_line_multi_question_other_and_confirmed_unanswered() {
-    let cfg = TempDir::new("s99-cfg");
-    let user = TempDir::new("s99-user");
+    let cfg = TempDir::new("s103-cfg");
+    let user = TempDir::new("s103-user");
     let tc=json!({"choices":[{"message":{"tool_calls":[{"id":"s99-ask","type":"function","function":{
         "name":"request_user_input","arguments":json!({"questions":(1..=2).map(|n|json!({"id":format!("q{n}"),"header":"确认",
             "question":format!("S99-问题{n}"),"options":[{"label":"保留","description":"兼容"}]})).collect::<Vec<_>>()}).to_string()}}]}}]}).to_string();
@@ -526,13 +526,13 @@ fn s99_line_multi_question_other_and_confirmed_unanswered() {
     seed_grant(
         user.path(),
         &catalog::origin_of(&mock.url).unwrap(),
-        &catalog::fingerprint("fake-s99"),
+        &catalog::fingerprint("fake-s103"),
     );
     let mut pty = PtySession::spawn(input_pty_cmd(
         cfg.path(),
         user.path(),
         "TCHAT_S99_KEY",
-        "fake-s99",
+        "fake-s103",
         false,
     ));
     pty.wait_output("你> ", WATCHDOG).unwrap();
@@ -636,6 +636,8 @@ fn s101_restore_unfinished_question_only_displays_unknown_result() {
         "unfinished",
         &[
             HistoryItem::Text(HistoryMessage {
+                images: None,
+                text_elements: Vec::new(),
                 role: HistoryRole::User,
                 content: "崩溃前用户轮".into(),
                 user_input_event: None,
@@ -874,8 +876,8 @@ fn s103_async_publish_f6_answer_enters_next_request_and_keeps_draft() {
 /// ready 结果之后答案数据随下一请求供依赖动作使用。
 #[test]
 fn s104_wait_auto_opens_and_dependent_action_follows_answer() {
-    let cfg = TempDir::new("s104-cfg");
-    let user = TempDir::new("s104-user");
+    let cfg = TempDir::new("s110-cfg");
+    let user = TempDir::new("s110-user");
     let args = json!({"questions":[{"title":"S104-面向谁？","options":["S104-内部","S104-外部"]}]}).to_string();
     let wait = json!({"request_id":"s104-ask"}).to_string();
     let mock = spawn_mock(vec![
@@ -887,17 +889,17 @@ fn s104_wait_auto_opens_and_dependent_action_follows_answer() {
                 "name":"wait_for_user_input","arguments":wait}}]}}]}).to_string()),
         MockResp::json(200, chat_body("S104-依赖完成")),
     ]);
-    write_manual(cfg.path(), &mock.url, "env:TCHAT_S104_KEY");
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S110_KEY");
     seed_grant(
         user.path(),
         &catalog::origin_of(&mock.url).unwrap(),
-        &catalog::fingerprint("fake-s104"),
+        &catalog::fingerprint("fake-s110"),
     );
     let mut pty = PtySession::spawn(input_pty_cmd(
         cfg.path(),
         user.path(),
-        "TCHAT_S104_KEY",
-        "fake-s104",
+        "TCHAT_S110_KEY",
+        "fake-s110",
         true,
     ));
     pty.wait_screen("? for shortcuts").unwrap();
@@ -2465,6 +2467,8 @@ fn s10_tui_resume_projects_history_without_replay() {
     // 种子快照：一轮用户消息＋assistant 回复（经生产 save_snapshot 写入）
     let msg = |role: terminal_chat::prompt::HistoryRole, content: &str| {
         terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role,
             content: content.to_string(),
             user_input_event: None,
@@ -3477,7 +3481,13 @@ fn s24_tui_resume_long_session_then_scrolls() {
     seed_grant(user.path(), &origin, &catalog::fingerprint(key));
 
     let msg = |role: terminal_chat::prompt::HistoryRole, content: String| {
-        terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage { role, content, user_input_event: None })
+        terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
+            role,
+            content,
+            user_input_event: None,
+            images: None,
+            text_elements: Vec::new(),
+        })
     };
     let hist: Vec<_> = (0..60)
         .map(|i| {
@@ -4354,7 +4364,13 @@ fn sgr_up(col: u16, row: u16) -> Vec<u8> {
 fn scrollbar_session(tag: &str) -> (PtySession, common::Mock, Vec<TempDir>) {
     let (pty, mock, keep) = scroll_session(tag, vec![]);
     let msg = |role: terminal_chat::prompt::HistoryRole, content: String| {
-        terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage { role, content, user_input_event: None })
+        terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
+            role,
+            content,
+            user_input_event: None,
+            images: None,
+            text_elements: Vec::new(),
+        })
     };
     let stem = format!("S{tag}");
     let hist: Vec<_> = (0..120)
@@ -4764,6 +4780,8 @@ fn selection_session_with_delayed_reply(
     let (pty, mock, keep) = scroll_session(tag, replies);
     let msg = |assistant: bool, content: String| {
         terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: if assistant {
                 terminal_chat::prompt::HistoryRole::Assistant
             } else {
@@ -5164,6 +5182,8 @@ fn s46_tui_selection_copy_injection_neutralized() {
     let (pty, mock, keep) = scroll_session("46", vec![]);
     let msg = |assistant: bool, content: String| {
         terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: if assistant {
                 terminal_chat::prompt::HistoryRole::Assistant
             } else {
@@ -5233,6 +5253,8 @@ fn s47_tui_multiline_wrap_combining_payload_exact() {
     let (pty, mock, keep) = scroll_session("47", vec![]);
     let msg = |assistant: bool, content: String| {
         terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: if assistant {
                 terminal_chat::prompt::HistoryRole::Assistant
             } else {
@@ -5330,6 +5352,8 @@ fn s48_tui_selection_holds_across_reply_and_ctrl_c_cancels() {
     );
     let msg = |assistant: bool, content: String| {
         terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: if assistant {
                 terminal_chat::prompt::HistoryRole::Assistant
             } else {
@@ -5422,6 +5446,8 @@ fn s49_tui_oversize_copy_fails_with_feedback_then_recovers() {
     let (pty, _mock, keep) = scroll_session("49", vec![]);
     let msg = |assistant: bool, content: String| {
         terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: if assistant {
                 terminal_chat::prompt::HistoryRole::Assistant
             } else {
@@ -6556,6 +6582,8 @@ fn cancel_session(
     let (pty, mock, keep) = scroll_session(&tag.to_lowercase(), replies);
     let msg = |assistant: bool, content: String| {
         terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: if assistant {
                 terminal_chat::prompt::HistoryRole::Assistant
             } else {
@@ -8711,4 +8739,498 @@ fn s95_tui_view_image_card_failure_and_resume() {
     assert_eq!(mock.count(), 4, "恢复只投影，不重放工具、不续请求");
     pty2.send_raw(b"\x03");
     assert_eq!(pty2.finish().1.code(), Some(0));
+}
+
+/// 020 S100：真实 TUI 粘贴图片路径→附件→提交→请求带图（入口 3/4；A03/A05/A16）。
+fn s100_png(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
+    let img = image::ImageBuffer::from_pixel(width, height, image::Rgba(rgba));
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+    cursor.into_inner()
+}
+
+#[test]
+fn s100_tui_paste_image_path_submit_with_attachment() {
+    let cfg = TempDir::new("s100-cfg");
+    let user = TempDir::new("s100-user");
+    let mock = spawn_mock(vec![MockResp::json(200, chat_body("S100-分析完成"))]);
+    write_manual_image_capable(cfg.path(), &mock.url, "env:TCHAT_S96_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s100"),
+    );
+    let bytes = s100_png(4, 4, [120, 200, 80, 255]);
+    let work = user.path().join("work");
+    fs::create_dir_all(&work).unwrap();
+    let shot = work.join("路径图.png");
+    fs::write(&shot, &bytes).unwrap();
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S96_KEY",
+        "fake-s100",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    // bracketed paste 图片路径（中文无空格——裸路径单 token）→ composer 转附件
+    let path_text = shot.display().to_string();
+    pty.send_raw(format!("\x1b[200~{path_text}\x1b[201~").as_bytes());
+    pty.wait_screen_timeout("[Image #1]", Duration::from_secs(5)).unwrap();
+    // 等待粘贴突发窗口过期（母本行为：窗口内 Enter 是换行不是提交）
+    std::thread::sleep(Duration::from_millis(700));
+    pty.send_raw(b" check this");
+    std::thread::sleep(Duration::from_millis(200));
+    pty.send_raw(b"\r");
+    pty.wait_screen_timeout("S100-分析完成", Duration::from_secs(10)).unwrap();
+    assert_eq!(mock.count(), 1, "恰一次请求");
+    let body: Value = serde_json::from_str(&mock.requests()[0].body).unwrap();
+    let img_msg = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == json!("user") && m["content"].is_array())
+        .expect("图片用户消息");
+    let parts = img_msg["content"].as_array().unwrap();
+    let text = parts.iter().find(|p| p["type"] == json!("text")).unwrap();
+    assert!(text["text"].as_str().unwrap().contains("[Image #1]"), "{text:?}");
+    assert!(text["text"].as_str().unwrap().contains("check this"), "{text:?}");
+    let url = parts.iter().find_map(|p| p["image_url"]["url"].as_str()).unwrap();
+    let b64 = url.strip_prefix("data:image/png;base64,").unwrap();
+    use base64::Engine as _;
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD.decode(b64).unwrap(),
+        bytes,
+        "请求图片＝源字节"
+    );
+    pty.send_raw(b"\x03");
+    assert_eq!(pty.finish().1.code(), Some(0));
+}
+
+/// 020 S101：TUI `-i` 启动初始图——就绪后纯图提交恰一次（A04 TUI 分支）。
+#[test]
+fn s101_tui_initial_image_flag_submits_once() {
+    let cfg = TempDir::new("s101-cfg");
+    let user = TempDir::new("s101-user");
+    let mock = spawn_mock(vec![MockResp::json(200, chat_body("S101-初始图已收"))]);
+    write_manual_image_capable(cfg.path(), &mock.url, "env:TCHAT_S97_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s101"),
+    );
+    let bytes = s100_png(2, 2, [10, 20, 30, 255]);
+    let work = user.path().join("work");
+    fs::create_dir_all(&work).unwrap();
+    let shot = work.join("init.png");
+    fs::write(&shot, &bytes).unwrap();
+    let mut cmd = input_pty_cmd(cfg.path(), user.path(), "TCHAT_S97_KEY", "fake-s101", true);
+    cmd.arg("-i").arg(shot.display().to_string());
+    let mut pty = PtySession::spawn(cmd);
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.wait_screen_timeout("S101-初始图已收", Duration::from_secs(10)).unwrap();
+    assert_eq!(mock.count(), 1, "初始图恰一次请求");
+    let body: Value = serde_json::from_str(&mock.requests()[0].body).unwrap();
+    let urls: Vec<&str> = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == json!("user") && m["content"].is_array())
+        .flat_map(|m| m["content"].as_array().unwrap())
+        .filter_map(|p| p["image_url"]["url"].as_str())
+        .collect();
+    assert_eq!(urls.len(), 1, "一张初始图");
+    pty.send_raw(b"\x03");
+    assert_eq!(pty.finish().1.code(), Some(0));
+}
+
+/// 020 S102：TUI 能力未知＋粘贴路径提交→提交被拒恢复草稿，零请求（A11 TUI）。
+#[test]
+fn s102_tui_capability_reject_restores_draft() {
+    let cfg = TempDir::new("s102-cfg");
+    let user = TempDir::new("s102-user");
+    let mock = spawn_mock(vec![MockResp::json(200, chat_body("不应到达"))]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S98_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s102"),
+    );
+    let bytes = s100_png(2, 2, [1, 2, 3, 255]);
+    let work = user.path().join("work");
+    fs::create_dir_all(&work).unwrap();
+    let shot = work.join("cap.png");
+    fs::write(&shot, &bytes).unwrap();
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S98_KEY",
+        "fake-s102",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    let path_text = shot.display().to_string();
+    pty.send_raw(format!("\x1b[200~{path_text}\x1b[201~").as_bytes());
+    pty.wait_screen_timeout("[Image #1]", Duration::from_secs(5)).unwrap();
+    std::thread::sleep(Duration::from_millis(700));
+    pty.send_raw(b"\r");
+    pty.wait_screen_timeout("提交被拒", Duration::from_secs(10)).unwrap();
+    pty.wait_screen_timeout("已恢复到输入框", Duration::from_secs(5)).unwrap();
+    assert_eq!(mock.count(), 0, "零请求");
+    pty.send_raw(b"\x03");
+    assert_eq!(pty.finish().1.code(), Some(0));
+}
+
+/// 020 S103：运行中入队（A09）——队列只存路径；出队正式提交时读取（源图在
+/// 排队期间被改写→采用新版本）；FIFO 顺序与 Dnew 保护由驱动既有语义承担。
+#[test]
+fn s103_tui_queued_submission_reads_image_at_dequeue_time() {
+    let cfg = TempDir::new("s103-cfg");
+    let user = TempDir::new("s103-user");
+    let (first, gate) = MockResp::gated(200, chat_body("S103-第一轮"));
+    let mock = spawn_mock(vec![first, MockResp::json(200, chat_body("S103-第二轮"))]);
+    write_manual_image_capable(cfg.path(), &mock.url, "env:TCHAT_S99_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s103"),
+    );
+    let v1 = s100_png(3, 3, [10, 10, 10, 255]);
+    let v2 = s100_png(3, 3, [200, 200, 200, 255]);
+    let work = user.path().join("work");
+    fs::create_dir_all(&work).unwrap();
+    let shot = work.join("q.png");
+    fs::write(&shot, &v1).unwrap();
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S99_KEY",
+        "fake-s103",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    // 第一轮（gated 挂起→turn 运行中）；分开发送避免突发窗口吞 Enter
+    pty.send_raw(b"first");
+    std::thread::sleep(Duration::from_millis(250));
+    pty.send_raw(b"\r");
+    std::thread::sleep(Duration::from_millis(500));
+    // 排队：粘贴路径→附件→Enter（turn 运行中→入队）
+    pty.send_raw(format!("\x1b[200~{}\x1b[201~", shot.display()).as_bytes());
+    pty.wait_screen_timeout("[Image #1]", Duration::from_secs(5)).unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    pty.send_raw(b"\r");
+    std::thread::sleep(Duration::from_millis(300));
+    // 排队期间改写源图（新版本）
+    fs::write(&shot, &v2).unwrap();
+    // 放行第一轮；重放出队读取的是新版本
+    gate.release();
+    pty.wait_screen_timeout("S103-第二轮", Duration::from_secs(15)).unwrap();
+    assert_eq!(mock.count(), 2, "两轮各一次请求");
+    let body: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
+    let url = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == json!("user") && m["content"].is_array())
+        .flat_map(|m| m["content"].as_array().unwrap())
+        .find_map(|p| p["image_url"]["url"].as_str())
+        .expect("第二轮带图");
+    let b64 = url.strip_prefix("data:image/png;base64,").unwrap();
+    use base64::Engine as _;
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD.decode(b64).unwrap(),
+        v2,
+        "出队采用排队期间改写后的新版本（入队不冻结）"
+    );
+    pty.send_raw(b"\x03");
+    assert_eq!(pty.finish().1.code(), Some(0));
+}
+
+/// 020 S110（§2.3 修复验收）：出队项被拒后，剩余队列暂停自动发送；
+/// 恢复稿留在输入框等待用户处理。
+#[test]
+fn s110_tui_rejected_dequeue_pauses_remaining_queue() {
+    let cfg = TempDir::new("s110-cfg");
+    let user = TempDir::new("s110-user");
+    let (first, gate) = MockResp::gated(200, chat_body("S110-第一轮"));
+    let mock = spawn_mock(vec![first, MockResp::json(200, chat_body("S110-C 自动发"))]);
+    // 能力未知（无 input_modalities）→带图提交必被拒
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S110_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s110"),
+    );
+    let work = user.path().join("work");
+    fs::create_dir_all(&work).unwrap();
+    let bad = work.join("bad.png");
+    fs::write(&bad, b"not really a png but has extension").unwrap();
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S110_KEY",
+        "fake-s110",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    // 第一轮（gated 挂起）
+    pty.send_raw(b"first");
+    std::thread::sleep(Duration::from_millis(250));
+    pty.send_raw(b"\r");
+    std::thread::sleep(Duration::from_millis(500));
+    // 排队 B：坏图附件（粘贴路径→附件→Enter）
+    pty.send_raw(format!("\x1b[200~{}\x1b[201~", bad.display()).as_bytes());
+    pty.wait_screen_timeout("[Image #1]", Duration::from_secs(5)).unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    pty.send_raw(b"\r");
+    std::thread::sleep(Duration::from_millis(300));
+    // 排队 C：纯文本
+    pty.send_raw(b"second C");
+    std::thread::sleep(Duration::from_millis(250));
+    pty.send_raw(b"\r");
+    std::thread::sleep(Duration::from_millis(300));
+    // 放行第一轮 → 重放 B → 宿主拒绝（能力未知）→ B 回草稿；
+    // 断言：C 不自动发送（mock 仍只有第一轮 1 次请求）
+    gate.release();
+    pty.wait_screen_timeout("提交被拒", Duration::from_secs(15)).unwrap();
+    // 等待多个 tick 周期（若自动续发，C 请求会在此窗口发出）
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(mock.count(), 1, "剩余队列暂停：仅第一轮请求，C 未自动发送");
+    pty.send_raw(b"\x03");
+    assert_eq!(pty.finish().1.code(), Some(0));
+}
+
+/// 020 S111（A02 L3）：`@` 搜索选图——弹窗候选可见、Tab 选中转附件、
+/// 提交请求携带真实图片字节。
+#[test]
+fn s111_tui_at_file_search_selects_image() {
+    let cfg = TempDir::new("s111-cfg");
+    let user = TempDir::new("s111-user");
+    let mock = spawn_mock(vec![MockResp::json(200, chat_body("S111-已分析"))]);
+    write_manual_image_capable(cfg.path(), &mock.url, "env:TCHAT_S111_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s111"),
+    );
+    let bytes = s100_png(3, 3, [66, 77, 88, 255]);
+    let work = user.path().join("work");
+    fs::create_dir_all(&work).unwrap();
+    fs::write(work.join("pickme.png"), &bytes).unwrap();
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S111_KEY",
+        "fake-s111",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    // 输入 @pick → 弹窗出现候选文件名
+    pty.send_raw(b"@pick");
+    pty.wait_screen_timeout("pickme.png", Duration::from_secs(5)).unwrap();
+    // Tab 选中 → 附件占位符
+    pty.send_raw(b"\t");
+    pty.wait_screen_timeout("[Image #1]", Duration::from_secs(5)).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    pty.send_raw(b"\r");
+    pty.wait_screen_timeout("S111-已分析", Duration::from_secs(10)).unwrap();
+    assert_eq!(mock.count(), 1);
+    let body: Value = serde_json::from_str(&mock.requests()[0].body).unwrap();
+    let url = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == json!("user") && m["content"].is_array())
+        .flat_map(|m| m["content"].as_array().unwrap())
+        .find_map(|p| p["image_url"]["url"].as_str())
+        .expect("请求带图");
+    let b64 = url.strip_prefix("data:image/png;base64,").unwrap();
+    use base64::Engine as _;
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD.decode(b64).unwrap(),
+        bytes,
+        "请求图片＝@ 选中的源字节"
+    );
+    pty.send_raw(b"\x03");
+    assert_eq!(pty.finish().1.code(), Some(0));
+}
+
+/// 020 S112（A07 L3）：两张附件删除第一张——第二张重编号为 1，
+/// 提交请求只携带幸存图片的字节。
+#[test]
+fn s112_tui_delete_first_attachment_renumbers_and_excludes() {
+    let cfg = TempDir::new("s112-cfg");
+    let user = TempDir::new("s112-user");
+    let mock = spawn_mock(vec![MockResp::json(200, chat_body("S112-完成"))]);
+    write_manual_image_capable(cfg.path(), &mock.url, "env:TCHAT_S112_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s112"),
+    );
+    let first = s100_png(2, 2, [111, 1, 1, 255]);
+    let second = s100_png(2, 2, [222, 2, 2, 255]);
+    let work = user.path().join("work");
+    fs::create_dir_all(&work).unwrap();
+    fs::write(work.join("first.png"), &first).unwrap();
+    fs::write(work.join("second.png"), &second).unwrap();
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S112_KEY",
+        "fake-s112",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    // 粘贴两张
+    pty.send_raw(format!("\x1b[200~{}\x1b[201~", work.join("first.png").display()).as_bytes());
+    pty.wait_screen_timeout("[Image #1]", Duration::from_secs(5)).unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    pty.send_raw(format!("\x1b[200~{}\x1b[201~", work.join("second.png").display()).as_bytes());
+    pty.wait_screen_timeout("[Image #2]", Duration::from_secs(5)).unwrap();
+    // 删除第一张：Home 到行首（紧邻 [Image #1] 元素左侧）＋Delete 前向删元素
+    std::thread::sleep(Duration::from_millis(500));
+    pty.send_raw(b"\x1b[H"); // Home
+    std::thread::sleep(Duration::from_millis(200));
+    pty.send_raw(b"\x1b[3~"); // Delete 删除整个占位符元素
+    std::thread::sleep(Duration::from_millis(300));
+    // 图 2 重编号为 1——由最终请求字节断言验证（屏幕中间态不作硬断言）
+    std::thread::sleep(Duration::from_millis(700));
+    pty.send_raw(b"\r");
+    pty.wait_screen_timeout("S112-完成", Duration::from_secs(10)).unwrap();
+    let body: Value = serde_json::from_str(&mock.requests()[0].body).unwrap();
+    let urls: Vec<&str> = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == json!("user") && m["content"].is_array())
+        .flat_map(|m| m["content"].as_array().unwrap())
+        .filter_map(|p| p["image_url"]["url"].as_str())
+        .collect();
+    assert_eq!(urls.len(), 1, "只发幸存一张：{urls:?}");
+    let b64 = urls[0].strip_prefix("data:image/png;base64,").unwrap();
+    use base64::Engine as _;
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD.decode(b64).unwrap(),
+        second,
+        "幸存的是第二张（第一张字节不再发送）"
+    );
+    pty.send_raw(b"\x03");
+    assert_eq!(pty.finish().1.code(), Some(0));
+}
+
+/// 020 S113（A13 L3）：带图入史后取消（gated 响应挂起时 Esc）——消息与
+/// 图片在历史保留恰一份；继续新输入后请求同时含旧图与新文本。
+#[test]
+fn s113_tui_cancel_after_history_keeps_image_once() {
+    let cfg = TempDir::new("s113-cfg");
+    let user = TempDir::new("s113-user");
+    let (first, gate) = MockResp::gated(200, chat_body("不应显示"));
+    let mock = spawn_mock(vec![
+        first,
+        MockResp::json(200, chat_body("S113-第二轮完成")),
+    ]);
+    write_manual_image_capable(cfg.path(), &mock.url, "env:TCHAT_S113_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s113"),
+    );
+    let bytes = s100_png(2, 3, [55, 66, 77, 255]);
+    let work = user.path().join("work");
+    fs::create_dir_all(&work).unwrap();
+    fs::write(work.join("keep.png"), &bytes).unwrap();
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S113_KEY",
+        "fake-s113",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    // 粘贴图片并提交（入史；请求被 gated 挂起）
+    pty.send_raw(format!("\x1b[200~{}\x1b[201~", work.join("keep.png").display()).as_bytes());
+    pty.wait_screen_timeout("[Image #1]", Duration::from_secs(5)).unwrap();
+    std::thread::sleep(Duration::from_millis(600));
+    pty.send_raw(b"\r");
+    std::thread::sleep(Duration::from_millis(800));
+    // Esc 取消（请求丢弃）
+    pty.send_raw(b"\x1b");
+    std::thread::sleep(Duration::from_millis(600));
+    gate.release();
+    std::thread::sleep(Duration::from_millis(600));
+    // 新输入：请求应含已入史图片恰一张＋新文本
+    pty.send_raw(b"next");
+    std::thread::sleep(Duration::from_millis(250));
+    pty.send_raw(b"\r");
+    pty.wait_screen_timeout("S113-第二轮完成", Duration::from_secs(10)).unwrap();
+    // next 轮请求（首个索引）：gated 响应在取消后已被消费丢弃
+    let body: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
+    let urls: Vec<&str> = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == json!("user") && m["content"].is_array())
+        .flat_map(|m| m["content"].as_array().unwrap())
+        .filter_map(|p| p["image_url"]["url"].as_str())
+        .collect();
+    assert_eq!(urls.len(), 1, "旧图保留恰一份：{urls:?}");
+    // 新文本（next）＝纯字符串 user 消息（020：无图消息保持原 content 形态）
+    let next_present = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["role"] == json!("user") && m["content"].is_string() && m["content"].as_str().unwrap() == "next");
+    assert!(next_present, "新文本在场：{:?}", body["messages"]);
+    pty.send_raw(b"\x03");
+    assert_eq!(pty.finish().1.code(), Some(0));
+}
+
+/// 020 S114（A21 L3）：问询回答窗口打开期间 Ctrl+V 不建附件、不产生剪贴板
+/// 提示（活动视图拥有按键；普通问询窗口不接图片）。
+#[test]
+fn s114a_tui_question_window_rejects_image_paste() {
+    let cfg = TempDir::new("s114a-cfg");
+    let user = TempDir::new("s114a-user");
+    let args = json!({"questions":[{"id":"dir","header":"方向","question":"S114A-请选择方向",
+        "options":[{"label":"甲","description":"a"},{"label":"乙","description":"b"}]}]});
+    let tc = json!({"choices":[{"message":{"tool_calls":[{"id":"q-ask","type":"function","function":{
+        "name":"request_user_input","arguments":args.to_string()}}]}}]})
+        .to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc),
+        MockResp::json(200, chat_body("S114A-继续")),
+    ]);
+    write_manual_image_capable(cfg.path(), &mock.url, "env:TCHAT_S114A_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s114a"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S114A_KEY",
+        "fake-s114a",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.send_raw(b"ask");
+    std::thread::sleep(Duration::from_millis(250));
+    pty.send_raw(b"\r");
+    pty.wait_screen_timeout("S114A-请选择方向", Duration::from_secs(5)).unwrap();
+    // Ctrl+V：问询窗口活动——不应建附件、不应出现剪贴板提示
+    pty.send_raw(b"\x16");
+    std::thread::sleep(Duration::from_millis(600));
+    let no_attachment = pty.wait_screen_timeout("[Image #", Duration::from_millis(300)).is_err();
+    assert!(no_attachment, "问询窗口不建附件");
+    let no_clip_hint = pty
+        .wait_screen_timeout("剪贴板图片", Duration::from_millis(300))
+        .is_err();
+    assert!(no_clip_hint, "不触发剪贴板提示（按键归问询视图）");
+    // 收尾：Esc 中断问询后退出（问询期间按键不建附件、不触发剪贴板读取已断言
+    // 为本用例核心；退出码不属本用例验证目标，按框架清理收尾）
+    pty.send_raw(b"\x1b");
+    std::thread::sleep(Duration::from_millis(800));
+    let _ = pty.finish();
 }

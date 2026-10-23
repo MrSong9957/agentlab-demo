@@ -161,144 +161,30 @@ user：宿主标注的 A 图片附件说明 + image_url(data URL, detail=high)
 
 ## 9. CLI 图片输入补充讨论（2026-10-23）
 
-本节按用户要求保存后续讨论：入口数量、Codex 已有实现、本项目待补部分及 `@` 与 `view_image` 的区别。**本节仅落盘讨论，未实施新的输入入口**；前述首版仍只覆盖 `view_image` 工具，实施状态与验证以[实施记录](../records/2026-10-23-view-image-impl.md)为准。
+本节原用户附图讨论已提炼为独立的 [020 CLI 用户附图规格](020-cli-image-input.md)。后续实现、范围与验收以 020 为准；本文继续约束已实施的 view_image 工具。019 §1–§8、[原实施证据](../records/2026-10-23-view-image-impl.md)与[调研 §5–§7](../records/2026-10-23-view-image-plan-research.md#5-cli-图片输入讨论落盘2026-10-23)保持原意，不用后续附图规格重写历史通过结论。
+
+为保留已有记录中的链接，原 9.1–9.6 标题与锚点继续作为关联索引；不在两份规格维护重复契约。020 本轮仅作规格准备，功能尚未实施，全部功能验收待验证。
 
 ### 9.1 共六个使用入口，Codex 均已有实现
 
-按本次讨论的终端本地图片入口计数：**五种用户输入方式，加一种模型工具，共六种**。下表源码仍固定于 `d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4`。
-
-| 编号 | 使用方式 | Codex 实际行为与来源 |
-|---|---|---|
-| 1 | 复制图片后粘贴到输入框 | 宿主读取剪贴板中的图片数据或图片文件，生成 PNG 并加入附件；已有[按键分派](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/app/clipboard.rs)和[剪贴板读取实现](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/clipboard_paste.rs) |
-| 2 | `@` 搜索并选中图片 | 文件选择器选中有效图片后调用 `attach_image`，提交时直接作为用户图片附件；见[选图实现](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/bottom_pane/chat_composer.rs#L2515) |
-| 3 | 拖拽图片文件到终端 | 在终端将拖入文件转换为路径文本的情况下，由 Codex 识别路径并加入附件；复用第 4 项的路径粘贴处理 |
-| 4 | 直接粘贴图片文件路径，无须 `@` | 规范化路径、读取图片尺寸，成功后调用 `attach_image`；见[路径识别](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/bottom_pane/chat_composer.rs#L1260)与[粘贴分派](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/bottom_pane/chat_composer/paste_input.rs) |
-| 5 | 启动时使用 `-i`／`--image` | 将一张或多张本地图片附到用户消息；见[参数定义](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/utils/cli/src/shared_options.rs)及[非交互提交实现](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/exec/src/lib.rs#L942) |
-| 6 | 告诉模型图片路径，由模型调用 `view_image` | 模型发出工具调用，宿主读取并返回结构化图片工具结果；见[工具实现](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/core/src/tools/handlers/view_image.rs) |
-
-六种是使用入口数，不是六套独立的图像处理实现。第 3、4 项共用路径识别，不同粘贴快捷键或鼠标操作也不额外计数。这里的 `@` 指在文件候选中选中有效图片；输入一段 `@路径` 文字，并不保证已经生成图片附件。
+见 [020 §1.1：六入口现状与范围](020-cli-image-input.md#11-六种入口的现状与执行范围)。
 
 ### 9.2 第 2、6 项：共用看图能力，触发链路不同
 
-两者最终都把图片内容交给视觉模型，`@` 不增加另一种图像识别能力。**“搜索选图后复用图片加载代码”的理解成立；Codex 的 `@` 选图没有调用 `view_image` 工具这一环。**
-
-| 比较项 | 第 2 项：`@` 选图 | 第 6 项：`view_image` |
-|---|---|---|
-| 由谁决定加载 | 用户明确选定图片 | 模型在执行任务时提出工具调用 |
-| 何时交给模型 | 随这次用户消息发送，模型开始处理该消息时即可获得图片 | 先得到模型工具调用，再读取图片，随工具结果进入后续模型请求 |
-| Codex 的消息来源 | 用户输入中的 `UserInput::LocalImage`，或提交准备后对应的图片输入项 | 关联调用 ID 的 `FunctionCallOutput`，其内容为 `InputImage` |
-| 是否需要看图工具往返 | 不需要为加载选中的图片额外请求模型 | 需要“工具调用 → 工具结果 → 模型续请求”这条链路 |
-| 典型用途 | 用户提供截图、设计稿、参考图 | 模型检查自己刚生成的截图，或按任务需要主动打开其他图片 |
-
-```text
-@ 选图：
-用户选择图片 → 宿主读取／准备图片 → 用户消息携带图片 → 模型分析
-
-view_image：
-模型提出看图工具调用 → 宿主读取／准备图片 → 保存配对工具结果 → 模型续请求分析
-```
-
-源码依据：`insert_selected_file_path` 在图片有效时清掉原路径 token 并调用 `attach_image`；[input_submission.rs](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/chatwidget/input_submission.rs#L253)将附件作为准备后的图片项或 `UserInput::LocalImage` 加入用户输入；`view_image.rs::to_response_item` 则构造关联 `call_id` 的图片工具结果。
-
-后续最小适配应**共用文件读取、解码校验、缩放、编码和限额处理**，分别接到用户附件与工具结果的提交路径。宿主直接复用 `view_image` 模块中的 Rust 处理函数，并不等于让模型调用 `view_image` 工具；无需为复用函数伪造 assistant 工具调用或工具结果。
-
-即使本项目的 Chat Completions 适配最终都使用 user 消息中的 `image_url`，历史来源仍应区分：用户选择的附件属于该用户消息；工具取得的图片属于对应工具调用，只在请求投影时补附件消息。不能因为图片协议部件相同，就混用调用记录、恢复和取消语义。
+见 [020 §2／§3：用户消息与工具结果的不同归属](020-cli-image-input.md#3-关键判断为什么)。
 
 ### 9.3 本项目还需接通的部分与建议顺序
 
-Codex 对上述六个入口均有代码实现。本项目首版只覆盖第 6 项；虽然输入框已经保留部分图片附件、路径识别及剪贴板函数，现有[驱动提交路径](../../src/tui/src/chat_driver.rs)仍只将文本交给宿主，不能据此认定前五项已端到端支持。
-
-若后续要覆盖完整 CLI 图片输入体验，需要：
-
-1. **用户图片附件通道**：输入框、宿主提交、排队输入、模型请求及会话保存恢复均保留图片，支持随文本一起发送及只发图片；复用已有图片处理与能力检查。
-2. **路径类入口接线**：粘贴图片路径与拖入共用识别逻辑；恢复 `@` 文件搜索和选图；启动参数 `-i`／`--image` 接到同一附件提交链路，不各自实现图片处理。
-3. **剪贴板宿主适配**：复用 Codex 的剪贴板读取与临时 PNG 保留策略（见 §9.6），接通 Windows 宿主到 Docker 的图片传输和路径可达性。Codex 的 WSL fallback 不等于本项目已经具备 Docker 剪贴板桥接。
-
-建议先接通统一附件通道与路径入口，再恢复 `@` 选图和剪贴板；`-i` 可在自动化有需求时补入。拖入或直接粘贴路径是比手写 `@` 更省操作的已有方式，`@` 则适合不知道完整路径、需要搜索文件的场景。这里记录的是范围与顺序建议，尚未授权或执行这些新增入口。
+见 [020 §1／§5：执行范围与后续流程](020-cli-image-input.md)。
 
 ### 9.4 多个入口、共用核心与两种出口
 
-明确采用的后续设计方向为：**多个入口 → 共用图片处理核心 → 用户附件／工具结果两个出口**。这不表示 Codex 的六个入口从头到尾都调用同一个函数，也不要求六个入口各写一套图片处理实现。
-
-```mermaid
-flowchart TD
-    U["用户入口 1—5：粘贴图片、@ 选图、拖入、粘贴路径、-i"] --> A["入口适配：获取图片字节或解析路径，保留来源及顺序"]
-    T["模型入口 6：view_image 工具调用"] --> A
-    A --> C["共用图片处理核心：有界读取、校验解码、缩放、编码、限额"]
-    C --> O{"按原始来源封装"}
-    O -->|用户选择| UM["用户附件出口：随用户消息发送并保存"]
-    O -->|模型工具调用| TR["工具结果出口：关联调用 ID，沿用批末附件投影"]
-```
-
-- **入口层**：负责剪贴板采集、文件选择、路径规范化或参数解析，保留图片顺序及用户／工具来源。剪贴板已提供的图片字节可直接进入准备流程；文件路径则共用有界读取，不强制所有输入先落临时文件。
-- **共用核心**：优先复用现有 [view_image.rs](../../src/app/src/view_image.rs) 的文件检查、读取和 `prepare_image`；只按复用所需开放或抽取小函数，不新建插件框架、缓存或通用媒体接口。核心输出准备后的图片字节／data URL、格式及源／发送尺寸，不决定消息角色、不生成工具调用。
-- **两个出口**：用户选图归入原用户消息；模型取图归入原工具结果并保留 `tool_call_id`。同一图片按其来源选择一个出口，不能同时伪造另一条记录。现有工具批次配对、8 次请求上限及工具图片投影保持原契约。
-- **模块边界**：图片准备继续放在 app 核心，TUI 向宿主提交附件与文本，不能让 TUI 反向依赖 app。剪贴板格式转换属于入口采集；模型用图的尺寸策略与限额只由核心统一执行。
-
-上游依据：[core/src/image_preparation.rs](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/core/src/image_preparation.rs) 的 `prepare_response_items` 同时处理消息图片与 `FunctionCallOutput` 图片，再调用共用准备函数；底层编解码和缩放来自 [utils/image/src/lib.rs](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/utils/image/src/lib.rs)。本项目只复用需要的部分，不引入上游附件存储与运行框架。
+见 [020 §3.1：共用核心结构图与复用落点](020-cli-image-input.md#31-复用路径与最小修改面)。
 
 ### 9.5 参考 Codex 仍需补齐的功能与细节
 
-以下是前五种用户入口接入时需要补全的行为建议，**本轮没有实施**。普通文件检查、图片格式识别、HIGH_DETAIL、单图资源限制、10 MiB 最终请求上限及工具图片保存恢复已经在首版范围内；后续应复用并扩展到用户附件，无须再做一份。
-
-| 补充项 | Codex 实际实现依据 | 本项目的最小补充及可观察验收 |
-|---|---|---|
-| 图片与文字作为完整消息提交，支持只发图 | [protocol/user_input.rs](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/protocol/src/user_input.rs) 的 `Text/Image/LocalImage`；[user_messages.rs](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/chatwidget/user_messages.rs) 的 `has_content` 与初始消息构造 | 驱动、宿主和模型请求传递文本＋附件，判空同时检查附件。只发一张图片也能提交，已有纯文本行为保持；用户附件不借用 `ToolResult` 保存 |
-| 多图编号、顺序、删除和编辑同步 | [attachment_state.rs](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/bottom_pane/chat_composer/attachment_state.rs) 的 attach、prune、remove 与 relabel；[chat_composer.rs](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/bottom_pane/chat_composer.rs) 的外部编辑处理 | 复用结构化 `[Image #N]` 附件标记；删除标记同步移除真实附件并更新编号。两张同名或同内容图片不因名称／内容被擅自合并；发送顺序与编号一致。手写标记文字不能生成附件；删图、清空和编辑后不能残留隐藏上传 |
-| 排队、历史回填与草稿编辑保留附件 | [input_queue.rs](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/chatwidget/input_queue.rs) 保存完整 `QueuedUserMessage`；`user_messages.rs` 合并附件并重映射编号；[chat_composer_history.rs](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/bottom_pane/chat_composer_history.rs) 区分会话内完整历史与跨会话文本历史 | 将当前纯字符串排队项扩展为完整消息；入队、重新编辑、切回草稿和上下键回填都保留附件关联。跨会话文本输入历史与会话正文恢复分别处理，不能把只恢复了标记文字当成已恢复图片，也不照搬上游 steer 调度 |
-| 冻结图片内容的时间 | [image_submission.rs](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/chatwidget/image_submission.rs) 为远程工作区提供客户端快照；[app/startup.rs](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/app/startup.rs) 条件启用；普通本地提交由 core 读取并准备后入史 | 采用 Codex 本地流程：入队只记录路径，出队正式提交用户轮时读取图片，统一准备后冻结并入史。排队期间原文件改变，采用正式提交时读到的内容；删除则按准备失败处理。入史后及恢复时不再重读源文件，详见 §9.6 |
-| 不支持图片、准备失败或取消时保留草稿 | [input_submission.rs](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/chatwidget/input_submission.rs) 的能力检查与 `restore_blocked_image_submission`；`image_submission.rs` 的恢复、串行准备与迟到结果过滤 | 能力未知／仅 text 时不发送，并保留文字和附件供重试。准备工作不能阻塞终端事件循环；取消后不提交，迟到完成不能污染新草稿，准备任务不能因反复取消而堆积。沿用本项目 Esc 取消、Ctrl+C 退出的分工 |
-| 用户图片持久化、降级与记忆隔离 | 上游 `UserInput` 保留真实图片项与 `TextElement`；`UserMessageEvent` 提供 `images`／`text_elements`；本项目已有[保存约束](#51-保存与恢复)和[记忆过滤约束](#52-记忆提炼) | 按 §9.6 在原用户消息中增加可选 `images` 和缺省为空的 `text_elements`，保存准备后的图片与标记。旧纯文本记录兼容；旧程序重存会丢附件。记忆过滤同时覆盖用户与工具附件，仍遵守原 1 MiB／8 MiB 读取预算 |
-| 路径解析及拖入行为 | [clipboard_paste.rs](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/clipboard_paste.rs) 的 `normalize_pasted_path` 支持带引号／shell 转义的单路径、`file://`、Windows／UNC；文件选择器按实际图片检查 | 优先复用已有规范化函数，覆盖空格、中文、引号和转义。普通文字不被误吞；一次含多个路径的文本不能随意按空格拆分。`file://` 仅作本地文件路径；Windows→Docker 的可达路径映射需要单独明确，不冒充 WSL 转换已解决 |
-| 单条消息和队列的累计预算 | `image_submission.rs` 的 32 MiB 是单次远程图片准备预算；本地 `InputQueueState` 存完整消息及图片路径，没有全队列图片字节计数 | 沿用路径队列，不提前为整个队列解码或常驻 base64，也不新增全队列图片字节限额。出队后复用原单图限制和最终 10 MiB 请求上限，超限零发送；不将上游 32 MiB 错当全队列预算，详见 §9.6 |
-| 剪贴板临时文件的生命周期 | `clipboard_paste.rs::paste_image_to_temp_png` 对生成的 PNG 调用 `keep()`，附件删除／取消路径未自动删除该文件；WSL 另有宿主取图 fallback | 先复用同样的保留策略：移除附件、取消、完成准备或退出时不自动删除已保留 PNG，不新增定时清理器；普通用户原图始终不删除。准备失败且尚未 keep 的临时文件沿 tempfile 自动清理；系统临时目录可能留下文件，详见 §9.6 |
-| 输入区域与命令边界 | `chat_composer.rs::ChatComposerConfig::plain_text` 关闭图片、文件弹窗和命令；[shared_options.rs](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/utils/cli/src/shared_options.rs) 定义 `-i` 多图参数 | 图片附加只在普通聊天输入生效，不能将问询回答窗口变成图片上传入口；`-i` 的多图、重复参数、相对目录及交互／管道行为需明确。沿用现有命令、退出和问询语义，不为对齐上游覆盖本地按键 |
-
-四项规则已按用户要求优先采用 Codex 方案，具体见 §9.6；这里没有额外的待审核清单。对 Chat Completions、既有 V1 会话和请求上限的必要适配已明确，不再以“实施前待定”作为这些项目的状态。远程快照、异步提交、UUID、远程存储和 WebSocket 设施仍不整套移植。
-
-后续验收应将这些场景纳入同一回归入口：只发图；多图及同名图片；删图后请求中无对应字节；编辑和排队后顺序一致；入队后改图采用正式提交时版本，入史后改图仍使用已保存版本；能力拒绝／取消／准备失败后草稿可恢复；迟到准备结果被丢弃；保存恢复、旧格式降级及用户图片记忆过滤；总量超限零发送；带空格路径与 Windows／Docker 路径；keep 后的 PNG 按保留策略留存，未 keep 的失败临时文件自动清理。测试仍用独立临时目录、固定图片和本地 mock，不依赖真实剪贴板、密钥或在线模型来判定核心逻辑通过；宿主剪贴板与目标终端互操作另记实测覆盖及缺口。
-
-`original` 模式、远程 URL 下载、终端内位图预览和图像生成维持原后置范围；本次没有为它们新增工具、实现或验收承诺。
+见 [020 §5：场景、状态、副作用及验证方式](020-cli-image-input.md)。
 
 ### 9.6 四项具体规则：优先复用 Codex（2026-10-23）
 
-用户明确要求有上游方案就先采用。本节据固定提交的实际代码确定后续方案，替代此前“入队即冻结”的本地建议和四项“待定”措辞；**无需用户再逐项审核**。方案确定不等于前五个用户图片入口已经实施，本轮仍只修改文档。
-
-| 项目 | Codex 已有方案 | 本项目采用的明确规则 |
-|---|---|---|
-| 冻结时机 | [input_flow.rs](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/chatwidget/input_flow.rs)、`input_submission.rs` 入队保存 `UserMessage` 的图片路径；[models.rs::from_user_input](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/protocol/src/models.rs#L2155) 在构造提交内容时读取本地文件；[session/mod.rs](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/core/src/session/mod.rs#L5314) 准备后入历史并持久化 | **入队不冻结文件内容；出队正式提交时读取，图片准备完成后入史并固定。** 没有排队时同样在正式提交阶段读取。入史后的续请求与恢复使用保存的准备后图片，不重新读取源路径。Codex 远程工作区的客户端快照不引入当前本地 CLI 流程 |
-| 队列总预算 | `InputQueueState`／`QueuedUserMessage` 记录文本、附件路径与标记；已核对的队列实现没有全队列图片字节计数或拒绝分支。32 MiB 仅位于 `image_submission.rs::prepare_images` 的远程传输准备 | **不新增全队列图片字节硬上限或配置项。** 队列只保存完整消息和路径，沿用现有内存队列生命周期；出队后逐条准备，不预先读取整个队列。单图仍按 §3.1 限额，最终 JSON 仍按原 10 MiB 限制，超限在网络发送前报错，不改成 32 MiB |
-| 附件持久化字段 | [protocol.rs::UserMessageEvent](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/protocol/src/protocol.rs#L2671) 有 `images` 和 `text_elements`；core 将准备后的用户图片内容写入历史，rollout 的[持久化策略](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/rollout/src/policy.rs)保留消息项 | **保留现有 `HistoryMessage.content: String`，仅增加 `images` 和 `text_elements` 两个可省略字段。** 图片数组保存准备后的 data URL，顺序对应附件编号；标记复用仓库已有 `codex_protocol::user_input::TextElement`。不移植整个 Responses／rollout 协议或附件服务 |
-| 清理规则 | [clipboard_paste.rs](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/clipboard_paste.rs#L129) 在写入 PNG 后 `keep()`；已核对的附件删除、取消及提交路径没有为其增加自动删除 | **先沿用 keep 保留。** 删除输入框附件只移除消息引用；取消、发送完成及退出均不自动删除已保留 PNG。keep 前失败由 tempfile 清理；用户原图不删除。不新增自动 GC、定时器或目录扫描。该策略可能在系统临时目录留存文件，后续如需回收再作为独立改动处理 |
-
-持久化字段采用上游字段名与结构，适配如下：
-
-| 字段 | 固定表征与兼容规则 |
-|---|---|
-| `images` | `Option<Vec<String>>`，每项为实际准备后的本地图片 data URL；缺字段为 `None`，无图片时不序列化。首版 detail 固定 `high`，按上游缺省语义处理，无需另存一份 `image_details`；只有图片的用户消息允许 `content` 为空字符串 |
-| `text_elements` | `Vec<codex_protocol::user_input::TextElement>`，复用 `byte_range` 与 `placeholder`；缺省为空且空数组不序列化，UTF-8 字节区间和附件编号必须与 `content`／`images` 对应 |
-| 原字段与未引入部分 | `role`、`content`、`user_input_event` 和 V1 meta 保持原语义；纯文本记录形状保持。`local_images` 只在输入框／内存队列中用来读取源文件，已经入史的正文恢复不依赖这些路径。不引入上游 `file_ids`、混合引用的 `image_order`、音频或远程下载字段 |
-
-例如，包含一张图片的用户历史行可以表述为下列形状（data URL 内容仅作占位示意）：
-
-```json
-{
-  "type": "text",
-  "role": "user",
-  "content": "[Image #1] 请检查界面",
-  "images": ["data:image/png;base64,..."],
-  "text_elements": [
-    {"byte_range": {"start": 0, "end": 10}, "placeholder": "[Image #1]"}
-  ]
-}
-```
-
-这是从 Codex 的用户图片与 UI 标记结构到本项目 V1 的最小映射，不直接替换已有字符串 `content`。加载时复用现有图片载荷校验和坏行规则；只允许普通用户消息携带附件，不改变问询回答通道。记忆提炼前剥除用户 `images`，不向提炼模型发送 base64；旧程序可读文本但重存会丢新字段，继续明确此降级。
-
-准备失败或能力拒绝时，沿用上游保留／恢复文字与附件供重试的处理。已按现有契约入史后的模型请求失败则保留既有历史，不自动再造一条用户消息。队列内容与已入史内容的边界必须在验收中区分：
-
-- **入队后改图**：正式提交时读取修改后的文件；入队后删图则报告准备错误并保留可重试消息，不能伪称已发送原图。
-- **入史后改图／删图**：后续请求和会话恢复仍使用已保存图片字节。
-- **队列与临时文件**：队列不常驻所有待发图片字节；移除附件／取消／退出不主动删除已 keep 的 PNG，也不新增未发送队列的持久化。
-
-这四项现在是可据以实施的规则，不再列为待用户审核或待定项目；其余用户入口的接线、Docker 剪贴板桥接及相应自动化验证仍属于后续实现工作。
+见 [020 §2.1／§2.2：已确认的四项规则与持久化契约](020-cli-image-input.md#21-已确认规则)。

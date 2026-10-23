@@ -595,6 +595,7 @@ fn lib_cancel_skips_view_image_without_payload() {
         None,
         None,
         true,
+        None
     );
     assert!(result.is_err(), "取消轮报错");
     let tool_results: Vec<&HistoryItem> = history
@@ -653,6 +654,7 @@ fn lib_memory_merge_rejects_forged_view_image_without_reading() {
         None,
         None,
         true,
+        None
     );
     let reply = result.expect("合并轮照常走完");
     assert_eq!(reply, "合并完成");

@@ -28,9 +28,44 @@ extern "C" fn on_sigint(_sig: libc::c_int) {
     TOOL_CANCEL.store(true, Ordering::SeqCst);
 }
 
+/// 020 A04：启动图片参数解析——`-i <路径>`、`--image <路径>`、`--image=<路径>`；
+/// 每个值按逗号拆分，重复参数按出现顺序累积。其余参数不识别也不报错
+///（不新增位置参数提示词）。值缺失按明确错误退出。
+fn parse_image_args(args: impl Iterator<Item = String>) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut out = Vec::new();
+    let mut iter = args.peekable();
+    while let Some(arg) = iter.next() {
+        let value = if let Some(v) = arg.strip_prefix("--image=") {
+            Some(v.to_string())
+        } else if arg == "-i" || arg == "--image" {
+            match iter.next() {
+                Some(v) => Some(v),
+                None => return Err(format!("{arg} 缺少图片路径参数")),
+            }
+        } else {
+            continue;
+        };
+        for part in value.expect("已取值").split(',') {
+            let part = part.trim();
+            if !part.is_empty() {
+                out.push(std::path::PathBuf::from(part));
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn main() {
     // .env 是环境变量的可选来源：启动时载入，已存在的变量不覆盖
     catalog::load_dotenv_from(std::path::Path::new(".env"));
+    // 020 A04：-i/--image 启动图片（TUI 存宿主待就绪提交；行式随首条输入）
+    let startup_images = match parse_image_args(std::env::args().skip(1)) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("错误：{e}");
+            std::process::exit(2);
+        }
+    };
 
     // 008-P3 交互入口切换：交互终端且 TERM 可用 → TUI（Owned 全屏）；否则行式原路径。
     // TUI 模式跳过开场横幅（J10 显示层替代——母本 startup/empty state 接管首屏）。
@@ -55,7 +90,8 @@ fn main() {
             println!("错误：{e}");
             std::process::exit(1);
         }
-        let exit = run_tui(host.clone(), startup_notices);
+        // 020：启动图片直传驱动（就绪后提交一次）
+        let exit = run_tui(host.clone(), startup_images.clone(), startup_notices);
         // 008：退出先取消仍在运行的 turn（016：取消只停止等待与后续调用，
         // 不终止已启动进程）；随后显式关闭全部进程会话并回收，再排空会话——
         // 不依赖析构（TUI 入口使用 process::exit）。
@@ -86,6 +122,8 @@ fn main() {
     // 006：会话历史（内存态）；007：默认自动追加落盘，/resume 恢复继续
     let mut history: Vec<HistoryItem> = Vec::new();
     let mut autosave = session::Session::new(session::sessions_dir());
+    // 020：-i/--image 启动图片路径（正式提交时读取——首条可提交输入后作废）
+    let mut pending_images: Vec<std::path::PathBuf> = startup_images;
     // 016：进程会话管理器（当前对话；/resume 成功切换后重置）
     let procs = ProcessManager::new();
     // 013-M7：threads 登记推进器（跨轮保持缓存库连接；enabled=false 零副作用）
@@ -109,7 +147,7 @@ fn main() {
 
                 // 空输入不打印空行,直接继续循环
                 if !input.is_empty() {
-                    if handle_input(
+                    let quit = handle_input(
                         &agent,
                         &mut rl,
                         input,
@@ -117,15 +155,31 @@ fn main() {
                         &mut autosave,
                         &mut registrar,
                         &procs,
-                    ) {
+                        &mut pending_images,
+                    );
+                    if quit {
                         break;
                     }
                 }
             }
             // Ctrl+C:打断当前输入,直接退出
             Err(ReadlineError::Interrupted) => break,
-            // Ctrl+D / EOF:正常退出
-            Err(ReadlineError::Eof) => break,
+            // Ctrl+D / EOF:正常退出；020：仍有启动图片时允许纯图恰一次（A04）
+            Err(ReadlineError::Eof) => {
+                if !pending_images.is_empty() {
+                    let _ = handle_input(
+                        &agent,
+                        &mut rl,
+                        "",
+                        &mut history,
+                        &mut autosave,
+                        &mut registrar,
+                        &procs,
+                        &mut pending_images,
+                    );
+                }
+                break;
+            }
             // 其他读取错误(如管道输入含非法 UTF-8):不 panic,按退出处理
             Err(_) => break,
         }
@@ -144,6 +198,7 @@ fn main() {
 /// 008-P3：组装驱动钩子并运行 TUI。
 fn run_tui(
     host: std::sync::Arc<tui_host::TuiHost>,
+    startup_images: Vec<std::path::PathBuf>,
     startup_notices: Vec<String>,
 ) -> Result<(), String> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -154,10 +209,26 @@ fn run_tui(
         let host_for_turn = host.clone();
         let host_for_cmd = host.clone();
         let host_cancel = host.clone();
+        // 020：-i/--image 启动图片→驱动就绪后的首次提交（纯图一次）
+        let initial_images = startup_images;
+        let initial_submission = (!initial_images.is_empty()).then(|| {
+            tchat_tui::chat_driver::SubmittedTurn {
+                text: String::new(),
+                local_images: initial_images
+                    .into_iter()
+                    .map(|path| tchat_tui::bottom_pane::LocalImageAttachment {
+                        placeholder: String::new(),
+                        path,
+                    })
+                    .collect(),
+                text_elements: Vec::new(),
+            }
+        });
         let hooks = tchat_tui::chat_driver::DriverHooks {
-            spawn_turn: Box::new(move |input, tx| host_for_turn.spawn_turn(input, tx)),
+            spawn_turn: Box::new(move |submission, tx| host_for_turn.spawn_turn(submission, tx)),
             run_command: Box::new(move |full| host_for_cmd.run_command(full)),
             set_cancel_requested: Box::new(move |requested| host_cancel.set_cancel(requested)),
+            initial_submission,
             startup_notices,
         };
         let result = tchat_tui::chat_driver::run_interactive(hooks).await;
@@ -355,6 +426,7 @@ fn read_question_line(prompt: &str) -> Result<String, terminal_chat::user_input:
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_input(
     agent: &ureq::Agent,
     rl: &mut DefaultEditor,
@@ -363,6 +435,7 @@ fn handle_input(
     autosave: &mut session::Session,
     registrar: &mut terminal_chat::memory::runner::ThreadRegistrar,
     procs: &ProcessManager,
+    startup_images: &mut Vec<std::path::PathBuf>,
 ) -> bool {
     if let Some(rest) = input.strip_prefix('/') {
         if let Some(arg) = rest.strip_prefix("save") {
@@ -399,7 +472,7 @@ fn handle_input(
         }
         return false;
     }
-    cmd_chat(agent, rl, input, history, autosave, registrar, procs)
+    cmd_chat(agent, rl, input, history, autosave, registrar, procs, startup_images)
 }
 
 /// `/save <名称>`：当前全部历史整体快照到 sessions/<名称>.jsonl（原子替换）。
@@ -495,6 +568,7 @@ fn build_dict() -> Option<catalog::FinalDict> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_chat(
     agent: &ureq::Agent,
     rl: &mut DefaultEditor,
@@ -503,7 +577,10 @@ fn cmd_chat(
     autosave: &mut session::Session,
     registrar: &mut terminal_chat::memory::runner::ThreadRegistrar,
     procs: &ProcessManager,
+    startup_images: &mut Vec<std::path::PathBuf>,
 ) -> bool {
+    // 020：启动图片一次机会——进入聊天轮即作废（无论成败）；命令/退出不进此处
+    let startup_paths: Vec<std::path::PathBuf> = std::mem::take(startup_images);
     let Some(dict) = build_dict() else {
         return false;
     };
@@ -524,6 +601,38 @@ fn cmd_chat(
             });
             match gate {
                 Ok(()) => {
+                    // 020：启动图片正式提交准备（能力检查先于文件打开；一次机会，
+                    // 失败＝明确报错、零请求、不自动转纯文本）。合成前置标记文本。
+                    let (turn_input, payload_ref): (String, Option<terminal_chat::prompt::UserImagePayload>) =
+                        if startup_paths.is_empty() {
+                            (input.to_string(), None)
+                        } else {
+                            match terminal_chat::view_image::prepare_user_images(
+                                &startup_paths,
+                                catalog::supports_image_input(&model),
+                                None,
+                            ) {
+                                Ok(urls) => {
+                                    let (content, elements) =
+                                        terminal_chat::view_image::compose_cli_user_message(
+                                            input,
+                                            urls.len(),
+                                        );
+                                    (
+                                        content,
+                                        Some(terminal_chat::prompt::UserImagePayload {
+                                            data_urls: urls,
+                                            text_elements: elements,
+                                        }),
+                                    )
+                                }
+                                Err(e) => {
+                                    say(&format!("错误：启动图片未发送：{e}"));
+                                    return exit_host;
+                                }
+                            }
+                        };
+                    let payload_ref = payload_ref.as_ref();
                     // 013-M7：记忆配置每轮装载（manual 段；无段＝默认关闭）。
                     let mem_config = terminal_chat::memory::runner::load_memories_config();
                     let user_dir = catalog::user_dir();
@@ -647,7 +756,7 @@ fn cmd_chat(
                     };
                     let outcome = turn::run_user_turn_with_context_and_host(
                         history,
-                        input,
+                        &turn_input,
                         &mut sender,
                         &mut notify,
                         Some(&TOOL_CANCEL),
@@ -670,6 +779,8 @@ fn cmd_chat(
                         },
                         // 019：每用户轮固定能力快照（声明与执行共用）
                         catalog::supports_image_input(&model),
+                        // 020：行式用户图片（-i 启动附件，首轮后无新入口）
+                        payload_ref,
                     );
                     unsafe {
                         libc::signal(libc::SIGINT, libc::SIG_DFL);

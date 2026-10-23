@@ -129,9 +129,9 @@ pub(crate) use view_stack::CenteredView;
 pub(crate) use view_stack::DialogOverlay;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LocalImageAttachment {
-    pub(crate) placeholder: String,
-    pub(crate) path: PathBuf,
+pub struct LocalImageAttachment {
+    pub placeholder: String,
+    pub path: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,7 +149,9 @@ mod chat_composer_history;
 // 008-TRIM: mod custom_prompt_view（008 §1 裁剪清单：无本地事件源）
 // 008-TRIM: mod effort_status_line（008 §1 裁剪清单：无本地事件源）
 // 008-TRIM: mod experimental_features_view（008 §1 裁剪清单：无本地事件源）
-// 008-TRIM: mod file_search_popup（008 §1 裁剪清单：无本地事件源）
+// 020 A02 恢复：@ 文件搜索弹窗（上游 d138398 的本地适配——同步搜索）
+mod file_search_popup;
+pub(crate) use file_search_popup::{FileMatch, FileSearchPopup};
 mod footer;
 mod list_selection_view;
 // 008-TRIM: mod memories_settings_view（008 §1 裁剪清单：无本地事件源）
@@ -331,6 +333,33 @@ pub(crate) struct BottomPaneParams {
     pub(crate) animations_enabled: bool,
     pub(crate) effects: codex_config::types::TuiEffects,
     // 008-TRIM: skills 字段（裁剪功能，008 §1）
+}
+/// 020 §2.3：剔除系统生成的附件标记字面（`[Image #N]` 及其尾随空格）——
+/// 恢复重建时统一按附件顺序重新生成标记；用户正文其余部分原样保留。
+fn strip_system_image_markers(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find("[Image #") {
+        let after = &rest[pos..];
+        let Some(close) = after.find(']') else {
+            break;
+        };
+        let digits = &after["[Image #".len()..close];
+        if !digits.bytes().all(|b| b.is_ascii_digit()) || digits.is_empty() {
+            // 非系统形态：原样保留该片段
+            out.push_str(&rest[..pos + "[Image #".len()]);
+            rest = &rest[pos + "[Image #".len()..];
+            continue;
+        }
+        out.push_str(&rest[..pos]);
+        let mut tail = &after[close + 1..];
+        if tail.starts_with(' ') {
+            tail = &tail[1..];
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    out.trim().to_string()
 }
 
 impl BottomPane {
@@ -1836,6 +1865,64 @@ impl BottomPane {
 
     // 008-TRIM: fn on_file_search_result（file search，008 §1 裁剪：无本地事件源）
 
+    
+/// 020 §2.3：提交被拒后恢复草稿——被取出的 D0（文本＋附件路径）与当前
+    /// 新草稿 Dnew 按 Codex 顺序合并（D0 在前、Dnew 换行接续），附件合并后由
+    /// composer 重建占位符并整体重编号；不复制进队列。
+    pub(crate) fn restore_rejected_submission(
+        &mut self,
+        text: String,
+        image_paths: Vec<PathBuf>,
+    ) {
+        // Dnew：当前草稿（文本＋附件元素）。元素字面按区间剔除——重建时
+        // 统一按合并后的附件顺序生成新标记（旧字面若保留会成为普通文本
+        // 与新元素重复编号；审查修复：原先直接拼接导致重编号失效）。
+        let dnew_text = self.composer.current_text();
+        let dnew_elements = self.composer.text_elements();
+        let mut clean_dnew = dnew_text.clone();
+        for el in dnew_elements.iter().rev() {
+            let end = el.byte_range.end.min(clean_dnew.len());
+            if el.byte_range.start <= end {
+                clean_dnew.replace_range(el.byte_range.start..end, "");
+            }
+        }
+        let clean_dnew = clean_dnew.trim().to_string();
+        let dnew_images = self.composer.local_images();
+        let mut paths = image_paths;
+        paths.extend(dnew_images.into_iter().map(|a| a.path));
+        // 合并文本＝按附件数重建前置标记（元素化）＋D0 正文（剔除旧标记
+        // 字面——D0 的标记由系统生成，重建后统一编号）＋换行接 Dnew 正文。
+        let clean_d0 = strip_system_image_markers(&text);
+        let mut merged = String::new();
+        let mut elements: Vec<codex_protocol::user_input::TextElement> = Vec::new();
+        use codex_protocol::user_input::{ByteRange, TextElement};
+        for n in 1..=paths.len() {
+            if !merged.is_empty() {
+                merged.push(' ');
+            }
+            let start = merged.len();
+            let marker = codex_protocol::models::local_image_label_text(n).to_string();
+            merged.push_str(&marker);
+            elements.push(TextElement::new(
+                ByteRange { start, end: merged.len() },
+                Some(marker),
+            ));
+        }
+        if !clean_d0.is_empty() {
+            if !merged.is_empty() {
+                merged.push(' ');
+            }
+            merged.push_str(&clean_d0);
+        }
+        if !clean_dnew.is_empty() {
+            merged.push('\n');
+            merged.push_str(&clean_dnew);
+        }
+        self.composer.set_text_content(merged, elements, paths);
+        self.composer.move_cursor_to_end();
+        self.request_redraw();
+    }
+
     pub(crate) fn attach_image(&mut self, path: PathBuf) {
         if !self.has_active_view() {
             self.composer.attach_image(path);
@@ -2126,6 +2213,39 @@ mod tests {
 
     pub(super) fn test_pane(app_event_tx: AppEventSender) -> BottomPane {
         test_pane_with_disable_paste_burst(app_event_tx, /*disable_paste_burst*/ false)
+    }
+
+    /// 020 §2.3/A10（审查补充）：拒绝恢复的 D0＋Dnew 合并——已有新草稿时
+    /// D0 在前、Dnew 换行接续，附件合并后整体重编号。
+    #[test]
+    fn restore_rejected_submission_merges_d0_then_dnew_and_renumbers() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let mut pane = test_pane(crate::app_event_sender::AppEventSender::new(tx));
+        let img_dir = tempfile::TempDir::new().unwrap();
+        let mk = |name: &str| img_dir.path().join(name);
+        // Dnew：用户在准备期间新写的草稿（含一个新附件）
+        pane.attach_image(mk("dnew.png"));
+        pane.composer.handle_paste("新草稿".into());
+        // 恢复被拒的 D0（文本＋两个附件路径）
+        pane.restore_rejected_submission(
+            "[Image #1] D0 文本".to_string(),
+            vec![mk("d0a.png"), mk("d0b.png")],
+        );
+        let text = pane.composer_text();
+        assert!(
+            text.contains("D0 文本") && text.contains("新草稿"),
+            "D0＋Dnew 都在场：{text:?}"
+        );
+        let d0_pos = text.find("D0 文本").expect("D0");
+        let dnew_pos = text.find("新草稿").expect("Dnew");
+        assert!(d0_pos < dnew_pos, "合并顺序 D0 前 Dnew 后：{text:?}");
+        // 附件合并后重编号：D0 两张在前（#1/#2），Dnew 一张成 #3
+        let paths = pane.composer_local_image_paths();
+        assert_eq!(paths.len(), 3, "三附件合并：{paths:?}");
+        assert_eq!(paths[0], mk("d0a.png"));
+        assert_eq!(paths[1], mk("d0b.png"));
+        assert_eq!(paths[2], mk("dnew.png"));
+        assert!(text.contains("[Image #1]") && text.contains("[Image #3]"), "重编号：{text:?}");
     }
 
     fn test_pane_with_disable_paste_burst(

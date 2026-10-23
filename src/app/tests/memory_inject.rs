@@ -164,6 +164,8 @@ fn m6_budget_preserves_utf8_ends_and_excludes_marker_and_rules() {
 
 fn user(content: &str) -> HistoryItem {
     HistoryItem::Text(HistoryMessage {
+        images: None,
+        text_elements: Vec::new(),
         role: HistoryRole::User,
         content: content.into(),
         user_input_event: None,

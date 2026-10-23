@@ -128,3 +128,21 @@
 - CLI 图片入口讨论（2026-10-23，仅文档）：Codex 的 `@` 选图直接构造用户图片附件，不触发 `view_image` 工具；两者可共享读取和图片准备函数，但用户消息与工具结果的来源、时机及历史关联仍须区分。六个入口的计数、源码与待补范围集中见 [019 §9](docs/specs/019-view-image.md#9-cli-图片输入补充讨论2026-10-23)。
 - CLI 图片细节复核（2026-10-23，仅文档）：多入口共用核心仍要保留两个消息出口；附件编号、删除、排队与恢复须绑定完整消息。Codex 的 `snapshot_local_images` 仅随远程工作区启用，32 MiB 是其传输预算，不能直接套成本地默认契约。结构与具体规则统一见 [019 §9.4／§9.6](docs/specs/019-view-image.md#94-多个入口共用核心与两种出口)。
 - CLI 图片默认方案（2026-10-23，用户要求优先复用 Codex，仅文档）：本地队列保存路径，正式提交时读取并准备后入史；不新增全队列图片字节限额，继续用原请求上限；用户附件映射上游 images／text_elements 字段；临时 PNG 沿用 keep 保留，不自加 GC。此前“入队即冻结”和四项待定建议已由 [019 §9.6](docs/specs/019-view-image.md#96-四项具体规则优先复用-codex2026-10-23)替代，不需要用户再逐项审核。
+- 020 规格准备（2026-10-23，未实施）：用户直接附图已从 019 §9 提炼为[独立五节规格](docs/specs/020-cli-image-input.md)，019 保留旧锚点索引和工具实施证据。入史前失败恢复稿与后来草稿按 Codex 合并，入史后请求失败保留历史且不自动重发；任务基线按准备时真实 main 核实，分支及工作保护见[准备记录](docs/records/2026-10-23-020-cli-image-input-spec-prep.md)。
+
+## 020 CLI 用户附图实施经验（2026-10-23）
+
+- 019 记过的坑再次复发并加深：机械脚本给 `HistoryMessage {` 构造点插新字段时，若模式匹配点（matches!/if let/filter）带 rest `..`，插入的 `images: None,` 是合法"匹配 None"子模式——编译不报错、行为静默收窄（首 user 识别、事件过滤全部失配）。修复脚本必须先剥除候选两行再判"是否含构造值调用"，且剥除自身行后判定，否则误插行会被当成构造证据而漏修；嵌套 `Some(X { .. })` 需栈式配对而非首个 `}`。手修破损后要 grep 重复块——替换脚本失败重跑可能造成 `..` 后重复残片。
+- PTY 时序两个真坑：① bracketed paste 之后立刻 Enter 会被 paste-enter 抑制窗口（120ms）吞成换行——母本行为不是 bug，测试需 sleep 后再提交；② 一次 `send_raw(b"first\r")` 多字符+回车会落入 8ms 突发窗口，Enter 同样被吞——文本与回车必须分开发送并留间隔。
+- 全新 Cargo target-dir 的全 workspace 测试编译在本环境超过单命令时限，后台跑完拿到的统计可能为空（被时限杀但退出码包装为 0）——先 `cargo check --workspace --all-targets` 预热或拆分跑，验证统计以日志文件内容为准，不信空输出的"成功"。
+- `@` 选图类入口依赖被整层裁剪的弹窗体系（ActivePopup/FileSearchPopup/completion 插入链）时，"恢复入口"实际等于重建宿主 glue 层——排期时按重建估，不要按"复用"估。
+
+## 020 A02 @ 选图补实施经验（2026-10-23 第二轮）
+
+- 恢复被 008 裁剪的弹窗链，实际改动面集中在四处：popup 本体（新文件）、`ActivePopup` 变体、composer 的 sync/键路由/插入三函数、popup 区域渲染（layout 的 `popup_rect` 一直在，只是 `popup: _` 丢弃）——基建（ScrollState/picker_rows/DismissedToken/completion_target）全部保留，恢复成本远低于重建。
+- composer 单测逐字符 `handle_key_event(Char)` 输入会被 paste-burst 缓冲（text 恒空、sync 无从触发）——测试输入走 `handle_paste` 通道；这同时提醒：真实用户敲键不会触发 burst（间隔>8ms），只有测试连发会。
+- PTY 断言请求消息时注意 020 投影语义：无图用户消息保持**纯字符串** content（不是数组）——"找数组消息的 text"会漏掉纯文本轮；VT 屏幕断言对"已删除元素"不可靠（残影帧），删除/重编号类断言应以最终请求字节为准。
+- TUI 进程退出码断言在"turn 阻塞于问询等待"时不可达（框架看门狗 SIGKILL→code None）；问询场景的收尾用 Esc 中断＋不硬断言退出码，退出语义由专门用例（S93 系列）持有。
+
+- 020 第二轮教训：给既有弹窗体系加"新弹窗变体"时，token 检测必须沿用上游的 editable 判定（`prefixed_token_range_is_editable`）——裸 `current_prefixed_token_range` 会匹配已绑定的 `@mention` 原子元素，既有"绑定 mention 不阻塞方向键导航"契约即被打破（全量回归抓到）；弹窗键分支早退还必须保留外层统一 `sync_popups`，否则候选停留旧 query。
+- PTY/集成测试之外，"合并重编号"这类状态重建逻辑必须有直接断言的组件测试：S110/S102 的 E2E 中 Dnew 恒为空，合并分支零覆盖，增量审查一句话就点破了"实现方向正确但无证据"。

@@ -46,6 +46,8 @@ fn now_ms() -> i64 {
 
 fn text(role: HistoryRole, content: &str) -> HistoryItem {
     HistoryItem::Text(HistoryMessage {
+        images: None,
+        text_elements: Vec::new(),
         role,
         content: content.to_string(),
         user_input_event: None,

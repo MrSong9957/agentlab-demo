@@ -134,12 +134,18 @@ enum Entry {
 /// detail 恰为 `high`、解码字节不超过准备后图片上限的本地图片 data URL。
 fn image_payload_ok(item: &HistoryItem) -> bool {
     let HistoryItem::ToolResult { image: Some(img), .. } = item else {
-        return true;
+        return user_images_payload_ok(item);
     };
     if img.detail != "high" {
         return false;
     }
-    let Some(rest) = img.image_url.strip_prefix("data:") else {
+    valid_local_image_data_url(&img.image_url)
+}
+
+/// 020 §2.2：本地图片 data URL 校验（用户附件与工具载荷共用）——
+/// `data:image/(png|jpeg|gif|webp);base64,` 形态、可解码、不超过准备后上限。
+fn valid_local_image_data_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("data:") else {
         return false; // 远程 URL 或其他前缀
     };
     let Some((meta, b64)) = rest.split_once(',') else {
@@ -156,6 +162,53 @@ fn image_payload_ok(item: &HistoryItem) -> bool {
         Ok(bytes) => bytes.len() <= crate::view_image::MAX_PREPARED_IMAGE_BYTES,
         Err(_) => false,
     }
+}
+
+/// 020 §2.2：用户消息图片字段校验（无图/无标记恒通过）：
+/// - 仅 User 角色可携带 images／非空 text_elements；问询来源标记
+///   （`user_input_event`）与图片互斥（020 §2.4：问询回答不带附件）；
+/// - images 每项为有界有效的本地图片 data URL；
+/// - text_elements 区间是 content 的有效 UTF-8 字节边界、按序不重叠；
+///   区间文字恰为 `[Image #N]`，N 指向存在的图片（1..=len）且不重复绑定。
+fn user_images_payload_ok(item: &HistoryItem) -> bool {
+    let HistoryItem::Text(m) = item else { return true };
+    let images = m.images.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+    if images.is_empty() && m.text_elements.is_empty() {
+        return true;
+    }
+    if m.role != HistoryRole::User {
+        return false; // 仅用户消息可携带图片附件
+    }
+    if m.user_input_event.is_some() && !images.is_empty() {
+        return false; // 问询回答记录不带附件（020 §2.4）
+    }
+    if !images.iter().all(|url| valid_local_image_data_url(url)) {
+        return false;
+    }
+    let mut last_end = 0usize;
+    let mut bound = std::collections::HashSet::new();
+    for el in &m.text_elements {
+        let (start, end) = (el.byte_range.start, el.byte_range.end);
+        if start < last_end || end > m.content.len() || start > end {
+            return false; // 重叠/越界/乱序
+        }
+        if !m.content.is_char_boundary(start) || !m.content.is_char_boundary(end) {
+            return false; // 必须是有效 UTF-8 字节边界
+        }
+        let marked = &m.content[start..end];
+        let Some(n) = marked
+            .strip_prefix("[Image #")
+            .and_then(|rest| rest.strip_suffix(']'))
+            .and_then(|n| n.parse::<usize>().ok())
+        else {
+            return false; // 标记文字形态
+        };
+        if n == 0 || n > images.len() || !bound.insert(n) {
+            return false; // 越界或重复绑定
+        }
+        last_end = end;
+    }
+    true
 }
 
 /// 批内/跨批 id 校验：同一 id 在行内或更早批出现 → 该行按坏行（§3 加载规则 3）。
@@ -903,6 +956,8 @@ mod tests {
 
     fn text_user(content: &str) -> HistoryItem {
         HistoryItem::Text(HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: HistoryRole::User,
             content: content.to_string(),
             user_input_event: None,
@@ -943,7 +998,9 @@ mod tests {
         };
         let mut history = vec![
             text_user("已提交一"),
-            HistoryItem::Text(HistoryMessage { role: HistoryRole::Assistant, content: "已提交二".into(), user_input_event: None }),
+            HistoryItem::Text(HistoryMessage {
+            images: None,
+            text_elements: Vec::new(), role: HistoryRole::Assistant, content: "已提交二".into(), user_input_event: None }),
             text_user("第三条写入将失败"),
         ];
         // 第三条：write_all ENOSPC → set_len EINVAL → 停用＋明确报错（一次）

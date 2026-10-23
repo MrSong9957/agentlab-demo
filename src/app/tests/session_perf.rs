@@ -315,6 +315,8 @@ fn perf_tiers_baseline_driven() {
         let t0 = Instant::now();
         for i in 0..N {
             h.push(HistoryItem::Text(HistoryMessage {
+                images: None,
+                text_elements: Vec::new(),
                 role: HistoryRole::User,
                 content: format!("perf-append-{i:04}-{filler}"),
                 user_input_event: None,

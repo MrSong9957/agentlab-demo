@@ -306,7 +306,7 @@ use ratatui::widgets::Block;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::StatefulWidgetRef;
 use ratatui::widgets::Widget;
-// 008-TRIM: use ratatui::widgets::WidgetRef;（弹窗 render_ref，008 §1 裁剪：无本地事件源）
+use ratatui::widgets::WidgetRef as _; // 020 A02 恢复：弹窗渲染
 
 // 008-TRIM: use codex_protocol::openai_models::ReasoningEffort;（effort 动画，008 §1 裁剪）
 
@@ -321,7 +321,7 @@ use super::chat_composer_history::HistorySearchResult;
 // 008-TRIM: use super::effort_ignition::IgnitionStyle;（裁剪功能，008 §1）
 // 008-TRIM: use super::effort_status_line::EFFORT_STATUS_LINE_FRAME_TICK;（裁剪功能，008 §1）
 // 008-TRIM: use super::effort_status_line::EffortStatusLineTransition;（裁剪功能，008 §1）
-// 008-TRIM: use super::file_search_popup::FileSearchPopup;（裁剪功能，008 §1）
+// 020 A02 恢复：@ 文件搜索弹窗（经 bottom_pane re-export）
 use super::footer::CollaborationModeIndicator;
 use super::footer::FooterMode;
 use super::footer::FooterProps;
@@ -406,7 +406,8 @@ use self::footer_state::FooterState;
 pub(crate) use self::footer_state::TranscriptFooter;
 use self::history_search::HistorySearchSession;
 use self::popup_state::ActivePopup;
-// 008-TRIM: use self::popup_state::DismissedToken;（弹窗 Esc 关闭标记，008 §1 裁剪）
+use self::popup_state::DismissedToken; // 020 A02 恢复：Esc 关闭标记
+use crate::bottom_pane::FileSearchPopup; // 020 A02 恢复：@ 文件搜索弹窗
 use self::popup_state::PopupState;
 use self::slash_input::SlashInput;
 use self::slash_input::SlashValidation;
@@ -1832,8 +1833,18 @@ impl ChatComposer {
             return (InputResult::None, true);
         }
 
-        // 008-TRIM: Command/File/Skill/MentionV2 弹窗键路由分支（mention/file/command
-        // 弹窗，008 §1 裁剪：无本地事件源）；ActivePopup 仅余 None 变体。
+        // 020 A02：@ 文件搜索弹窗打开时按键归弹窗（↑↓ 导航/Tab/Enter 选中/
+        // Esc 关闭；其余键照常编辑）。结果与普通路径同样经 reset＋sync——
+        // 弹窗内容必须跟随每次编辑后的 token（审查修复：早退曾跳过 sync，
+        // 导致候选停留旧 query、光标离开 token 不关窗）。
+        if matches!(self.popups.active, ActivePopup::File(_)) {
+            let result = self.handle_key_event_with_file_popup(key_event);
+            self.reset_vim_mode_after_successful_dispatch(&result.0);
+            self.sync_popups();
+            return result;
+        }
+        // 008-TRIM: Command/Skill/MentionV2 弹窗键路由分支（008 §1 裁剪：
+        // 无本地事件源）；File 弹窗已由 020 A02 恢复。
         let result = self.handle_key_event_without_popup(key_event);
         self.reset_vim_mode_after_successful_dispatch(&result.0);
         // Update (or hide/show) popup after processing the key.
@@ -1960,7 +1971,43 @@ impl ChatComposer {
             || lower.ends_with(".webp")
     }
 
-    // 008-TRIM: fn advance_past_completion_separator / dismiss_completed_prefixed_token /
+    /// 020 A02 恢复（上游原样）：选中插入后把光标移过补全分隔符（已有空格
+    /// 则复用，否则补一个；紧跟后缀时保位再补空格）。
+    fn advance_past_completion_separator(&mut self) {
+        let cursor = self.draft.textarea.cursor();
+        let existing_separator_len = self.draft.textarea.text()[cursor..]
+            .chars()
+            .next()
+            .filter(|c| {
+                c.is_whitespace()
+                    && !matches!(
+                        *c,
+                        '\n' | '\r'
+                            | '\u{000B}'
+                            | '\u{000C}'
+                            | '\u{0085}'
+                            | '\u{2028}'
+                            | '\u{2029}'
+                    )
+            })
+            .map(char::len_utf8);
+        if let Some(separator_len) = existing_separator_len {
+            let after_separator = cursor + separator_len;
+            let separator_precedes_suffix = self.draft.textarea.text()[after_separator..]
+                .chars()
+                .next()
+                .is_some_and(|c| !c.is_whitespace());
+            if separator_precedes_suffix {
+                self.draft.textarea.insert_str_at(cursor, " ");
+            } else {
+                self.draft.textarea.set_cursor(after_separator);
+            }
+        } else {
+            self.draft.textarea.insert_str_at(cursor, " ");
+        }
+    }
+
+    // 008-TRIM: fn dismiss_completed_prefixed_token /
     // insert_selected_file_path（file search/mention 补全插入链，008 §1 裁剪：无本地事件源）
 
     fn trim_text_elements(
@@ -3074,13 +3121,206 @@ impl ChatComposer {
             self.popups.active = ActivePopup::None;
             return;
         }
-        self.popups.dismissed_file_token = None;
-        self.popups.dismissed_mention_token = None;
+        // 020 A02：@ 文件搜索弹窗同步——当前光标所在 `@token` 驱动（存在则
+        // 同步搜索并开窗/更新；不存在则关闭）。Esc 关闭的 token 保持关闭
+        //（dismissed 与当前 token 一致时不重开；编辑 token 后自动清 dismiss）。
+        self.sync_file_popup();
+        // 编辑到 dismissed 之外的 token＝dismissal 失效（清标记允许重开）
+        let dismissal_stale = self
+            .current_file_token()
+            .is_some_and(|(range, query)| {
+                self.popups
+                    .dismissed_file_token
+                    .as_ref()
+                    .is_none_or(|d| !d.matches(&self.draft.textarea, &range, query.as_str()))
+            });
+        if dismissal_stale {
+            self.popups.dismissed_file_token = None;
+            self.popups.dismissed_mention_token = None;
+        }
     }
 
-    // 008-TRIM: fn sync_command_popup / sync_file_search_popup / sync_mention_popup /
+    /// 020 A02：当前光标所在的**可编辑** `@token`（无则 None）。已完成/绑定的
+    /// mention 元素（如 `@figma` 原子元素）不可编辑——不触发文件弹窗（既有
+    /// `bound_at_mentions_do_not_block_arrow_navigation` 契约）。
+    fn current_file_token(&self) -> Option<(std::ops::Range<usize>, String)> {
+        let (range, token) = completion_target::current_prefixed_token_range(
+            &self.draft.textarea,
+            '@',
+            /*allow_empty*/ false,
+        )?;
+        if !completion_target::prefixed_token_range_is_editable(
+            &self.draft.textarea,
+            '@',
+            &range,
+            &token,
+        ) {
+            return None;
+        }
+        Some((range, token))
+    }
+
+    /// 020 A02：@ 文件搜索弹窗同步（上游 sync_file_search_popup 的本地同步版：
+    /// 直接在 composer 内做有界目录扫描，不发送异步搜索事件）。
+    fn sync_file_popup(&mut self) {
+        let Some((range, query)) = self.current_file_token() else {
+            // 不在 @token 上：关闭文件弹窗（不影响未来其他弹窗）
+            if matches!(self.popups.active, ActivePopup::File(_)) {
+                self.popups.active = ActivePopup::None;
+                self.popups.current_file_query = None;
+            }
+            return;
+        };
+        // Esc 关闭中的 token 不重开
+        if self
+            .popups
+            .dismissed_file_token
+            .as_ref()
+            .is_some_and(|d| d.matches(&self.draft.textarea, &range, &query))
+        {
+            self.popups.active = ActivePopup::None;
+            return;
+        }
+        if self.popups.current_file_query.as_deref() == Some(query.as_str())
+            && matches!(self.popups.active, ActivePopup::File(_))
+        {
+            return; // 同查询已同步
+        }
+        let matches = local_file_search(&query);
+        match &mut self.popups.active {
+            ActivePopup::File(popup) => {
+                popup.set_query(&query);
+                popup.set_matches(matches);
+            }
+            _ => {
+                let mut popup = FileSearchPopup::new();
+                popup.set_query(&query);
+                popup.set_matches(matches);
+                self.popups.active = ActivePopup::File(popup);
+            }
+        }
+        self.popups.current_file_query = Some(query);
+        self.popups.dismissed_file_token = None;
+    }
+
+    /// 020 A02：@ 弹窗键处理（上游 handle_key_event_with_file_popup 的本地适配）。
+    fn handle_key_event_with_file_popup(&mut self, key_event: KeyEvent) -> (InputResult, bool) {
+        match key_event {
+            KeyEvent {
+                code: KeyCode::Up, ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('p'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                if let ActivePopup::File(popup) = &mut self.popups.active {
+                    popup.move_up();
+                }
+                (InputResult::None, true)
+            }
+            KeyEvent {
+                code: KeyCode::Down, ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('n'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                if let ActivePopup::File(popup) = &mut self.popups.active {
+                    popup.move_down();
+                }
+                (InputResult::None, true)
+            }
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            } => {
+                if let Some((range, query)) = self.current_file_token() {
+                    self.popups.dismissed_file_token =
+                        Some(DismissedToken::new(&self.draft.textarea, range, query));
+                }
+                self.popups.active = ActivePopup::None;
+                (InputResult::None, true)
+            }
+            KeyEvent {
+                code: KeyCode::Tab, ..
+            }
+            | KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                let selected = match &self.popups.active {
+                    ActivePopup::File(popup) => popup.selected_match().cloned(),
+                    _ => None,
+                };
+                let Some(sel_path) = selected else {
+                    self.popups.active = ActivePopup::None;
+                    return if key_event.code == KeyCode::Enter {
+                        self.handle_key_event_without_popup(key_event)
+                    } else {
+                        (InputResult::None, true)
+                    };
+                };
+                let sel_path = sel_path.to_string_lossy().to_string();
+                if let Some((token_range, _)) = self.current_file_token() {
+                    self.insert_selected_file_path(token_range, &sel_path);
+                }
+                self.popups.active = ActivePopup::None;
+                (InputResult::None, true)
+            }
+            // 其余键照常编辑；结果交回外层统一 reset＋sync（跟随最新 token）
+            input => self.handle_key_event_without_popup(input),
+        }
+    }
+
+    /// 020 A02（上游 insert_selected_file_path 本地适配）：有效图片（真实解码
+    /// 验证尺寸）→ 删 token 并转附件；非图片/解码失败 → 按路径文本插入
+    ///（含空格加引号），不伪称已附图。
+    fn insert_selected_file_path(&mut self, token_range: std::ops::Range<usize>, selected_path: &str) {
+        if Self::is_image_path(selected_path) {
+            let path_buf = std::path::PathBuf::from(selected_path);
+            match image::image_dimensions(&path_buf) {
+                Ok((width, height)) => {
+                    let _ = (width, height);
+                    let start_idx = token_range.start;
+                    self.draft.textarea.replace_range(token_range, "");
+                    self.draft.textarea.set_cursor(start_idx);
+                    self.attach_image(path_buf);
+                }
+                Err(_) => {
+                    // 无效图片：保留可恢复输入并按普通路径插入，并明确提示
+                    //（A02：不伪称已附图；审查修复：原先静默回退无提示）
+                    self.show_footer_flash(
+                        Line::from(format!("不是有效图片，已按路径插入：{selected_path}")),
+                        Duration::from_secs(3),
+                    );
+                    self.insert_selected_path(token_range, selected_path);
+                }
+            }
+        } else {
+            self.insert_selected_path(token_range, selected_path);
+        }
+    }
+
+    /// 上游 insert_selected_path：替换 `@token` 为路径文本（含空格加引号）。
+    fn insert_selected_path(&mut self, token_range: std::ops::Range<usize>, path: &str) {
+        let needs_quotes = path.chars().any(char::is_whitespace);
+        let inserted = if needs_quotes && !path.contains('"') {
+            format!("\"{path}\"")
+        } else {
+            path.to_string()
+        };
+        let start_idx = token_range.start;
+        self.draft.textarea.replace_range(token_range, &inserted);
+        let end = start_idx.saturating_add(inserted.len());
+        self.draft.textarea.set_cursor(end);
+        self.advance_past_completion_separator();
+    }
+
+    // 008-TRIM: fn sync_command_popup / sync_mention_popup /
     // sync_mentions_v2_popup / mention_items / connector_brief_description /
-    // connector_description（弹窗同步与 mention 目录构建，008 §1 裁剪：无本地事件源）
+    // connector_description（弹窗同步与 mention 目录构建，008 §1 裁剪）
 
 
     fn set_has_focus(&mut self, has_focus: bool) {
@@ -3340,9 +3580,13 @@ impl ChatComposer {
             composer: composer_rect,
             remote_images: remote_images_rect,
             textarea: textarea_rect,
-            popup: _, // 008-TRIM: 弹窗区域不再渲染（008 §1 裁剪）
+            popup: popup_rect,
             footer: footer_rect,
         } = self.layout_with_options(area, options);
+        // 020 A02：@ 文件搜索弹窗渲染（popup 区由 layout 保留）
+        if let ActivePopup::File(popup) = &self.popups.active {
+            popup.render_ref(popup_rect, buf);
+        }
         self.render_status_surface(status, buf, options);
         // 008-TRIM: 弹窗 above-composer 渲染块与 shortcut overlay 渲染臂（Command/
         // File/Skill/MentionV2 弹窗与快捷键帮助层，008 §1 裁剪：无本地事件源）。
@@ -9274,5 +9518,345 @@ mod tests {
             .draw(|f| composer.render(f.area(), f.buffer_mut()))
             .unwrap();
         insta::assert_snapshot!("shutdown_in_progress", terminal.backend());
+    }
+}
+
+
+/// 020 A02：`@` 文件搜索的有界同步扫描（上游异步 file-search 服务的本地替代）。
+/// 自 `cwd` 起最多 3 层、收集上限 400 个常规文件；跳过隐藏目录与 `.git`。
+/// 结果按路径长度升序（浅层/短路径优先），查询为文件名/路径子串（大小写不敏感）。
+fn local_file_search(query: &str) -> Vec<crate::bottom_pane::FileMatch> {
+    use std::path::Path;
+    const MAX_DEPTH: usize = 3;
+    const MAX_FILES: usize = 400;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let mut all: Vec<std::path::PathBuf> = Vec::new();
+    let mut stack: Vec<(std::path::PathBuf, usize)> = vec![(cwd, 0)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth >= MAX_DEPTH || all.len() >= MAX_FILES {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            if all.len() >= MAX_FILES {
+                break;
+            }
+            let Ok(file_type) = entry.file_type() else { continue };
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            if name.starts_with('.') {
+                continue;
+            }
+            if file_type.is_dir() {
+                stack.push((path, depth + 1));
+            } else if file_type.is_file() {
+                all.push(path);
+            }
+        }
+    }
+    all.sort_by_key(|p| p.as_os_str().len());
+    if query.is_empty() {
+        return all
+            .into_iter()
+            .take(crate::bottom_pane::popup_consts::MAX_POPUP_ROWS.max(1) * 4)
+            .map(|path| crate::bottom_pane::FileMatch { path })
+            .collect();
+    }
+    let q = query.to_lowercase();
+    all.into_iter()
+        .filter(|p| p.to_string_lossy().to_lowercase().contains(&q))
+        .take(crate::bottom_pane::popup_consts::MAX_POPUP_ROWS.max(1) * 4)
+        .map(|path| crate::bottom_pane::FileMatch { path })
+        .collect()
+}
+
+// ---------- 020 A02：@ 文件搜索选图 ----------
+
+#[cfg(test)]
+mod a02_tests {
+    use super::*;
+    use crate::bottom_pane::LocalImageAttachment;
+    use tokio::sync::mpsc::unbounded_channel;
+
+    /// cwd 是进程全局——夹具目录互斥（a02 测试串行）。
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn composer() -> ChatComposer {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ false,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ false,
+        )
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn type_text(c: &mut ChatComposer, text: &str) {
+        // 逐字符按键会被 paste-burst 窗口缓冲（母本行为）——测试用粘贴通道输入
+        c.handle_paste(text.to_string());
+    }
+
+    /// 独立临时工作目录：含一张真实 PNG、一个非图片文件、一张损坏扩展名的"png"。
+    struct Dir(std::sync::MutexGuard<'static, ()>, tempfile::TempDir);
+    impl Dir {
+        fn new() -> Self {
+            let lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let dir = tempfile::tempdir().expect("tempdir");
+            // 切换 cwd 到夹具目录（local_file_search 以 cwd 为根；串行化避免并行测试互扰）
+            std::env::set_current_dir(dir.path()).expect("chdir");
+            let img = image::ImageBuffer::from_pixel(2, 2, image::Rgba([7u8, 8, 9, 255]));
+            let mut cursor = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+            std::fs::write(dir.path().join("real.png"), cursor.into_inner()).unwrap();
+            std::fs::write(dir.path().join("notes.txt"), b"txt").unwrap();
+            std::fs::write(dir.path().join("broken.png"), b"not a png").unwrap();
+            Dir(lock, dir)
+        }
+        fn path(&self) -> &std::path::Path {
+            self.1.path()
+        }
+    }
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            // 归还 cwd（回到临时根；夹具文件由 tempdir 析构清理）
+            let _ = std::env::set_current_dir(std::env::temp_dir());
+        }
+    }
+
+    /// A02-1：`@real` 输入→弹窗打开且命中真实图片；Tab 选中→token 删除、
+    /// 附件建立（占位符＋路径），文本无重复路径。
+    #[test]
+    fn at_token_opens_popup_and_tab_selects_image_as_attachment() {
+        let _dir = Dir::new();
+        let mut c = composer();
+        type_text(&mut c, "@real");
+        assert!(
+            matches!(c.popups.active, ActivePopup::File(_)),
+            "弹窗应打开"
+        );
+        let (result, _) = c.handle_key_event(key(KeyCode::Tab));
+        assert!(matches!(result, InputResult::None), "选中不提交");
+        let attachments: Vec<LocalImageAttachment> = c.local_images();
+        assert_eq!(attachments.len(), 1, "恰一个附件");
+        assert!(
+            attachments[0].path.ends_with("real.png"),
+            "路径：{:?}",
+            attachments[0].path
+        );
+        let text = c.current_text();
+        assert!(!text.contains("@real"), "token 已删除：{text:?}");
+        assert!(text.contains("[Image #1]"), "占位符编号：{text:?}");
+    }
+
+    /// A02-2：非图片候选（.txt）→按路径文本插入，不建附件、无占位符。
+    #[test]
+    fn at_token_non_image_inserts_path_text_without_attachment() {
+        let _dir = Dir::new();
+        let mut c = composer();
+        type_text(&mut c, "@notes");
+        assert!(matches!(c.popups.active, ActivePopup::File(_)));
+        let _ = c.handle_key_event(key(KeyCode::Tab));
+        assert!(c.local_images().is_empty(), "非图片不建附件");
+        let text = c.current_text();
+        assert!(text.contains("notes.txt"), "按路径插入：{text:?}");
+        assert!(!text.contains("[Image #"), "无占位符：{text:?}");
+    }
+
+    /// A02-3：损坏扩展名图片（image_dimensions 失败）→按路径文本插入＋
+    /// footer 明确提示，不伪称已附图（规格 A02"保留可恢复输入并提示"）。
+    #[test]
+    fn at_token_broken_image_falls_back_to_path_text_with_notice() {
+        let _dir = Dir::new();
+        let mut c = composer();
+        type_text(&mut c, "@broken");
+        let _ = c.handle_key_event(key(KeyCode::Tab));
+        assert!(c.local_images().is_empty(), "坏图不建附件");
+        assert!(c.current_text().contains("broken.png"));
+        // 提示：footer flash 指明已按路径插入（不冒称附图）
+        assert!(
+            c.footer.flash_visible(),
+            "应有坏图提示（footer flash）"
+        );
+    }
+
+    /// A02-4：Esc 关闭弹窗——token 未变时（仅重复 sync）不重开；编辑 token
+    /// 后 dismissal 失效、弹窗重开（上游 dismiss 语义）。
+    #[test]
+    fn esc_dismisses_and_token_edit_reopens() {
+        let _dir = Dir::new();
+        let mut c = composer();
+        type_text(&mut c, "@real");
+        assert!(matches!(c.popups.active, ActivePopup::File(_)));
+        let _ = c.handle_key_event(key(KeyCode::Esc));
+        assert!(!matches!(c.popups.active, ActivePopup::File(_)), "Esc 关闭");
+        // token 未变：再次同步不重开
+        c.sync_popups();
+        assert!(
+            !matches!(c.popups.active, ActivePopup::File(_)),
+            "同 token 不重开"
+        );
+        // 编辑 token（@realx）→ dismissed 失效 → 重开
+        type_text(&mut c, "x");
+        assert!(
+            matches!(c.popups.active, ActivePopup::File(_)),
+            "编辑 token 后重开"
+        );
+    }
+
+    /// A02-5（A08 侧）：仅输入 `@real` 不选择直接提交＝普通文本，不建附件、
+    /// 不读图；提交文本含原 token 文字。
+    #[test]
+    fn at_token_without_selection_submits_plain_text() {
+        let _dir = Dir::new();
+        let mut c = composer();
+        type_text(&mut c, "@real ");
+        // Enter：弹窗无选中（结果集非空但未按 Tab）——上游语义 Enter 无选中
+        // 走 without_popup＝提交
+        let (result, _) = c.handle_key_event(key(KeyCode::Enter));
+        match result {
+            InputResult::Submitted { text, .. } => {
+                assert!(text.contains("@real"), "原 token 文字保留：{text:?}");
+            }
+            other => panic!("应提交：{other:?}"),
+        }
+        assert!(c.local_images().is_empty(), "未选择不建附件");
+    }
+
+    // ---------- 020 A03：路径粘贴经生产入口（normalize→附件） ----------
+
+    /// 在当前 cwd（已由 Dir 切到夹具目录）下构造相对路径。
+    fn fixture_path(name: &str) -> std::path::PathBuf {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")).join(name)
+    }
+
+    fn write_real_png(path: &std::path::Path) -> Vec<u8> {
+        let img = image::ImageBuffer::from_pixel(2, 2, image::Rgba([50u8, 60, 70, 255]));
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+        let bytes = cursor.into_inner();
+        std::fs::write(path, &bytes).unwrap();
+        bytes
+    }
+
+    /// A03（生产入口）：带引号＋空格＋中文路径粘贴（bracketed paste）→
+    /// 附件建立在解码后的真实路径、原图字节不被修改。
+    #[test]
+    fn paste_quoted_space_chinese_path_attaches_real_file() {
+        let _dir = Dir::new();
+        let target = fixture_path("带 空格 图.png");
+        let original = write_real_png(&target);
+        let mut c = composer();
+        // 生产入口：带引号的完整路径（shell 形态）
+        c.handle_paste(format!("\"{}\"", target.display()));
+        let imgs = c.local_images();
+        assert_eq!(imgs.len(), 1, "引号路径建立附件");
+        assert_eq!(imgs[0].path, target, "最终路径＝解码路径");
+        assert!(c.current_text().contains("[Image #1]"), "占位符在场");
+        // 原图不被修改
+        assert_eq!(std::fs::read(&target).unwrap(), original, "原图字节不变");
+    }
+
+    /// A03（生产入口）：`file://` URL 粘贴 → 附件建立在 URL 解码后的路径。
+    #[test]
+    fn paste_file_url_attaches_decoded_path() {
+        let _dir = Dir::new();
+        let target = fixture_path("url图.png");
+        let original = write_real_png(&target);
+        let mut c = composer();
+        c.handle_paste(format!("file://{}", target.display()));
+        let imgs = c.local_images();
+        assert_eq!(imgs.len(), 1, "file URL 建立附件");
+        assert_eq!(imgs[0].path, target, "URL 解码到本地路径");
+        assert_eq!(std::fs::read(&target).unwrap(), original, "原图字节不变");
+    }
+
+    /// A03（生产入口）：shell 转义路径粘贴 → 附件建立在反转义后的路径。
+    #[test]
+    fn paste_shell_escaped_path_attaches_unescaped() {
+        let _dir = Dir::new();
+        let target = fixture_path("My 图.png");
+        let original = write_real_png(&target);
+        let mut c = composer();
+        // shlex 单 token 转义形态（反斜杠转义空格）
+        let escaped = target.display().to_string().replace(' ', "\\ ");
+        c.handle_paste(escaped);
+        let imgs = c.local_images();
+        assert_eq!(imgs.len(), 1, "转义路径建立附件");
+        assert_eq!(imgs[0].path, target, "反转义后＝真实路径");
+        assert_eq!(std::fs::read(&target).unwrap(), original, "原图字节不变");
+    }
+
+    /// A03（负例，生产入口）：多路径文本不被误吞——不建附件、原文作为
+    /// 普通文本保留（上游"单路径才转附件"语义）。
+    #[test]
+    fn paste_multi_path_text_is_not_swallowed() {
+        let _dir = Dir::new();
+        let a = fixture_path("first.png");
+        let b = fixture_path("second.png");
+        write_real_png(&a);
+        write_real_png(&b);
+        let mut c = composer();
+        c.handle_paste(format!("{} {}", a.display(), b.display()));
+        assert!(c.local_images().is_empty(), "多路径文本不建附件");
+        let text = c.current_text();
+        assert!(text.contains("first.png") && text.contains("second.png"), "文本保留：{text:?}");
+    }
+
+    /// A03（负例，生产入口）：普通文字粘贴（非路径）不建附件。
+    #[test]
+    fn paste_plain_text_never_attaches() {
+        let _dir = Dir::new();
+        let mut c = composer();
+        c.handle_paste("这是一段普通说明文字".to_string());
+        assert!(c.local_images().is_empty());
+        assert_eq!(c.current_text(), "这是一段普通说明文字");
+    }
+
+    /// A07（composer 级）：两张附件删除第一张（Home＋Delete）——元素删除、
+    /// 附件移除、剩余重编号为 1；提交只带幸存图片。
+    #[test]
+    fn delete_first_attachment_renumbers_composer_level() {
+        let _dir = Dir::new();
+        let img2 = tempfile::TempDir::new().unwrap();
+        let p1 = img2.path().join("one.png");
+        let p2 = img2.path().join("two.png");
+        let mk = |p: &std::path::Path, v: u8| {
+            let img = image::ImageBuffer::from_pixel(2, 2, image::Rgba([v, v, v, 255]));
+            let mut cursor = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+            std::fs::write(p, cursor.into_inner()).unwrap();
+        };
+        mk(&p1, 10);
+        mk(&p2, 20);
+        let mut c = composer();
+        c.attach_image(p1.clone());
+        c.attach_image(p2.clone());
+        let text = c.current_text();
+        assert!(text.contains("[Image #1]") && text.contains("[Image #2]"), "{text:?}");
+        // Home 到行首＋Delete 删除首个占位符元素
+        let _ = c.handle_key_event(key(KeyCode::Home));
+        let _ = c.handle_key_event(key(KeyCode::Delete));
+        let after = c.current_text();
+        assert!(!after.contains("[Image #2]"), "删除后重编号，无 #2：{after:?}");
+        assert!(after.contains("[Image #1]"), "幸存者编号 1：{after:?}");
+        let imgs = c.local_images();
+        assert_eq!(imgs.len(), 1, "附件移除");
+        assert_eq!(imgs[0].path, p2, "幸存附件是第二张");
+    }
+
+    /// A02-6：Enter 与 Tab 等价选中（↑↓ 导航由弹窗键路由分支承担）。
+    #[test]
+    fn enter_selects_like_tab() {
+        let _dir = Dir::new();
+        let mut c = composer();
+        type_text(&mut c, "@real");
+        let _ = c.handle_key_event(key(KeyCode::Enter));
+        assert_eq!(c.local_images().len(), 1, "Enter 选中＝Tab");
     }
 }

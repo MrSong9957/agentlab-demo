@@ -209,7 +209,8 @@ fn publish_args_validate_upstream_shape_without_host_calls() {
             &ProcessManager::new(),
             None,
             Some(&mut async_host),
-        false
+        false,
+        None
         )
         .unwrap();
         assert_eq!(host.publish_count(), 0, "非法参数不得调用宿主：{raw}");
@@ -245,7 +246,8 @@ fn publish_args_validate_upstream_shape_without_host_calls() {
         &ProcessManager::new(),
         None,
         Some(&mut async_host),
-        false
+        false,
+        None
     )
     .unwrap();
     assert_eq!(host.publish_count(), 1);
@@ -296,7 +298,8 @@ fn publish_then_independent_work_continues_without_polling() {
         &ProcessManager::new(),
         None,
         Some(&mut async_host),
-        false
+        false,
+        None
     );
     assert_eq!(reply.unwrap(), "S104-完成");
     assert_eq!(sent, 2, "发布不等待答案：批后恰续一次请求");
@@ -364,7 +367,8 @@ fn answer_submitted_mid_batch_enters_history_after_full_batch_only() {
                 &ProcessManager::new(),
                 None,
                 Some(&mut async_host),
-        false
+        false,
+        None
             );
             (result, history, sent, next_body)
         })
@@ -396,7 +400,8 @@ fn answer_submitted_mid_batch_enters_history_after_full_batch_only() {
     );
     let answer_pos = pos(
         &history,
-        &|h| matches!(h, HistoryItem::Text(HistoryMessage { user_input_event: Some(UserInputEvent::Answer { request_id }), .. }) if request_id == "pub"),
+        &|h| matches!(h, HistoryItem::Text(HistoryMessage {
+    user_input_event: Some(UserInputEvent::Answer { request_id }), .. }) if request_id == "pub"),
     );
     assert!(
         pub_pos < exec_pos && exec_pos < last_tool_pos && last_tool_pos < answer_pos,
@@ -421,7 +426,9 @@ fn answer_submitted_mid_batch_enters_history_after_full_batch_only() {
     let answer_events = history
         .iter()
         .filter(|h| {
-            matches!(h, HistoryItem::Text(HistoryMessage { user_input_event: Some(UserInputEvent::Answer { request_id }), .. }) if request_id == "pub")
+            matches!(h, HistoryItem::Text(HistoryMessage {
+        images: None,
+        user_input_event: Some(UserInputEvent::Answer { request_id }), .. }) if request_id == "pub")
         })
         .count();
     assert_eq!(answer_events, 1, "恰一次入史");
@@ -471,7 +478,8 @@ fn wait_blocks_until_answer_then_next_request_carries_dependent_action() {
                 &ProcessManager::new(),
                 None,
                 Some(&mut async_host),
-        false
+        false,
+        None
             );
             (result, history, sent, next_body)
         })
@@ -544,7 +552,8 @@ fn wait_with_trailing_call_rejects_whole_batch_before_history() {
         &ProcessManager::new(),
         None,
         Some(&mut async_host),
-        false
+        false,
+        None
     )
     .unwrap_err();
     assert!(error.contains("最后一条"), "{error}");
@@ -606,7 +615,8 @@ fn wait_before_batch_end_rejects_whole_batch_before_dependent_execution() {
             &ProcessManager::new(),
             None,
             Some(&mut async_host),
-        false
+        false,
+        None
         )
         .unwrap_err();
         assert!(
@@ -664,7 +674,8 @@ fn protocol_error_preserves_already_accepted_answer() {
             &ProcessManager::new(),
             None,
             Some(&mut async_host),
-        false
+        false,
+        None
         )
         .unwrap_err();
         assert!(error.contains("协议错误"), "{error}");
@@ -731,7 +742,8 @@ fn later_batch_wait_for_recorded_answer_returns_ready() {
         &ProcessManager::new(),
         None,
         Some(&mut async_host),
-        false
+        false,
+        None
     )
     .unwrap();
     assert_eq!(result, "完成");
@@ -792,7 +804,8 @@ fn later_batch_wait_for_recorded_answer_returns_ready() {
         &ProcessManager::new(),
         None,
         Some(&mut async_host2),
-        false
+        false,
+        None
     )
     .unwrap();
     let cross_turn = tool_results(&history)
@@ -873,7 +886,8 @@ fn wait_answered_id_keeps_second_pending_independent() {
                 &ProcessManager::new(),
                 None,
                 Some(&mut async_host),
-        false
+        false,
+        None
             );
             let _ = done_tx.send((result, history, sent, last_body));
         })
@@ -993,7 +1007,8 @@ fn wait_already_answered_returns_ready_immediately() {
         &ProcessManager::new(),
         None,
         Some(&mut async_host),
-        false
+        false,
+        None
     );
     assert_eq!(result.unwrap(), "完成");
     let results = tool_results(&history);
@@ -1060,7 +1075,8 @@ fn occupancy_and_mismatch_errors_keep_single_pending_item() {
         &ProcessManager::new(),
         Some(&mut sync_host),
         Some(&mut async_host),
-        false
+        false,
+        None
     )
     .unwrap();
     assert_eq!(host.publish_count(), 1, "第二项发布被占用错误拒绝");
@@ -1137,7 +1153,8 @@ fn cancel_and_channel_failure_during_wait_close_with_real_reason() {
                     &ProcessManager::new(),
                     None,
                     Some(&mut async_host),
-        false
+        false,
+        None
                 );
                 let _ = done_tx.send((result, history, sent));
             });
@@ -1210,7 +1227,8 @@ fn cancel_and_channel_failure_during_wait_close_with_real_reason() {
                     &ProcessManager::new(),
                     None,
                     Some(&mut async_host),
-        false
+        false,
+        None
                 );
                 (result, history, sent)
             })
@@ -1266,7 +1284,8 @@ fn terminal_text_with_received_answer_continues_original_turn() {
         &ProcessManager::new(),
         None,
         Some(&mut async_host),
-        false
+        false,
+        None
     )
     .unwrap();
     assert_eq!(reply, "S104-最终完成", "草稿终文不提前交付");
@@ -1275,13 +1294,16 @@ fn terminal_text_with_received_answer_continues_original_turn() {
     let draft_pos = history
         .iter()
         .position(|h| {
-            matches!(h, HistoryItem::Text(HistoryMessage { role: HistoryRole::Assistant, content, .. }) if content == "S104-草稿终文")
+            matches!(h, HistoryItem::Text(HistoryMessage {
+    role: HistoryRole::Assistant, content, .. }) if content == "S104-草稿终文")
         })
         .expect("草稿终文如实保留");
     let answer_pos = history
         .iter()
         .position(|h| {
-            matches!(h, HistoryItem::Text(HistoryMessage { user_input_event: Some(UserInputEvent::Answer { request_id }), .. }) if request_id == "pub")
+            matches!(h, HistoryItem::Text(HistoryMessage {
+        images: None,
+        user_input_event: Some(UserInputEvent::Answer { request_id }), .. }) if request_id == "pub")
         })
         .unwrap();
     assert!(draft_pos < answer_pos);
@@ -1334,7 +1356,8 @@ fn eighth_request_rejects_publish_and_wait_and_saves_arrived_answer() {
             &ProcessManager::new(),
             None,
             Some(&mut async_host),
-        false
+        false,
+        None
         )
         .unwrap_err();
         assert!(error.contains("上限（8）"), "{error}");
@@ -1400,7 +1423,8 @@ fn eighth_request_rejects_publish_and_wait_and_saves_arrived_answer() {
             &ProcessManager::new(),
             None,
             Some(&mut async_host),
-        false
+        false,
+        None
         )
         .unwrap_err();
         assert!(error.contains("上限（8）"), "{error}");
@@ -1457,7 +1481,8 @@ fn tool_counts_and_forged_calls_respect_capability_gates() {
             } else {
                 None
             },
-        false
+        false,
+        None
         )
         .unwrap();
         let _ = sent;
@@ -1487,7 +1512,8 @@ fn tool_counts_and_forged_calls_respect_capability_gates() {
         &ProcessManager::new(),
         None,
         None,
-        false
+        false,
+        None
     )
     .unwrap();
     assert_eq!(result, "完成");
@@ -1545,7 +1571,8 @@ fn tool_counts_and_forged_calls_respect_capability_gates() {
         &ProcessManager::new(),
         Some(&mut sync_host),
         Some(&mut async_host),
-        false
+        false,
+        None
     )
     .unwrap();
     assert_eq!(host.publish_count(), 0, "合并轮不执行问询发布");
@@ -1591,7 +1618,8 @@ fn late_answer_after_release_is_rejected_by_one_shot_channel() {
         &ProcessManager::new(),
         None,
         Some(&mut async_host),
-        false
+        false,
+        None
     )
     .unwrap();
     // 回答已入史、单项已释放：同通道重复提交送不进旧请求
@@ -1652,7 +1680,8 @@ fn sync_and_async_coexist_and_cancel_preserves_accepted_answer() {
         &ProcessManager::new(),
         Some(&mut sync_host),
         Some(&mut async_host),
-        false
+        false,
+        None
     )
     .unwrap_err();
     assert!(
@@ -1689,6 +1718,8 @@ fn session_roundtrip_preserves_marker_and_old_resave_degrades() {
     std::fs::create_dir_all(&dir).unwrap();
     let history = vec![
         HistoryItem::Text(HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: HistoryRole::User,
             content: "go".into(),
             user_input_event: None,
@@ -1708,6 +1739,8 @@ fn session_roundtrip_preserves_marker_and_old_resave_degrades() {
             display: None,
         },
         HistoryItem::Text(HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: HistoryRole::User,
             content: user_input_async::answer_event_content(
                 "pub",
@@ -1734,13 +1767,15 @@ fn session_roundtrip_preserves_marker_and_old_resave_degrades() {
             content,
             user_input_event: None,
             ..
-        }) => {
+            }        ) => {
             assert!(content.contains("内部评审"), "答案正文保留：{content}");
         }
         other => panic!("旧程序重存后应为普通文本：{other:?}"),
     }
     // 旧 V1 记录（无字段）装载为 None
     let old_line = serde_json::to_string(&HistoryItem::Text(HistoryMessage {
+        images: None,
+        text_elements: Vec::new(),
         role: HistoryRole::User,
         content: "旧记录".into(),
         user_input_event: None,
@@ -1786,7 +1821,8 @@ fn sender_failure_closes_pending_and_preserves_accepted_answer() {
             &ProcessManager::new(),
             None,
             Some(&mut async_host),
-        false
+        false,
+        None
         )
         .unwrap_err();
         assert_eq!(error, "模型请求失败");

@@ -9,7 +9,13 @@ use terminal_chat::prompt::{HistoryItem, HistoryMessage, HistoryRole, ToolCallRe
 use terminal_chat::session::{load_session_file, TailState, LINE_LIMIT};
 
 fn text(role: HistoryRole, content: &str) -> HistoryItem {
-    HistoryItem::Text(HistoryMessage { role, content: content.into(), user_input_event: None })
+    HistoryItem::Text(HistoryMessage {
+        role,
+        content: content.into(),
+        user_input_event: None,
+        images: None,
+        text_elements: Vec::new(),
+    })
 }
 
 fn batch(id: &str, name: &str, arguments: &str) -> HistoryItem {
@@ -432,8 +438,12 @@ fn summary_counts_and_deterministic_reload() {
 #[test]
 fn serialization_representation_roundtrip() {
     let items = vec![
-        HistoryItem::Text(HistoryMessage { role: HistoryRole::User, content: "你好".into() , user_input_event: None}),
         HistoryItem::Text(HistoryMessage {
+        images: None,
+        text_elements: Vec::new(), role: HistoryRole::User, content: "你好".into() , user_input_event: None}),
+        HistoryItem::Text(HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: HistoryRole::Assistant,
             content: "回复\"含引号\"与\\反斜杠".into(),
             user_input_event: None,
@@ -1399,6 +1409,8 @@ fn tool_result_display_roundtrip_and_legacy_default_none() {
     // （配对修复语义：孤立结果行按修复跳过），夹具须还原真实会话结构。
     let hist = vec![
         HistoryItem::Text(HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: HistoryRole::User,
             content: "012 展示字段往返".into(),
             user_input_event: None,
@@ -1586,4 +1598,136 @@ fn downgrade_fixtures_old_reader_drops_image_and_rejects_new_config() {
         r#"{"id":"m","input_modalities":["text","image"]}"#,
     );
     assert!(err.is_err(), "旧程序拒绝新配置字段：{err:?}");
+}
+
+// ---------- 020：用户消息图片字段的装载校验 ----------
+
+use codex_protocol::user_input::{ByteRange, TextElement};
+
+fn user_img_msg(content: &str, images: Vec<String>, elements: Vec<TextElement>) -> HistoryItem {
+    HistoryItem::Text(HistoryMessage {
+        role: HistoryRole::User,
+        content: content.to_string(),
+        user_input_event: None,
+        images: (!images.is_empty()).then_some(images),
+        text_elements: elements,
+    })
+}
+
+fn b64_url(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
+}
+
+/// 020 §2.2：合法用户图片行完整往返；坏字段按 007 坏行处理（跳过＋首 user 修复）。
+#[test]
+fn user_image_rows_valid_roundtrip_and_bad_lines() {
+    let dir = TempDir::new("s-uimg");
+    let path = session_path(&dir);
+    let ok = user_img_msg(
+        "[Image #1] 看",
+        vec![b64_url(b"\x89PNGok")],
+        vec![TextElement::new(ByteRange { start: 0, end: 10 }, Some("[Image #1]".into()))],
+    );
+    let raw_line = line(&ok);
+    seed(&path, &format!("{META}\n{raw_line}\n"));
+    let loaded = load_session_file(&path).unwrap();
+    assert!(
+        loaded.skipped_lines == 0,
+        "合法行被跳过：{raw_line} → {loaded:?}"
+    );
+    match &loaded.history[0] {
+        HistoryItem::Text(m) => {
+            assert_eq!(m.images.as_ref().map(|v| v.len()), Some(1));
+            assert_eq!(m.text_elements.len(), 1);
+        }
+        other => panic!("形状：{other:?}"),
+    }
+    // 坏行族：assistant 带图／问询标记带图／远程 URL／坏 base64／超限额／
+    // 标记越界（#2 只有 1 图）／标记文字形态错／区间重叠／非 UTF-8 边界
+    let u1 = b64_url(b"AAA");
+    let mk_el = |s: usize, e: usize| TextElement::new(ByteRange { start: s, end: e }, None);
+    let cases: Vec<(&str, HistoryItem)> = vec![
+        ("assistant 带图", HistoryItem::Text(HistoryMessage {
+            role: HistoryRole::Assistant,
+            content: "a".into(),
+            user_input_event: None,
+            images: Some(vec![u1.clone()]),
+            text_elements: vec![],
+        })),
+        ("问询标记带图", HistoryItem::Text(HistoryMessage {
+            role: HistoryRole::User,
+            content: "答".into(),
+            user_input_event: Some(terminal_chat::prompt::UserInputEvent::Answer {
+                request_id: "r".into(),
+            }),
+            images: Some(vec![u1.clone()]),
+            text_elements: vec![],
+        })),
+        ("远程 URL", user_img_msg("[Image #1]", vec!["https://e/x.png".into()], vec![mk_el(0, 10)])),
+        ("坏 base64", user_img_msg("[Image #1]", vec!["data:image/png;base64,!!!!".into()], vec![mk_el(0, 10)])),
+        ("超限额", user_img_msg(
+            "[Image #1]",
+            vec![format!("data:image/png;base64,{}", "Q".repeat(6 * 1024 * 1024))],
+            vec![mk_el(0, 10)],
+        )),
+        ("标记越界", user_img_msg("[Image #2]", vec![u1.clone()], vec![mk_el(0, 10)])),
+        ("标记文字错", user_img_msg("图片1", vec![u1.clone()], vec![mk_el(0, 10)])),
+        ("区间重叠", user_img_msg(
+            "[Image #1][Image #1]",
+            vec![u1.clone()],
+            vec![mk_el(0, 10), mk_el(5, 15)],
+        )),
+        ("重复绑定", user_img_msg(
+            "[Image #1][Image #1]",
+            vec![u1.clone(), u1.clone()],
+            vec![mk_el(0, 10), mk_el(11, 21)],
+        )),
+        ("非 UTF-8 边界", {
+            // content = "中"（3 字节）+ 标记；区间 1..11 落在"中"中间
+            let content = "中[Image #1]";
+            user_img_msg(content, vec![u1.clone()], vec![mk_el(1, 11)])
+        }),
+    ];
+    for (tag, item) in cases {
+        let body = format!(
+            "{META}\n{}\n{}\n{}\n",
+            line(&text(HistoryRole::User, "先")),
+            line(&batch("u0", "exec_command", "{}")),
+            line(&item),
+        );
+        seed(&path, &body);
+        let loaded = load_session_file(&path).unwrap();
+        assert_eq!(loaded.skipped_lines, 1, "{tag}：{loaded:?}");
+        let imgs: Vec<&HistoryItem> = loaded
+            .history
+            .iter()
+            .filter(|h| matches!(h, HistoryItem::Text(m) if m.images.is_some()))
+            .collect();
+        assert!(imgs.is_empty(), "{tag}：坏图行不得入史");
+    }
+}
+
+/// 旧记录兼容：无新字段的行照常；多张图＋标记按序校验通过。
+#[test]
+fn user_image_old_rows_and_multi_image_order() {
+    let dir = TempDir::new("s-uimg2");
+    let path = session_path(&dir);
+    let u1 = b64_url(b"AAA");
+    let u2 = b64_url(b"BBB");
+    let ok = user_img_msg(
+        "[Image #1] 中间 [Image #2]",
+        vec![u1, u2],
+        vec![
+            TextElement::new(ByteRange { start: 0, end: 10 }, None),
+            TextElement::new(ByteRange { start: 18, end: 28 }, None),
+        ],
+    );
+    seed(&path, &format!("{META}\n{}\n", line(&ok)));
+    let loaded = load_session_file(&path).unwrap();
+    assert_eq!(loaded.skipped_lines, 0);
+    assert_eq!(loaded.history.len(), 1);
 }

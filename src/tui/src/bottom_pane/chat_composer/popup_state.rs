@@ -104,7 +104,9 @@ impl PopupState {
 pub(super) enum ActivePopup {
     #[default]
     None,
-    // 008-TRIM: Command/File/Skill/MentionV2 弹窗变体（首批无弹窗，008 §1；本地 / 命令原样提交由驱动处理）
+    /// 020 A02 恢复：@ 文件搜索弹窗（仅此一个弹窗变体；Command/Skill/MentionV2
+    /// 仍保持 008 裁剪——无本地事件源）。
+    File(crate::bottom_pane::FileSearchPopup),
 }
 
 impl ActivePopup {
@@ -116,6 +118,7 @@ impl ActivePopup {
     pub(super) fn required_height(&self, _width: u16, footer_total_height: u16) -> u16 {
         match self {
             Self::None => footer_total_height,
+            Self::File(popup) => footer_total_height + popup.calculate_required_height(),
         }
     }
 }

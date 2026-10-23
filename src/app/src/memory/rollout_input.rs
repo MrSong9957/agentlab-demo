@@ -183,6 +183,15 @@ pub fn sanitize_history_item_for_memories(item: &HistoryItem) -> Option<HistoryI
                 image: None,
             })
         }
+        // 020 §2.2：用户附件同样剥除（images→None；正文与 text_elements
+        // 保留，text_elements 为 UI 元数据不进投影）；预算不放宽。
+        HistoryItem::Text(m)
+            if m.role == HistoryRole::User && m.images.as_ref().is_some_and(|v| !v.is_empty()) =>
+        {
+            let mut stripped = m.clone();
+            stripped.images = None;
+            Some(HistoryItem::Text(stripped))
+        }
         _ => Some(item.clone()),
     }
 }
@@ -217,6 +226,8 @@ mod tests {
 
     fn user(content: &str) -> HistoryItem {
         HistoryItem::Text(HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: HistoryRole::User,
             content: content.to_string(),
             user_input_event: None,
@@ -326,6 +337,41 @@ mod tests {
         std::fs::write(&p, format!("{{\"v\":1}}\n{line}\n")).unwrap();
         let items = read_recent_rollout_items(&p).unwrap();
         assert!(items.is_empty(), "超限记录整条跳过（不参与提炼）");
+    }
+
+    /// 020 §2.2：用户附件剥除——提炼输入保留正文但无 data URL；
+    /// text_elements（UI 元数据）保留不进投影。
+    #[test]
+    fn user_images_stripped_from_memory_input() {
+        use crate::prompt::HistoryRole;
+        use codex_protocol::user_input::{ByteRange, TextElement};
+        use base64::Engine as _;
+        let url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(b"PNGDATA")
+        );
+        let item = HistoryItem::Text(HistoryMessage {
+            role: HistoryRole::User,
+            content: "[Image #1] 看这张".into(),
+            user_input_event: None,
+            images: Some(vec![url]),
+            text_elements: vec![TextElement::new(
+                ByteRange { start: 0, end: 10 },
+                Some("[Image #1]".into()),
+            )],
+        });
+        let stripped = sanitize_history_item_for_memories(&item).expect("正文保留");
+        match stripped {
+            HistoryItem::Text(m) => {
+                assert!(m.images.is_none(), "images 必须剥除");
+                assert!(m.content.contains("看这张"), "正文保留");
+            }
+            other => panic!("形状：{other:?}"),
+        }
+        let text = serialize_filtered_history_items(&[item]).unwrap();
+        assert!(text.contains("看这张"), "正文进提炼输入：{text}");
+        assert!(!text.contains("base64"), "无 base64：{text}");
+        assert!(!text.contains("image_url"), "无图片部件：{text}");
     }
 
     #[test]

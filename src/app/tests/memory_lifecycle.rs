@@ -149,6 +149,8 @@ fn source(
     std::env::set_var("TCHAT_SESSION_PID", pid);
     let mut session = terminal_chat::session::Session::new(e.sessions.clone());
     let history = vec![HistoryItem::Text(HistoryMessage {
+        images: None,
+        text_elements: Vec::new(),
         role: HistoryRole::User,
         content: content.into(),
         user_input_event: None,
@@ -538,6 +540,8 @@ fn same_chain_registration_to_retention_remerge_and_injection() {
             .history;
     updated.push(terminal_chat::prompt::HistoryItem::Text(
         terminal_chat::prompt::HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
             role: terminal_chat::prompt::HistoryRole::User,
             content: "SESSION-A-V2-M9: NEW-A-V2-M9 supersedes the old A experience".into(),
             user_input_event: None,
