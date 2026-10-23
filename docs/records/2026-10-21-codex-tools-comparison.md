@@ -18,7 +18,7 @@
 | 命令执行、进程交互 | `exec_command`、`write_stdin` | 已有同步执行；缺少进程会话、后续取输出和输入能力。**优先补齐** |
 | 文件补丁 | `apply_patch` | 已有，继续复用；JSON 参数为主动适配，`Move to` 与 Unicode 匹配容差暂缺，无需紧急改造（[2026-10-22 复核](2026-10-22-codex-apply-patch-comparison.md)） |
 | 任务计划 | `update_plan` | 确实缺少；已制定仅覆盖该功能的 [017 接入方案](../specs/017-update-plan.md)，尚未实施，保留 8 次请求额度（[2026-10-22 复核](2026-10-22-codex-update-plan-comparison.md)） |
-| 用户问询 | `request_user_input`、`request_user_input_async` | [018](../specs/018-user-input.md) 阶段 A 同步问答已获批准（2026-10-23），正在本地交付；独立回答通道、关闭自动空答。异步工具未注册、运行机制未实施（[实施证据](2026-10-22-018-user-input-implementation.md)） |
+| 用户问询 | `request_user_input`、`request_user_input_async` | [018](../specs/018-user-input.md) 阶段 A 同步问答已本地交付（2026-10-23），任务分支已清理；独立回答通道、关闭自动空答。异步工具未注册、运行机制未实施（[实施证据](2026-10-22-018-user-input-implementation.md)） |
 | 工作中主动通知 | `send_message_to_user_async` | 缺少。需要持续运行和异步交互场景再补 |
 | 查看图片 | `view_image` | 缺少。处理截图、UI 验收时有价值，但需要多模态消息支持 |
 | MCP 外部工具 | 按服务器动态注册工具 | 未接入用户轮。适合成为外部能力的统一入口 |

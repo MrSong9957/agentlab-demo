@@ -30,7 +30,7 @@
 - 016 命令执行与进程交互：已实施并验证（2026-10-22，分支 feat/016-process-sessions，待批准）——默认可续接进程会话（管道＋PTY）、write_stdin 查询/输入/中断/终止、取消与寿命分开、64 条容量＋1 MiB 头尾缓存＋64 KiB 输入上限、两种宿主退出清理。记录 `docs/records/2026-10-22-016-implementation.md`。
 - 017 任务计划：已批准交付（2026-10-22，分支 feat/017-update-plan 合并入 main）——只新增 update_plan：参数/状态/解析复用 Codex（shim 三类型＋Serde 原语义），两字段结果，行式清单＋TUI 计划 cell（上游 PlanUpdateCell 最小移植），V1 会话形状不变、成功快照恢复投影；母本计划指引两节恢复保留。记录 `docs/records/2026-10-22-017-implementation.md`。
 
-- 018 用户问询：[阶段 A 已获批准](docs/specs/018-user-input.md)（2026-10-23，正在本地交付）；同步问答、独立回送、取消/退出和 V1 同源恢复已接入，安全门禁与双轴审查已收口，全量 3142 通过/0 失败/3 原有忽略；全目标 lint 保留两处旧测试错误。异步版未注册/未实施。[实施证据](docs/records/2026-10-22-018-user-input-implementation.md)。
+- 018 用户问询：[阶段 A 已批准交付](docs/specs/018-user-input.md)（2026-10-23，任务提交 `96682d0` 快进合入本地 `main`，本地任务分支已删除）；同步问答、独立回送、取消/退出和 V1 同源恢复已接入，安全门禁与双轴审查已收口，全量 3142 通过/0 失败/3 原有忽略；全目标 lint 保留两处旧测试错误。异步版未注册/未实施，未推送或发布。[实施证据](docs/records/2026-10-22-018-user-input-implementation.md)。
 
 ## 4. 必须保持的行为（契约明细）
 

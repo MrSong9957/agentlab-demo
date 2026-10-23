@@ -5,7 +5,7 @@
 - 上游基线：`openai/codex@d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4`，通过本地缓存的 `git show <提交>:<路径>` 读取。
 - 本项目现状：017 已交付，普通用户轮为 `exec_command / apply_patch / write_stdin / update_plan` 四工具，两个问询工具均未接入。
 - 状态：源码、规格与已有测试源码复核；本次仅修改文档。
-- 后续实施：[018 用户问询分阶段接入](../specs/018-user-input.md)直接作为契约；阶段 A 同步问答已获批准（2026-10-23），正在本地交付；阶段 B 未实施。[实际来源与验证](2026-10-22-018-user-input-implementation.md)。下文保留接入前的差异复核。
+- 后续实施：[018 用户问询分阶段接入](../specs/018-user-input.md)直接作为契约；阶段 A 同步问答已本地交付（2026-10-23），任务分支已清理；阶段 B 未实施。[实际来源与验证](2026-10-22-018-user-input-implementation.md)。下文保留接入前的差异复核。
 
 ## 结论
 
