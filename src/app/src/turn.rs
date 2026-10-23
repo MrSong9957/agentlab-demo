@@ -624,6 +624,27 @@ fn close_pending_async(
     }
 }
 
+/// 模型/协议失败收尾（§8.5）：已受理答案先恰一次入史，再仅对未答项
+/// 记 model_error 关闭（已答项终态即答案事件，不追加第二条记录）。
+fn close_pending_on_model_error(
+    history: &mut Vec<HistoryItem>,
+    on_record: &mut dyn FnMut(&[HistoryItem]),
+    notify: &mut dyn FnMut(TurnNotify),
+    pending: &mut Option<PendingAsyncInput>,
+) {
+    if let Some(p) = pending.as_ref().filter(|p| p.answer.is_some()) {
+        record_async_answer(history, on_record, notify, p);
+        *pending = None;
+    }
+    close_pending_async(
+        history,
+        on_record,
+        notify,
+        pending,
+        crate::user_input_async::CLOSE_MODEL_ERROR,
+    );
+}
+
 /// 018 阶段 B 核心循环：在 [`run_tool_turn_with_host`] 之上接入异步发布、
 /// 显式等待与批末回答接入。契约见 018 §8.3–8.5：
 /// - 发布成功立即返回 `{"accepted":true}`；每轮同一时刻最多一项未决；
@@ -670,6 +691,9 @@ pub fn run_tool_turn_with_hosts(
     };
     let mut requests = 0usize;
     let mut pending_async: Option<PendingAsyncInput> = None;
+    // 同轮已入史答案的 request_id（§8.4）：后续批次再等待这些 ID 只确认
+    // 就绪，不重问、不重复记录；未在此列的 ID 仍按无未决/不匹配拒绝。
+    let mut recorded_answer_ids: Vec<String> = Vec::new();
     loop {
         if requests >= MAX_MODEL_REQUESTS_PER_TURN {
             close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_REQUEST_LIMIT);
@@ -701,17 +725,7 @@ pub fn run_tool_turn_with_hosts(
                 // 018-B（§8.5）：模型请求失败＝明确结束本轮——先处理已受理回答
                 // （通道终态与模型失败同轮发生时以模型失败文案收尾，通道侧无新事实）
                 let _ = drain_pending_async(&mut pending_async);
-                if let Some(p) = pending_async.as_ref().filter(|p| p.answer.is_some()) {
-                    record_async_answer(history, on_record, notify, p);
-                    pending_async = None;
-                }
-                close_pending_async(
-                    history,
-                    on_record,
-                    notify,
-                    &mut pending_async,
-                    crate::user_input_async::CLOSE_MODEL_ERROR,
-                );
+                close_pending_on_model_error(history, on_record, notify, &mut pending_async);
                 return Err(error);
             }
         };
@@ -722,15 +736,16 @@ pub fn run_tool_turn_with_hosts(
             close_pending_async(history, on_record, notify, &mut pending_async, reason);
             return Err(error.message().into());
         }
-        // 先整条校验消息与整批调用结构，再写入历史、执行
+        // 先整条校验消息与整批调用结构，再写入历史、执行；协议级失败
+        // 收尾统一先保存已受理回答（§8.5），未答项才按 model_error 关闭
         let Some(message) = resp.pointer("/choices/0/message").cloned() else {
-            close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_MODEL_ERROR);
+            close_pending_on_model_error(history, on_record, notify, &mut pending_async);
             return Err("协议错误：响应缺少 choices[0].message".to_string());
         };
         let calls = match parse_tool_calls(&message) {
             Ok(calls) => calls,
             Err(error) => {
-                close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_MODEL_ERROR);
+                close_pending_on_model_error(history, on_record, notify, &mut pending_async);
                 return Err(error);
             }
         };
@@ -738,26 +753,26 @@ pub fn run_tool_turn_with_hosts(
             None | Some(Value::Null) => None,
             Some(Value::String(s)) => Some(s.clone()),
             Some(_) => {
-                close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_MODEL_ERROR);
+                close_pending_on_model_error(history, on_record, notify, &mut pending_async);
                 return Err("协议错误：assistant.content 必须是字符串或 null".into());
             }
         };
         // N3：批大小在入史/执行之前检查，超限整批拒绝（协议级失败，历史不污染）
         if calls.len() > MAX_TOOL_CALLS_PER_BATCH {
-            close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_MODEL_ERROR);
+            close_pending_on_model_error(history, on_record, notify, &mut pending_async);
             return Err(format!(
                 "单批工具调用 {} 条超过上限 {MAX_TOOL_CALLS_PER_BATCH}，整批拒绝",
                 calls.len()
             ));
         }
-        // 018-B（§8.4）：等待必须位于批内最后一条——带后续调用的等待批在
-        // 入史/执行前整批拒绝，避免预先执行尚不知道答案的动作。
-        if calls.iter().any(|c| c.name == "wait_for_user_input")
-            && !calls
-                .last()
-                .is_some_and(|c| c.name == "wait_for_user_input")
+        // 018-B（§8.4）：等待只允许出现在批内最后一条——任何非批末等待
+        // （含 [wait, exec, wait]、[wait, wait]）都在入史/执行前整批拒绝，
+        // 避免预先执行尚不知道答案的动作。
+        if calls[..calls.len().saturating_sub(1)]
+            .iter()
+            .any(|c| c.name == "wait_for_user_input")
         {
-            close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_MODEL_ERROR);
+            close_pending_on_model_error(history, on_record, notify, &mut pending_async);
             return Err(
                 "协议错误：wait_for_user_input 必须是批内最后一条调用，整批拒绝".to_string(),
             );
@@ -765,7 +780,7 @@ pub fn run_tool_turn_with_hosts(
         if calls.is_empty() {
             let reply = content.unwrap_or_default();
             if reply.trim().is_empty() {
-                close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_MODEL_ERROR);
+                close_pending_on_model_error(history, on_record, notify, &mut pending_async);
                 return Err("模型回复为空".into());
             }
             // 018-B 结束检查：已受理回答先于终文——继续原轮让模型处理，
@@ -778,7 +793,7 @@ pub fn run_tool_turn_with_hosts(
                 }));
                 on_record(history);
                 record_async_answer(history, on_record, notify, p);
-                pending_async = None;
+                recorded_answer_ids.push(pending_async.take().unwrap().request_id);
                 continue;
             }
             history.push(HistoryItem::Text(HistoryMessage {
@@ -921,6 +936,11 @@ pub fn run_tool_turn_with_hosts(
                 } else {
                     match crate::user_input_async::parse_wait_arguments(&call.arguments) {
                         Err(error) => Err(error),
+                        // 018-B（§8.4）：同轮已入史答案的 ID 再等待只确认就绪，
+                        // 不重问、不重复记录；未知/异轮 ID 不在此列，仍拒绝。
+                        Ok(request_id) if recorded_answer_ids.contains(&request_id) => {
+                            Ok(crate::user_input_async::wait_ready_result(&request_id))
+                        }
                         Ok(request_id) => match pending_async.as_mut() {
                             None => Err("当前没有未决问询可等待".to_string()),
                             Some(p) if p.request_id != request_id => Err(
@@ -1011,7 +1031,7 @@ pub fn run_tool_turn_with_hosts(
             async_answer_recorded = true;
         }
         if async_answer_recorded {
-            pending_async = None;
+            recorded_answer_ids.push(pending_async.take().unwrap().request_id);
         }
         if let Some(reason) = input_end {
             let close_reason = crate::user_input_async::close_reason_for(&reason);

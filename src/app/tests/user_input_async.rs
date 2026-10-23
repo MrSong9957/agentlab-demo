@@ -512,8 +512,8 @@ fn wait_blocks_until_answer_then_next_request_carries_dependent_action() {
 #[test]
 fn wait_with_trailing_call_rejects_whole_batch_before_history() {
     let host = AsyncHost::default();
-    let probe = std::env::temp_dir().join(format!("018b-waitorder-{}", std::process::id()));
-    let _ = std::fs::remove_file(&probe);
+    let temp = common::TempDir::new("018b-waitorder");
+    let probe = temp.path().join("probe.txt");
     let mut history = Vec::new();
     let mut sent = 0;
     let mut async_host = host.hook();
@@ -544,7 +544,407 @@ fn wait_with_trailing_call_rejects_whole_batch_before_history() {
     assert!(error.contains("最后一条"), "{error}");
     assert_eq!(history.len(), 1, "批不入史：{history:?}");
     assert!(!probe.exists(), "未知答案的动作不预先执行");
-    let _ = std::fs::remove_file(&probe);
+}
+
+/// 审计修复 1（§8.4）：任何非批末等待都整批拒绝——[wait, exec, wait] 与
+/// [wait, wait] 不入史、中间命令不执行（其参数来自尚未看过答案的请求）。
+#[test]
+fn wait_before_batch_end_rejects_whole_batch_before_dependent_execution() {
+    let temp = common::TempDir::new("018b-audit-waitorder");
+    let probe = temp.path().join("dependent.txt");
+    for batch in [
+        vec![
+            call("w1", "wait_for_user_input", &wait_args("pub")),
+            call(
+                "mid",
+                "exec_command",
+                &json!({"cmd": format!("echo audit-dependent-executed > {}", probe.display())})
+                    .to_string(),
+            ),
+            call("w2", "wait_for_user_input", &wait_args("pub")),
+        ],
+        vec![
+            call("w1", "wait_for_user_input", &wait_args("pub")),
+            call("w2", "wait_for_user_input", &wait_args("pub")),
+        ],
+    ] {
+        let host = AsyncHost::default();
+        let mut history = Vec::new();
+        let mut sent = 0;
+        let inject_host = host.clone();
+        let mut async_host = host.hook();
+        let error = turn::run_tool_turn_with_hosts(
+            &mut history,
+            "go",
+            &mut |_| {
+                sent += 1;
+                if sent == 2 {
+                    // 第二次请求发出后、响应返回前提交答案：即便答案已受理，
+                    // 非批末等待批仍须整批拒绝
+                    inject_host.answer(0, answered(&q_id("pub"), "内部评审"));
+                }
+                Ok(if sent == 1 {
+                    tool_response(vec![call(
+                        "pub",
+                        "request_user_input_async",
+                        &publish_args(),
+                    )])
+                } else {
+                    tool_response(batch.clone())
+                })
+            },
+            &mut |_| {},
+            None,
+            &mut |_| {},
+            ToolMode::User,
+            &ProcessManager::new(),
+            None,
+            Some(&mut async_host),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("最后一条") && error.contains("整批拒绝"),
+            "{error}"
+        );
+        assert_eq!(sent, 2, "整批拒绝后不得再请求");
+        // 该批不入史：历史仅剩本轮输入、发布调用与发布确认，外加协议错误
+        // 收尾保存的已受理答案（§8.5）；批内调用与中间命令结果均不出现
+        assert_eq!(history.len(), 4, "非法批不入史：{history:?}");
+        assert!(
+            !history.iter().any(|h| matches!(h,
+                HistoryItem::ToolResult { tool_call_id, .. } if tool_call_id != "pub")),
+            "非法批的任何调用不得产生结果：{history:?}"
+        );
+        assert!(!probe.exists(), "未知答案的中间命令不得执行");
+        // 已受理答案按 §8.5 保留（协议错误收尾先保存已答）
+        assert!(answer_event_of(&history, "pub").is_some(), "已受理答案保留");
+    }
+}
+
+/// 审计修复 2（§8.5）：协议解析失败不丢已受理答案——答案恰一次入史，
+/// 已答问题不重记为未答关闭；未提交回答时仍按真实原因关闭。
+#[test]
+fn protocol_error_preserves_already_accepted_answer() {
+    for with_answer in [true, false] {
+        let host = AsyncHost::default();
+        let mut history = Vec::new();
+        let mut sent = 0;
+        let inject = host.clone();
+        let mut async_host = host.hook();
+        let error = turn::run_tool_turn_with_hosts(
+            &mut history,
+            "go",
+            &mut |_| {
+                sent += 1;
+                if sent == 2 && with_answer {
+                    inject.answer(0, answered(&q_id("pub"), "内部评审"));
+                }
+                Ok(if sent == 1 {
+                    tool_response(vec![call(
+                        "pub",
+                        "request_user_input_async",
+                        &publish_args(),
+                    )])
+                } else {
+                    // tool_calls 非法形状 → 协议错误
+                    json!({"choices":[{"message":{"tool_calls":42}}]})
+                })
+            },
+            &mut |_| {},
+            None,
+            &mut |_| {},
+            ToolMode::User,
+            &ProcessManager::new(),
+            None,
+            Some(&mut async_host),
+        )
+        .unwrap_err();
+        assert!(error.contains("协议错误"), "{error}");
+        assert_eq!(sent, 2);
+        if with_answer {
+            assert!(
+                answer_event_of(&history, "pub").is_some(),
+                "已受理答案在协议错误路径仍保留"
+            );
+            assert!(
+                close_event_of(&history, "pub").is_none(),
+                "已答问题不记为未答关闭"
+            );
+        } else {
+            assert!(
+                answer_event_of(&history, "pub").is_none(),
+                "未提交回答不得凭空出现"
+            );
+            let (_, closed) = close_event_of(&history, "pub").expect("协议错误关闭未决问题");
+            assert_eq!(closed["reason"], json!("model_error"));
+        }
+    }
+}
+
+/// 审计修复 3（§8.4）：答案批末入史后，同轮同 ID 再等待只确认就绪，
+/// 不重问、不重复记录；未知 ID 仍拒绝。
+#[test]
+fn later_batch_wait_for_recorded_answer_returns_ready() {
+    let host = AsyncHost::default();
+    let mut history = Vec::new();
+    let mut sent = 0;
+    // 第 2 次请求发出前注入回答：该批 wait 就绪、批末入史；第 3 批再等待
+    // 已入史的同轮 ID 应返回 ready；第 4 批未知 ID 仍拒绝
+    let inject_host = host.clone();
+    let mut async_host = host.hook();
+    let result = turn::run_tool_turn_with_hosts(
+        &mut history,
+        "go",
+        &mut |_| {
+            sent += 1;
+            if sent == 2 {
+                inject_host.answer(0, answered(&q_id("pub"), "内部评审"));
+            }
+            Ok(match sent {
+                1 => tool_response(vec![call(
+                    "pub",
+                    "request_user_input_async",
+                    &publish_args(),
+                )]),
+                2 => tool_response(vec![call("w", "wait_for_user_input", &wait_args("pub"))]),
+                3 => tool_response(vec![call("w2", "wait_for_user_input", &wait_args("pub"))]),
+                4 => tool_response(vec![call(
+                    "bad",
+                    "wait_for_user_input",
+                    &wait_args("unknown-id"),
+                )]),
+                _ => final_response("完成"),
+            })
+        },
+        &mut |_| {},
+        None,
+        &mut |_| {},
+        ToolMode::User,
+        &ProcessManager::new(),
+        None,
+        Some(&mut async_host),
+    )
+    .unwrap();
+    assert_eq!(result, "完成");
+    assert_eq!(sent, 5);
+    let results = tool_results(&history);
+    assert_eq!(
+        results.iter().find(|(id, _)| id == "w").unwrap().1,
+        json!({"ready":true,"request_id":"pub"})
+    );
+    assert_eq!(
+        results.iter().find(|(id, _)| id == "w2").unwrap().1,
+        json!({"ready":true,"request_id":"pub"}),
+        "同轮已入史答案的 ID 再等待只确认就绪，不重问"
+    );
+    let bad = results
+        .iter()
+        .find(|(id, _)| id == "bad")
+        .unwrap()
+        .1
+        .clone();
+    assert!(
+        bad["error"].as_str().unwrap().contains("没有未决问询"),
+        "未知 ID 不得确认就绪：{bad}"
+    );
+    assert_eq!(
+        history
+            .iter()
+            .filter(|h| matches!(
+                h,
+                HistoryItem::Text(HistoryMessage {
+                    user_input_event: Some(UserInputEvent::Answer { .. }),
+                    ..
+                })
+            ))
+            .count(),
+        1,
+        "再等待不重复记录答案"
+    );
+    // 跨轮：已入史答案的 ID 只在本轮有效——新用户轮等待旧 ID 仍拒绝，
+    // 不得命中上一轮的就绪记录（recorded_answer_ids 不跨轮泄漏）
+    let mut sent2 = 0;
+    let mut async_host2 = host.hook();
+    turn::run_tool_turn_with_hosts(
+        &mut history,
+        "下一轮",
+        &mut |_| {
+            sent2 += 1;
+            Ok(if sent2 == 1 {
+                tool_response(vec![call("w3", "wait_for_user_input", &wait_args("pub"))])
+            } else {
+                final_response("完成")
+            })
+        },
+        &mut |_| {},
+        None,
+        &mut |_| {},
+        ToolMode::User,
+        &ProcessManager::new(),
+        None,
+        Some(&mut async_host2),
+    )
+    .unwrap();
+    let cross_turn = tool_results(&history)
+        .into_iter()
+        .find(|(id, _)| id == "w3")
+        .unwrap()
+        .1;
+    assert!(
+        cross_turn["error"]
+            .as_str()
+            .unwrap()
+            .contains("没有未决问询"),
+        "其他轮 ID 不得确认就绪：{cross_turn}"
+    );
+}
+
+/// 审计收尾（§8.4）：同轮 Q1 已答入史、Q2 尚未回答——wait Q1 只确认就绪
+/// 且不消费 Q2 通道；wait Q2 必须等待 Q2 自己的回答；两份回答各恰一次保存。
+#[test]
+fn wait_answered_id_keeps_second_pending_independent() {
+    let host = AsyncHost::default();
+    let (wait_tx, wait_rx) = mpsc::channel::<String>();
+    let (done_tx, done_rx) =
+        mpsc::channel::<(Result<String, String>, Vec<HistoryItem>, usize, Value)>();
+    let mut history = Vec::new();
+    let worker = {
+        let host = host.clone();
+        let wait_tx = wait_tx.clone();
+        std::thread::spawn(move || {
+            let mut async_host = host.hook();
+            let mut sent = 0;
+            let mut last_body = Value::Null;
+            let result = turn::run_tool_turn_with_hosts(
+                &mut history,
+                "go",
+                &mut |body| {
+                    sent += 1;
+                    if sent == 6 {
+                        last_body = body.clone();
+                    }
+                    Ok(match sent {
+                        1 => tool_response(vec![call(
+                            "pub1",
+                            "request_user_input_async",
+                            &publish_args(),
+                        )]),
+                        2 => tool_response(vec![call(
+                            "w1",
+                            "wait_for_user_input",
+                            &wait_args("pub1"),
+                        )]),
+                        3 => tool_response(vec![call(
+                            "pub2",
+                            "request_user_input_async",
+                            &publish_args(),
+                        )]),
+                        4 => tool_response(vec![call(
+                            "w1b",
+                            "wait_for_user_input",
+                            &wait_args("pub1"),
+                        )]),
+                        5 => tool_response(vec![call(
+                            "w2",
+                            "wait_for_user_input",
+                            &wait_args("pub2"),
+                        )]),
+                        _ => final_response("S104-双问完成"),
+                    })
+                },
+                &mut |n| {
+                    if let turn::TurnNotify::UserInputAsyncWait { request_id } = &n {
+                        wait_tx.send(request_id.clone()).unwrap();
+                    }
+                },
+                None,
+                &mut |_| {},
+                ToolMode::User,
+                &ProcessManager::new(),
+                None,
+                Some(&mut async_host),
+            );
+            let _ = done_tx.send((result, history, sent, last_body));
+        })
+    };
+    // 批 2：wait Q1 阻塞中提交 Q1 答案——就绪、批末入史
+    assert_eq!(
+        wait_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap(),
+        "pub1"
+    );
+    host.answer(0, answered(&q_id("pub1"), "内部评审"));
+    // 批 4 已就绪返回（不发等待通知）：下一通知必须是 Q2 的等待本身。
+    // 若 wait Q1 误阻塞或吞 Q2 通道，这里收到的是第二个 "pub1" 或超时
+    assert_eq!(
+        wait_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap(),
+        "pub2",
+        "wait Q1 就绪确认后，Q2 仍保持未决并进入真实等待"
+    );
+    assert_eq!(host.publish_count(), 2);
+    host.answer(1, answered(&q_id("pub2"), "外部客户"));
+    let (result, history, sent, last_body) = done_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("看门狗：双问流程未在时限内完成");
+    assert_eq!(result.unwrap(), "S104-双问完成");
+    assert_eq!(sent, 6);
+    let results = tool_results(&history);
+    assert_eq!(
+        results.iter().find(|(id, _)| id == "w1").unwrap().1,
+        json!({"ready":true,"request_id":"pub1"})
+    );
+    assert_eq!(
+        results.iter().find(|(id, _)| id == "w1b").unwrap().1,
+        json!({"ready":true,"request_id":"pub1"}),
+        "已入史 Q1 的再等待＝就绪确认，不重问"
+    );
+    assert_eq!(
+        results.iter().find(|(id, _)| id == "w2").unwrap().1,
+        json!({"ready":true,"request_id":"pub2"}),
+        "wait Q2 等到的是 Q2 自己的回答"
+    );
+    // 两份回答各恰一次入史，无关闭事件（两题都已回答）
+    assert!(answer_event_of(&history, "pub1").is_some());
+    assert!(answer_event_of(&history, "pub2").is_some());
+    assert_eq!(
+        history
+            .iter()
+            .filter(|h| matches!(
+                h,
+                HistoryItem::Text(HistoryMessage {
+                    user_input_event: Some(_),
+                    ..
+                })
+            ))
+            .count(),
+        2,
+        "恰两份答案事件，无关闭"
+    );
+    // 最终请求同时携带两份答案，且 Q1 先于 Q2
+    let msgs = last_body["messages"].as_array().unwrap();
+    let q1_pos = msgs
+        .iter()
+        .position(|m| {
+            m["role"] == json!("user")
+                && m["content"]
+                    .as_str()
+                    .is_some_and(|c| c.contains("内部评审"))
+        })
+        .expect("Q1 答案进入最终请求");
+    let q2_pos = msgs
+        .iter()
+        .position(|m| {
+            m["role"] == json!("user")
+                && m["content"]
+                    .as_str()
+                    .is_some_and(|c| c.contains("外部客户"))
+        })
+        .expect("Q2 答案进入最终请求");
+    assert!(q1_pos < q2_pos);
+    let _ = worker.join();
 }
 
 /// 验收行 4（就绪）：已答 ID 再等待立即返回 ready，不重复入史、不重写回答。
