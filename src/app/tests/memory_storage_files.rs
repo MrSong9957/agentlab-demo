@@ -352,7 +352,7 @@ fn m4_a13_m3_parse_store_export_redacts_body_and_exact_slug_projection() {
     let secret = "sk-ABCDEFGHIJKLMNOPQRSTUVwx123";
     let sessions = e.tmp.path().join("sessions"); std::fs::create_dir(&sessions).unwrap();
     let path = sessions.join("a.jsonl");
-    let item = HistoryItem::Text(HistoryMessage { role: HistoryRole::User, content: "remember the task".into() });
+    let item = HistoryItem::Text(HistoryMessage { role: HistoryRole::User, content: "remember the task".into() , user_input_event: None});
     std::fs::write(&path, format!("{{\"v\":1}}\n{}\n", serde_json::to_string(&item).unwrap())).unwrap();
     let session_before = std::fs::read(&path).unwrap();
     let token = e.claim("a", 100);

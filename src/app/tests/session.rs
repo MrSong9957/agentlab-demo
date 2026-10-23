@@ -9,7 +9,7 @@ use terminal_chat::prompt::{HistoryItem, HistoryMessage, HistoryRole, ToolCallRe
 use terminal_chat::session::{load_session_file, TailState, LINE_LIMIT};
 
 fn text(role: HistoryRole, content: &str) -> HistoryItem {
-    HistoryItem::Text(HistoryMessage { role, content: content.into() })
+    HistoryItem::Text(HistoryMessage { role, content: content.into(), user_input_event: None })
 }
 
 fn batch(id: &str, name: &str, arguments: &str) -> HistoryItem {
@@ -422,10 +422,11 @@ fn summary_counts_and_deterministic_reload() {
 #[test]
 fn serialization_representation_roundtrip() {
     let items = vec![
-        HistoryItem::Text(HistoryMessage { role: HistoryRole::User, content: "你好".into() }),
+        HistoryItem::Text(HistoryMessage { role: HistoryRole::User, content: "你好".into() , user_input_event: None}),
         HistoryItem::Text(HistoryMessage {
             role: HistoryRole::Assistant,
             content: "回复\"含引号\"与\\反斜杠".into(),
+            user_input_event: None,
         }),
         HistoryItem::AssistantToolCalls {
             tool_calls: vec![ToolCallRecord {
@@ -1389,6 +1390,7 @@ fn tool_result_display_roundtrip_and_legacy_default_none() {
         HistoryItem::Text(HistoryMessage {
             role: HistoryRole::User,
             content: "012 展示字段往返".into(),
+            user_input_event: None,
         }),
         HistoryItem::AssistantToolCalls {
             tool_calls: vec![ToolCallRecord {

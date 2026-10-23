@@ -32,6 +32,17 @@ pub struct RequestUserInputResponse {
     pub answers: HashMap<String, RequestUserInputAnswer>,
 }
 
+/// Codex d138398 `protocol/src/items.rs::AsyncUserInputQuestion` 的必要子集：
+/// `title`＋可省略的字符串数组 `options`，拒绝未知字段——不是同步工具的
+/// id/header/选项说明结构。归一化到本地 [`RequestUserInputQuestion`]。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AsyncUserInputQuestion {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<String>>,
+}
+
 /// 018 本地宿主通道终态；不进入 V1 持久化或模型参数。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestUserInputError {

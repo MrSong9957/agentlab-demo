@@ -15,7 +15,7 @@ const RAW_LEN: usize = 20903;
 const RAW_SHA256: &str = "ac8ae107a0d72fe3476b430afb161ea4e67da2e446d778aefc44828160559807";
 
 fn msg(role: HistoryRole, content: &str) -> HistoryItem {
-    HistoryItem::Text(HistoryMessage { role, content: content.to_string() })
+    HistoryItem::Text(HistoryMessage { role, content: content.to_string(), user_input_event: None })
 }
 
 /// 1. 来源一致性（嵌入母本）：字节数与 SHA-256 独立锚定，非实现自我比较。

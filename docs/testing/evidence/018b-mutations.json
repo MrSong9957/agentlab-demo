@@ -1,0 +1,86 @@
+{
+  "feature": "018 阶段 B 异步问询",
+  "date": "2026-10-23",
+  "baseline": "main@dc7a4f1747b9670ed048aa37f63f5a8ddefc3e23（分支 feat/018-user-input-async）",
+  "method": "可逆源码变异：应用补丁→定向测试→断言失败（退出 101，非编译失败）→按原始字节恢复并核对 SHA-256→正确候选复验通过",
+  "mutations": [
+    {
+      "id": "M1",
+      "desc": "误当聊天：回答入史去掉来源标记（降级为普通聊天文本）",
+      "file": "src/app/src/turn.rs",
+      "command": "cargo test -p terminal-chat --test user_input_async -- terminal_text_with_received_answer",
+      "exit_code": 101,
+      "original_sha256": "97f70ab8caecba2bfadf6dad5784c7a94788eeebb76fbe4b6486d2de0486627a",
+      "mutated_sha256": "b8c1d752d880057450c29114fc5ce4531a48b3234995a8a30a7ec3cc1bd6a9fd",
+      "restored_sha256": "97f70ab8caecba2bfadf6dad5784c7a94788eeebb76fbe4b6486d2de0486627a",
+      "restored_ok": true,
+      "failure_excerpt": "thread 'terminal_text_with_received_answer_continues_original_turn' (607228) panicked at src/app/tests/user_input_async.rs:849:10:\nwarning: unused import: `chords::KEY_CHORD_TIMEOUT`\n60 | pub(crate) use chords::KEY_CHORD_TIMEOUT;\nwarning: constant `QUIT_SHORTCUT_TIMEOUT` is never used\n236 | pub(crate) const QUIT_SHORTCUT_TIMEOUT: Duration = Duration::from_secs(1);"
+    },
+    {
+      "id": "M2",
+      "desc": "批中插答：工具完成检查点立即把回答插入批内历史",
+      "file": "src/app/src/turn.rs",
+      "command": "cargo test -p terminal-chat --test user_input_async -- answer_submitted_mid_batch",
+      "exit_code": 101,
+      "original_sha256": "97f70ab8caecba2bfadf6dad5784c7a94788eeebb76fbe4b6486d2de0486627a",
+      "mutated_sha256": "4d3e52bb1dc26aa30f79436d2e8fcfda5d58ff572ee7c3f33b939e7f654cda7e",
+      "restored_sha256": "97f70ab8caecba2bfadf6dad5784c7a94788eeebb76fbe4b6486d2de0486627a",
+      "restored_ok": true,
+      "failure_excerpt": "thread 'answer_submitted_mid_batch_enters_history_after_full_batch_only' (643076) panicked at src/app/tests/user_input_async.rs:389:5:\nwarning: unused import: `chords::KEY_CHORD_TIMEOUT`\n60 | pub(crate) use chords::KEY_CHORD_TIMEOUT;\nwarning: constant `QUIT_SHORTCUT_TIMEOUT` is never used\n236 | pub(crate) const QUIT_SHORTCUT_TIMEOUT: Duration = Duration::from_secs(1);"
+    },
+    {
+      "id": "M3",
+      "desc": "未等即做：wait 不等回答立即返回 ready",
+      "file": "src/app/src/turn.rs",
+      "command": "cargo test -p terminal-chat --test user_input_async -- wait_blocks_until_answer",
+      "exit_code": 101,
+      "original_sha256": "97f70ab8caecba2bfadf6dad5784c7a94788eeebb76fbe4b6486d2de0486627a",
+      "mutated_sha256": "ff8ba2e8f2f93fd3c8585ad704e947df31769505a79b8eca44c64b924baab460",
+      "restored_sha256": "ea5003f02f6bc8ac050b4e316cd00b7f596ee0fa173992b970e110fd399436a6",
+      "restored_ok": true,
+      "failure_excerpt": "thread 'wait_blocks_until_answer_then_next_request_carries_dependent_action' (2959419) panicked at src/app/tests/user_input_async.rs:478:14:\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 14 filtered out; finished in 10.01s",
+      "note": "审查修复后锚点更新重录"
+    },
+    {
+      "id": "M4",
+      "desc": "旧答串题：wait 不校验 request_id 归属（任意未决可被吞答）",
+      "file": "src/app/src/turn.rs",
+      "command": "cargo test -p terminal-chat --test user_input_async -- occupancy_and_mismatch",
+      "exit_code": 101,
+      "original_sha256": "97f70ab8caecba2bfadf6dad5784c7a94788eeebb76fbe4b6486d2de0486627a",
+      "mutated_sha256": "466efbc491503b2f9b3e2c3d6cc4fd02455d70459b859129b9b7beba075d5727",
+      "restored_sha256": "97f70ab8caecba2bfadf6dad5784c7a94788eeebb76fbe4b6486d2de0486627a",
+      "restored_ok": true,
+      "failure_excerpt": "thread 'occupancy_and_mismatch_errors_keep_single_pending_item' (719704) panicked at src/app/tests/user_input_async.rs:662:32:\nwarning: unused import: `chords::KEY_CHORD_TIMEOUT`\n60 | pub(crate) use chords::KEY_CHORD_TIMEOUT;\nwarning: constant `QUIT_SHORTCUT_TIMEOUT` is never used\n236 | pub(crate) const QUIT_SHORTCUT_TIMEOUT: Duration = Duration::from_secs(1);"
+    },
+    {
+      "id": "M5",
+      "desc": "取消不醒：wait 等待忽略取消标志",
+      "file": "src/app/src/turn.rs",
+      "command": "cargo test -p terminal-chat --test user_input_async -- cancel_and_channel_failure",
+      "exit_code": 101,
+      "original_sha256": "97f70ab8caecba2bfadf6dad5784c7a94788eeebb76fbe4b6486d2de0486627a",
+      "mutated_sha256": "c1a4b96994881eb7dcab0233533082092180c4b1684508ea706e953c34383af5",
+      "restored_sha256": "97f70ab8caecba2bfadf6dad5784c7a94788eeebb76fbe4b6486d2de0486627a",
+      "restored_ok": true,
+      "failure_excerpt": "thread 'cancel_and_channel_failure_during_wait_close_with_real_reason' (1453346) panicked at src/app/tests/user_input_async.rs:726:14:\n取消未解除问询等待（看门狗超时）: Timeout\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 10.05s"
+    },
+    {
+      "id": "M6",
+      "desc": "恢复错显：恢复投影忽略来源标记事件（已答显示为已失效）",
+      "file": "src/app/src/tui_host.rs",
+      "command": "cargo test -p terminal-chat --lib -- project_history_items_merges",
+      "exit_code": 101,
+      "original_sha256": "046d5a4665edd3bfca3874e56c64867e74fd46f896b70a66aacfe13f77caf85a",
+      "mutated_sha256": "1b6797c2c23257c8d93ced58195e076a62cb1aaeffe50ce9fdf53c284c60580b",
+      "restored_sha256": "3def01dc1fa1856f0070d87c612d883f7f974f16e19a15b1fc10eeb2bfbb321e",
+      "restored_ok": true,
+      "failure_excerpt": "thread 'tui_host::tests::project_history_items_merges_async_events_by_marker' (2993973) panicked at src/app/src/tui_host.rs:1345:9:\nassertion `left == right` failed: 回答合并进单一发布 cell：[UserInputAsync { questions: [RequestUserInputQuestion { id: \"[\\\"request_user_input_async\\\",\\\"a1\\\",0]\", header: \"问题1\", question: \"S104-报告面向谁？\", is_other: true, is_secret: false, options: Some([RequestUserInputQuestionOption { label: \"内部评审\", description: \"\" }]) }], response: None, closed_reason: Some(\"中断/未保存回答，已失效\"), answerable: false }, Text { assistant: false, content: \"{\\\"request_id\\\":\\\"a1\\\",\\\"answers\\\":{\\\"[\\\\\\\"re",
+      "note": "审查修复后锚点更新重录"
+    }
+  ],
+  "positive_control": {
+    "command": "cargo test -p terminal-chat --test user_input_async && cargo test -p terminal-chat --lib tui_host",
+    "result": "14+8 通过（正确候选复绿）"
+  }
+}

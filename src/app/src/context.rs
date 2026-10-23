@@ -312,7 +312,7 @@ pub fn context_body(text: &str) -> Option<&str> {
 /// 基线；resume 后自动恢复，零新增持久化状态）。
 pub fn last_context_body(history: &[HistoryItem]) -> Option<&str> {
     history.iter().rev().find_map(|item| match item {
-        HistoryItem::Text(HistoryMessage { role, content }) if *role == HistoryRole::User => {
+        HistoryItem::Text(HistoryMessage { role, content, ..}) if *role == HistoryRole::User => {
             context_body(content)
         }
         _ => None,

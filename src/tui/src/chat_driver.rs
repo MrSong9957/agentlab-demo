@@ -94,6 +94,25 @@ pub enum DriverEvent {
         live: Arc<std::sync::atomic::AtomicBool>,
         display_filter: fn(&str) -> String,
     },
+    /// 018-B：异步问询发布——不自动抢占输入焦点，仅登记待回答项；
+    /// F6 或显式等待经 [`DriverEvent::UserInputAsyncWait`] 打开同一问答窗口。
+    UserInputAsync {
+        request_id: String,
+        questions: Vec<RequestUserInputQuestion>,
+        reply: UserInputReply,
+        live: Arc<std::sync::atomic::AtomicBool>,
+        display_filter: fn(&str) -> String,
+    },
+    /// 018-B：显式等待开始——自动打开本轮唯一未决问询窗口（不创建第二次问询）。
+    UserInputAsyncWait {
+        request_id: String,
+    },
+    /// 018-B：未决问询状态更新（回答入史/关闭）——同一关联展示更新，
+    /// 不伪造第二个 ToolEnd/工具结果。
+    UserInputAsyncUpdate {
+        request_id: String,
+        update: AsyncInputUpdate,
+    },
     /// 增量文本（按宿主确定性切分）。
     Delta(String),
     /// 一轮成功完成：最终完整回复文本。
@@ -112,6 +131,21 @@ pub enum DriverEvent {
     ToolEnd {
         id: String,
         item: HostHistoryItem,
+    },
+}
+
+/// 018-B：异步问询展示状态（宿主已过滤展示副本；request_id/答案 ID 原值）。
+#[derive(Debug, Clone)]
+pub enum AsyncInputUpdate {
+    /// 已受理回答入史。
+    Answered {
+        questions: Vec<RequestUserInputQuestion>,
+        response: RequestUserInputResponse,
+    },
+    /// 未决问询关闭（原因短串，已过滤）。
+    Closed {
+        questions: Vec<RequestUserInputQuestion>,
+        reason: String,
     },
 }
 
@@ -247,6 +281,30 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
     // 替换）。工具 cell 绝不入 stream_indices（需求⑧：最终回复不覆盖工具详情）。
     let mut tool_cells: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
+    // 018-B：本轮唯一未决异步问询（发布事件登记，F6/显式等待打开同一窗口）。
+    struct PendingAsyncQuestion {
+        request_id: String,
+        questions: Vec<RequestUserInputQuestion>,
+        reply: Option<UserInputReply>,
+        live: Arc<std::sync::atomic::AtomicBool>,
+        display_filter: fn(&str) -> String,
+    }
+
+    impl PendingAsyncQuestion {
+        /// 打开原问答窗口（F6 与显式等待共用同一入口；调用方判定可开后 take）。
+        fn open(self, pane: &mut BottomPane) {
+            pane.show_user_input(
+                self.questions,
+                self.reply.expect("可开后回执通道必在"),
+                self.live,
+                self.display_filter,
+            );
+        }
+    }
+    let mut pending_async: Option<PendingAsyncQuestion> = None;
+    // 018-B：异步问询 cell 记账（request_id → cells 下标）——回答/关闭更新同一 cell。
+    let mut async_cells: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     // 008：turn 运行中提交的排队输入（母本排队语义；一次重放一条，至多一个在飞 turn）
     let mut queued_inputs: VecDeque<String> = VecDeque::new();
     // 012 §8：独立工具详情页槽位（母本 app.overlay 同构；打开期间终端事件全路由页）
@@ -328,6 +386,89 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                     }));
                                 }
                             }
+                            DriverEvent::UserInputAsync {
+                                request_id,
+                                questions,
+                                reply,
+                                live,
+                                display_filter,
+                            } => {
+                                // 018-B：只登记待回答项，不自动抢占输入焦点；
+                                // 转瞬失效（取消/无活动轮/重复发布）立即回送终态。
+                                if turn_running
+                                    && !turn_cancelled
+                                    && pending_async.is_none()
+                                    && live.load(std::sync::atomic::Ordering::SeqCst)
+                                {
+                                    pending_async = Some(PendingAsyncQuestion {
+                                        request_id,
+                                        questions,
+                                        reply: Some(reply),
+                                        live,
+                                        display_filter,
+                                    });
+                                } else {
+                                    reply.send(Err(if turn_cancelled {
+                                        RequestUserInputError::Cancelled
+                                    } else {
+                                        RequestUserInputError::Closed
+                                    }));
+                                }
+                            }
+                            DriverEvent::UserInputAsyncWait { request_id } => {
+                                // 018-B：显式等待自动打开同一窗口（不创建第二次问询）
+                                let openable = pending_async
+                                    .as_ref()
+                                    .is_some_and(|p| {
+                                        p.request_id == request_id
+                                            && p.reply.is_some()
+                                            && pane.active_view_id() != Some("user-input")
+                                            && p.live
+                                                .load(std::sync::atomic::Ordering::SeqCst)
+                                    });
+                                if openable {
+                                    pending_async.take().unwrap().open(&mut pane);
+                                }
+                            }
+                            DriverEvent::UserInputAsyncUpdate { request_id, update } => {
+                                // 018-B：回答/关闭更新同一关联 cell；F6 不再打开
+                                if pending_async
+                                    .as_ref()
+                                    .is_some_and(|p| p.request_id == request_id)
+                                {
+                                    pending_async = None;
+                                }
+                                let item = match update {
+                                    AsyncInputUpdate::Answered { questions, response } => {
+                                        HostHistoryItem::UserInputAsync {
+                                            questions,
+                                            response: Some(response),
+                                            closed_reason: None,
+                                            answerable: false,
+                                        }
+                                    }
+                                    AsyncInputUpdate::Closed { questions, reason } => {
+                                        HostHistoryItem::UserInputAsync {
+                                            questions,
+                                            response: None,
+                                            closed_reason: Some(reason),
+                                            answerable: false,
+                                        }
+                                    }
+                                };
+                                if let Some(&idx) = async_cells
+                                    .get(&request_id)
+                                    .filter(|i| **i < cells.len())
+                                {
+                                    replace_cell(
+                                        &mut cells,
+                                        &mut tool_cells,
+                                        &mut async_cells,
+                                        idx,
+                                        project_tool_item(&item, &request_id, &cwd),
+                                    );
+                                }
+                            }
                             DriverEvent::Delta(delta) => {
                                 let controller = stream.get_or_insert_with(|| new_stream(&cwd));
                                 controller.push(&delta);
@@ -348,6 +489,9 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                 }
                                 // 012：流式移除使工具下标漂移——turn 终结即清空记账
                                 tool_cells.clear();
+                                // 018-B：未决问询随轮结束失效（未答项由工作线程关闭）
+                                pending_async = None;
+                                async_cells.clear();
                                 finish_stream(&mut stream, &mut cells, &cwd, text, false);
                                 turn_running = false;
                                 pane.set_task_running(false);
@@ -359,6 +503,8 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                     cells.remove(idx);
                                 }
                                 tool_cells.clear();
+                                pending_async = None;
+                                async_cells.clear();
                                 finish_stream(&mut stream, &mut cells, &cwd, text, true);
                                 turn_running = false;
                                 pane.set_task_running(false);
@@ -400,8 +546,10 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                 // 012：终态经与 /resume 同一投影（project_tool_item）；
                                 // 按记账下标替换运行态 cell（1→N 时修正其余记账下标）
                                 let projected = project_tool_item(&item, &id, &cwd);
+                                let is_async_cell =
+                                    matches!(item, HostHistoryItem::UserInputAsync { .. });
                                 let tool_cells_removed_idx = tool_cells.remove(&id);
-                                match tool_cells_removed_idx {
+                                let async_base_index = match tool_cells_removed_idx {
                                     Some(idx) if idx < cells.len() => {
                                         let delta = projected.len() as isize - 1;
                                         cells.splice(idx..idx + 1, projected);
@@ -412,8 +560,17 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                                 }
                                             }
                                         }
+                                        idx
                                     }
-                                    _ => cells.extend(projected),
+                                    _ => {
+                                        cells.extend(projected);
+                                        cells.len() - 1
+                                    }
+                                };
+                                // 018-B：发布 cell 登记 request_id → 下标（回答/关闭
+                                // 更新同一关联展示，不伪造第二个 ToolEnd）
+                                if is_async_cell {
+                                    async_cells.insert(id.clone(), async_base_index);
                                 }
                                 // 012 §8：浏览中的工具到达终态——同 id 页内 cell 刷新
                                 // （exec 页活动 id＝`exec:{id}`、patch 页＝`{id}`）
@@ -648,7 +805,23 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                             // - transcript_owns_key：滚动键（A3）＋F4 活动聚焦入口＋
                             //   视图交互激活期间的全部键（母本 has_active_interaction 门）。
                             let mut owned_by_view = false;
-                            if is_ctrl_t(&key) {
+                            if key.code == KeyCode::F(6) && key.modifiers.is_empty() {
+                                // 018-B：F6 打开本轮唯一未决异步问询——复用原问答窗口
+                                //（发布不抢焦点，仅此键进入）。无未决项时消费按键无动作。
+                                let openable = pending_async.as_ref().is_some_and(|p| {
+                                    p.reply.is_some()
+                                        && turn_running
+                                        && !turn_cancelled
+                                        && pane.active_view_id().is_none()
+                                        && p.live
+                                            .load(std::sync::atomic::Ordering::SeqCst)
+                                });
+                                if openable {
+                                    pending_async.take().unwrap().open(&mut pane);
+                                }
+                                needs_draw = true;
+                                owned_by_view = true;
+                            } else if is_ctrl_t(&key) {
                                 // 012 §8：Ctrl+T＝打开（聚焦或最近）工具详情页——不再
                                 // 切换全局原地 detailed 呈现（需求⑧：入口与新交互一致）
                                 let index = transcript
@@ -963,6 +1136,28 @@ enum Ev {
 }
 
 
+
+/// 018-B：按下标替换为一个投影 cell，并同步修正工具/异步两组记账的下标漂移
+///（与 ToolEnd 替换同一规则：1→N 时其后下标整体平移）。
+fn replace_cell(
+    cells: &mut Vec<Arc<dyn HistoryCell>>,
+    tool_cells: &mut std::collections::HashMap<String, usize>,
+    async_cells: &mut std::collections::HashMap<String, usize>,
+    index: usize,
+    projected: Vec<Arc<dyn HistoryCell>>,
+) {
+    let delta = projected.len() as isize - 1;
+    cells.splice(index..index + 1, projected);
+    if delta != 0 {
+        for book in [&mut *tool_cells, &mut *async_cells] {
+            for v in book.values_mut() {
+                if *v > index {
+                    *v = (*v as isize + delta) as usize;
+                }
+            }
+        }
+    }
+}
 
 fn is_ctrl_c(key: &KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL))
@@ -1340,6 +1535,14 @@ pub enum HostHistoryItem {
         response: Option<RequestUserInputResponse>,
         error: Option<String>,
     },
+    /// 018-B：异步问询终态（发布确认/已答/关闭同一 cell 的三个状态）。
+    /// `answerable`＝实时未决（显示 F6 提示）；恢复投影恒为 false（不重开问询）。
+    UserInputAsync {
+        questions: Vec<RequestUserInputQuestion>,
+        response: Option<RequestUserInputResponse>,
+        closed_reason: Option<String>,
+        answerable: bool,
+    },
 }
 
 /// 012：apply_patch 逐文件真实差异（应用时的真实前后内容）。
@@ -1411,7 +1614,8 @@ pub fn project_history(items: Vec<HostHistoryItem>) -> Vec<std::sync::Arc<dyn Hi
             tool @ (HostHistoryItem::Exec { .. }
             | HostHistoryItem::Patch { .. }
             | HostHistoryItem::Plan { .. }
-            | HostHistoryItem::UserInput { .. }) => {
+            | HostHistoryItem::UserInput { .. }
+            | HostHistoryItem::UserInputAsync { .. }) => {
                 flush_text!();
                 out.extend(project_tool_item(&tool, &id, &cwd));
             }
@@ -1609,6 +1813,60 @@ fn project_tool_item(
             }
             out
         }
+        // 018-B：异步问询同一 cell 的三态——已答复用上游结果 cell（与同步问询
+        // 同一渲染）；未答/关闭为事实文本（实时带 F6 提示，恢复表明已失效）。
+        HostHistoryItem::UserInputAsync {
+            questions,
+            response,
+            closed_reason,
+            answerable,
+        } => {
+            if let Some(response) = response {
+                return vec![Arc::new(crate::history_cell::RequestUserInputResultCell {
+                    questions: questions.clone(),
+                    answers: response.answers.clone(),
+                    interrupted: false,
+                })];
+            }
+            let mut lines = Vec::new();
+            match closed_reason {
+                Some(reason) => {
+                    let label = close_reason_label(reason);
+                    lines.push(ratatui::text::Line::from(
+                        format!("已发布的问询未收到回答，已关闭（{label}）").dim(),
+                    ));
+                }
+                None => {
+                    let hint = if *answerable { "，按 F6 打开回答" } else { "" };
+                    lines.push(ratatui::text::Line::from(
+                        format!("已发布问询，等待用户回答{hint}").dim(),
+                    ));
+                }
+            }
+            for (idx, q) in questions.iter().enumerate() {
+                lines.push(ratatui::text::Line::from(format!(
+                    "  {}. {}",
+                    idx + 1,
+                    q.question
+                ))
+                .dim());
+            }
+            vec![Arc::new(PlainHistoryCell::new(lines))]
+        }
+    }
+}
+
+/// 018-B：关闭原因短串 → 展示措辞（不可信来源经宿主过滤后仅剩短串枚举；
+/// 未知串原样透传，不再二次解释）。
+fn close_reason_label(reason: &str) -> String {
+    match reason {
+        "task_completed" => "任务已结束".to_string(),
+        "cancelled" => "用户已取消".to_string(),
+        "request_limit" => "模型请求额度耗尽".to_string(),
+        "host_exit" => "宿主退出".to_string(),
+        "channel_error" => "回答通道异常".to_string(),
+        "model_error" => "模型或协议错误".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -2120,6 +2378,90 @@ mod tests {
         assert!(ctrl_d(KeyModifiers::CONTROL));
         assert!(!ctrl_d(KeyModifiers::CONTROL | KeyModifiers::SHIFT));
         assert!(!ctrl_d(KeyModifiers::CONTROL | KeyModifiers::ALT));
+    }
+
+    /// 018-B：异步问询 cell 三态——实时未决（F6 提示＋题面）、已答（与同步问询
+    /// 同一结果 cell）、关闭（原因措辞）；恢复未决（answerable=false）无 F6 提示。
+    #[test]
+    fn async_input_projection_three_states() {
+        use codex_protocol::request_user_input::{
+            RequestUserInputAnswer, RequestUserInputQuestion, RequestUserInputResponse,
+        };
+        let questions = vec![RequestUserInputQuestion {
+            id: "[\"request_user_input_async\",\"pub\",0]".into(),
+            header: "问题1".into(),
+            question: "S104-报告面向谁？".into(),
+            is_other: true,
+            is_secret: false,
+            options: Some(vec![
+                codex_protocol::request_user_input::RequestUserInputQuestionOption {
+                    label: "内部评审".into(),
+                    description: String::new(),
+                },
+            ]),
+        }];
+        // 实时未决：F6 提示＋题面可见
+        let cells = project_tool_item(
+            &HostHistoryItem::UserInputAsync {
+                questions: questions.clone(),
+                response: None,
+                closed_reason: None,
+                answerable: true,
+            },
+            "pub",
+            std::path::Path::new("/"),
+        );
+        let text = cells_text(&cells);
+        assert!(text.contains("已发布问询，等待用户回答，按 F6 打开回答"), "{text}");
+        assert!(text.contains("S104-报告面向谁？"), "题面可见：{text}");
+        assert_eq!(cells.len(), 1, "单一 cell（回答/关闭原地替换）");
+        // 已答：与同步问询同一结果 cell（answers 可见、不显示 F6 提示）
+        let mut answers = std::collections::HashMap::new();
+        answers.insert(
+            "[\"request_user_input_async\",\"pub\",0]".to_string(),
+            RequestUserInputAnswer { answers: vec!["内部评审".into()] },
+        );
+        let cells = project_tool_item(
+            &HostHistoryItem::UserInputAsync {
+                questions: questions.clone(),
+                response: Some(RequestUserInputResponse { answers }),
+                closed_reason: None,
+                answerable: false,
+            },
+            "pub",
+            std::path::Path::new("/"),
+        );
+        let text = cells_text(&cells);
+        assert!(text.contains("内部评审"), "答案可见：{text}");
+        assert!(!text.contains("F6"), "已答不再提示 F6：{text}");
+        // 关闭：原因措辞（固定短串映射）＋无 F6 提示
+        let cells = project_tool_item(
+            &HostHistoryItem::UserInputAsync {
+                questions: questions.clone(),
+                response: None,
+                closed_reason: Some("task_completed".into()),
+                answerable: false,
+            },
+            "pub",
+            std::path::Path::new("/"),
+        );
+        let text = cells_text(&cells);
+        assert!(text.contains("已关闭（任务已结束）"), "{text}");
+        assert!(!text.contains("F6"), "关闭态不提示 F6：{text}");
+        // 恢复只有确认（无回答/关闭记录）：中断/未保存回答、已失效
+        let cells = project_tool_item(
+            &HostHistoryItem::UserInputAsync {
+                questions,
+                response: None,
+                closed_reason: None,
+                answerable: false,
+            },
+            "pub",
+            std::path::Path::new("/"),
+        );
+        let text = cells_text(&cells);
+        assert!(text.contains("已发布问询，等待用户回答"), "{text}");
+        assert!(!text.contains("F6"), "恢复态不提示 F6：{text}");
     }
 
     /// 017：计划终态投影——成功快照经 PlanUpdateCell 清单渲染（说明＋三种

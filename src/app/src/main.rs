@@ -553,6 +553,11 @@ fn cmd_chat(
                     // 016：运行中／已取消但进程仍存活的工具，明确展示会话编号；
                     // 017：update_plan 的 ToolEnd 打印计划清单/原因（成功快照说明与步骤）。
                     let mut notify = |n: turn::TurnNotify| match n {
+                        // 018-B：行式 CLI 不提供异步宿主，这三个事件不可达；
+                        // 显式列为无操作，避免未来接入时静默落入其他分支。
+                        turn::TurnNotify::UserInputAsyncWait { .. }
+                        | turn::TurnNotify::UserInputAsyncAnswered { .. }
+                        | turn::TurnNotify::UserInputAsyncClosed { .. } => {}
                         turn::TurnNotify::Info(line) => say(&line),
                         turn::TurnNotify::ToolBegin { id, name, .. } => {
                             say(&turn::tool_activity_line(&name, &id));

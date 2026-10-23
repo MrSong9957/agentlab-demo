@@ -317,6 +317,7 @@ fn perf_tiers_baseline_driven() {
             h.push(HistoryItem::Text(HistoryMessage {
                 role: HistoryRole::User,
                 content: format!("perf-append-{i:04}-{filler}"),
+                user_input_event: None,
             }));
             s.on_history(&h);
         }

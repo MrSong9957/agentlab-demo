@@ -294,6 +294,7 @@ fn e1_auto_save_default_and_resume_roundtrip() {
             terminal_chat::prompt::HistoryMessage {
                 role: terminal_chat::prompt::HistoryRole::User,
                 content: "你好".into(),
+                user_input_event: None,
             })).unwrap());
     // 工具结果为真实 exec 结果结构（第 4 项：ctx→user→tool_calls→result）
     match &loaded.history[3] {
@@ -333,6 +334,7 @@ fn e1_auto_save_default_and_resume_roundtrip() {
         terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
             role: terminal_chat::prompt::HistoryRole::User,
             content: "续聊".into(),
+            user_input_event: None,
         }));
 }
 
@@ -840,12 +842,14 @@ fn e17_two_process_concurrent_save_same_snapshot() {
         .map(|i| HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
             role: HistoryRole::User,
             content: format!("A-user-{i:05}-{}", "填充".repeat(120)),
+            user_input_event: None,
         }))
         .collect();
     let hist_b: Vec<HistoryItem> = (0..1500)
         .map(|i| HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
             role: HistoryRole::User,
             content: format!("B-user-{i:05}-{}", "填充".repeat(120)),
+            user_input_event: None,
         }))
         .collect();
     terminal_chat::session::save_snapshot(&fx.sessions(), "seedA", &hist_a).unwrap();
@@ -905,6 +909,7 @@ fn e17_two_process_concurrent_save_same_snapshot() {
         HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
             role: HistoryRole::User,
             content: format!("{}-user-00000-{}", if winner_is_a { "A" } else { "B" }, "填充".repeat(120)),
+            user_input_event: None,
         })
     );
 }

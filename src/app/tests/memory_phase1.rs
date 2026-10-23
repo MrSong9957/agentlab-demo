@@ -56,7 +56,7 @@ fn env(tag: &str) -> Env {
 }
 
 fn text(role: HistoryRole, content: &str) -> HistoryItem {
-    HistoryItem::Text(HistoryMessage { role, content: content.to_string() })
+    HistoryItem::Text(HistoryMessage { role, content: content.to_string(), user_input_event: None })
 }
 
 fn user_msg(content: &str) -> HistoryItem {
@@ -374,16 +374,16 @@ fn m3_oversize_record_skipped_and_total_budget_keeps_newest() {
         .map(|i| serde_json::to_vec(i).unwrap().len())
         .sum();
     assert!(total <= MAX_ROLLOUT_BYTES, "保留总量不得超 8 MiB（实际 {total}）");
-    assert!(!read.iter().any(|i| matches!(i, HistoryItem::Text(HistoryMessage { content, .. }) if content.starts_with('x'))), "超限单条被跳过");
-    assert!(!read.iter().any(|i| matches!(i, HistoryItem::Text(HistoryMessage { content, .. }) if content.contains("keep-old-marker"))), "总量预算从最旧挤起");
+    assert!(!read.iter().any(|i| matches!(i, HistoryItem::Text(HistoryMessage { content, ..}) if content.starts_with('x'))), "超限单条被跳过");
+    assert!(!read.iter().any(|i| matches!(i, HistoryItem::Text(HistoryMessage { content, ..}) if content.contains("keep-old-marker"))), "总量预算从最旧挤起");
     assert!(
-        read.iter().any(|i| matches!(i, HistoryItem::Text(HistoryMessage { content, .. }) if content.starts_with("fill-15"))),
+        read.iter().any(|i| matches!(i, HistoryItem::Text(HistoryMessage { content, ..}) if content.starts_with("fill-15"))),
         "最新条目保留"
     );
     // 来源顺序恢复（fill-15 在 fill-14 之后）。
     let idx = |needle: &str| {
         read.iter()
-            .position(|i| matches!(i, HistoryItem::Text(HistoryMessage { content, .. }) if content.contains(needle)))
+            .position(|i| matches!(i, HistoryItem::Text(HistoryMessage { content, ..}) if content.contains(needle)))
             .unwrap()
     };
     assert!(idx("fill-14") < idx("fill-15"), "恢复来源顺序");

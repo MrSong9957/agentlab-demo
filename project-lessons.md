@@ -32,6 +32,8 @@
 
 - 018 用户问询：[阶段 A 已批准交付](docs/specs/018-user-input.md)（2026-10-23，任务提交 `96682d0` 快进合入本地 `main`，本地任务分支已删除）；同步问答、独立回送、取消/退出和 V1 同源恢复已接入，安全门禁与双轴审查已收口，全量 3142 通过/0 失败/3 原有忽略；全目标 lint 保留两处旧测试错误。异步版未注册/未实施，未推送或发布。[实施证据](docs/records/2026-10-22-018-user-input-implementation.md)。
 
+  阶段 B：[已实施验证待批准](docs/records/2026-10-23-018b-implementation.md)（2026-10-23，分支 feat/018-user-input-async，基线 main@dc7a4f1）——TUI 七工具（异步发布＋本地 wait_for_user_input）、每轮单项未决、F6 打开原问答窗口、回答在完整批后入史、结束检查先处理已受理回答、V1 可选来源标记＋旧版重存降级；CLI/无宿主/内部记忆轮工具面不变。全量 3171/0/3，安全门禁、六项变异与双轴审查（2 规格缺口已修复补回归）闭环；2026-10-23 获用户批准交付本地 main（交付结果以实施记录为准）。
+
 ## 4. 必须保持的行为（契约明细）
 
 按规格与安全修复已验收的契约；行为变更须先核对对应规格并按 AGENTS.md 门禁补回归。
@@ -39,7 +41,7 @@
 - REPL（001）：回显 `Agent：`（全角冒号）、空输入不回显；`exit`/Ctrl+C/Ctrl+D 打印 `再见!` 且退出码 0（动画期间 Ctrl+C 仍为默认 SIGINT 退出码 130，按规格保留）；非法 UTF-8 不 panic、回显无 U+FFFD；管道等非终端输出跳过动画帧；rustyline 必须保留 `buffer-redux` 特性（关闭会丢多行粘贴输入）；TERM 为 `dumb`/未设置时交互退化属已知限制。
 - 配置（002）：`config/` 存手动配置与自动目录、`/refresh` 刷新、普通非流式对话；重试机制未实现。
 - 工具执行（003/004/016）：exec_command 固定 `/bin/sh -c`、**默认可续接**——等待（yield 250..=30000）只控返回，运行中返回 session_id；可选 timeout_ms 总时限（正整数无上限，从启动按单调时钟独立计时，到期 SIGKILL 整组回收）；tty=true 分配真实 PTY；输出双流按码点有界截断、非法字节替换 U+FFFD、待取缓存单份 1 MiB 头尾保留；write_stdin：空查询／PTY 文字输入（超 64 KiB 整次拒绝）／管道仅 Ctrl+C（\u0003）中断／terminate=true 三秒有界收尾；句柄仅当前对话有效，64 条满额拒绝不淘汰。apply_patch 仅 Add/Update/Delete（Update 仅常规文件）、完整解析后按序执行失败不回滚、写入/删除类失败 `state_known=false` 须重读、未改行保留原行尾。
-- 工具调用（006/016）：用户轮默认四项 exec_command/apply_patch/write_stdin/update_plan；有回答宿主时才加 request_user_input 为五项（记忆内部轮仍仅 mem 工具）；`id`/`name` 原样保留（trim 仅用于全空白判断，存储/唯一性判断/分派均用原始值）；取消只停止等待与剩余调用**不终止已启动进程**（016）；取消时已知工具的未执行调用按各自结果结构（空句柄）、未知工具回传单 `error` 字段通用结构。
+- 工具调用（006/016/018-B）：用户轮默认四项 exec_command/apply_patch/write_stdin/update_plan；有同步回答宿主加 request_user_input 为五项（行式 CLI）；TUI 同步＋异步宿主为七项（再加 request_user_input_async/wait_for_user_input，等待必须批内最后一条）；无宿主四项；记忆内部轮仍仅 mem 工具；`id`/`name` 原样保留（trim 仅用于全空白判断，存储/唯一性判断/分派均用原始值）；取消只停止等待与剩余调用**不终止已启动进程**（016）；取消时已知工具的未执行调用按各自结果结构（空句柄）、未知工具回传单 `error` 字段通用结构。
 - 安全边界（003 安全修复及后续加固）：凭证外发须过 origin 授权门（重定向一律拒绝）；`file:` 凭证仅可引用专用凭证目录内文件；公共目录一律强制 HTTPS；远端文本显示前经 `display::sanitize_for_terminal` 过滤、服务端回显凭证值须脱敏；响应体与最终模型请求 JSON 上限各 10 MiB；timeout_ms 1..=60000、max_output_chars 1..=100000、单批 tool_calls ≤32、patch ≤1 MiB、单文件读入/生成内容 ≤4 MiB 且 ≤100000 逻辑行；`.env`/配置文件 0600 且 `.env` 不得注入信任根控制变量（名单见 §6）。
 - 会话（007）：默认自动追加＋`/save`/`/resume`/`/sessions`；恢复的工具调用只作历史投影绝不重放；坏 meta 唯一整拒、行损坏跳行＋计数＋配对修复；auto 续写独占锁、获锁失败降级只读零修改；行 64 MiB 上限超限停用不截断；sessions 目录 0700/文件 0600。
 - TUI 按键单一职责（010/012，定案）：Ctrl+C 一律退出（含运行中，完整收尾）；Esc 仅取消（空闲无动作、不清选区/不回底/不关页、绝不退搜索）；q 关详情页；清选区＝点击输入区；回底＝Ctrl+End；键盘永不复制；搜索出口＝Enter。
@@ -65,6 +67,8 @@
 
 ## 7. 实现取舍与问题根因
 
+- 018-B 实施（2026-10-23）：①测试辅助 `PtyCli::send` 自动追加 CR——功能键/方向键须用新 `send_keys`，否则 F6 后跟 Enter 会把预选项直接提交；xterm F6＝`ESC[17~`（`ESC[15~` 是 F5）。②等待类用例经通道＋recv_timeout 交付并设看门狗，变异「取消不醒」10 秒内断言失败而非无限 join 挂死。③变异有效性证明的测试选择必须让被破坏行为可见：手工构造历史的用例检不出生产端标记删除（M1），两条调用的批次检不出批中插答（M2，需第三条调用错位）；变异脚本异常路径也必须恢复文件。④会话文件 content 内 JSON 为转义形态，断言按字段组合而非未转义字面量。
+- 018-B 调查（2026-10-23）：Codex 异步确认不含答案，回答经活动轮输入消费。本地 V1 探针确认：批中插入文本会使后续结果被配对修复，重复同 ID 的 ToolResult 被丢弃；回答应在完整批后独立入史。可选来源字段旧程序能读、重存会丢可靠关联；兼容方案须确认，依据见 [018 §8.1/§8.6](docs/specs/018-user-input.md#8-阶段-b最小异步问询契约草案)。
 - 用户问询复核（2026-10-22）：Codex 同步工具要求非空选项并等待回答；普通模式可开放，但上游 TUI 非阻塞问询在无交互时会自动返回空回答，不能等同“必须等到用户提交”。本地 turn 运行中输入仅排队，问询须另接回答回送，否则会互相等待；底层弹窗和协议空壳不等于工具已接通。建议先复用同步问答的必要部分，异步后置，依据见 [用户问询差异复核](docs/records/2026-10-22-codex-user-input-comparison.md)。
 - 017 计划工具（2026-10-22）：①嵌入母本锚点不变前提下「停用剔除」即恢复指引——`without_update_plan_instructions` 过滤器与其上游锚定测试一并移除，prompt_assembly s2 的测试侧独立重建同步改写（不再剔节）即为防回归面；②TUI 计划 cell 移植保真用「008-TRIM 遗留同名快照逐字节对比」锚定（新旧 .snap 正文一致＝渲染零漂移），孤儿快照删除、等价新快照（plans_tests 名下）接管；③Owned transcript 对计划 cell 用母本**紧凑视图**（按状态排序、隐藏说明、计数头），说明只在完整视图（Ctrl+T 详情页/展开）——e2e 断言需按视图分治，s91 以 Ctrl+T 验证说明；④TUI 侧错误文本（serde 错误可内嵌模型可控变体名）同属不可信来源，展示副本一并过 sanitize（审查发现补齐）。
 - 004 与 Codex 同名工具的兼容性（2026-10-22 复核）：`{"patch":...}` 是 Chat Completions 函数工具适配，工具定义与发送版提示词已同步；不能仅为对齐上游自由文本接口更换参数。`Move to`、Unicode 标点匹配容差是已知 MVP 取舍；移植上游时须保留本地 Add 禁止覆盖及四字段结果契约。依据与按需补齐建议见 [apply_patch 差异复核](docs/records/2026-10-22-codex-apply-patch-comparison.md)。
@@ -80,7 +84,8 @@
 
 ## 8. 验证结论演进
 
-- 当前基线（2026-10-22 017 update-plan，已批准交付）：`cargo check && cargo test --workspace --no-fail-fast` exit 0，51 目标 **3103 通过/0 失败/3 既有忽略**（含补验收轮 s92 真实缩放 e2e）；净增 20 用例（新增 24：plan 7/turn 2/tui_host 2/chat_driver 2/plans_tests 4/tool_loop t15–t18/session_cli e21/e2e s91＋s92；移除 4：`without_update_plan_instructions` 锚定测试随过滤器移除），`git diff --check` 通过。同法实测 HEAD（895cd60，独立 worktree＋独立 target）＝3083/0/3，账目闭环；此前记录的 3079 为 016 三轮历史口径、与 HEAD 实测差 4。6 项可逆变异（漏注册/失败误画清单/成功判定/终端过滤/取消形状/缩放无 SIGWINCH）全部检出。记录 `docs/records/2026-10-22-017-implementation.md`。
+- 当前基线（2026-10-23 018-B 候选，待批准）：`cargo check && cargo test --workspace --no-fail-fast` exit 0，**3171 通过/0 失败/3 既有忽略**，相对阶段 A 交付基线 3142/0/3 **净增 29**（模块内嵌单测 5、user_input_async 集成 15、安全 3、E2E S103–S106 4、TUI 投影 2；勿以实现中间态 3147 为基线——它已含 5 项内嵌单测）；六项可逆变异全部检出；lint 仅两处旧测试错误沿用（`security_untrusted_text.rs` unused_io_amount）。记录 `docs/records/2026-10-23-018b-implementation.md`。
+- 前一基线（2026-10-22 017 update-plan，已批准交付）：`cargo check && cargo test --workspace --no-fail-fast` exit 0，51 目标 **3103 通过/0 失败/3 既有忽略**（含补验收轮 s92 真实缩放 e2e）；净增 20 用例（新增 24：plan 7/turn 2/tui_host 2/chat_driver 2/plans_tests 4/tool_loop t15–t18/session_cli e21/e2e s91＋s92；移除 4：`without_update_plan_instructions` 锚定测试随过滤器移除），`git diff --check` 通过。同法实测 HEAD（895cd60，独立 worktree＋独立 target）＝3083/0/3，账目闭环；此前记录的 3079 为 016 三轮历史口径、与 HEAD 实测差 4。6 项可逆变异（漏注册/失败误画清单/成功判定/终端过滤/取消形状/缩放无 SIGWINCH）全部检出。记录 `docs/records/2026-10-22-017-implementation.md`。
 - 当前基线（2026-10-22 016 三轮测试加固候选，已批准交付）：`cargo test --workspace --no-fail-fast` 51 目标 **3079 通过/0 失败/3 既有忽略**（二轮 3084−净删 5：重复用例删 4＋导出合并 2→1）；三轮可逆变异 15/15 检出（七处加固 H1–H7、删除替代 D1–D4、合并 M1–M2），零生产行为改动；记录 `docs/records/2026-10-22-test-hardening-round.md`（前两轮见 `2026-10-22-016-implementation.md`，二轮 3084/0/3 与 12 项变异为历史证据）。
 - 前一基线（2026-10-21 后端回归收口）：容器内 `cargo check --locked --offline && cargo test --workspace --locked --offline --no-fail-fast` exit 0，50 个目标 **3045 通过/0 失败/3 既有忽略/0 过滤**；`e2e_acceptance` **106/0/0**。3 个忽略为 Windows AltGr 专项及两个父测试启动的子进程 helper。期间修复记忆库并发迁移竞态（见 §7），S81 修复后 20/20＋10/10 复跑通过；证据 `docs/records/2026-10-21-backend-regression.md`。
 - 当前基线（014 收口，2026-10-20）：`cargo test --workspace --no-fail-fast` 49 套件 **3019 通过/0 失败/3 既有忽略/0 过滤**；e2e `--test e2e_acceptance` **106/0/0**。来源：`docs/records/2026-10-20-014-implementation.md`。

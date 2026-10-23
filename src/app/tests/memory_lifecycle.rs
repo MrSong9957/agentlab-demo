@@ -151,6 +151,7 @@ fn source(
     let history = vec![HistoryItem::Text(HistoryMessage {
         role: HistoryRole::User,
         content: content.into(),
+        user_input_event: None,
     })];
     session.on_history(&history);
     assert_eq!(session.durable_history_len(), 1);
@@ -539,6 +540,7 @@ fn same_chain_registration_to_retention_remerge_and_injection() {
         terminal_chat::prompt::HistoryMessage {
             role: terminal_chat::prompt::HistoryRole::User,
             content: "SESSION-A-V2-M9: NEW-A-V2-M9 supersedes the old A experience".into(),
+            user_input_event: None,
         },
     ));
     a.on_history(&updated);

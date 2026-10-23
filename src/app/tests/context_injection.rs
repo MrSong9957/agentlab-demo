@@ -121,6 +121,7 @@ fn user(content: &str) -> HistoryItem {
     HistoryItem::Text(HistoryMessage {
         role: HistoryRole::User,
         content: content.to_string(),
+        user_input_event: None,
     })
 }
 
@@ -128,6 +129,7 @@ fn assistant(content: &str) -> HistoryItem {
     HistoryItem::Text(HistoryMessage {
         role: HistoryRole::Assistant,
         content: content.to_string(),
+        user_input_event: None,
     })
 }
 
@@ -198,10 +200,12 @@ fn t01_first_turn_full_context_byte_exact() {
             HistoryItem::Text(HistoryMessage {
                 role: r1,
                 content: c1,
+                user_input_event: None,
             }),
             HistoryItem::Text(HistoryMessage {
                 role: r2,
                 content: c2,
+                user_input_event: None,
             }),
         ) => {
             assert_eq!(*r1, HistoryRole::User);
@@ -559,6 +563,7 @@ fn t07_lookalike_not_recognized_real_forms_recognized() {
         assert_eq!(history[2], HistoryItem::Text(HistoryMessage {
             role: HistoryRole::User,
             content: ctx_now.clone(),
+            user_input_event: None,
         }), "仿冒不被认作基线：注入裸消息（无声明）：{lookalike}");
     }
 
@@ -580,6 +585,7 @@ fn t07_lookalike_not_recognized_real_forms_recognized() {
     assert_eq!(history[2], HistoryItem::Text(HistoryMessage {
         role: HistoryRole::User,
         content: format!("{DECL}\n\n{ctx_now}"),
+        user_input_event: None,
     }), "真实旧上下文被识别：新消息带替换声明");
 
     // 带声明的等正文（恢复形态）→ 不注入

@@ -166,6 +166,7 @@ fn user(content: &str) -> HistoryItem {
     HistoryItem::Text(HistoryMessage {
         role: HistoryRole::User,
         content: content.into(),
+        user_input_event: None,
     })
 }
 

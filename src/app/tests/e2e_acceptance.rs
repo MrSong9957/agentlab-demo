@@ -104,7 +104,7 @@ fn s93_tui_user_input_submit_and_continue() {
         serde_json::from_str::<Value>(result["content"].as_str().unwrap()).unwrap(),
         json!({"answers":{"direction":{"answers":["保留密码"]}}})
     );
-    assert_eq!(body["tools"].as_array().unwrap().len(), 5);
+    assert_eq!(body["tools"].as_array().unwrap().len(), 7);
 }
 
 #[test]
@@ -637,6 +637,7 @@ fn s101_restore_unfinished_question_only_displays_unknown_result() {
             HistoryItem::Text(HistoryMessage {
                 role: HistoryRole::User,
                 content: "崩溃前用户轮".into(),
+                user_input_event: None,
             }),
             HistoryItem::AssistantToolCalls {
                 content: None,
@@ -790,6 +791,262 @@ fn s102_redirected_line_cli_uppercase_term_cancels_without_another_line() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, "s102-ask");
     assert_eq!(results[0].1, json!({"error":"用户已取消本轮：问询未完成"}));
+}
+
+/// 018-B S103：异步发布不抢焦点——F6 打开原问答窗口；独立命令继续执行；
+/// 回答在完整批后进入下一请求；聊天草稿保留。
+#[test]
+fn s103_async_publish_f6_answer_enters_next_request_and_keeps_draft() {
+    let cfg = TempDir::new("s103-cfg");
+    let user = TempDir::new("s103-user");
+    let gate = user.path().join("work").join("gate");
+    let block_cmd = format!("while [ ! -e {} ]; do sleep 0.05; done", gate.display());
+    let args = json!({"questions":[{"title":"S103-报告面向谁？","options":["S103-内部评审","S103-外部客户"]}]}).to_string();
+    let tc = json!({"choices":[{"message":{"tool_calls":[
+        {"id":"s103-ask","type":"function","function":{
+            "name":"request_user_input_async","arguments":args}},
+        {"id":"s103-work","type":"function","function":{
+            "name":"exec_command","arguments":json!({"cmd": block_cmd, "yield_time_ms": 30000}).to_string()}}
+    ]}}]}).to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc),
+        MockResp::json(200, chat_body("S103-完成")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S103_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s103"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S103_KEY",
+        "fake-s103",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.send_line("准备报告");
+    // 发布提示 cell：不自动打开窗口，仅 F6 入口
+    pty.wait_screen("已发布问询，等待用户回答，按 F6 打开回答")
+        .unwrap();
+    // 草稿不被抢占；等待期间继续输入（不提交）
+    pty.send_raw("\x1b[200~S103-未发草稿\x1b[201~".as_bytes());
+    pty.wait_screen("S103-未发草稿").unwrap();
+    // F6 打开本轮唯一未决项（复用原问答窗口）
+    pty.send_raw(b"\x1b[17~"); // F6（xterm 转义序列）
+    pty.wait_screen("S103-报告面向谁").unwrap();
+    pty.send_raw(b"\r");
+    pty.wait_screen("Questions 1/1 answered").unwrap();
+    // 回答已受理；解除独立命令的阻塞，批收尾后回答进入下一请求
+    std::fs::write(&gate, b"1").unwrap();
+    pty.wait_screen("S103-完成").unwrap();
+    pty.wait_screen("S103-未发草稿").unwrap();
+    pty.send_raw(b"\x03");
+    assert!(pty.finish().1.success());
+    assert_eq!(mock.count(), 2, "回答不成为聊天轮、无空转请求");
+    let body: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
+    let msgs = body["messages"].as_array().unwrap();
+    let publish_result = msgs
+        .iter()
+        .find(|m| m["tool_call_id"] == "s103-ask")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(publish_result["content"].as_str().unwrap()).unwrap(),
+        json!({"accepted":true,"request_id":"s103-ask"})
+    );
+    let work_pos = msgs
+        .iter()
+        .position(|m| m["tool_call_id"] == "s103-work")
+        .unwrap();
+    let answer_pos = msgs
+        .iter()
+        .position(|m| {
+            m["role"] == "user" && m["content"].as_str().is_some_and(|c| c.contains("S103-内部评审"))
+        })
+        .expect("回答进入下一请求");
+    assert!(work_pos < answer_pos, "回答在完整批之后进入");
+}
+
+/// 018-B S104：显式等待自动打开同一窗口；等待期间请求计数不增加；
+/// ready 结果之后答案数据随下一请求供依赖动作使用。
+#[test]
+fn s104_wait_auto_opens_and_dependent_action_follows_answer() {
+    let cfg = TempDir::new("s104-cfg");
+    let user = TempDir::new("s104-user");
+    let args = json!({"questions":[{"title":"S104-面向谁？","options":["S104-内部","S104-外部"]}]}).to_string();
+    let wait = json!({"request_id":"s104-ask"}).to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, json!({"choices":[{"message":{"tool_calls":[
+            {"id":"s104-ask","type":"function","function":{
+                "name":"request_user_input_async","arguments":args}}]}}]}).to_string()),
+        MockResp::json(200, json!({"choices":[{"message":{"tool_calls":[
+            {"id":"s104-w","type":"function","function":{
+                "name":"wait_for_user_input","arguments":wait}}]}}]}).to_string()),
+        MockResp::json(200, chat_body("S104-依赖完成")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S104_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s104"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S104_KEY",
+        "fake-s104",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.send_line("先问清楚");
+    pty.wait_screen("已发布问询，等待用户回答").unwrap();
+    // 模型显式等待：同一窗口自动打开（无需 F6）
+    pty.wait_screen("S104-面向谁").unwrap();
+    wait_request_count(&mut pty, &mock, 2);
+    pty.send_raw(b"\r");
+    pty.wait_screen("S104-依赖完成").unwrap();
+    pty.send_raw(b"\x03");
+    assert!(pty.finish().1.success());
+    assert_eq!(mock.count(), 3);
+    let body: Value = serde_json::from_str(&mock.requests()[2].body).unwrap();
+    let msgs = body["messages"].as_array().unwrap();
+    let wait_pos = msgs
+        .iter()
+        .position(|m| m["tool_call_id"] == "s104-w")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(
+            msgs[wait_pos]["content"].as_str().unwrap()
+        )
+        .unwrap(),
+        json!({"ready":true,"request_id":"s104-ask"}),
+        "ready 不是第二份回答"
+    );
+    let answer_pos = msgs
+        .iter()
+        .position(|m| {
+            m["role"] == "user" && m["content"].as_str().is_some_and(|c| c.contains("S104-内部"))
+        })
+        .expect("答案数据随等待之后进入请求");
+    assert!(wait_pos < answer_pos);
+}
+
+/// 018-B S105：等待中 Esc 取消——解除等待、剩余配对收尾、按 cancelled 关闭、
+/// 不再请求模型；会话文件保存真实关闭原因。
+#[test]
+fn s105_esc_during_wait_cancels_and_closes_question() {
+    let cfg = TempDir::new("s105-cfg");
+    let user = TempDir::new("s105-user");
+    let args = json!({"questions":[{"title":"S105-还继续吗？","options":["S105-继续","S105-停止"]}]}).to_string();
+    let wait = json!({"request_id":"s105-ask"}).to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, json!({"choices":[{"message":{"tool_calls":[
+            {"id":"s105-ask","type":"function","function":{
+                "name":"request_user_input_async","arguments":args}}]}}]}).to_string()),
+        MockResp::json(200, json!({"choices":[{"message":{"tool_calls":[
+            {"id":"s105-w","type":"function","function":{
+                "name":"wait_for_user_input","arguments":wait}}]}}]}).to_string()),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S105_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s105"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S105_KEY",
+        "fake-s105",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.send_line("确认方向");
+    pty.wait_screen("S105-还继续吗").unwrap();
+    wait_request_count(&mut pty, &mock, 2);
+    pty.send_raw(b"\x1b"); // Esc＝仅取消当前轮
+    pty.wait_screen("用户已取消本轮：问询未完成").unwrap();
+    assert_eq!(mock.count(), 2, "取消后不再请求模型");
+    pty.send_raw(b"\x03");
+    assert!(pty.finish().1.success());
+    // 会话文件：wait 错误结果＋关闭事件（cancelled），无回答事件
+    let sessions = fs::read_dir(user.path().join("sessions")).unwrap();
+    let session_file = sessions
+        .into_iter()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("auto-"))
+        })
+        .expect("自动会话已落盘");
+    let content = fs::read_to_string(&session_file).unwrap();
+    assert!(content.contains("用户已取消本轮：问询未完成"), "{content}");
+    // content 内 JSON 为转义形态；按字段组合断言（reason=cancelled 且无 answer 事件）
+    assert!(
+        content.contains("cancelled") && content.contains("reason"),
+        "真实关闭原因：{content}"
+    );
+    assert!(
+        !content.contains("\"answer\":{\"request_id\""),
+        "未答问题不得出现回答事件：{content}"
+    );
+}
+
+/// 018-B S106：已答异步问询的会话恢复——同源投影显示已答，恢复零请求。
+#[test]
+fn s106_resume_answered_async_question_displays_without_new_requests() {
+    let cfg = TempDir::new("s106-cfg");
+    let user = TempDir::new("s106-user");
+    let args = json!({"questions":[{"title":"S106-风格？","options":["S106-正式","S106-轻松"]}]}).to_string();
+    let wait = json!({"request_id":"s106-ask"}).to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, json!({"choices":[{"message":{"tool_calls":[
+            {"id":"s106-ask","type":"function","function":{
+                "name":"request_user_input_async","arguments":args}}]}}]}).to_string()),
+        MockResp::json(200, json!({"choices":[{"message":{"tool_calls":[
+            {"id":"s106-w","type":"function","function":{
+                "name":"wait_for_user_input","arguments":wait}}]}}]}).to_string()),
+        MockResp::json(200, chat_body("S106-完成")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S106_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s106"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S106_KEY",
+        "fake-s106",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.send_line("确认风格");
+    pty.wait_screen("S106-风格").unwrap();
+    pty.send_raw(b"\r");
+    pty.wait_screen("S106-完成").unwrap();
+    pty.send_line("/save s106");
+    pty.wait_screen("已保存").unwrap();
+    pty.send_raw(b"\x03");
+    assert!(pty.finish().1.success());
+    assert_eq!(mock.count(), 3);
+    let mut resumed = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S106_KEY",
+        "fake-s106",
+        true,
+    ));
+    resumed.wait_screen("? for shortcuts").unwrap();
+    resumed.send_line("/resume s106");
+    resumed.wait_screen("Questions 1/1 answered").unwrap();
+    resumed.wait_screen("S106-正式").unwrap();
+    resumed.send_raw(b"\x03");
+    assert!(resumed.finish().1.success());
+    assert_eq!(mock.count(), 3, "恢复只展示，不重新提问或请求模型");
 }
 
 // ---------- PTY 基础设施 ----------
@@ -1311,8 +1568,8 @@ fn s1_pty_normal_session_full_roundtrip() {
     assert_eq!(body["messages"][2]["content"], "你好");
     assert_eq!(
         body["tools"].as_array().unwrap().len(),
-        5,
-        "018：具备回答宿主的交互轮五工具"
+        7,
+        "018-B：TUI 具备同步＋异步回答宿主的交互轮七工具"
     );
     // 凭证明文不回显；已授权命中不改写授权记录
     assert!(!out.contains(key), "密钥明文不得出现在终端输出");
@@ -2177,6 +2434,7 @@ fn s10_tui_resume_projects_history_without_replay() {
         terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage {
             role,
             content: content.to_string(),
+            user_input_event: None,
         })
     };
     let hist = vec![
@@ -3186,7 +3444,7 @@ fn s24_tui_resume_long_session_then_scrolls() {
     seed_grant(user.path(), &origin, &catalog::fingerprint(key));
 
     let msg = |role: terminal_chat::prompt::HistoryRole, content: String| {
-        terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage { role, content })
+        terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage { role, content, user_input_event: None })
     };
     let hist: Vec<_> = (0..60)
         .map(|i| {
@@ -4063,7 +4321,7 @@ fn sgr_up(col: u16, row: u16) -> Vec<u8> {
 fn scrollbar_session(tag: &str) -> (PtySession, common::Mock, Vec<TempDir>) {
     let (pty, mock, keep) = scroll_session(tag, vec![]);
     let msg = |role: terminal_chat::prompt::HistoryRole, content: String| {
-        terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage { role, content })
+        terminal_chat::prompt::HistoryItem::Text(terminal_chat::prompt::HistoryMessage { role, content, user_input_event: None })
     };
     let stem = format!("S{tag}");
     let hist: Vec<_> = (0..120)
@@ -4479,6 +4737,7 @@ fn selection_session_with_delayed_reply(
                 terminal_chat::prompt::HistoryRole::User
             },
             content,
+            user_input_event: None,
         })
     };
     let stem = format!("S{tag}");
@@ -4878,6 +5137,7 @@ fn s46_tui_selection_copy_injection_neutralized() {
                 terminal_chat::prompt::HistoryRole::User
             },
             content,
+            user_input_event: None,
         })
     };
     let hist = vec![
@@ -4946,6 +5206,7 @@ fn s47_tui_multiline_wrap_combining_payload_exact() {
                 terminal_chat::prompt::HistoryRole::User
             },
             content,
+            user_input_event: None,
         })
     };
     let hist = vec![
@@ -5042,6 +5303,7 @@ fn s48_tui_selection_holds_across_reply_and_ctrl_c_cancels() {
                 terminal_chat::prompt::HistoryRole::User
             },
             content,
+            user_input_event: None,
         })
     };
     let mut hist = Vec::new();
@@ -5133,6 +5395,7 @@ fn s49_tui_oversize_copy_fails_with_feedback_then_recovers() {
                 terminal_chat::prompt::HistoryRole::User
             },
             content,
+            user_input_event: None,
         })
     };
     let hist = vec![
@@ -6266,6 +6529,7 @@ fn cancel_session(
                 terminal_chat::prompt::HistoryRole::User
             },
             content,
+            user_input_event: None,
         })
     };
     let stem = format!("S{tag}");

@@ -167,7 +167,7 @@ pub fn serialize_filtered_history_items(items: &[HistoryItem]) -> Result<String,
 /// 本地 `HistoryMessage` 无这些字段（无对应概念）。
 pub fn sanitize_history_item_for_memories(item: &HistoryItem) -> Option<HistoryItem> {
     match item {
-        HistoryItem::Text(HistoryMessage { role, content })
+        HistoryItem::Text(HistoryMessage { role, content, ..})
             if matches!(role, HistoryRole::User) && is_memory_excluded_fragment(content) =>
         {
             None
@@ -208,6 +208,7 @@ mod tests {
         HistoryItem::Text(HistoryMessage {
             role: HistoryRole::User,
             content: content.to_string(),
+            user_input_event: None,
         })
     }
 

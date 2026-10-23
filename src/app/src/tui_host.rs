@@ -230,10 +230,37 @@ impl TuiHost {
             // 参数不可解析（exec 无 cmd）或未知工具回退原活动行（Info）。
             // 016：write_stdin 的 Begin/End 关联原命令（会话记录），不伪造新命令；
             // 运行中状态携带会话编号，独立呈现。
+            // 018-B：异步问询等待/回答/关闭→驱动事件；展示副本在此过滤，
+            // 关联 ID（request_id）保持原值。
             let procs_for_notify = procs.clone();
             let mut notify = |n: turn::TurnNotify| {
                 let ev: Option<DriverEvent> = match n {
                     turn::TurnNotify::Info(line) => Some(DriverEvent::Info(line)),
+                    turn::TurnNotify::UserInputAsyncWait { request_id } => {
+                        Some(DriverEvent::UserInputAsyncWait { request_id })
+                    }
+                    turn::TurnNotify::UserInputAsyncAnswered {
+                        request_id,
+                        questions,
+                        response,
+                    } => Some(DriverEvent::UserInputAsyncUpdate {
+                        request_id,
+                        update: tchat_tui::chat_driver::AsyncInputUpdate::Answered {
+                            questions: crate::user_input::sanitized_questions(&questions),
+                            response: crate::user_input::sanitized_response(&response),
+                        },
+                    }),
+                    turn::TurnNotify::UserInputAsyncClosed {
+                        request_id,
+                        questions,
+                        reason,
+                    } => Some(DriverEvent::UserInputAsyncUpdate {
+                        request_id,
+                        update: tchat_tui::chat_driver::AsyncInputUpdate::Closed {
+                            questions: crate::user_input::sanitized_questions(&questions),
+                            reason: crate::display::sanitize_for_terminal(&reason),
+                        },
+                    }),
                     turn::TurnNotify::ToolBegin { id, name, arguments } => {
                         let ev = if name == "write_stdin" {
                             stdin_begin_event(&procs_for_notify, &id, &arguments)
@@ -246,7 +273,7 @@ impl TuiHost {
                     }
                     turn::TurnNotify::ToolEnd { id, name, arguments, result, display, cancelled } => {
                         // 未知工具：无 cell 可替换（Begin 已回退活动行），不发送
-                        tool_end_item(&name, &arguments, &result, display.as_ref(), cancelled)
+                        tool_end_item(&name, &id, &arguments, &result, display.as_ref(), cancelled)
                             .map(|item| DriverEvent::ToolEnd { id, item })
                     }
                 };
@@ -296,7 +323,25 @@ impl TuiHost {
                 });
                 crate::user_input::wait_for_response(receiver, &HOST_CANCEL, &live)
             };
-            let result = turn::run_user_turn_with_context_and_host(
+            // 018 阶段 B：异步发布——校验通过后建立一次性回执通道并交给 UI 事件
+            // 通道，随即返回（不等待答案）；回答/取消不获取 history 或 autosave 锁。
+            let mut async_input_host =
+                |call: &turn::ParsedToolCall, questions: &[crate::user_input::Question]| {
+                    let (reply, receiver) = std_mpsc::channel();
+                    let live = Arc::new(AtomicBool::new(true));
+                    let sent = tx.send(DriverEvent::UserInputAsync {
+                        request_id: call.id.clone(),
+                        questions: questions.to_vec(),
+                        reply: tchat_tui::chat_driver::UserInputReply::new(reply),
+                        live: live.clone(),
+                        display_filter: crate::display::sanitize_for_terminal,
+                    });
+                    if sent.is_err() {
+                        return Err("问询发布通道已关闭：问询未完成".to_string());
+                    }
+                    Ok(crate::user_input_async::AsyncReplyChannel { receiver, live })
+                };
+            let result = turn::run_user_turn_with_context_and_hosts(
                 &mut history.lock().unwrap(),
                 &input,
                 &mut sender,
@@ -307,6 +352,7 @@ impl TuiHost {
                 &context_sources,
                 &procs,
                 Some(&mut input_host),
+                Some(&mut async_input_host),
             );
             unsafe {
                 libc::signal(libc::SIGINT, libc::SIG_DFL);
@@ -552,9 +598,62 @@ impl TuiHost {
 /// 历史投影（012）：文本直映；工具结果按 id→（name, arguments）配对后，经与
 /// 实时 ToolEnd **同一转换**（[`tool_end_item`]）产出 HostHistoryItem——恢复视图与
 /// 实时终态同源同投影（需求⑤）。调用参数不重放（007：恢复只投影不执行）。
+/// 018-B：带来源标记的回答/关闭文本（正文与标记 request_id 一致）合并进对应
+/// 异步发布调用的同一展示，不作为普通用户文本重复出现；孤儿/重复/矛盾记录
+/// 不伪造已答，按普通文本保留。
 fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
     use std::collections::HashMap;
+    // 018-B 预扫：request_id → 首条有效 answer/closed 事件
+    use crate::prompt::HistoryMessage as HM;
+    enum AsyncHistoryEvent {
+        Answer(crate::user_input::Response),
+        Closed(String),
+    }
+    let mut async_events: HashMap<String, AsyncHistoryEvent> = HashMap::new();
+    for item in history {
+        let HistoryItem::Text(HM {
+            user_input_event: Some(event),
+            content,
+            ..
+        }) = item
+        else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(content) else {
+            continue;
+        };
+        let Some(content_id) = v.get("request_id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if content_id != event.request_id() {
+            continue; // 标记与正文矛盾：不合并，按普通文本保留
+        }
+        match event {
+            crate::prompt::UserInputEvent::Answer { request_id } => {
+                if let Ok(response) =
+                    serde_json::from_value::<crate::user_input::Response>(v.clone())
+                {
+                    async_events
+                        .entry(request_id.clone())
+                        .or_insert(AsyncHistoryEvent::Answer(response));
+                }
+            }
+            crate::prompt::UserInputEvent::Closed { request_id } => {
+                let reason = v
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                async_events
+                    .entry(request_id.clone())
+                    .or_insert(AsyncHistoryEvent::Closed(reason));
+            }
+        }
+    }
     let mut pending: HashMap<String, (String, String)> = HashMap::new();
+    // 018-B：成功合并进发布 cell 的事件文本不再作为普通用户文本重复展示；
+    // 未合并（孤儿/矛盾/外来题号）的事件文本按普通文本保留
+    let mut merged_events: HashMap<String, ()> = HashMap::new();
     let mut out = Vec::new();
     for item in history {
         match item {
@@ -563,6 +662,12 @@ fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
                 // 历史与请求面不变；识别与去重共用同一识别器）
                 if m.role == crate::prompt::HistoryRole::User
                     && crate::context::context_body(&m.content).is_some()
+                {
+                    continue;
+                }
+                if m.user_input_event
+                    .as_ref()
+                    .is_some_and(|e| merged_events.contains_key(e.request_id()))
                 {
                     continue;
                 }
@@ -581,23 +686,77 @@ fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
                 let paired = pending.remove(tool_call_id);
                 // 016：恢复历史中的 running 只表示当时状态——不作为当前活会话
                 // 展示（/resume 已重置管理器，旧句柄失效），按事实文本呈现。
-                let item = paired
-                    .and_then(|(name, arguments)| {
-                        if result_was_running(content) {
-                            restored_running_text(&name, &arguments, content, display.as_ref())
-                        } else {
-                            tool_end_item(&name, &arguments, content, display.as_ref(), false)
-                        }
-                    })
-                    .unwrap_or(HostHistoryItem::Text {
-                        assistant: true,
-                        content: content.clone(),
-                    });
+                let async_event = async_events.get(tool_call_id).map(|e| match e {
+                    AsyncHistoryEvent::Answer(response) => (Some(response.clone()), None),
+                    AsyncHistoryEvent::Closed(reason) => (None, Some(reason.clone())),
+                });
+                let restored = paired.and_then(|(name, arguments)| {
+                    if name == "request_user_input_async" {
+                        restored_async_item(tool_call_id, &arguments, content, async_event)
+                            .map(|(item, merged)| {
+                                if merged {
+                                    merged_events.insert(tool_call_id.clone(), ());
+                                }
+                                item
+                            })
+                    } else if result_was_running(content) {
+                        restored_running_text(&name, &arguments, content, display.as_ref())
+                    } else {
+                        tool_end_item(&name, tool_call_id, &arguments, content, display.as_ref(), false)
+                    }
+                });
+                let item = restored.unwrap_or(HostHistoryItem::Text {
+                    assistant: true,
+                    content: content.clone(),
+                });
                 out.push(item);
             }
         }
     }
     out
+}
+
+/// 018-B：恢复投影中的异步问询终态——发布确认＋来源标记事件合并为同一展示；
+/// 只有确认而无回答/关闭记录＝中断/未保存回答、已失效（§8.6），不假定已答。
+fn restored_async_item(
+    request_id: &str,
+    arguments: &str,
+    result: &str,
+    event: Option<(Option<crate::user_input::Response>, Option<String>)>,
+) -> Option<(HostHistoryItem, bool)> {
+    let questions = crate::user_input_async::parse_arguments(arguments, request_id).ok()?;
+    let v: serde_json::Value = serde_json::from_str(result).ok()?;
+    if v.get("accepted").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None; // 发布失败：按普通文本呈现，不伪造问题
+    }
+    let mut merged = false;
+    let (response, closed_reason) = match event {
+        // 答案 ID 只能属于原题（§8.6）：含外来题号的记录不合并、不伪造已答
+        Some((Some(response), _))
+            if response
+                .answers
+                .keys()
+                .all(|key| questions.iter().any(|q| &q.id == key)) =>
+        {
+            merged = true;
+            (Some(crate::user_input::sanitized_response(&response)), None)
+        }
+        Some((None, Some(reason))) => {
+            merged = true;
+            (None, Some(reason))
+        }
+        // 无事件/正文畸形/答案不属于原题＝未保存回答的中断记录（事件文本按普通文本保留）
+        _ => (None, Some("中断/未保存回答，已失效".to_string())),
+    };
+    Some((
+        HostHistoryItem::UserInputAsync {
+            questions: crate::user_input::sanitized_questions(&questions),
+            response,
+            closed_reason,
+            answerable: false,
+        },
+        merged,
+    ))
 }
 
 /// 从工具 arguments JSON 提取 exec 的 cmd（Begin 与 End 共用）。
@@ -699,9 +858,12 @@ fn restored_running_text(
 /// [`turn::SKIPPED_BY_CANCEL_MESSAGE`] 精确匹配（恢复路径——单一生产者常量）。
 /// 016：write_stdin 复用 Exec 形状——`command`＝关联原命令（优先取展示数据，
 /// 旧记录缺失时留空降级），运行中携带会话编号（running）。
+/// 018-B：`request_user_input_async`＝发布确认的实时投影（answerable=true，
+/// 显示 F6 提示）；回答/关闭经 AsyncInputUpdate 更新同一 cell。
 /// 解析失败返回 None（调用方按普通文本处理）。
 fn tool_end_item(
     name: &str,
+    id: &str,
     arguments: &str,
     result: &str,
     display: Option<&ToolDisplay>,
@@ -838,6 +1000,20 @@ fn tool_end_item(
                 error,
             })
         }
+        // 018-B：发布确认实时投影——仅 accepted=true 生成问询 cell（等待回答）；
+        // 发布失败按普通文本呈现错误，不伪造问题。
+        "request_user_input_async" => {
+            let questions = crate::user_input_async::parse_arguments(arguments, id).ok()?;
+            if v.get("accepted").and_then(serde_json::Value::as_bool) != Some(true) {
+                return None;
+            }
+            Some(HostHistoryItem::UserInputAsync {
+                questions: crate::user_input::sanitized_questions(&questions),
+                response: None,
+                closed_reason: None,
+                answerable: true,
+            })
+        }
         _ => None,
     }
 }
@@ -870,7 +1046,7 @@ mod tests {
             r#"{"status":"completed","exit_code":0,"output":"hi"#,
             r#"\n","truncated":false,"error":null}"#
         );
-        match tool_end_item("exec_command", exec_args, exec_result, Some(&ToolDisplay::Exec {
+        match tool_end_item("exec_command", "", exec_args, exec_result, Some(&ToolDisplay::Exec {
             duration_ms: 42,
         }), false) {
             Some(H::Exec { command, output, exit_code, cancelled, error, duration_ms, running }) => {
@@ -887,19 +1063,20 @@ mod tests {
         // exec 取消
         let cancelled_result =
             r#"{"status":"cancelled","exit_code":null,"output":"partial","truncated":false,"error":"执行已取消，已终止进程组"}"#;
-        match tool_end_item("exec_command", exec_args, cancelled_result, None, false) {
+        match tool_end_item("exec_command", "", exec_args, cancelled_result, None, false) {
             Some(H::Exec { cancelled, .. }) => assert!(cancelled),
             other => panic!("cancelled 形状：{other:?}"),
         }
         // 016：运行中携带会话编号；write_stdin 关联原命令（不伪造新命令）
         let running_result = r#"{"status":"running","exit_code":null,"output":"partial","truncated":false,"error":null,"session_id":"s7"}"#;
-        match tool_end_item("exec_command", exec_args, running_result, None, false) {
+        match tool_end_item("exec_command", "", exec_args, running_result, None, false) {
             Some(H::Exec { running, .. }) => assert_eq!(running.as_deref(), Some("s7")),
             other => panic!("running 形状：{other:?}"),
         }
         let stdin_result = r#"{"status":"running","exit_code":null,"output":"问：","truncated":false,"error":null,"session_id":"s7"}"#;
         match tool_end_item(
             "write_stdin",
+            "",
             r#"{"session_id":"s7","chars":"y
 "}"#,
             stdin_result,
@@ -915,7 +1092,7 @@ mod tests {
         }
         // patch：changed_files 为对象数组（{path, action}——原按字符串提取恒空）
         let patch_result = r#"{"ok":true,"changed_files":[{"path":"/w/a.txt","action":"add"}],"state_known":true,"error":null}"#;
-        match tool_end_item("apply_patch", "{}", patch_result, Some(&ToolDisplay::Patch {
+        match tool_end_item("apply_patch", "", "{}", patch_result, Some(&ToolDisplay::Patch {
             changes: vec![crate::prompt::PatchChange {
                 path: "/w/a.txt".into(),
                 kind: crate::prompt::PatchChangeKind::Add { content: "x\n".into() },
@@ -929,8 +1106,8 @@ mod tests {
             other => panic!("patch 形状：{other:?}"),
         }
         // 未知工具/非 JSON → None（调用方按文本投影）
-        assert!(tool_end_item("web_search", "{}", r#"{"error":"x"}"#, None, false).is_none());
-        assert!(tool_end_item("exec_command", "{}", "not json", None, false).is_none());
+        assert!(tool_end_item("web_search", "", "{}", r#"{"error":"x"}"#, None, false).is_none());
+        assert!(tool_end_item("exec_command", "", "{}", "not json", None, false).is_none());
     }
 
     /// 012：/resume 投影配对——arguments 随 id 配对传递（旧会话命令恢复），
@@ -942,6 +1119,7 @@ mod tests {
             HistoryItem::Text(crate::prompt::HistoryMessage {
                 role: crate::prompt::HistoryRole::User,
                 content: "go".into(),
+                user_input_event: None,
             }),
             HistoryItem::AssistantToolCalls {
                 tool_calls: vec![crate::prompt::ToolCallRecord {
@@ -985,6 +1163,7 @@ mod tests {
             HistoryItem::Text(crate::prompt::HistoryMessage {
                 role: crate::prompt::HistoryRole::User,
                 content: "go".into(),
+                user_input_event: None,
             }),
             HistoryItem::AssistantToolCalls {
                 tool_calls: vec![crate::prompt::ToolCallRecord {
@@ -1026,14 +1205,17 @@ mod tests {
             HistoryItem::Text(crate::prompt::HistoryMessage {
                 role: crate::prompt::HistoryRole::User,
                 content: declared,
+                user_input_event: None,
             }),
             HistoryItem::Text(crate::prompt::HistoryMessage {
                 role: crate::prompt::HistoryRole::User,
                 content: "真实输入".into(),
+                user_input_event: None,
             }),
             HistoryItem::Text(crate::prompt::HistoryMessage {
                 role: crate::prompt::HistoryRole::Assistant,
                 content: "答".into(),
+                user_input_event: None,
             }),
         ];
         let items = project_history_items(&history);
@@ -1050,6 +1232,7 @@ mod tests {
         let history2 = vec![HistoryItem::Text(crate::prompt::HistoryMessage {
             role: crate::prompt::HistoryRole::User,
             content: env_block.to_string(),
+            user_input_event: None,
         })];
         assert!(project_history_items(&history2).is_empty());
     }
@@ -1065,7 +1248,7 @@ mod tests {
         use tchat_tui::chat_driver::HostHistoryItem as H;
         // 说明含 ESC 序列、步骤含 BEL：展示副本过滤，快照仍重建
         let args = "{\"explanation\":\"说\\u001b[2J明\",\"plan\":[{\"step\":\"步\\u0007骤\",\"status\":\"in_progress\"}]}";
-        match tool_end_item("update_plan", args, r#"{"ok":true,"error":null}"#, None, false) {
+        match tool_end_item("update_plan", "", args, r#"{"ok":true,"error":null}"#, None, false) {
             Some(H::Plan { update: Some(u), cancelled, error }) => {
                 assert!(!cancelled);
                 assert!(error.is_none());
@@ -1078,6 +1261,7 @@ mod tests {
         let esc_error = "unknown variant `\u{1b}[2Jbad`, expected pending";
         match tool_end_item(
             "update_plan",
+            "",
             r#"{"plan":[]}"#,
             &serde_json::json!({ "ok": false, "error": esc_error }).to_string(),
             None,
@@ -1096,6 +1280,7 @@ mod tests {
         // 取消：恢复路径按结果中的 SKIPPED 常量识别（cancelled_event=false）
         match tool_end_item(
             "update_plan",
+            "",
             r#"{"plan":[]}"#,
             &serde_json::json!({ "ok": false, "error": turn::SKIPPED_BY_CANCEL_MESSAGE }).to_string(),
             None,
@@ -1107,6 +1292,7 @@ mod tests {
         // 实时取消事件旗标（结果形状同上）
         match tool_end_item(
             "update_plan",
+            "",
             r#"{"plan":[]}"#,
             r#"{"ok":false,"error":"别的原因"}"#,
             None,
@@ -1116,10 +1302,167 @@ mod tests {
             other => panic!("事件取消形状：{other:?}"),
         }
         // 成功结果＋参数损坏 → None（文本降级）；结果非 JSON → None
-        assert!(tool_end_item("update_plan", "corrupt", r#"{"ok":true,"error":null}"#, None, false).is_none());
-        assert!(tool_end_item("update_plan", args, "not json", None, false).is_none());
+        assert!(tool_end_item("update_plan", "", "corrupt", r#"{"ok":true,"error":null}"#, None, false).is_none());
+        assert!(tool_end_item("update_plan", "", args, "not json", None, false).is_none());
         // 成功但缺 error 字段（非明确成功）＋无 error 文本 → None
-        assert!(tool_end_item("update_plan", args, r#"{"ok":true}"#, None, false).is_none());
+        assert!(tool_end_item("update_plan", "", args, r#"{"ok":true}"#, None, false).is_none());
+    }
+
+    /// 018-B：恢复投影——来源标记把回答/关闭合并进发布调用同一展示；
+    /// 孤儿/矛盾/重复记录不伪造已答（按普通用户文本保留）；只有确认而无
+    /// 事件＝中断/未保存回答、已失效；旧程序重存丢标记后降级为普通文本。
+    #[test]
+    fn project_history_items_merges_async_events_by_marker() {
+        use crate::prompt::UserInputEvent;
+        use tchat_tui::chat_driver::HostHistoryItem as H;
+        let args = r#"{"questions":[{"title":"S104-报告面向谁？","options":["内部评审"]}]}"#;
+        let publish = |id: &str| HistoryItem::AssistantToolCalls {
+            tool_calls: vec![crate::prompt::ToolCallRecord {
+                id: id.into(),
+                name: "request_user_input_async".into(),
+                arguments: args.into(),
+            }],
+            content: None,
+        };
+        let accepted = |id: &str| HistoryItem::ToolResult {
+            tool_call_id: id.into(),
+            content: crate::user_input_async::accepted_result(id),
+            display: None,
+        };
+        // 已答：answer 标记（正文一致）合并进发布 cell，不再作为普通文本重复
+        let answer_body = r#"{"request_id":"a1","answers":{"[\"request_user_input_async\",\"a1\",0]":{"answers":["内部评审"]}}}"#;
+        let history = vec![
+            publish("a1"),
+            accepted("a1"),
+            HistoryItem::Text(crate::prompt::HistoryMessage {
+                role: crate::prompt::HistoryRole::User,
+                content: answer_body.into(),
+                user_input_event: Some(UserInputEvent::Answer {
+                    request_id: "a1".into(),
+                }),
+            }),
+        ];
+        let items = project_history_items(&history);
+        assert_eq!(items.len(), 1, "回答合并进单一发布 cell：{items:?}");
+        match &items[0] {
+            H::UserInputAsync { response: Some(r), closed_reason: None, answerable, .. } => {
+                assert!(!*answerable, "恢复不重开问询");
+                assert!(r.answers.values().any(|a| a.answers == vec!["内部评审".to_string()]));
+            }
+            other => panic!("已答形状：{other:?}"),
+        }
+        // 关闭：closed 标记合并（原因透传），cell 呈关闭态
+        let history = vec![
+            publish("c1"),
+            accepted("c1"),
+            HistoryItem::Text(crate::prompt::HistoryMessage {
+                role: crate::prompt::HistoryRole::User,
+                content: r#"{"request_id":"c1","reason":"task_completed"}"#.into(),
+                user_input_event: Some(UserInputEvent::Closed {
+                    request_id: "c1".into(),
+                }),
+            }),
+        ];
+        let items = project_history_items(&history);
+        match &items[0] {
+            H::UserInputAsync { response: None, closed_reason: Some(reason), .. } => {
+                assert_eq!(reason, "task_completed");
+            }
+            other => panic!("关闭形状：{other:?}"),
+        }
+        // 只有确认而无事件：中断/未保存回答、已失效（不假定已答/未执行）
+        let items = project_history_items(&vec![publish("i1"), accepted("i1")]);
+        match &items[0] {
+            H::UserInputAsync { response: None, closed_reason: Some(reason), .. } => {
+                assert!(reason.contains("已失效"), "{reason}");
+            }
+            other => panic!("中断形状：{other:?}"),
+        }
+        // 孤儿标记（无对应发布调用）与矛盾标记（正文 request_id 不一致）：
+        // 不合并、按普通文本保留，不伪造已答
+        let orphan = HistoryItem::Text(crate::prompt::HistoryMessage {
+            role: crate::prompt::HistoryRole::User,
+            content: answer_body.into(),
+            user_input_event: Some(UserInputEvent::Answer {
+                request_id: "ghost".into(),
+            }),
+        });
+        let mismatch = HistoryItem::Text(crate::prompt::HistoryMessage {
+            role: crate::prompt::HistoryRole::User,
+            content: r#"{"request_id":"someone-else","answers":{}}"#.into(),
+            user_input_event: Some(UserInputEvent::Answer {
+                request_id: "a1".into(),
+            }),
+        });
+        let history = vec![publish("a1"), accepted("a1"), orphan.clone(), mismatch];
+        let items = project_history_items(&history);
+        match &items[0] {
+            H::UserInputAsync { closed_reason: Some(reason), .. } => {
+                assert!(reason.contains("已失效"), "矛盾标记不得合并为已答：{reason}");
+            }
+            other => panic!("矛盾形状：{other:?}"),
+        }
+        assert!(items.len() >= 2, "孤儿/矛盾按普通文本保留：{items:?}");
+        assert!(
+            items.iter().any(|i| matches!(i, H::Text { content, .. } if content.contains("ghost")
+                || content.contains("someone-else"))),
+            "原文不丢失：{items:?}"
+        );
+        // 旧程序重存丢标记：同一正文按普通用户文本展示（降级不丢内容）
+        let degraded = HistoryItem::Text(crate::prompt::HistoryMessage {
+            role: crate::prompt::HistoryRole::User,
+            content: answer_body.into(),
+            user_input_event: None,
+        });
+        let items = project_history_items(&vec![publish("a1"), accepted("a1"), degraded]);
+        match &items[0] {
+            H::UserInputAsync { closed_reason: Some(reason), .. } => {
+                assert!(reason.contains("已失效"));
+            }
+            other => panic!("降级发布形状：{other:?}"),
+        }
+        assert!(
+            items.iter().any(|i| matches!(i, H::Text { assistant: false, content } if content.contains("内部评审"))),
+            "丢标记后答案正文仍按用户文本可见：{items:?}"
+        );
+        // 答案含外来题号（标记一致但 answers 键不属于原题）：不伪造已答
+        let foreign_body = r#"{"request_id":"f1","answers":{"other-question":{"answers":["X"]}}}"#;
+        let history = vec![
+            publish("f1"),
+            accepted("f1"),
+            HistoryItem::Text(crate::prompt::HistoryMessage {
+                role: crate::prompt::HistoryRole::User,
+                content: foreign_body.into(),
+                user_input_event: Some(UserInputEvent::Answer {
+                    request_id: "f1".into(),
+                }),
+            }),
+        ];
+        let items = project_history_items(&history);
+        match &items[0] {
+            H::UserInputAsync { response: None, closed_reason: Some(reason), .. } => {
+                assert!(reason.contains("已失效"), "外来题号不合并为已答：{reason}");
+            }
+            other => panic!("外来题号形状：{other:?}"),
+        }
+        assert!(
+            items.iter().any(|i| matches!(i, H::Text { assistant: false, content } if content.contains("other-question"))),
+            "外来答案正文按普通文本保留：{items:?}"
+        );
+        // 重复 answer 标记：首条合并，第二条按普通文本保留
+        let dup = HistoryItem::Text(crate::prompt::HistoryMessage {
+            role: crate::prompt::HistoryRole::User,
+            content: answer_body.into(),
+            user_input_event: Some(UserInputEvent::Answer {
+                request_id: "a1".into(),
+            }),
+        });
+        let history = vec![publish("a1"), accepted("a1"), dup.clone(), dup];
+        let items = project_history_items(&history);
+        assert!(
+            items.iter().filter(|i| matches!(i, H::UserInputAsync { response: Some(_), .. })).count() == 1,
+            "重复标记不产生第二个已答 cell：{items:?}"
+        );
     }
 
     /// 017：恢复投影——成功计划调用配对重建快照（与实时同一转换）；失败调用
@@ -1132,6 +1475,7 @@ mod tests {
             HistoryItem::Text(crate::prompt::HistoryMessage {
                 role: crate::prompt::HistoryRole::User,
                 content: "go".into(),
+                user_input_event: None,
             }),
             HistoryItem::AssistantToolCalls {
                 tool_calls: vec![
@@ -1265,6 +1609,7 @@ mod tests {
         let msg = crate::prompt::HistoryMessage {
             role: crate::prompt::HistoryRole::User,
             content: "快照记录".into(),
+            user_input_event: None,
         };
         session::save_snapshot(
             &user.join("sessions"),

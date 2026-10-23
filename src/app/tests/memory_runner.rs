@@ -48,6 +48,7 @@ fn text(role: HistoryRole, content: &str) -> HistoryItem {
     HistoryItem::Text(HistoryMessage {
         role,
         content: content.to_string(),
+        user_input_event: None,
     })
 }
 

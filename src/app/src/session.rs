@@ -871,6 +871,7 @@ mod tests {
         HistoryItem::Text(HistoryMessage {
             role: HistoryRole::User,
             content: content.to_string(),
+            user_input_event: None,
         })
     }
 
@@ -908,7 +909,7 @@ mod tests {
         };
         let mut history = vec![
             text_user("已提交一"),
-            HistoryItem::Text(HistoryMessage { role: HistoryRole::Assistant, content: "已提交二".into() }),
+            HistoryItem::Text(HistoryMessage { role: HistoryRole::Assistant, content: "已提交二".into(), user_input_event: None }),
             text_user("第三条写入将失败"),
         ];
         // 第三条：write_all ENOSPC → set_len EINVAL → 停用＋明确报错（一次）
