@@ -11,8 +11,8 @@ use crate::apply_patch::ApplyPatchResult;
 use crate::exec::{ExecResult, ExecStatus};
 use crate::proc_session::ProcessManager;
 use crate::prompt::{
-    build_turn_request_with, build_turn_request_with_async_host, HistoryItem, HistoryMessage,
-    HistoryRole, ToolCallRecord, ToolDisplay, UserInputEvent,
+    build_turn_request_with, HistoryItem, HistoryMessage, HistoryRole, ToolCallRecord,
+    ToolDisplay, UserInputEvent,
 };
 use serde_json::{json, Value};
 use std::path::Path;
@@ -135,17 +135,21 @@ pub trait SteerChannel {
 }
 
 /// 021：用户轮附加能力与接续通道（宿主按每轮快照传入；既有入口默认全关）。
+/// 022：`mcp`＝本轮冻结的 MCP 工具快照（声明与分派共用；None＝无 MCP；
+/// MemoryMerge 强制忽略）。
 pub struct TurnExtras<'a> {
     /// 模型目录显式声明 send_message_to_user_async（声明与执行共用快照）。
     pub send_message: bool,
+    /// 022：本轮 MCP 快照（工具定义＋原始身份映射＋连接句柄）。
+    pub mcp: Option<&'a crate::mcp::manager::McpSnapshot>,
     /// 运行中普通输入接续通道（None＝无运行中接续能力；MemoryMerge 强制忽略）。
     pub steer: Option<&'a mut dyn SteerChannel>,
 }
 
 impl TurnExtras<'_> {
-    /// 既有入口的兼容取值：无消息能力、无接续通道。
+    /// 既有入口的兼容取值：无消息能力、无 MCP、无接续通道。
     pub fn none() -> Self {
-        Self { send_message: false, steer: None }
+        Self { send_message: false, mcp: None, steer: None }
     }
 }
 
@@ -914,6 +918,9 @@ pub fn run_tool_turn_with_hosts_extras(
     // 021：合并轮双层隔离——即使误传能力与通道也不声明、不接收、不执行；
     // 误传通道立即封口，已受理输入交还宿主恢复（不静默丢弃）
     let send_message = extras.send_message && !merge_mode;
+    // 022：合并轮双层隔离——即使误传快照也不声明、不执行（与消息工具同源）。
+    let mcp_snapshot: Option<&crate::mcp::manager::McpSnapshot> =
+        if merge_mode { None } else { extras.mcp };
     let mut steer = if merge_mode {
         let late = extras.steer.map(|c| c.close()).unwrap_or_default();
         if !late.is_empty() {
@@ -961,22 +968,28 @@ pub fn run_tool_turn_with_hosts_extras(
             return Err(cap_error());
         }
         // 续请求使用完整历史（含本轮 user 与已有结果），不再次追加当前输入
+        let empty_tools: Vec<Value> = Vec::new();
+        let mcp_definitions: &[Value] = mcp_snapshot
+            .map(|s| s.definitions())
+            .unwrap_or(&empty_tools);
         let body = match &mode {
-            ToolMode::User => build_turn_request_with_async_host(
+            ToolMode::User => crate::prompt::build_turn_request_with_mcp(
                 history,
                 None,
                 input_host.is_some(),
                 async_host.is_some(),
                 image_input,
                 send_message,
+                mcp_definitions,
             ),
-            ToolMode::UserWithMemory { .. } => build_turn_request_with_async_host(
+            ToolMode::UserWithMemory { .. } => crate::prompt::build_turn_request_with_mcp(
                 history,
                 memory_context.as_deref(),
                 input_host.is_some(),
                 async_host.is_some(),
                 image_input,
                 send_message,
+                mcp_definitions,
             ),
             ToolMode::MemoryMerge { system, .. } => build_turn_request_with(
                 history,
@@ -984,6 +997,30 @@ pub fn run_tool_turn_with_hosts_extras(
                 system,
             ),
         };
+        // 022：工具总数上限（含本轮条件原生工具）在模型请求发送前按组装结果
+        // 检查，超限明确报错、不静默截断。
+        let declared_tools = body["tools"].as_array().map(|t| t.len()).unwrap_or(0);
+        if let Some(snapshot) = mcp_snapshot {
+            if declared_tools > crate::mcp::config::MAX_TOTAL_TOOLS {
+                close_steer_restore(
+                    &mut steer,
+                    notify,
+                    crate::user_input_async::CLOSE_REQUEST_LIMIT,
+                );
+                close_pending_async(
+                    history,
+                    on_record,
+                    notify,
+                    &mut pending_async,
+                    crate::user_input_async::CLOSE_REQUEST_LIMIT,
+                );
+                return Err(format!(
+                    "本轮工具总数 {declared_tools} 超过上限 {}（其中 MCP {} 项）：请缩小 mcp.json 的工具名单",
+                    crate::mcp::config::MAX_TOTAL_TOOLS,
+                    snapshot.len()
+                ));
+            }
+        }
         let resp = match sender(&body) {
             Ok(resp) => resp,
             Err(error) => {
@@ -1344,6 +1381,29 @@ pub fn run_tool_turn_with_hosts_extras(
                     None,
                     None,
                 )
+            } else if let Some(entry) = mcp_snapshot.and_then(|s| s.entry(&call.name)) {
+                // 022：MCP 分派——按快照精确命中（原始身份映射；不拆 `__`、
+                // 不看前缀）。参数错误在发送前返回；结果投影与凭证污染检查
+                // 在快照调用内完成。
+                let no_cancel = std::sync::atomic::AtomicBool::new(false);
+                let cancel_flag = cancel.unwrap_or(&no_cancel);
+                let content = match serde_json::from_str::<Value>(&call.arguments) {
+                    Err(e) => crate::mcp::call::client_error_json(
+                        "参数",
+                        &format!("arguments 不是有效 JSON：{e}"),
+                    ),
+                    Ok(v) if !v.is_object() => crate::mcp::call::client_error_json(
+                        "参数",
+                        "arguments 必须是 JSON 对象",
+                    ),
+                    Ok(v) => {
+                        let (content, _failed) = mcp_snapshot
+                            .expect("已确认命中")
+                            .call(entry, v, cancel_flag);
+                        content
+                    }
+                };
+                (content, None, None)
             } else {
                 let (content, display) = execute_tool(call, cancel, &mode, procs);
                 (content, display, None)

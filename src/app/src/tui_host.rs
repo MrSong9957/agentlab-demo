@@ -123,6 +123,8 @@ pub struct TuiHost {
     steer_slot: Arc<Mutex<SteerSlot>>,
     /// 021：接续提交标识发生器（宿主生成；回执按 id 恰一次关联）。
     steer_seq: std::sync::atomic::AtomicU64,
+    /// 022：MCP 管理器（跨轮保留连接；退出显式关闭）。
+    mcp: Arc<crate::mcp::manager::McpManager>,
 }
 
 impl TuiHost {
@@ -134,6 +136,11 @@ impl TuiHost {
     /// 016：宿主退出（TUI Ctrl+C）——显式关闭全部进程会话并回收。
     pub fn close_process_sessions(&self) {
         self.procs.close();
+    }
+
+    /// 022：宿主退出——显式关闭全部 MCP 连接（有界；不依赖 Drop）。
+    pub fn close_mcp(&self) {
+        self.mcp.close();
     }
 
     pub fn new(agent: ureq::Agent, autosave: session::Session) -> Self {
@@ -148,6 +155,7 @@ impl TuiHost {
             procs: ProcessManager::new(),
             steer_slot: Arc::new(Mutex::new(SteerSlot::Closed)),
             steer_seq: std::sync::atomic::AtomicU64::new(0),
+            mcp: crate::mcp::manager::McpManager::new(),
         }
     }
 
@@ -241,6 +249,8 @@ impl TuiHost {
         let procs = self.procs.clone();
         // 021：接续槽位句柄（线程内经短锁与提交侧互斥，不捕获 &self）
         let steer_slot = self.steer_slot.clone();
+        // 022：MCP 管理器句柄（线程内准备快照；不捕获 &self）
+        let mcp = self.mcp.clone();
         let tx_panic = tx.clone();
         std::thread::spawn(move || {
             // 008：线程异常终止（如毒锁 panic）不得静默——回推 Failed 让驱动恢复
@@ -504,7 +514,26 @@ impl TuiHost {
                 };
             // 021：本轮接续通道实现（rx 由本线程持有；受理资格经短锁与提交侧互斥）
             let mut steer_channel = TurnSteerChannel { slot: steer_slot, rx: steer_rx };
+            // 022：MCP 快照在普通用户轮准备时取得（首次触发配置加载与连接；
+            // 取消＝结束本轮、不发模型请求；已就绪连接保留、候选回收）。
+            let mcp_snapshot = match mcp.prepare_for_turn(&HOST_CANCEL) {
+                Some(snapshot) => Some(snapshot),
+                None => {
+                    let _ = tx.send(DriverEvent::SubmissionRejected {
+                        text: submission.text.clone(),
+                        image_paths: submission
+                            .local_images
+                            .iter()
+                            .map(|a| a.path.clone())
+                            .collect(),
+                        reason: "用户已取消（MCP 准备阶段）".to_string(),
+                    });
+                    return;
+                }
+            };
             let extras = turn::TurnExtras {
+                // 022：声明与分派共用同一快照（合并轮由 turn 层强制忽略）
+                mcp: mcp_snapshot.as_deref(),
                 // 021：每用户轮固定能力快照（声明与执行共用）
                 send_message: catalog::supports_send_message_to_user(&model),
                 steer: Some(&mut steer_channel),
@@ -589,6 +618,33 @@ impl TuiHost {
     /// 斜杠命令（/exit 已由驱动内建；其余与行式路径同一语义）。
     /// /resume 成功时返回 [`CommandOutcome::ReplaceCells`]——驱动据此把投影 cells
     /// 立即渲染进 transcript（装载历史不重放工具，007）。
+    /// 022：`/mcp` 状态与 `/mcp reload`。reload 只在空闲时执行（接续槽位
+    /// Open＝当前轮运行中→明确返回忙）；管理器 runtime 的 block_on 不得在
+    /// TUI runtime 上下文内执行，经独立线程桥接后取回结果。
+    fn cmd_mcp(&self, args: &str) -> String {
+        let arg = args.trim();
+        if arg == "reload" {
+            let busy = matches!(
+                &*self.steer_slot.lock().unwrap_or_else(|e| e.into_inner()),
+                SteerSlot::Open { .. }
+            );
+            if busy {
+                return "MCP reload：当前轮运行中，请稍后再试".to_string();
+            }
+            let mcp = self.mcp.clone();
+            let result = std::thread::spawn(move || mcp.reload()).join();
+            match result {
+                Ok(Ok(())) => "MCP：已重新加载配置并重建连接".to_string(),
+                Ok(Err(e)) => format!("MCP：{e}"),
+                Err(_) => "MCP：reload 线程异常".to_string(),
+            }
+        } else if arg.is_empty() {
+            self.mcp.status_lines().join("\n")
+        } else {
+            "用法：/mcp [reload]".to_string()
+        }
+    }
+
     pub fn run_command(&self, full: &str) -> tchat_tui::chat_driver::CommandOutcome {
         let raw = full.split_whitespace().next().unwrap_or("");
         // 008-ADAPT：驱动经母本通道回传的命令名不带前导斜杠——规范化
@@ -611,8 +667,9 @@ impl TuiHost {
                     args,
                 ))
             }
+            "/mcp" => Outcome::Output(self.cmd_mcp(args)),
             other => Outcome::Output(format!(
-                "未知命令 {other}，可用：/models、/refresh、/save <名称>、/resume [名称]、/sessions、/memory-status、/memory-reset confirm"
+                "未知命令 {other}，可用：/models、/refresh、/save <名称>、/resume [名称]、/sessions、/memory-status、/memory-reset confirm、/mcp [reload]"
             )),
         }
     }

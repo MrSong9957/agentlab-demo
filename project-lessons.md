@@ -150,3 +150,16 @@
 ## 021 执行中消息规划依据（2026-10-23 实施，2026-10-24 批准交付本地 main）
 
 - Codex 的 `send_message_to_user_async` 发出的是 `delivery=Async` 的 assistant 消息：消息阶段即使是 FinalAnswer，也不结束 turn；成功只回 `accepted`，下一请求不另注入同文 assistant 正文。回应中途追问还依赖独立的普通输入接续，不能用本地原排队行为或 018 回答通道冒充；复用 020 完整消息，具体取舍与固定源码见 [021 调研记录](docs/records/2026-10-23-send-message-to-user-async-plan-research.md)。
+
+## 022 MCP 工具规划依据（2026-10-24 实施，同日批准交付本地 main）
+
+- Codex `d138398` 的 MCP 已拆到 `codex-mcp`／`rmcp-client`，底层官方 SDK 固定 rev 的 `LATEST` 为 2026-07-28，initialize 生命周期须显式选择；上游模型名上限 128 还需适配本项目 CC 的 64。SDK HTTP 404 会话恢复可能重发原 POST，接入时须关闭并验证，才能保持 006 的不重放契约。原始身份、每轮快照及两种传输的最小复用方案见 [022 规格](docs/specs/022-mcp-tools.md)与[固定源码调研](docs/records/2026-10-24-022-mcp-tools-spec-research.md)。
+
+## 022 MCP 实施经验（2026-10-24 实施，同日批准交付本地 main）
+
+- rmcp `98a5478` 的客户端默认 `get_info` 发 `LATEST`（2026-07-28 无 initialize 生命周期）：自定义 ClientHandler 必须显式 `with_protocol_version(LATEST_WITH_INITIALIZE)`，漏掉时全部连接报「不兼容协议版本 2026-07-28」——规格 §4 预警在实测中真实踩中。
+- 目录过期计数（stale_epoch）的发布基准必须在**列出前**记录：列出后 settle 再读会把重列期间的新通知当作已处理内容吞掉（违反「重列期间收到的新通知必须保留过期标记」）；列出前记录则保守多列、不丢通知。
+- 该 SDK 把 `resultType:"input_required"` 反序列化为 `ServerResult::CustomResult` 而非 `InputRequiredResult`（分派层 `other` 分支承接）；「不支持协议响应」的拒绝要在两个分支都成立。
+- SDK 的 reqwest 适配器与 SSE 事件限额器是 `pub(crate)`：外部只能函数级移植；移植时把 JSON 体一并改为有界读取（SDK 默认 `bytes()`/`text()` 无界）。
+- serde_json 的 Map 反序列化会静默合并重复 JSON 键，「拒绝重复键」契约必须手写 visitor 逐键迭代。
+- 管理器同步桥接：专用 tokio runtime＋`block_on` 驱动 SDK 异步面；`sleep()` future 必须在 block_on 的 async 块内构造（块外构造会报「no reactor running」）。

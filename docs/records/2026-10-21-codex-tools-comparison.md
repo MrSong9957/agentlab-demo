@@ -21,7 +21,7 @@
 | 用户问询 | `request_user_input`、`request_user_input_async` | [018](../specs/018-user-input.md) 阶段 A 同步问答已本地交付（2026-10-23），任务分支已清理；独立回答通道、关闭自动空答。阶段 B 异步问询已实施并获批准本地交付（2026-10-23）：TUI 七工具（异步发布＋本地等待）、单项未决、F6 回答窗口（[证据](2026-10-23-018b-implementation.md)） |
 | 执行中发消息 | `send_message_to_user_async` | [021](../specs/021-send-message-to-user-async.md) 已实施（2026-10-23）：模型目录 opt-in、accepted 即时确认、消息不结束轮、无额外注入、/resume 只展示不重发；运行中 Enter 接续当前轮＋显式排队保留（[证据](2026-10-23-021-implementation.md)）。任务完成后的响铃、桌面提醒由应用另行实现 |
 | 查看图片 | `view_image` | [019](../specs/019-view-image.md) 已实施（2026-10-23）：按路径加载真实图片并传给模型（Chat Completions 批末 user 附件）、能力开关、保存恢复与 TUI 卡片（[证据](2026-10-23-view-image-impl.md)） |
-| MCP 外部工具 | 按服务器动态注册工具 | 未接入用户轮。适合成为外部能力的统一入口 |
+| MCP 外部工具 | 按服务器动态注册工具 | [022](../specs/022-mcp-tools.md) 已实施并批准本地交付（2026-10-24）：stdio／Streamable HTTP、每轮快照、原始身份路由、真实调用与凭证污染拒绝（[证据](2026-10-24-022-mcp-tools-implementation.md)）；资源接口、工具搜索另定范围 |
 | MCP 资源 | `list_mcp_resources`、`list_mcp_resource_templates`、`read_mcp_resource` | 缺少；与 MCP 工具调用属于不同接口 |
 | 工具发现 | `tool_search` | 缺少。工具数量较多、需要按需加载时再补 |
 | 权限申请 | `request_permissions` | 缺少。必须与执行环境的权限控制配套 |

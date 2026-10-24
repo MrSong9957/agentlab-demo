@@ -1,4 +1,4 @@
-//! terminal-chat 库：配置与模型目录（catalog）+ 协议适配（api）+ 同步命令执行（exec）+ 文本补丁修改（apply_patch）+ 最小请求组装（prompt）+ 工具调用循环（turn）+ 会话保存与恢复（session）+ 显示边界（display）+ V1 记忆状态存储（memory，013-M1）。
+//! terminal-chat 库：配置与模型目录（catalog）+ 协议适配（api）+ 同步命令执行（exec）+ 文本补丁修改（apply_patch）+ 最小请求组装（prompt）+ 工具调用循环（turn）+ 会话保存与恢复（session）+ 显示边界（display）+ V1 记忆状态存储（memory，013-M1）+ MCP 外部工具（mcp，022）。
 
 pub mod api;
 pub mod apply_patch;
@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod context;
 pub mod display;
 pub mod exec;
+pub mod mcp;
 pub mod memory;
 pub mod message_to_user;
 pub mod plan;

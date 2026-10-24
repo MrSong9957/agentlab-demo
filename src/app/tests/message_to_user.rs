@@ -201,7 +201,7 @@ fn run_turn_with(
         on_notify(&n, &submit_tx);
         events.push(n);
     };
-    let extras = TurnExtras { send_message, steer: Some(&mut channel) };
+    let extras = TurnExtras { mcp: None, send_message, steer: Some(&mut channel) };
     let reply = turn::run_user_turn_with_context_and_caps(
         &mut history,
         "执行任务",
@@ -453,7 +453,7 @@ fn cancelled_message_call_keeps_generic_error_shape() {
             }
             let _ = n;
         };
-        let extras = TurnExtras { send_message: true, steer: Some(&mut channel) };
+        let extras = TurnExtras { mcp: None, send_message: true, steer: Some(&mut channel) };
         let reply = turn::run_user_turn_with_context_and_caps(
             &mut history,
             "开始",
@@ -523,7 +523,7 @@ fn steer_enters_history_after_full_batch_before_next_request() {
         bodies.push(body.clone());
         Ok(serde_json::from_str(&responses.next().unwrap()).unwrap())
     };
-    let extras = TurnExtras { send_message: false, steer: Some(&mut channel) };
+    let extras = TurnExtras { mcp: None, send_message: false, steer: Some(&mut channel) };
     let reply = turn::run_user_turn_with_context_and_caps(
         &mut history,
         "跑任务",
@@ -594,7 +594,7 @@ fn final_text_race_continues_turn_with_kept_reply() {
         bodies.push(body.clone());
         Ok(serde_json::from_str(&responses.next().unwrap()).unwrap())
     };
-    let extras = TurnExtras { send_message: true, steer: Some(&mut channel) };
+    let extras = TurnExtras { mcp: None, send_message: true, steer: Some(&mut channel) };
     let reply = turn::run_user_turn_with_context_and_caps(
         &mut history,
         "开始",
@@ -667,7 +667,7 @@ fn turn_exit_seals_channel_exactly_once() {
     let mut history: Vec<HistoryItem> = Vec::new();
     let mgr = ProcessManager::new();
     let sources = terminal_chat::context::ContextSources::from_env();
-    let extras = TurnExtras { send_message: false, steer: Some(&mut channel) };
+    let extras = TurnExtras { mcp: None, send_message: false, steer: Some(&mut channel) };
     turn::run_user_turn_with_context_and_caps(
         &mut history,
         "收尾",
@@ -717,7 +717,7 @@ fn cancel_restores_uningested_steer() {
         }
         events.push(n);
     };
-    let extras = TurnExtras { send_message: false, steer: Some(&mut channel) };
+    let extras = TurnExtras { mcp: None, send_message: false, steer: Some(&mut channel) };
     let err = turn::run_user_turn_with_context_and_caps(
         &mut history,
         "会被取消",
@@ -776,7 +776,7 @@ fn steer_image_prepare_failure_restores_and_continues() {
         Ok(serde_json::from_str(&responses.next().unwrap()).unwrap())
     };
     let mut events: Vec<TurnNotify> = Vec::new();
-    let extras = TurnExtras { send_message: false, steer: Some(&mut channel) };
+    let extras = TurnExtras { mcp: None, send_message: false, steer: Some(&mut channel) };
     let reply = turn::run_user_turn_with_context_and_caps(
         &mut history,
         "开始",
@@ -844,7 +844,7 @@ fn steer_with_image_enters_history_with_payload() {
         bodies.push(body.clone());
         Ok(serde_json::from_str(&responses.next().unwrap()).unwrap())
     };
-    let extras = TurnExtras { send_message: false, steer: Some(&mut channel) };
+    let extras = TurnExtras { mcp: None, send_message: false, steer: Some(&mut channel) };
     turn::run_user_turn_with_context_and_caps(
         &mut history,
         "开始",
@@ -898,7 +898,7 @@ fn steer_works_without_message_capability() {
         bodies.push(body.clone());
         Ok(serde_json::from_str(&responses.next().unwrap()).unwrap())
     };
-    let extras = TurnExtras { send_message: false, steer: Some(&mut channel) };
+    let extras = TurnExtras { mcp: None, send_message: false, steer: Some(&mut channel) };
     turn::run_user_turn_with_context_and_caps(
         &mut history,
         "开始",
@@ -966,7 +966,7 @@ fn steer_and_async_answer_both_after_full_batch() {
             live: live.clone(),
         })
     };
-    let extras = TurnExtras { send_message: false, steer: Some(&mut channel) };
+    let extras = TurnExtras { mcp: None, send_message: false, steer: Some(&mut channel) };
     turn::run_user_turn_with_context_and_caps(
         &mut history,
         "开始",
@@ -1032,7 +1032,7 @@ fn steer_does_not_reset_request_budget() {
         }
         events.push(n);
     };
-    let extras = TurnExtras { send_message: false, steer: Some(&mut channel) };
+    let extras = TurnExtras { mcp: None, send_message: false, steer: Some(&mut channel) };
     let err = turn::run_user_turn_with_context_and_caps(
         &mut history,
         "开始",
@@ -1175,7 +1175,7 @@ fn mixed_batch_view_image_and_message_kept_in_order() {
         bodies.push(body.clone());
         Ok(serde_json::from_str(&responses.next().unwrap()).unwrap())
     };
-    let extras = TurnExtras { send_message: true, steer: None };
+    let extras = TurnExtras { mcp: None, send_message: true, steer: None };
     let reply = turn::run_user_turn_with_context_and_caps(
         &mut history,
         "看图并通报",

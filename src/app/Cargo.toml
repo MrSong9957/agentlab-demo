@@ -23,3 +23,9 @@ chrono = { version = "0.4", default-features = false, features = ["std"] } # 013
 uuid = { version = "1", default-features = false } # 013-M4：上游文件名的 UUID 解析/时间戳；不生成随机 UUID
 base64 = "0.22"  # 019：view_image data URL 编解码（工作区已锁 0.22.1，与 tui 同款）
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }  # 019：图片解码/缩放/编码（上游 codex-utils-image 函数级移植；特性沿用 tui）
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "98a54789b80110ad210495c4ad845c89e1980471", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }  # 022：官方 MCP SDK 固定 rev（rmcp 3.5.1，Apache-2.0）；仅客户端＋stdio/Streamable HTTP，规格 §3.1
+futures = "0.3"  # 022：SDK HTTP 适配器移植所需的 Stream 工具（工作区已锁版本）
+http = "1"  # 022：env_http_headers 的 HeaderName/HeaderValue（rmcp 同源）
+bytes = "1"  # 022：SSE 字节流限额器（rmcp 同源）
+sse-stream = "0.2"  # 022：SSE 事件流解析（rmcp 同源）
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }  # 022：有界 HTTP 客户端移植（与 rmcp 的 reqwest 依赖同版本合并）

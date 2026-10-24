@@ -9696,3 +9696,279 @@ fn s11c_tui_cancel_restores_steer_to_queue_and_replays_once() {
     let (out, status) = pty.finish();
     assert_eq!(status.code(), Some(0), "{out}");
 }
+
+// ========== 022 MCP 外部工具（L3：真实 CLI＋PTY＋本地 stdio 服务器） ==========
+
+/// 022：stdio MCP 夹具（与 mcp_stdio/mcp_turn 共用同一固定测试程序）。
+fn write_mcp_config(user: &Path, scenario: &str, record: &Path, extra: &str) {
+    write_mcp_config_enabled(user, scenario, record, extra, true)
+}
+
+fn write_mcp_config_enabled(
+    user: &Path,
+    scenario: &str,
+    record: &Path,
+    extra: &str,
+    enabled: bool,
+) {
+    let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mcp_stdio_server.py");
+    let json = format!(
+        r#"{{"mcp_servers": {{"fx": {{"enabled": {enabled}, "command": "python3", "args": ["{fixture}", "--scenario", "{scenario}", "--record", "{record}"], "cwd": "{cwd}"{extra}}}}}}}"#,
+        fixture = fixture,
+        record = record.display(),
+        cwd = std::env::temp_dir().display(),
+        extra = extra,
+    );
+    fs::write(user.join("mcp.json"), json).unwrap();
+}
+
+fn mcp_record(path: &Path) -> Vec<Value> {
+    let text = fs::read_to_string(path).unwrap_or_default();
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+/// 进程是否仍存活（/proc 探测；进程组回收的 L3 证据）。
+fn process_alive(pid: u64) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+fn wait_pid_gone(pid: u64, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !process_alive(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+/// A03/A07/A09 L3：真实行式 CLI——MCP 工具声明进请求、真实子进程调用、
+/// 结果配对回模型、`/mcp` 状态可见。
+#[test]
+fn s102_mcp_line_cli_declares_calls_and_pairs() {
+    let cfg = TempDir::new("s102-cfg");
+    let user = TempDir::new("s102-user");
+    let record_dir = TempDir::new("s102-record");
+    let record = record_dir.path().join("record.jsonl");
+    write_mcp_config(user.path(), "echo", &record, r#", "env_vars": ["TCHAT_S102_TOKEN"]"#);
+    let tc = json!({"choices":[{"message":{"tool_calls":[{"id":"s102-c1","type":"function","function":{
+        "name":"mcp__fx__echo","arguments":json!({"text":"端到端"}).to_string()}}]}}]})
+        .to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc),
+        MockResp::json(200, chat_body("S102-工具结果已收到")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S102_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s102"),
+    );
+    let mut cmd = input_pty_cmd(cfg.path(), user.path(), "TCHAT_S102_KEY", "fake-s102", false);
+    cmd.env("TCHAT_S102_TOKEN", "s102-canary-token");
+    let mut pty = PtySession::spawn(cmd);
+    pty.wait_output("你> ", WATCHDOG).unwrap();
+    pty.send_line("调用 MCP 工具");
+    // 工具活动行（真实子进程调用前的 flush 契约）。
+    pty.wait_output("[工具] mcp__fx__echo", WATCHDOG).unwrap();
+    pty.wait_output("S102-工具结果已收到", WATCHDOG).unwrap();
+    pty.wait_output("你> ", WATCHDOG).unwrap();
+    // /mcp 状态：连接状态＋模型名与原始名映射。
+    pty.send_line("/mcp");
+    pty.wait_output("MCP：已加载", WATCHDOG).unwrap();
+    pty.wait_output("mcp__fx__echo ← echo", WATCHDOG).unwrap();
+    pty.send_raw(b"\x04");
+    let (out, status) = pty.finish();
+    assert!(status.success(), "{out}");
+    // 服务器收到原始名与参数（真实调用）。
+    let record_lines = mcp_record(&record);
+    let call_entry = record_lines
+        .iter()
+        .find(|e| e["kind"] == "call")
+        .expect("服务器真实收到调用");
+    assert_eq!(call_entry["name"], "echo");
+    assert_eq!(call_entry["arguments"]["text"], "端到端");
+    // 下一请求包含配对结果。
+    let body: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
+    let tool = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["tool_call_id"] == "s102-c1")
+        .expect("下一请求含配对结果");
+    let content: Value = serde_json::from_str(tool["content"].as_str().unwrap()).unwrap();
+    assert_eq!(content["content"][0]["text"], "echo:端到端");
+    // 声明在请求 tools 中且位于原生工具之后。
+    let first: Value = serde_json::from_str(&mock.requests()[0].body).unwrap();
+    let names: Vec<&str> = first["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap_or(""))
+        .collect();
+    let pos = names.iter().position(|n| *n == "mcp__fx__echo").expect("MCP 已声明");
+    assert!(pos >= 4, "MCP 定义追加在原生工具之后：{names:?}");
+}
+
+/// A13 L3：`/mcp reload` 停用立即生效、旧进程回收；A18 L3：退出显式回收
+/// MCP 进程组。
+#[test]
+fn s103_mcp_reload_disables_and_exit_reaps_process() {
+    let cfg = TempDir::new("s103-cfg");
+    let user = TempDir::new("s103-user");
+    let record_dir = TempDir::new("s103-record");
+    let record = record_dir.path().join("record.jsonl");
+    write_mcp_config(user.path(), "echo", &record, "");
+    let mock = spawn_mock(vec![
+        MockResp::json(200, chat_body("S103-就绪")),
+        MockResp::json(200, chat_body("S103-停用后仍可对话")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S103_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s103"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S103_KEY",
+        "fake-s103",
+        false,
+    ));
+    pty.wait_output("你> ", WATCHDOG).unwrap();
+    // 首个用户轮触发 MCP 启动（记录 PID）。
+    pty.send_line("连接一次");
+    pty.wait_output("S103-就绪", WATCHDOG).unwrap();
+    pty.wait_output("你> ", WATCHDOG).unwrap();
+    let record_lines = mcp_record(&record);
+    let pid = record_lines
+        .iter()
+        .find(|e| e["kind"] == "startup")
+        .expect("启动记录")["pid"]
+        .as_u64()
+        .expect("pid");
+    assert!(process_alive(pid), "MCP 子进程存活");
+    // 修改配置停用服务器 → reload → 立即生效且旧进程回收。
+    write_mcp_config_enabled(user.path(), "echo", &record, "", false);
+    pty.send_line("/mcp reload");
+    pty.wait_output("已重新加载配置并重建连接", WATCHDOG).unwrap();
+    assert!(
+        wait_pid_gone(pid, Duration::from_secs(5)),
+        "停用后旧 MCP 进程被回收"
+    );
+    pty.send_line("/mcp");
+    pty.wait_output("fx（stdio）：已停用", WATCHDOG).unwrap();
+    // 停用后继续对话照常（原生工具面不受影响）。
+    pty.send_line("还在吗");
+    pty.wait_output("S103-停用后仍可对话", WATCHDOG).unwrap();
+    // 退出：显式清理路径完成（无 MCP 连接残留）。
+    pty.send_raw(b"\x04");
+    let (out, status) = pty.finish();
+    assert!(status.success(), "{out}");
+}
+
+/// A14 L3：V1 历史中的 MCP 调用恢复只展示；无配置时 `/resume` 零 MCP 启动、
+/// 新提交才取当前能力；历史可读且不被回写。
+#[test]
+fn s104_mcp_resume_replays_nothing_and_new_turn_uses_current_caps() {
+    let cfg = TempDir::new("s104-cfg");
+    let user = TempDir::new("s104-user");
+    let record_dir = TempDir::new("s104-record");
+    let record = record_dir.path().join("record.jsonl");
+    write_mcp_config(user.path(), "echo", &record, "");
+    let tc = json!({"choices":[{"message":{"tool_calls":[{"id":"s104-c1","type":"function","function":{
+        "name":"mcp__fx__echo","arguments":json!({"text":"历史调用"}).to_string()}}]}}]})
+        .to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc),
+        MockResp::json(200, chat_body("S104-第一轮完成")),
+        MockResp::json(200, chat_body("S104-恢复后新轮")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S104_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s104"),
+    );
+    // 第一段：真实调用一次（产生自动会话与 MCP 记录）。
+    {
+        let mut cmd =
+            input_pty_cmd(cfg.path(), user.path(), "TCHAT_S104_KEY", "fake-s104", false);
+        cmd.env("TCHAT_S104_TOKEN", "s104-canary");
+        let mut pty = PtySession::spawn(cmd);
+        pty.wait_output("你> ", WATCHDOG).unwrap();
+        pty.send_line("第一轮");
+        pty.wait_output("S104-第一轮完成", WATCHDOG).unwrap();
+        pty.wait_output("你> ", WATCHDOG).unwrap();
+        pty.send_raw(b"\x04");
+        let (out, status) = pty.finish();
+        assert!(status.success(), "{out}");
+    }
+    let record_lines = mcp_record(&record);
+    assert_eq!(
+        record_lines.iter().filter(|e| e["kind"] == "call").count(),
+        1,
+        "历史恰一次真实调用"
+    );
+    // 移除 mcp.json：恢复后无 MCP 配置。
+    fs::remove_file(user.path().join("mcp.json")).unwrap();
+    let mock = spawn_mock(vec![MockResp::json(200, chat_body("S104-恢复后新轮"))]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S104_KEY2");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s104-2"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S104_KEY2",
+        "fake-s104-2",
+        false,
+    ));
+    pty.wait_output("你> ", WATCHDOG).unwrap();
+    pty.send_line("/resume");
+    // 恢复展示历史摘要（含 MCP 工具调用记录），零 MCP 启动（无配置）。
+    pty.wait_output("恢复 5 条", WATCHDOG).unwrap();
+    pty.wait_output("你> ", WATCHDOG).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let record_after = mcp_record(&record);
+    assert_eq!(
+        record_after.iter().filter(|e| e["kind"] == "startup").count(),
+        1,
+        "恢复零 MCP 启动（不重启服务器）"
+    );
+    assert_eq!(
+        record_after.iter().filter(|e| e["kind"] == "call").count(),
+        1,
+        "恢复零重放"
+    );
+    // 恢复后的新提交：MCP 不声明（无配置），普通对话照常。
+    pty.send_line("恢复后的新输入");
+    pty.wait_output("S104-恢复后新轮", WATCHDOG).unwrap();
+    pty.send_raw(b"\x04");
+    let (out, status) = pty.finish();
+    assert!(status.success(), "{out}");
+    let body: Value = serde_json::from_str(&mock.requests()[0].body).unwrap();
+    let names: Vec<String> = body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        !names.iter().any(|n| n.starts_with("mcp__")),
+        "无配置时不声明 MCP 工具：{names:?}"
+    );
+    // 历史中的 MCP 调用与结果仍在请求里（事实记录）。
+    let msgs = body["messages"].as_array().unwrap();
+    assert!(
+        msgs.iter().any(|m| m["tool_call_id"] == "s104-c1"),
+        "V1 历史工具记录照常投影"
+    );
+}

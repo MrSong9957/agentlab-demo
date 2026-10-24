@@ -93,10 +93,11 @@ fn main() {
         // 020：启动图片直传驱动（就绪后提交一次）
         let exit = run_tui(host.clone(), startup_images.clone(), startup_notices);
         // 008：退出先取消仍在运行的 turn（016：取消只停止等待与后续调用，
-        // 不终止已启动进程）；随后显式关闭全部进程会话并回收，再排空会话——
-        // 不依赖析构（TUI 入口使用 process::exit）。
+        // 不终止已启动进程）；随后显式关闭全部进程会话与 MCP 连接并回收，
+        // 再排空会话——不依赖析构（TUI 入口使用 process::exit；022 §2.5）。
         host.set_cancel(true);
         host.close_process_sessions();
+        host.close_mcp();
         // 007：退出排空——与行式路径同契约（TUI 内 on_history 写失败的滞留待写段
         // 在退出前补写；008-REVIEW 独立审查 P0-2）
         if let Err(e) = host.flush_final_session() {
@@ -128,6 +129,8 @@ fn main() {
     let procs = ProcessManager::new();
     // 013-M7：threads 登记推进器（跨轮保持缓存库连接；enabled=false 零副作用）
     let mut registrar = terminal_chat::memory::runner::ThreadRegistrar::default();
+    // 022：MCP 管理器（跨轮保留连接；退出显式关闭——不依赖 Drop）
+    let mcp = terminal_chat::mcp::manager::McpManager::new();
 
     loop {
         match rl.readline("你> ") {
@@ -156,6 +159,7 @@ fn main() {
                         &mut registrar,
                         &procs,
                         &mut pending_images,
+                        &mcp,
                     );
                     if quit {
                         break;
@@ -176,6 +180,7 @@ fn main() {
                         &mut registrar,
                         &procs,
                         &mut pending_images,
+                        &mcp,
                     );
                 }
                 break;
@@ -187,6 +192,8 @@ fn main() {
 
     // 016：宿主退出——显式关闭全部进程会话并回收，再完成会话排空和退出。
     procs.close();
+    // 022：退出显式关闭全部 MCP 连接（stdio 有界 3 秒＋进程组回收）。
+    mcp.close();
     // 007：退出排空——主循环退出后、进程结束前补写一次；成功静默，失败明确报错
     if let Err(e) = autosave.flush_final(&history) {
         say(&format!("错误：会话退出排空失败：{e}"));
@@ -439,6 +446,7 @@ fn handle_input(
     registrar: &mut terminal_chat::memory::runner::ThreadRegistrar,
     procs: &ProcessManager,
     startup_images: &mut Vec<std::path::PathBuf>,
+    mcp: &terminal_chat::mcp::manager::McpManager,
 ) -> bool {
     if let Some(rest) = input.strip_prefix('/') {
         if let Some(arg) = rest.strip_prefix("save") {
@@ -462,6 +470,12 @@ fn handle_input(
                 return false;
             }
         }
+        if let Some(arg) = rest.strip_prefix("mcp") {
+            if arg.is_empty() || arg.starts_with(char::is_whitespace) {
+                cmd_mcp(mcp, arg);
+                return false;
+            }
+        }
         match rest.trim() {
             "models" => cmd_models(),
             "refresh" => cmd_refresh(agent, rl),
@@ -470,12 +484,31 @@ fn handle_input(
                 &catalog::user_dir(),
             )),
             other => say(&format!(
-                "未知命令 /{other}，可用：/models、/refresh、/save <名称>、/resume [名称]、/sessions、/memory-status、/memory-reset confirm"
+                "未知命令 /{other}，可用：/models、/refresh、/save <名称>、/resume [名称]、/sessions、/memory-status、/memory-reset confirm、/mcp [reload]"
             )),
         }
         return false;
     }
-    cmd_chat(agent, rl, input, history, autosave, registrar, procs, startup_images)
+    cmd_chat(agent, rl, input, history, autosave, registrar, procs, startup_images, mcp)
+}
+
+/// 022：`/mcp` 状态显示与 `/mcp reload`（行式宿主主循环天然串行＝空闲时执行）。
+fn cmd_mcp(mcp: &terminal_chat::mcp::manager::McpManager, arg: &str) {
+    let arg = arg.trim();
+    if arg == "reload" {
+        match mcp.reload() {
+            Ok(()) => say("MCP：已重新加载配置并重建连接"),
+            Err(e) => say(&format!("MCP：{e}")),
+        }
+        return;
+    }
+    if !arg.is_empty() {
+        say("用法：/mcp [reload]");
+        return;
+    }
+    for line in mcp.status_lines() {
+        say(&line);
+    }
 }
 
 /// `/save <名称>`：当前全部历史整体快照到 sessions/<名称>.jsonl（原子替换）。
@@ -581,6 +614,7 @@ fn cmd_chat(
     registrar: &mut terminal_chat::memory::runner::ThreadRegistrar,
     procs: &ProcessManager,
     startup_images: &mut Vec<std::path::PathBuf>,
+    mcp: &terminal_chat::mcp::manager::McpManager,
 ) -> bool {
     // 020：启动图片一次机会——进入聊天轮即作废（无论成败）；命令/退出不进此处
     let startup_paths: Vec<std::path::PathBuf> = std::mem::take(startup_images);
@@ -768,6 +802,19 @@ fn cmd_chat(
                     unsafe {
                         libc::signal(libc::SIGINT, on_sigint as extern "C" fn(libc::c_int) as libc::sighandler_t);
                     }
+                    // 022：MCP 快照在普通用户轮准备时取得（首次触发配置加载与
+                    // 连接建立）。取消（SIGINT 置位）＝结束本轮、不发模型请求、
+                    // 候选连接回收；已就绪连接保留。
+                    let mcp_snapshot = match mcp.prepare_for_turn(&TOOL_CANCEL) {
+                        Some(snapshot) => Some(snapshot),
+                        None => {
+                            unsafe {
+                                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                            }
+                            say("已取消");
+                            return exit_host;
+                        }
+                    };
                     // 015：用户轮上下文来源（每轮解析：全局规则目录、cwd、SHELL、时钟）
                     let context_sources = terminal_chat::context::ContextSources::from_env();
                     let mut input_host = |_: &turn::ParsedToolCall,
@@ -811,6 +858,8 @@ fn cmd_chat(
                         // 不提供运行中接续通道（后续行仍按普通输入处理）
                         turn::TurnExtras {
                             send_message: catalog::supports_send_message_to_user(&model),
+                            // 022：声明与分派共用本轮快照
+                            mcp: mcp_snapshot.as_deref(),
                             steer: None,
                         },
                     );

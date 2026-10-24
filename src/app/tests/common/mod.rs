@@ -5,7 +5,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -283,4 +283,15 @@ pub fn cleanup_cred_file(tag: &str) {
         terminal_chat::catalog::credential_dir().join(format!("cred-{tag}.json")),
     );
 }
+pub mod mcp_fixtures;
 pub mod pty;
+
+/// 022：持有 ENV_LOCK 的守卫类型（与 mcp 测试的 Drop 清理模式配合）。
+pub struct EnvLockGuard(pub MutexGuard<'static, ()>);
+
+impl std::ops::Deref for EnvLockGuard {
+    type Target = MutexGuard<'static, ()>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
