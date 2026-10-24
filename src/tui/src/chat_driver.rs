@@ -139,6 +139,32 @@ pub enum DriverEvent {
         id: String,
         item: HostHistoryItem,
     },
+    /// 021：接续输入恰一次入史——确认提交：推用户消息 cell、清除接入预览。
+    SteerIngested { input: SteerSubmission },
+    /// 021：接续输入未入史交还（图片准备失败或轮终止原因）——恢复为待处理
+    /// 完整消息并暂停自动发送（020 规则）；已入史输入不经此事件。
+    SteerRestored {
+        inputs: Vec<SteerSubmission>,
+        reason: String,
+    },
+}
+
+/// 021：接续提交载荷（宿主受理时分配提交标识；附件仅路径——正式入史前才读取，
+/// 不提前冻结）。
+#[derive(Debug, Clone)]
+pub struct SteerContent {
+    pub text: String,
+    pub image_paths: Vec<PathBuf>,
+    pub text_elements: Vec<codex_protocol::user_input::TextElement>,
+}
+
+/// 021：已受理的接续提交（宿主生成的 id 关联入史/恢复回执，恰一次）。
+#[derive(Debug, Clone)]
+pub struct SteerSubmission {
+    pub id: u64,
+    pub text: String,
+    pub image_paths: Vec<PathBuf>,
+    pub text_elements: Vec<codex_protocol::user_input::TextElement>,
 }
 
 /// 018-B：异步问询展示状态（宿主已过滤展示副本；request_id/答案 ID 原值）。
@@ -193,6 +219,9 @@ pub struct DriverHooks {
     pub run_command: Box<dyn FnMut(&str) -> CommandOutcome + Send>,
     /// turn 运行中的取消标志句柄（006 N2b：宿主置标志→SIGKILL 进程组→CLI 存活）。
     pub set_cancel_requested: Box<dyn FnMut(bool) + Send>,
+    /// 021：运行中接续提交（Enter 路径）。宿主原子判定：Ok(id)＝已受理（当前轮
+    /// 将在批末或终文判定点处理）；Err(原因)＝当前轮已结束（驱动转显式排队）。
+    pub submit_steer: Box<dyn FnMut(SteerContent) -> Result<u64, String> + Send>,
     /// 启动通知（F7 权限审计等本地生成行）——渲染为既有通知 cell（008 P2-7）。
     pub startup_notices: Vec<String>,
 }
@@ -332,6 +361,9 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
         std::collections::HashMap::new();
     // 008：turn 运行中提交的排队输入（母本排队语义；一次重放一条，至多一个在飞 turn）
     let mut queued_inputs: VecDeque<SubmittedTurn> = VecDeque::new();
+    // 021：已受理未入史的运行中接续输入（接入预览；SteerIngested/SteerRestored
+    // 按 id 恰一次消化）
+    let mut steer_pending: Vec<SteerSubmission> = Vec::new();
     // 020 §2.3：入史前拒绝／入史后失败后剩余队列暂停自动发送，等待用户
     // 处理；用户再次提交任意新输入即视为已处理，恢复出队。
     // user_cell_base＝本轮用户 cell 推入前的 cells 长度（拒绝时回收）。
@@ -534,6 +566,11 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                 // 018-B：未决问询随轮结束失效（未答项由工作线程关闭）
                                 pending_async = None;
                                 async_cells.clear();
+                                clear_steer_preview(
+                                    &mut steer_pending,
+                                    &queued_inputs,
+                                    &mut pane,
+                                );
                                 finish_stream(&mut stream, &mut cells, &cwd, text, false);
                                 turn_running = false;
                                 pane.set_task_running(false);
@@ -568,6 +605,12 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                 tool_cells.clear();
                                 pending_async = None;
                                 async_cells.clear();
+                                // 未入史输入已经 SteerRestored 转入待处理队列
+                                clear_steer_preview(
+                                    &mut steer_pending,
+                                    &queued_inputs,
+                                    &mut pane,
+                                );
                                 finish_stream(&mut stream, &mut cells, &cwd, text, true);
                                 turn_running = false;
                                 // 020 §2.3：入史后请求失败——剩余队列暂停自动发送
@@ -660,6 +703,66 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                     }
                                 }
                             }
+                            DriverEvent::SteerIngested { input } => {
+                                // 021：正式入史＝确认提交——按 id 恰一次清除接入
+                                // 预览并推用户消息 cell（与回合提交同类型，不伪造
+                                // 第二条工具结果）
+                                if let Some(pos) =
+                                    steer_pending.iter().position(|s| s.id == input.id)
+                                {
+                                    steer_pending.remove(pos);
+                                }
+                                pane.set_pending_input_preview(
+                                    input_preview_lines(&steer_pending, &queued_inputs),
+                                    Vec::new(),
+                                    Vec::new(),
+                                );
+                                cells.push(Arc::new(crate::history_cell::UserHistoryCell {
+                                    spoken: false,
+                                    message: input.text,
+                                    text_elements: input.text_elements,
+                                    local_image_paths: input.image_paths,
+                                    remote_image_urls: Vec::new(),
+                                }));
+                            }
+                            DriverEvent::SteerRestored { inputs, reason } => {
+                                // 021 §2.3-6：未入史输入恢复为待处理完整消息并
+                                // 暂停自动发送（020 规则）；已入史输入不经此事件
+                                queue_paused = true;
+                                for sub in inputs {
+                                    if let Some(pos) =
+                                        steer_pending.iter().position(|s| s.id == sub.id)
+                                    {
+                                        steer_pending.remove(pos);
+                                    }
+                                    queue_input(
+                                        &mut queued_inputs,
+                                        &mut pane,
+                                        &steer_pending,
+                                        SubmittedTurn {
+                                            local_images: sub
+                                                .image_paths
+                                                .into_iter()
+                                                .map(|path| {
+                                                    crate::bottom_pane::LocalImageAttachment {
+                                                        placeholder: String::new(),
+                                                        path,
+                                                    }
+                                                })
+                                                .collect(),
+                                            text_elements: sub.text_elements,
+                                            text: sub.text,
+                                        },
+                                    );
+                                }
+                                push_info_lines(
+                                    &mut cells,
+                                    &format!(
+                                        "接续输入未入史（{}），已转入待处理队列",
+                                        close_reason_label(&reason)
+                                    ),
+                                );
+                            }
                         }
                     }
                 }
@@ -677,8 +780,8 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                     changed = true;
                     let submission = queued_inputs.pop_front().unwrap();
                     pane.set_pending_input_preview(
-                        // 020：预览仍按文本行（附件路径不展开为多行）
-                        queued_inputs.iter().map(|s| s.text.clone()).collect(),
+                        // 021：预览含已受理未入史接续输入＋剩余排队项
+                        input_preview_lines(&steer_pending, &queued_inputs),
                         Vec::new(),
                         Vec::new(),
                     );
@@ -1014,12 +1117,59 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                         if !submission.is_submittable() {
                                             // 空输入不提交（001）——无状态变化，不置脏
                                         } else if turn_running {
-                                            // 008：turn 运行中提交（母本为 steer 注入
-                                            // 当前 turn；本地同步 turn 不支持）→ 排队待
-                                            // 重放——至多一个在飞 turn（J11），不丢输入
-                                            queue_input(&mut queued_inputs, &mut pane, submission);
-                                            // 011 §7：排队预览是可见变化
-                                            // （set_pending_input_preview 不自请求，坑 1）
+                                            // 021 §2.3-1：运行中 Enter——先尝试送入当前轮
+                                            //（宿主原子受理：Ok(id)＝已受理，批末或终文
+                                            // 判定点接入；Err＝明确"当前轮已结束"回执）。
+                                            // 显式排队键（queue key）仍走 Queued 分支，
+                                            // 两种输入意图并存。
+                                            let content = SteerContent {
+                                                text: submission.text.clone(),
+                                                image_paths: submission
+                                                    .local_images
+                                                    .iter()
+                                                    .map(|a| a.path.clone())
+                                                    .collect(),
+                                                text_elements: submission.text_elements.clone(),
+                                            };
+                                            match (hooks.submit_steer)(content) {
+                                                Ok(id) => {
+                                                    steer_pending.push(SteerSubmission {
+                                                        id,
+                                                        text: submission.text.clone(),
+                                                        image_paths: submission
+                                                            .local_images
+                                                            .iter()
+                                                            .map(|a| a.path.clone())
+                                                            .collect(),
+                                                        text_elements: submission
+                                                            .text_elements
+                                                            .clone(),
+                                                    });
+                                                    pane.set_pending_input_preview(
+                                                        input_preview_lines(
+                                                            &steer_pending,
+                                                            &queued_inputs,
+                                                        ),
+                                                        Vec::new(),
+                                                        Vec::new(),
+                                                    );
+                                                }
+                                                Err(_reason) => {
+                                                    // 迟到输入不丢失：明确"当前轮已结束"
+                                                    // 回执后转后续轮（显式排队路径）
+                                                    queue_input(
+                                                        &mut queued_inputs,
+                                                        &mut pane,
+                                                        &steer_pending,
+                                                        submission,
+                                                    );
+                                                    push_info_lines(
+                                                        &mut cells,
+                                                        "当前轮已结束：输入已转入后续队列",
+                                                    );
+                                                }
+                                            }
+                                            // 011 §7：接入/排队预览是可见变化
                                             needs_draw = true;
                                         } else {
                                             // 020 §2.3：用户重新提交＝已处理，恢复队列
@@ -1090,7 +1240,12 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                             text_elements,
                                             text,
                                         };
-                                        queue_input(&mut queued_inputs, &mut pane, queued_submission);
+                                        queue_input(
+                                            &mut queued_inputs,
+                                            &mut pane,
+                                            &steer_pending,
+                                            queued_submission,
+                                        );
                                         needs_draw = true;
                                     }
                                     _ => {}
@@ -1408,27 +1563,61 @@ fn spawn_turn_cells(
 }
 
 /// 008：入队一条 turn 期间提交的输入并更新 composer 上方的排队预览（母本行为）。
-fn queue_input(queued: &mut VecDeque<SubmittedTurn>, pane: &mut BottomPane, submission: SubmittedTurn) {
+/// 021：预览含已受理未入史的接续输入（在前）＋排队项（随后）。
+fn queue_input(
+    queued: &mut VecDeque<SubmittedTurn>,
+    pane: &mut BottomPane,
+    steer_pending: &[SteerSubmission],
+    submission: SubmittedTurn,
+) {
     // 020 §2.3：队列保存完整消息与附件路径（入队不读取、不冻结图片）
     if !submission.is_submittable() {
         return;
     }
     queued.push_back(submission);
     pane.set_pending_input_preview(
-        // 预览按文本行；纯图排队项显示附件占位提示
-        queued
-            .iter()
-            .map(|s| {
-                if s.text.trim().is_empty() {
-                    format!("（图片 ×{}）", s.local_images.len())
-                } else {
-                    s.text.trim().to_string()
-                }
-            })
-            .collect(),
+        input_preview_lines(steer_pending, queued.iter()),
         Vec::new(),
         Vec::new(),
     );
+}
+
+/// 021：轮终防呆清空接入预览（正常路径已由入史/交还事件消化；仅在仍有残留
+/// 时动作并刷新预览）。
+fn clear_steer_preview(
+    steer_pending: &mut Vec<SteerSubmission>,
+    queued_inputs: &VecDeque<SubmittedTurn>,
+    pane: &mut BottomPane,
+) {
+    if steer_pending.is_empty() {
+        return;
+    }
+    steer_pending.clear();
+    pane.set_pending_input_preview(
+        input_preview_lines(steer_pending.iter(), queued_inputs.iter()),
+        Vec::new(),
+        Vec::new(),
+    );
+}
+
+/// 021：输入预览统一计算——已受理未入史的接续输入在前，显式排队随后；
+/// 纯图项显示附件占位提示（附件路径不展开为多行）。
+fn input_preview_lines<'a>(
+    steer_pending: impl IntoIterator<Item = &'a SteerSubmission>,
+    queued: impl IntoIterator<Item = &'a SubmittedTurn>,
+) -> Vec<String> {
+    let text = |text: &str, images: usize| {
+        if text.trim().is_empty() {
+            format!("（图片 ×{images}）")
+        } else {
+            text.trim().to_string()
+        }
+    };
+    steer_pending
+        .into_iter()
+        .map(|s| text(&s.text, s.image_paths.len()))
+        .chain(queued.into_iter().map(|s| text(&s.text, s.local_images.len())))
+        .collect()
 }
 
 /// 应用命令结果到 transcript；返回 true 表示请求退出。
@@ -1694,6 +1883,9 @@ pub enum HostHistoryItem {
         closed_reason: Option<String>,
         answerable: bool,
     },
+    /// 021：send_message_to_user_async 成功发出的消息（与最终回复同一 assistant
+    /// Markdown 渲染，独立成 cell；每个成功调用一条）。
+    AssistantMessage { content: String },
 }
 
 /// 012：apply_patch 逐文件真实差异（应用时的真实前后内容）。
@@ -1767,7 +1959,8 @@ pub fn project_history(items: Vec<HostHistoryItem>) -> Vec<std::sync::Arc<dyn Hi
             | HostHistoryItem::Plan { .. }
             | HostHistoryItem::ViewImage { .. }
             | HostHistoryItem::UserInput { .. }
-            | HostHistoryItem::UserInputAsync { .. }) => {
+            | HostHistoryItem::UserInputAsync { .. }
+            | HostHistoryItem::AssistantMessage { .. }) => {
                 flush_text!();
                 out.extend(project_tool_item(&tool, &id, &cwd));
             }
@@ -1801,6 +1994,15 @@ fn project_tool_item(
     use ratatui::style::Stylize as _;
     match item {
         HostHistoryItem::Text { .. } => Vec::new(), // 文本经 thread 投影，不在此处理
+        // 021：消息项——与最终回复同一 assistant Markdown cell（实时终态与
+        // /resume 同源同投影）；追加时不触发 Final/流式清理语义。
+        HostHistoryItem::AssistantMessage { content } => {
+            vec![Arc::new(AgentMarkdownCell::new_with_inline_visualizations(
+                content.clone(),
+                cwd,
+                /*inline_visualization_context*/ None,
+            ))]
+        }
         // 019：查看图片终态——成功经 ViewImageHistoryCell 渲染（与恢复投影同源）；
         // 失败/取消/历史缺图内容不生成正常"已查看"卡片，按原因降级呈现
         //（§5.3：成功摘要但无载荷＝明确显示"历史图片内容不可用"）。
@@ -2049,6 +2251,9 @@ fn close_reason_label(reason: &str) -> String {
         "host_exit" => "宿主退出".to_string(),
         "channel_error" => "回答通道异常".to_string(),
         "model_error" => "模型或协议错误".to_string(),
+        // 021：接续通道防御路径原因
+        "merge_turn" => "内部合并轮不接收输入".to_string(),
+        "轮已结束" => "轮已结束".to_string(),
         other => other.to_string(),
     }
 }

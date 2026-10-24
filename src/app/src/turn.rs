@@ -89,6 +89,64 @@ pub enum TurnNotify {
         questions: Vec<crate::user_input::Question>,
         reason: String,
     },
+    /// 021：运行中接续输入恰一次入史（宿主确认提交回显：推用户消息 cell、
+    /// 清除接入预览）。`input` 为宿主受理的原始提交（id 关联）。
+    SteerIngested { input: SteerInput },
+    /// 021：接续输入未入史交还宿主（图片准备失败或轮终止原因）——恢复为
+    /// 待处理完整消息并暂停自动发送（§2.3-6）；已入史输入不经此事件。
+    SteerRestored {
+        inputs: Vec<SteerInput>,
+        reason: String,
+    },
+}
+
+/// 021 §2.3：运行中接续的普通输入（宿主生成提交标识；与宿主提交同构，
+/// 图片保留路径——正式入史前才读取准备，不提前冻结）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SteerInput {
+    /// 宿主生成的提交标识（入史/恢复回执按 id 恰一次关联）。
+    pub id: u64,
+    pub text: String,
+    pub image_paths: Vec<std::path::PathBuf>,
+    pub text_elements: Vec<codex_protocol::user_input::TextElement>,
+}
+
+/// 021 §2.3-5：终文竞态原子判定的结果。
+#[derive(Debug, PartialEq, Eq)]
+pub enum SteerSeal {
+    /// 无待处理输入且已封口：调用方可结束本轮；此后提交由宿主回执"当前轮已结束"。
+    Closed,
+    /// 已受理输入（按受理顺序）；受理保持开放，调用方继续当前轮。
+    Inputs(Vec<SteerInput>),
+}
+
+/// 021 §2.3：运行中普通输入接续通道（每轮独立；宿主实现）。
+/// 提交侧只经短锁入队，不获取 turn 长时间持有的 history/autosave 锁；
+/// 收取输入与封闭当前轮在同一接续状态上原子判定。
+pub trait SteerChannel {
+    /// 非阻塞收取已受理输入（受理保持开放；入史边界由循环固定在完整批末）。
+    fn drain(&mut self) -> Vec<SteerInput>;
+    /// 终文竞态原子判定（§2.3-5）：已有已受理输入→收取且保持受理开放；
+    /// 为空→原子封口。
+    fn seal(&mut self) -> SteerSeal;
+    /// 无条件封口：撤回受理资格并返回已受理未消化输入（取消/失败/额度出口
+    /// 交还宿主恢复）。每个轮出口恰调用一次。
+    fn close(&mut self) -> Vec<SteerInput>;
+}
+
+/// 021：用户轮附加能力与接续通道（宿主按每轮快照传入；既有入口默认全关）。
+pub struct TurnExtras<'a> {
+    /// 模型目录显式声明 send_message_to_user_async（声明与执行共用快照）。
+    pub send_message: bool,
+    /// 运行中普通输入接续通道（None＝无运行中接续能力；MemoryMerge 强制忽略）。
+    pub steer: Option<&'a mut dyn SteerChannel>,
+}
+
+impl TurnExtras<'_> {
+    /// 既有入口的兼容取值：无消息能力、无接续通道。
+    pub fn none() -> Self {
+        Self { send_message: false, steer: None }
+    }
 }
 
 /// 行式宿主的工具活动行（012：格式与历史输出逐字节一致，供宿主打印）。
@@ -428,6 +486,7 @@ pub fn run_user_turn_with_context_and_host(
 /// 018 阶段 B：TUI 用户轮同时传入同步与异步问答宿主（七工具）；
 /// CLI 仍走 [`run_user_turn_with_context_and_host`]（五工具，仅同步）。
 /// 019：`image_input`＝本轮模型图片能力快照；MemoryMerge 内部轮不经本入口。
+/// 021 兼容入口：无消息能力、无运行中接续通道。
 pub fn run_user_turn_with_context_and_hosts(
     history: &mut Vec<HistoryItem>,
     current_input: &str,
@@ -442,6 +501,43 @@ pub fn run_user_turn_with_context_and_hosts(
     async_host: Option<&mut crate::user_input_async::AsyncInputHost<'_>>,
     image_input: bool,
     user_images: Option<&crate::prompt::UserImagePayload>,
+) -> Result<String, String> {
+    run_user_turn_with_context_and_caps(
+        history,
+        current_input,
+        sender,
+        notify,
+        cancel,
+        on_record,
+        mode,
+        sources,
+        procs,
+        input_host,
+        async_host,
+        image_input,
+        user_images,
+        TurnExtras::none(),
+    )
+}
+
+/// 021 完整入口：在既有宿主参数之上接收 [`TurnExtras`]（消息能力声明/执行
+/// 共用快照＋运行中普通输入接续通道）。TUI／行式宿主按模型目录声明传入。
+#[allow(clippy::too_many_arguments)]
+pub fn run_user_turn_with_context_and_caps(
+    history: &mut Vec<HistoryItem>,
+    current_input: &str,
+    sender: &mut dyn FnMut(&Value) -> Result<Value, String>,
+    notify: &mut dyn FnMut(TurnNotify),
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    on_record: &mut dyn FnMut(&[HistoryItem]),
+    mode: ToolMode<'_>,
+    sources: &crate::context::ContextSources,
+    procs: &ProcessManager,
+    input_host: Option<&mut crate::user_input::InputHost<'_>>,
+    async_host: Option<&mut crate::user_input_async::AsyncInputHost<'_>>,
+    image_input: bool,
+    user_images: Option<&crate::prompt::UserImagePayload>,
+    extras: TurnExtras<'_>,
 ) -> Result<String, String> {
     // 020 A05：空白校验与底层一致（纯图合法）
     let has_user_images = user_images.is_some_and(|p| !p.data_urls.is_empty());
@@ -473,7 +569,7 @@ pub fn run_user_turn_with_context_and_hosts(
             on_record(history);
         }
     }
-    run_tool_turn_with_hosts(
+    run_tool_turn_with_hosts_extras(
         history,
         current_input,
         sender,
@@ -486,6 +582,7 @@ pub fn run_user_turn_with_context_and_hosts(
         async_host,
         image_input,
         user_images,
+        extras,
     )
 }
 
@@ -677,6 +774,67 @@ fn close_pending_on_model_error(
     );
 }
 
+/// 021：轮出口统一封口接续通道；未入史的已受理输入恰一次交还宿主恢复
+///（§2.3-6：保留完整消息并暂停自动发送，不丢弃、不入史）。
+fn close_steer_restore(
+    steer: &mut Option<&mut dyn SteerChannel>,
+    notify: &mut dyn FnMut(TurnNotify),
+    reason: &str,
+) {
+    let Some(channel) = steer.as_mut() else { return };
+    let inputs = channel.close();
+    if !inputs.is_empty() {
+        notify(TurnNotify::SteerRestored {
+            inputs,
+            reason: reason.to_string(),
+        });
+    }
+}
+
+/// 021 §2.3-2/6：接入一份已受理的运行中普通输入（完整批末调用）。
+/// 图片在正式入史前读取准备（复用 020 核心、本轮能力快照与取消检查点）；
+/// 失败＝SteerRestored 明确交还宿主恢复，不入史、不降级为纯文本。
+/// 入史即确认提交：SteerIngested 恰一次回执（正文＋附件路径原值）。
+fn ingest_steer_input(
+    history: &mut Vec<HistoryItem>,
+    on_record: &mut dyn FnMut(&[HistoryItem]),
+    input: SteerInput,
+    image_input: bool,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    notify: &mut dyn FnMut(TurnNotify),
+) {
+    let payload = if input.image_paths.is_empty() {
+        None
+    } else {
+        match crate::view_image::prepare_user_images(&input.image_paths, image_input, cancel) {
+            Ok(data_urls) => Some(crate::prompt::UserImagePayload {
+                data_urls,
+                text_elements: input.text_elements.clone(),
+            }),
+            Err(reason) => {
+                notify(TurnNotify::SteerRestored {
+                    inputs: vec![input],
+                    reason,
+                });
+                return;
+            }
+        }
+    };
+    let has_images = payload.as_ref().is_some_and(|p| !p.data_urls.is_empty());
+    history.push(HistoryItem::Text(HistoryMessage {
+        images: has_images.then(|| payload.as_ref().expect("已确认存在").data_urls.clone()),
+        text_elements: payload
+            .as_ref()
+            .map(|p| p.text_elements.clone())
+            .unwrap_or_default(),
+        role: HistoryRole::User,
+        content: input.text.clone(),
+        user_input_event: None,
+    }));
+    on_record(history);
+    notify(TurnNotify::SteerIngested { input });
+}
+
 /// 018 阶段 B 核心循环：在 [`run_tool_turn_with_host`] 之上接入异步发布、
 /// 显式等待与批末回答接入。契约见 018 §8.3–8.5：
 /// - 发布成功立即返回 `{"accepted":true}`；每轮同一时刻最多一项未决；
@@ -686,7 +844,49 @@ fn close_pending_on_model_error(
 /// - 结束/取消/额度耗尽路径原子处理已受理回答并关闭未决项。
 /// 019：`image_input`＝本轮模型图片能力快照（用户轮开始时固定，声明与
 /// view_image 执行分派共用；MemoryMerge 内部轮不声明也不执行 view_image）。
+/// 021 兼容入口：无消息能力、无运行中接续通道。
 pub fn run_tool_turn_with_hosts(
+    history: &mut Vec<HistoryItem>,
+    current_input: &str,
+    sender: &mut dyn FnMut(&Value) -> Result<Value, String>,
+    notify: &mut dyn FnMut(TurnNotify),
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    on_record: &mut dyn FnMut(&[HistoryItem]),
+    mode: ToolMode<'_>,
+    procs: &ProcessManager,
+    input_host: Option<&mut crate::user_input::InputHost<'_>>,
+    async_host: Option<&mut crate::user_input_async::AsyncInputHost<'_>>,
+    image_input: bool,
+    user_images: Option<&crate::prompt::UserImagePayload>,
+) -> Result<String, String> {
+    run_tool_turn_with_hosts_extras(
+        history,
+        current_input,
+        sender,
+        notify,
+        cancel,
+        on_record,
+        mode,
+        procs,
+        input_host,
+        async_host,
+        image_input,
+        user_images,
+        TurnExtras::none(),
+    )
+}
+
+/// 021 核心循环：在既有宿主参数之上接收 [`TurnExtras`]——
+/// - `send_message`：send_message_to_user_async 声明/执行共用快照；成功即回
+///   `{"accepted":true}`，消息经宿主 ToolEnd 投影，不结束当前轮；
+/// - `steer`：运行中普通输入接续通道（§2.3）。收取输入与封闭当前轮在同一
+///   接续状态上原子判定：完整工具批及结果配对（含异步答案）之后、下一请求
+///   组装之前接入已受理输入；模型返回纯文本时 `seal` 先行——有受理输入则
+///   保留正文继续，为空才原子封口结束；取消/失败/额度每个出口 `close` 恰
+///   一次，未入史输入交还宿主恢复。
+/// MemoryMerge 内部轮强制忽略两者（声明与执行双层隔离）。
+#[allow(clippy::too_many_arguments)]
+pub fn run_tool_turn_with_hosts_extras(
     history: &mut Vec<HistoryItem>,
     current_input: &str,
     sender: &mut dyn FnMut(&Value) -> Result<Value, String>,
@@ -699,16 +899,33 @@ pub fn run_tool_turn_with_hosts(
     mut async_host: Option<&mut crate::user_input_async::AsyncInputHost<'_>>,
     image_input: bool,
     user_images: Option<&crate::prompt::UserImagePayload>,
+    extras: TurnExtras<'_>,
 ) -> Result<String, String> {
     // 020 A05：空文字＋有图＝合法纯图消息；空文字＋无图仍拒绝
     let has_user_images = user_images.is_some_and(|p| !p.data_urls.is_empty());
     if current_input.trim().is_empty() && !has_user_images {
         return Err(BLANK_INPUT_ERROR.into());
     }
-    if matches!(mode, ToolMode::MemoryMerge { .. }) {
+    let merge_mode = matches!(mode, ToolMode::MemoryMerge { .. });
+    if merge_mode {
         input_host = None;
         async_host = None;
     }
+    // 021：合并轮双层隔离——即使误传能力与通道也不声明、不接收、不执行；
+    // 误传通道立即封口，已受理输入交还宿主恢复（不静默丢弃）
+    let send_message = extras.send_message && !merge_mode;
+    let mut steer = if merge_mode {
+        let late = extras.steer.map(|c| c.close()).unwrap_or_default();
+        if !late.is_empty() {
+            notify(TurnNotify::SteerRestored {
+                inputs: late,
+                reason: "merge_turn".to_string(),
+            });
+        }
+        None
+    } else {
+        extras.steer
+    };
     // 取消状态不跨用户轮（006：每轮开始复位）
     if let Some(c) = cancel {
         c.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -739,6 +956,7 @@ pub fn run_tool_turn_with_hosts(
     let mut recorded_answer_ids: Vec<String> = Vec::new();
     loop {
         if requests >= MAX_MODEL_REQUESTS_PER_TURN {
+            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_REQUEST_LIMIT);
             close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_REQUEST_LIMIT);
             return Err(cap_error());
         }
@@ -750,6 +968,7 @@ pub fn run_tool_turn_with_hosts(
                 input_host.is_some(),
                 async_host.is_some(),
                 image_input,
+                send_message,
             ),
             ToolMode::UserWithMemory { .. } => build_turn_request_with_async_host(
                 history,
@@ -757,6 +976,7 @@ pub fn run_tool_turn_with_hosts(
                 input_host.is_some(),
                 async_host.is_some(),
                 image_input,
+                send_message,
             ),
             ToolMode::MemoryMerge { system, .. } => build_turn_request_with(
                 history,
@@ -769,7 +989,9 @@ pub fn run_tool_turn_with_hosts(
             Err(error) => {
                 // 018-B（§8.5）：模型请求失败＝明确结束本轮——先处理已受理回答
                 // （通道终态与模型失败同轮发生时以模型失败文案收尾，通道侧无新事实）
+                // 021：未入史的已受理接续输入交还宿主恢复
                 let _ = drain_pending_async(&mut pending_async);
+                close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
                 close_pending_on_model_error(history, on_record, notify, &mut pending_async);
                 return Err(error);
             }
@@ -777,6 +999,11 @@ pub fn run_tool_turn_with_hosts(
         requests += 1;
         // 018-B 模型返回检查点：通道终态为失败＝明确结束本轮，不处理该响应
         if let Some(error) = drain_pending_async(&mut pending_async) {
+            close_steer_restore(
+                &mut steer,
+                notify,
+                crate::user_input_async::close_reason_for(&error),
+            );
             let reason = crate::user_input_async::close_reason_for(&error);
             close_pending_async(history, on_record, notify, &mut pending_async, reason);
             return Err(error.message().into());
@@ -784,12 +1011,14 @@ pub fn run_tool_turn_with_hosts(
         // 先整条校验消息与整批调用结构，再写入历史、执行；协议级失败
         // 收尾统一先保存已受理回答（§8.5），未答项才按 model_error 关闭
         let Some(message) = resp.pointer("/choices/0/message").cloned() else {
+            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
             close_pending_on_model_error(history, on_record, notify, &mut pending_async);
             return Err("协议错误：响应缺少 choices[0].message".to_string());
         };
         let calls = match parse_tool_calls(&message) {
             Ok(calls) => calls,
             Err(error) => {
+                close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
                 close_pending_on_model_error(history, on_record, notify, &mut pending_async);
                 return Err(error);
             }
@@ -798,12 +1027,14 @@ pub fn run_tool_turn_with_hosts(
             None | Some(Value::Null) => None,
             Some(Value::String(s)) => Some(s.clone()),
             Some(_) => {
+                close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
                 close_pending_on_model_error(history, on_record, notify, &mut pending_async);
                 return Err("协议错误：assistant.content 必须是字符串或 null".into());
             }
         };
         // N3：批大小在入史/执行之前检查，超限整批拒绝（协议级失败，历史不污染）
         if calls.len() > MAX_TOOL_CALLS_PER_BATCH {
+            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
             close_pending_on_model_error(history, on_record, notify, &mut pending_async);
             return Err(format!(
                 "单批工具调用 {} 条超过上限 {MAX_TOOL_CALLS_PER_BATCH}，整批拒绝",
@@ -817,6 +1048,7 @@ pub fn run_tool_turn_with_hosts(
             .iter()
             .any(|c| c.name == "wait_for_user_input")
         {
+            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
             close_pending_on_model_error(history, on_record, notify, &mut pending_async);
             return Err(
                 "协议错误：wait_for_user_input 必须是批内最后一条调用，整批拒绝".to_string(),
@@ -825,6 +1057,7 @@ pub fn run_tool_turn_with_hosts(
         if calls.is_empty() {
             let reply = content.unwrap_or_default();
             if reply.trim().is_empty() {
+                close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
                 close_pending_on_model_error(history, on_record, notify, &mut pending_async);
                 return Err("模型回复为空".into());
             }
@@ -841,6 +1074,31 @@ pub fn run_tool_turn_with_hosts(
                 on_record(history);
                 record_async_answer(history, on_record, notify, p);
                 recorded_answer_ids.push(pending_async.take().unwrap().request_id);
+                // 021：受理中的接续输入保持开放，随下一批末接入
+                continue;
+            }
+            // 021 终文竞态（§2.3-5）：seal 原子判定——通道内已有受理输入则保留
+            // 该正文继续当前轮（先正文入史，再接入输入），不提前宣告任务完成；
+            // 为空才原子封口结束。封口后的迟到提交由宿主回执"当前轮已结束"。
+            let late = match steer.as_mut() {
+                Some(channel) => match channel.seal() {
+                    SteerSeal::Inputs(inputs) => inputs,
+                    SteerSeal::Closed => Vec::new(),
+                },
+                None => Vec::new(),
+            };
+            if !late.is_empty() {
+                history.push(HistoryItem::Text(HistoryMessage {
+                    images: None,
+                    text_elements: Vec::new(),
+                    role: HistoryRole::Assistant,
+                    content: reply.clone(),
+                    user_input_event: None,
+                }));
+                on_record(history);
+                for input in late {
+                    ingest_steer_input(history, on_record, input, image_input, cancel, notify);
+                }
                 continue;
             }
             history.push(HistoryItem::Text(HistoryMessage {
@@ -1065,6 +1323,27 @@ pub fn run_tool_turn_with_hosts(
                     crate::view_image::unsupported_outcome()
                 };
                 (outcome.summary, None, outcome.image)
+            } else if call.name == "send_message_to_user_async" && !merge_mode {
+                // 021：能力快照决定执行分派——关闭态（含伪造调用）返回错误且
+                // 不产生消息；成功严格为 {"accepted":true}，消息由宿主经 ToolEnd
+                // 投影（参数原文保留，展示副本由宿主过滤）。
+                let outcome = if send_message {
+                    crate::message_to_user::parse_arguments(&call.arguments)
+                        .map(|_| crate::message_to_user::accepted_result())
+                } else {
+                    Err(format!(
+                        "{} 不可用：当前模型未声明支持（experimental_supported_tools）",
+                        crate::message_to_user::TOOL_NAME
+                    ))
+                };
+                (
+                    match outcome {
+                        Ok(content) => content,
+                        Err(error) => json!({ "error": error }).to_string(),
+                    },
+                    None,
+                    None,
+                )
             } else {
                 let (content, display) = execute_tool(call, cancel, &mode, procs);
                 (content, display, None)
@@ -1103,25 +1382,43 @@ pub fn run_tool_turn_with_hosts(
             recorded_answer_ids.push(pending_async.take().unwrap().request_id);
         }
         if let Some(reason) = input_end {
+            close_steer_restore(
+                &mut steer,
+                notify,
+                crate::user_input_async::close_reason_for(&reason),
+            );
             let close_reason = crate::user_input_async::close_reason_for(&reason);
             close_pending_async(history, on_record, notify, &mut pending_async, close_reason);
             return Err(reason.message().into());
         }
         if cancelled_batch {
             // 取消：结束本轮，保留已发生结果与历史，不自动请求模型、不重复已执行工具
+            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_CANCELLED);
             close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_CANCELLED);
             return Err("用户已取消本轮工具执行：已执行结果保留，剩余调用未执行".into());
         }
         if (answered_in_batch || async_answer_recorded)
             && cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst))
         {
+            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_CANCELLED);
             close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_CANCELLED);
             return Err("用户已取消本轮：已保存问询结果，不再请求模型".into());
         }
         if requests == MAX_MODEL_REQUESTS_PER_TURN {
             // 第 8 批：保存全部结果后报上限，不发第 9 次请求，不生成假回复
+            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_REQUEST_LIMIT);
             close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_REQUEST_LIMIT);
             return Err(cap_error());
+        }
+        // 021 §2.3-4：完整工具批及结果配对（含异步答案）之后、下一请求组装
+        // 之前——按受理顺序接入已受理普通输入（受理保持开放，后续批次可继续
+        // 受理）；入史即确认提交（SteerIngested），准备失败经 SteerRestored 交还。
+        let pending_inputs = match steer.as_mut() {
+            Some(channel) => channel.drain(),
+            None => Vec::new(),
+        };
+        for input in pending_inputs {
+            ingest_steer_input(history, on_record, input, image_input, cancel, notify);
         }
     }
 }

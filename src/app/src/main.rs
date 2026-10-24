@@ -209,6 +209,7 @@ fn run_tui(
         let host_for_turn = host.clone();
         let host_for_cmd = host.clone();
         let host_cancel = host.clone();
+        let host_steer = host.clone();
         // 020：-i/--image 启动图片→驱动就绪后的首次提交（纯图一次）
         let initial_images = startup_images;
         let initial_submission = (!initial_images.is_empty()).then(|| {
@@ -228,6 +229,8 @@ fn run_tui(
             spawn_turn: Box::new(move |submission, tx| host_for_turn.spawn_turn(submission, tx)),
             run_command: Box::new(move |full| host_for_cmd.run_command(full)),
             set_cancel_requested: Box::new(move |requested| host_cancel.set_cancel(requested)),
+            // 021：运行中接续提交——宿主短锁原子判定受理或"当前轮已结束"
+            submit_steer: Box::new(move |content| host_steer.submit_steer(content)),
             initial_submission,
             startup_notices,
         };
@@ -663,13 +666,21 @@ fn cmd_chat(
                     // 017：update_plan 的 ToolEnd 打印计划清单/原因（成功快照说明与步骤）。
                     let mut notify = |n: turn::TurnNotify| match n {
                         // 018-B：行式 CLI 不提供异步宿主，这三个事件不可达；
-                        // 显式列为无操作，避免未来接入时静默落入其他分支。
+                        // 021：行式宿主运行 turn 时没有第二个终端读取者，不接续
+                        // 输入（steer=None），这两个事件同样不可达——显式列为
+                        // 无操作，避免未来接入时静默落入其他分支。
                         turn::TurnNotify::UserInputAsyncWait { .. }
                         | turn::TurnNotify::UserInputAsyncAnswered { .. }
-                        | turn::TurnNotify::UserInputAsyncClosed { .. } => {}
+                        | turn::TurnNotify::UserInputAsyncClosed { .. }
+                        | turn::TurnNotify::SteerIngested { .. }
+                        | turn::TurnNotify::SteerRestored { .. } => {}
                         turn::TurnNotify::Info(line) => say(&line),
                         turn::TurnNotify::ToolBegin { id, name, .. } => {
-                            say(&turn::tool_activity_line(&name, &id));
+                            // 021：消息工具无运行活动——成功即消息本身，失败原因
+                            // 在 ToolEnd 呈现；不打印无信息量的活动行
+                            if name != "send_message_to_user_async" {
+                                say(&turn::tool_activity_line(&name, &id));
+                            }
                         }
                         turn::TurnNotify::ToolEnd {
                             name,
@@ -677,6 +688,19 @@ fn cmd_chat(
                             result,
                             ..
                         } => {
+                            // 021：send_message 成功消息即时输出（终文前；println
+                            // 按行 flush）；失败/取消/未知显式呈现原因。不重复
+                            // 打印活动行（Begin 已抑制）。
+                            if name == "send_message_to_user_async" {
+                                match terminal_chat::message_to_user::sent_message_from_record(
+                                    &arguments, &result,
+                                ) {
+                                    Some(message) => say(&format!("Agent：{message}")),
+                                    None => say(&terminal_chat::message_to_user::failure_line(
+                                        &result,
+                                    )),
+                                }
+                            }
                             // 019：view_image——输出已加载路径与实际尺寸；失败/取消
                             // 显示原因；不输出 data URL（say 统一终端过滤）。
                             if name == "view_image" {
@@ -754,7 +778,7 @@ fn cmd_chat(
                         }
                         result
                     };
-                    let outcome = turn::run_user_turn_with_context_and_host(
+                    let outcome = turn::run_user_turn_with_context_and_caps(
                         history,
                         &turn_input,
                         &mut sender,
@@ -777,10 +801,18 @@ fn cmd_chat(
                         } else {
                             None
                         },
+                        // 018-B：行式 CLI 无异步问询宿主
+                        None,
                         // 019：每用户轮固定能力快照（声明与执行共用）
                         catalog::supports_image_input(&model),
                         // 020：行式用户图片（-i 启动附件，首轮后无新入口）
                         payload_ref,
+                        // 021：消息能力按模型目录声明；行式宿主无第二个终端读取者，
+                        // 不提供运行中接续通道（后续行仍按普通输入处理）
+                        turn::TurnExtras {
+                            send_message: catalog::supports_send_message_to_user(&model),
+                            steer: None,
+                        },
                     );
                     unsafe {
                         libc::signal(libc::SIGINT, libc::SIG_DFL);

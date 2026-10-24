@@ -500,19 +500,23 @@ pub fn build_turn_request_with_input_host(
     memory_context: Option<&str>,
     has_input_host: bool,
 ) -> Value {
-    build_turn_request_with_async_host(history, memory_context, has_input_host, false, false)
+    build_turn_request_with_async_host(history, memory_context, has_input_host, false, false, false)
 }
 
 /// 018 阶段 B：同时具备同步与异步回答宿主的 TUI 用户轮声明七项工具
 ///（原四项＋同步问询＋异步发布＋本地等待）；只具备同步宿主仍为五项。
 /// 019：`image_input`＝本轮模型图片能力快照（`catalog::supports_image_input`），
 /// 为真时再加 `view_image`；MemoryMerge 合并轮不走本入口（仍三项 mem 工具）。
+/// 021：`send_message`＝模型目录显式声明（`catalog::supports_send_message_to_user`）
+/// 时再加 `send_message_to_user_async`——所有宿主（TUI／行式／管道）都具备
+/// 消息输出路径，不绑定问询开关或回答宿主。
 pub fn build_turn_request_with_async_host(
     history: &[HistoryItem],
     memory_context: Option<&str>,
     has_input_host: bool,
     has_async_input_host: bool,
     image_input: bool,
+    send_message: bool,
 ) -> Value {
     let mut system = sent_instructions();
     if let Some(context) = memory_context {
@@ -536,6 +540,10 @@ pub fn build_turn_request_with_async_host(
     // 019：图片能力确认的用户轮加声明 view_image（每轮固定快照）
     if image_input {
         tools.push(crate::view_image::tool_definition());
+    }
+    // 021：模型目录声明的用户轮加声明即时消息工具（每轮固定快照）
+    if send_message {
+        tools.push(crate::message_to_user::tool_definition());
     }
     build_turn_request_with(history, &tools, &system)
 }

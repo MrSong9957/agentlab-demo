@@ -372,7 +372,7 @@ fn s10_image_attachment_follows_full_paired_batch() {
         tool_result("call-b", r#"{"status":"completed"}"#, None),
         msg(HistoryRole::Assistant, "分析完成"),
     ];
-    let body = build_turn_request_with_async_host(&history, None, false, false, false);
+    let body = build_turn_request_with_async_host(&history, None, false, false, false, false);
     let msgs = body["messages"].as_array().unwrap();
     let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
     assert_eq!(
@@ -417,7 +417,7 @@ fn s11_two_images_attach_in_call_order_and_failure_attaches_nothing() {
         tool_result("call-3", &view_ok_content("/3.png", 8, 8), Some(img("data:image/png;base64,Q0ND"))),
         msg(HistoryRole::Assistant, "完"),
     ];
-    let body = build_turn_request_with_async_host(&history, None, false, false, false);
+    let body = build_turn_request_with_async_host(&history, None, false, false, false, false);
     let msgs = body["messages"].as_array().unwrap();
     // system + assistant + 3 tool + 2 附件 + assistant
     assert_eq!(msgs.len(), 8, "形状：{msgs:?}");
@@ -444,7 +444,7 @@ fn s11b_multi_batch_attachments_stay_within_their_batch() {
         tool_result("b2", &view_ok_content("/2.png", 3, 3), Some(img("data:image/png;base64,Qg=="))),
         msg(HistoryRole::Assistant, "完"),
     ];
-    let body = build_turn_request_with_async_host(&history, None, false, false, false);
+    let body = build_turn_request_with_async_host(&history, None, false, false, false, false);
     let msgs = body["messages"].as_array().unwrap();
     let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
     assert_eq!(
@@ -469,7 +469,7 @@ fn s11c_attachment_path_control_chars_filtered() {
         tool_result("hc", hostile, Some(img("data:image/png;base64,QQ=="))),
         msg(HistoryRole::Assistant, "完"),
     ];
-    let body = build_turn_request_with_async_host(&history, None, false, false, false);
+    let body = build_turn_request_with_async_host(&history, None, false, false, false, false);
     let text = serde_json::to_string(&body).unwrap();
     let annotation = body["messages"]
         .as_array()
@@ -506,7 +506,7 @@ fn s12_image_field_serialization_optional() {
 #[test]
 fn s13_view_image_tool_declared_only_when_capable() {
     let history = vec![msg(HistoryRole::User, "hi")];
-    let off = build_turn_request_with_async_host(&history, None, false, false, false);
+    let off = build_turn_request_with_async_host(&history, None, false, false, false, false);
     let names: Vec<&str> = off["tools"]
         .as_array()
         .unwrap()
@@ -516,7 +516,7 @@ fn s13_view_image_tool_declared_only_when_capable() {
     assert_eq!(names, vec!["exec_command", "apply_patch", "write_stdin", "update_plan"]);
     let body = serde_json::to_string(&off).unwrap();
     assert!(!body.contains("image_url"), "纯文本请求不出现 image_url");
-    let on = build_turn_request_with_async_host(&history, None, false, false, true);
+    let on = build_turn_request_with_async_host(&history, None, false, false, true, false);
     let names: Vec<&str> = on["tools"]
         .as_array()
         .unwrap()
@@ -600,7 +600,7 @@ fn s15_user_image_projection_shape() {
         img_msg("", vec![u1.clone()], vec![]),
         msg(HistoryRole::User, "纯文本"),
     ];
-    let body = build_turn_request_with_async_host(&history, None, false, false, false);
+    let body = build_turn_request_with_async_host(&history, None, false, false, false, false);
     let msgs = body["messages"].as_array().unwrap();
     // system + user(数组) + user(数组) + user(字符串)
     let m0 = &msgs[1];
@@ -634,8 +634,53 @@ fn s16_handwritten_marker_without_payload_projects_plain_text() {
         img_msg("[Image #1] 手写的标记", Vec::new(), Vec::new()),
         msg(HistoryRole::User, "另一条 [Image #9] 也一样"),
     ];
-    let body = build_turn_request_with_async_host(&history, None, false, false, false);
+    let body = build_turn_request_with_async_host(&history, None, false, false, false, false);
     let raw = serde_json::to_string(&body).unwrap();
     assert!(!raw.contains("image_url"), "无载荷标记不产生图片部件：{raw}");
     assert!(!raw.contains("data:"), "无 data URL：{raw}");
+}
+
+/// 17.（021 A01/A03）`send_message` 能力快照——true 时声明
+/// `send_message_to_user_async`（Schema 严格单 message 字段）；false 时不声明；
+/// 与问询宿主开关相互独立。
+#[test]
+fn s17_send_message_declaration_follows_capability_snapshot() {
+    let history: Vec<terminal_chat::prompt::HistoryItem> = Vec::new();
+    // true：声明且 Schema 与上游映射一致
+    let body = build_turn_request_with_async_host(&history, None, false, false, false, true);
+    let tools = body["tools"].as_array().unwrap();
+    let tool = tools
+        .iter()
+        .find(|t| t["function"]["name"] == json!("send_message_to_user_async"))
+        .expect("能力开启必须声明消息工具");
+    assert_eq!(
+        tool["function"]["parameters"]["required"],
+        json!(["message"]),
+        "必填恰 message：{tool}"
+    );
+    assert_eq!(
+        tool["function"]["parameters"]["additionalProperties"],
+        json!(false),
+        "拒绝未知字段（上游 additionalProperties:false 映射）：{tool}"
+    );
+    assert!(
+        tool["function"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("report a critical blocker"),
+        "描述保留上游使用指引：{tool}"
+    );
+    // false：不声明
+    let body = build_turn_request_with_async_host(&history, None, false, false, false, false);
+    assert!(!body["tools"].as_array().unwrap().iter().any(|t| {
+        t["function"]["name"] == json!("send_message_to_user_async")
+    }));
+    // 与问询开关独立：仅消息能力（无问询宿主）也声明消息工具
+    let body = build_turn_request_with_async_host(&history, None, false, false, false, true);
+    assert!(body["tools"].as_array().unwrap().iter().any(|t| {
+        t["function"]["name"] == json!("send_message_to_user_async")
+    }));
+    assert!(!body["tools"].as_array().unwrap().iter().any(|t| {
+        t["function"]["name"] == json!("request_user_input_async")
+    }));
 }

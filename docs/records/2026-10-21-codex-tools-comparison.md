@@ -19,7 +19,7 @@
 | 文件补丁 | `apply_patch` | 已有，继续复用；JSON 参数为主动适配，`Move to` 与 Unicode 匹配容差暂缺，无需紧急改造（[2026-10-22 复核](2026-10-22-codex-apply-patch-comparison.md)） |
 | 任务计划 | `update_plan` | 确实缺少；已制定仅覆盖该功能的 [017 接入方案](../specs/017-update-plan.md)，尚未实施，保留 8 次请求额度（[2026-10-22 复核](2026-10-22-codex-update-plan-comparison.md)） |
 | 用户问询 | `request_user_input`、`request_user_input_async` | [018](../specs/018-user-input.md) 阶段 A 同步问答已本地交付（2026-10-23），任务分支已清理；独立回答通道、关闭自动空答。阶段 B 异步问询已实施并获批准本地交付（2026-10-23）：TUI 七工具（异步发布＋本地等待）、单项未决、F6 回答窗口（[证据](2026-10-23-018b-implementation.md)） |
-| 执行中发消息 | `send_message_to_user_async` | 缺少，暂缓接入。用于及时告知重要情况或回应中途追问，发完继续做，不调用提问工具、不等回复。任务完成后的响铃、桌面提醒由应用另行实现 |
+| 执行中发消息 | `send_message_to_user_async` | [021](../specs/021-send-message-to-user-async.md) 已实施（2026-10-23）：模型目录 opt-in、accepted 即时确认、消息不结束轮、无额外注入、/resume 只展示不重发；运行中 Enter 接续当前轮＋显式排队保留（[证据](2026-10-23-021-implementation.md)）。任务完成后的响铃、桌面提醒由应用另行实现 |
 | 查看图片 | `view_image` | [019](../specs/019-view-image.md) 已实施（2026-10-23）：按路径加载真实图片并传给模型（Chat Completions 批末 user 附件）、能力开关、保存恢复与 TUI 卡片（[证据](2026-10-23-view-image-impl.md)） |
 | MCP 外部工具 | 按服务器动态注册工具 | 未接入用户轮。适合成为外部能力的统一入口 |
 | MCP 资源 | `list_mcp_resources`、`list_mcp_resource_templates`、`read_mcp_resource` | 缺少；与 MCP 工具调用属于不同接口 |

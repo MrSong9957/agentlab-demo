@@ -44,6 +44,10 @@ pub struct ModelInfo {
         deserialize_with = "parse_input_modalities"
     )]
     pub input_modalities: Option<Vec<String>>,
+    /// 021：模型目录显式声明的实验性支持工具（精确名匹配）。None/空＝不启用；
+    /// 其他名称不自动获得本地执行权限，也不注册未知工具。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experimental_supported_tools: Option<Vec<String>>,
 }
 
 /// 019：模态字段解析——未知值（如 audio）按配置格式错误拒绝，不静默忽略。
@@ -688,6 +692,9 @@ fn overlay_model(dst: &mut ModelInfo, src: &ModelInfo) {
     if src.input_modalities.is_some() {
         dst.input_modalities = src.input_modalities.clone();
     }
+    if src.experimental_supported_tools.is_some() {
+        dst.experimental_supported_tools = src.experimental_supported_tools.clone();
+    }
     dst.id = src.id.clone();
 }
 
@@ -836,6 +843,16 @@ pub fn supports_image_input(model: &ModelInfo) -> bool {
         .input_modalities
         .as_ref()
         .is_some_and(|list| list.iter().any(|m| m == "image"))
+}
+
+/// 021：模型目录显式声明 send_message_to_user_async——唯一开关来源
+///（`experimental_supported_tools` 精确匹配该工具名）；缺省/空数组/只含
+/// 其他名称均关闭。不按模型名称猜测、不串用问询能力、不做网络探测。
+pub fn supports_send_message_to_user(model: &ModelInfo) -> bool {
+    model
+        .experimental_supported_tools
+        .as_ref()
+        .is_some_and(|list| list.iter().any(|t| t == crate::message_to_user::TOOL_NAME))
 }
 
 /// 参数能力检查：能力未知不算不支持（不带可选参数的基础对话照常发送）；
@@ -1652,6 +1669,96 @@ mod tests {
         );
         let dict = merge_final(&manual_with(None, manual_ov), &auto2);
         assert!(crate::catalog::supports_image_input(
+            &dict.providers["deepseek"].models["deepseek-flash"]
+        ));
+    }
+
+    /// 021：experimental_supported_tools——精确名匹配启用 send_message_to_user_async；
+    /// 缺省/空数组/其他名称关闭；手动值逐字段覆盖自动侧（显式空数组可关闭目录声明）。
+    #[test]
+    fn experimental_supported_tools_overlay_and_capability() {
+        let auto = AutoCatalog { providers: builtin(), ..Default::default() };
+        // 手动精确声明 → 开放
+        let mut models = BTreeMap::new();
+        models.insert(
+            "deepseek-flash".to_string(),
+            ModelInfo {
+                experimental_supported_tools: Some(vec![
+                    "send_message_to_user_async".to_string()
+                ]),
+                ..Default::default()
+            },
+        );
+        let dict = merge_final(&manual_with(None, models), &auto);
+        let m = &dict.providers["deepseek"].models["deepseek-flash"];
+        assert!(crate::catalog::supports_send_message_to_user(m));
+        // 空数组＝显式关闭
+        let mut models = BTreeMap::new();
+        models.insert(
+            "deepseek-flash".to_string(),
+            ModelInfo {
+                experimental_supported_tools: Some(Vec::new()),
+                ..Default::default()
+            },
+        );
+        let dict = merge_final(&manual_with(None, models), &auto);
+        assert!(!crate::catalog::supports_send_message_to_user(
+            &dict.providers["deepseek"].models["deepseek-flash"]
+        ));
+        // 其他工具名不启用（精确匹配，不按名称/问询能力推断）
+        let mut models = BTreeMap::new();
+        models.insert(
+            "deepseek-flash".to_string(),
+            ModelInfo {
+                experimental_supported_tools: Some(vec![
+                    "request_user_input_async".to_string(),
+                    "web_search".to_string(),
+                ]),
+                ..Default::default()
+            },
+        );
+        let dict = merge_final(&manual_with(None, models), &auto);
+        assert!(!crate::catalog::supports_send_message_to_user(
+            &dict.providers["deepseek"].models["deepseek-flash"]
+        ));
+        // 未声明＝关闭
+        let dict = merge_final(&manual_with(None, BTreeMap::new()), &auto);
+        assert!(!crate::catalog::supports_send_message_to_user(
+            &dict.providers["deepseek"].models["deepseek-flash"]
+        ));
+        // 手动覆盖未写该字段时不抹掉自动侧已有值（逐字段覆盖语义）
+        let mut auto2 = AutoCatalog { providers: builtin(), ..Default::default() };
+        let mut base_models = BTreeMap::new();
+        base_models.insert(
+            "deepseek-flash".to_string(),
+            ModelInfo {
+                experimental_supported_tools: Some(vec![
+                    "send_message_to_user_async".to_string()
+                ]),
+                ..Default::default()
+            },
+        );
+        auto2.providers.get_mut("deepseek").unwrap().base.models = base_models;
+        let mut manual_ov = BTreeMap::new();
+        manual_ov.insert(
+            "deepseek-flash".to_string(),
+            ModelInfo { display_name: Some("仅改名".into()), ..Default::default() },
+        );
+        let dict = merge_final(&manual_with(None, manual_ov), &auto2);
+        assert!(crate::catalog::supports_send_message_to_user(
+            &dict.providers["deepseek"].models["deepseek-flash"]
+        ));
+        // 手动显式空数组覆盖自动侧声明（可关闭目录声明）
+        let mut manual_off = BTreeMap::new();
+        manual_off.insert(
+            "deepseek-flash".to_string(),
+            ModelInfo {
+                experimental_supported_tools: Some(Vec::new()),
+                ..Default::default()
+            },
+        );
+        let dict = merge_final(&manual_with(None, manual_off), &auto2);
+        assert!(!crate::catalog::supports_send_message_to_user(
             &dict.providers["deepseek"].models["deepseek-flash"]
         ));
     }

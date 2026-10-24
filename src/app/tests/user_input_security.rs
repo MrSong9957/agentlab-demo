@@ -342,6 +342,8 @@ fn pending_question_cancel_child() {
                 }
             }
         }),
+        // 021：安全场景不提供接续通道——拒绝即"当前轮已结束"回执
+        submit_steer: Box::new(|_| Err("当前轮已结束".into())),
         run_command: Box::new(|_| CommandOutcome::Output(String::new())),
         startup_notices: Vec::new(),
     };

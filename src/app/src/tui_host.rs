@@ -27,6 +27,7 @@ use tchat_tui::chat_driver::ToolBeginKind;
 use crate::prompt::HistoryItem;
 use crate::prompt::ToolDisplay;
 use crate::proc_session::ProcessManager;
+use crate::turn::SteerChannel as _;
 use crate::{api, catalog, session, turn};
 
 /// 是否应进入 TUI 模式。
@@ -39,6 +40,69 @@ pub fn tui_should_run() -> bool {
         Ok(term) => term != "dumb" && !term.is_empty(),
         // TERM 未设置：按母本能力探测（terminal-detection）裁决，不直接拒绝
         Err(_) => tchat_tui::terminal_supported(),
+    }
+}
+
+/// 021：当前轮接续通道受理资格（短锁；提交侧不获取 history/autosave 锁）。
+enum SteerSlot {
+    /// 接受中：提交经 tx 入队，由本轮接续通道消化。
+    Open { tx: std_mpsc::Sender<turn::SteerInput> },
+    /// 已封口／无活动轮：提交得到"当前轮已结束"回执。
+    Closed,
+}
+
+/// 021：每轮独立的接续通道实现——rx 由轮线程持有；受理资格经短锁与提交侧
+/// 互斥，`seal`/`close` 的"收取＋封口"在同一临界区内原子完成。
+struct TurnSteerChannel {
+    slot: Arc<Mutex<SteerSlot>>,
+    rx: std_mpsc::Receiver<turn::SteerInput>,
+}
+
+impl TurnSteerChannel {
+    fn drain_rx(&self) -> Vec<turn::SteerInput> {
+        let mut out = Vec::new();
+        while let Ok(input) = self.rx.try_recv() {
+            out.push(input);
+        }
+        out
+    }
+}
+
+impl turn::SteerChannel for TurnSteerChannel {
+    fn drain(&mut self) -> Vec<turn::SteerInput> {
+        self.drain_rx()
+    }
+    fn seal(&mut self) -> turn::SteerSeal {
+        let mut guard = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        if !matches!(*guard, SteerSlot::Open { .. }) {
+            return turn::SteerSeal::Closed;
+        }
+        // 同一临界区内判定：先收取再封口，提交侧无法插入其间——
+        // 通道为空才真正封口（终文竞态原子判定，§2.3-5）
+        let inputs = self.drain_rx();
+        if inputs.is_empty() {
+            *guard = SteerSlot::Closed;
+            turn::SteerSeal::Closed
+        } else {
+            turn::SteerSeal::Inputs(inputs)
+        }
+    }
+    fn close(&mut self) -> Vec<turn::SteerInput> {
+        let mut guard = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = SteerSlot::Closed;
+        self.drain_rx()
+    }
+}
+
+/// 021：turn::SteerInput → 驱动事件载荷（id 关联恰一次消化）。
+fn steer_submission_of(
+    input: turn::SteerInput,
+) -> tchat_tui::chat_driver::SteerSubmission {
+    tchat_tui::chat_driver::SteerSubmission {
+        id: input.id,
+        text: input.text,
+        image_paths: input.image_paths,
+        text_elements: input.text_elements,
     }
 }
 
@@ -55,6 +119,10 @@ pub struct TuiHost {
 
     /// 016：进程会话管理器（当前对话；跨轮保留进程，TUI Ctrl+C 退出时关闭）。
     procs: ProcessManager,
+    /// 021：当前轮接续通道受理资格（spawn 同步置 Open；seal/close 置 Closed）。
+    steer_slot: Arc<Mutex<SteerSlot>>,
+    /// 021：接续提交标识发生器（宿主生成；回执按 id 恰一次关联）。
+    steer_seq: std::sync::atomic::AtomicU64,
 }
 
 impl TuiHost {
@@ -78,6 +146,37 @@ impl TuiHost {
                 crate::memory::runner::ThreadRegistrar::default(),
             )),
             procs: ProcessManager::new(),
+            steer_slot: Arc::new(Mutex::new(SteerSlot::Closed)),
+            steer_seq: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// 021：运行中接续提交（驱动 Enter 路径）。Ok(id)＝已受理（当前轮批末或
+    /// 终文判定点接入）；Err＝当前轮已结束（驱动转后续轮）。
+    /// 只取短锁并入队，不获取 turn 长时间持有的 history/autosave 锁。
+    pub fn submit_steer(
+        &self,
+        content: tchat_tui::chat_driver::SteerContent,
+    ) -> Result<u64, String> {
+        use std::sync::atomic::Ordering;
+        let id = self.steer_seq.fetch_add(1, Ordering::SeqCst);
+        let input = turn::SteerInput {
+            id,
+            text: content.text,
+            image_paths: content.image_paths,
+            text_elements: content.text_elements,
+        };
+        let mut guard = self.steer_slot.lock().unwrap_or_else(|e| e.into_inner());
+        match &*guard {
+            SteerSlot::Open { tx } => match tx.send(input) {
+                Ok(()) => Ok(id),
+                // 接收端已不在（轮线程异常终止）＝轮不可再接续
+                Err(_) => {
+                    *guard = SteerSlot::Closed;
+                    Err("当前轮已结束".to_string())
+                }
+            },
+            SteerSlot::Closed => Err("当前轮已结束".to_string()),
         }
     }
 
@@ -121,14 +220,18 @@ impl TuiHost {
 
     /// 驱动 spawn_turn 钩子的直连（公开给 main 组装）。
     /// 020：完整提交（文本＋附件路径＋元素）——线程内正式准备图片。
+    /// 021：同步建立本轮接续通道（驱动 turn_running 置位后即可提交接续输入）。
     pub fn spawn_turn(&self, submission: tchat_tui::chat_driver::SubmittedTurn, tx: std_mpsc::Sender<DriverEvent>) {
-        self.run_turn_inner(submission, tx);
+        let (steer_tx, steer_rx) = std_mpsc::channel();
+        *self.steer_slot.lock().unwrap_or_else(|e| e.into_inner()) = SteerSlot::Open { tx: steer_tx };
+        self.run_turn_inner(submission, tx, steer_rx);
     }
 
     fn run_turn_inner(
         &self,
         submission: tchat_tui::chat_driver::SubmittedTurn,
         tx: std_mpsc::Sender<DriverEvent>,
+        steer_rx: std_mpsc::Receiver<turn::SteerInput>,
     ) {
         let history = self.history.clone();
         let autosave = self.autosave.clone();
@@ -136,6 +239,8 @@ impl TuiHost {
         let authorized_guard = self.authorized.clone();
         let registrar = self.registrar.clone();
         let procs = self.procs.clone();
+        // 021：接续槽位句柄（线程内经短锁与提交侧互斥，不捕获 &self）
+        let steer_slot = self.steer_slot.clone();
         let tx_panic = tx.clone();
         std::thread::spawn(move || {
             // 008：线程异常终止（如毒锁 panic）不得静默——回推 Failed 让驱动恢复
@@ -290,20 +395,47 @@ impl TuiHost {
                             reason: crate::display::sanitize_for_terminal(&reason),
                         },
                     }),
+                    // 021：接续输入回执——入史确认／未入史交还（原因已过终端过滤）
+                    turn::TurnNotify::SteerIngested { input } => {
+                        Some(DriverEvent::SteerIngested { input: steer_submission_of(input) })
+                    }
+                    turn::TurnNotify::SteerRestored { inputs, reason } => {
+                        Some(DriverEvent::SteerRestored {
+                            inputs: inputs.into_iter().map(steer_submission_of).collect(),
+                            reason: crate::display::sanitize_for_terminal(&reason),
+                        })
+                    }
                     turn::TurnNotify::ToolBegin { id, name, arguments } => {
-                        let ev = if name == "write_stdin" {
-                            stdin_begin_event(&procs_for_notify, &id, &arguments)
+                        // 021：消息工具无运行活动可展示——成功路径直接投影为
+                        // 消息 cell，失败原因在 ToolEnd 显式呈现；不打印无信息
+                        // 量的活动行（成功通知不重复打印正文）。
+                        if name == "send_message_to_user_async" {
+                            None
                         } else {
-                            tool_begin_event(&name, &id, &arguments)
-                        };
-                        Some(ev.unwrap_or_else(|| {
-                            DriverEvent::Info(crate::display::sanitize_for_terminal(&turn::tool_activity_line(&name, &id)))
-                        }))
+                            let ev = if name == "write_stdin" {
+                                stdin_begin_event(&procs_for_notify, &id, &arguments)
+                            } else {
+                                tool_begin_event(&name, &id, &arguments)
+                            };
+                            Some(ev.unwrap_or_else(|| {
+                                DriverEvent::Info(crate::display::sanitize_for_terminal(&turn::tool_activity_line(&name, &id)))
+                            }))
+                        }
                     }
                     turn::TurnNotify::ToolEnd { id, name, arguments, result, display, cancelled } => {
                         // 未知工具：无 cell 可替换（Begin 已回退活动行），不发送
-                        tool_end_item(&name, &id, &arguments, &result, display.as_ref(), cancelled)
-                            .map(|item| DriverEvent::ToolEnd { id, item })
+                        let item = tool_end_item(&name, &id, &arguments, &result, display.as_ref(), cancelled);
+                        match item {
+                            Some(item) => Some(DriverEvent::ToolEnd { id, item }),
+                            // 021：消息工具失败/取消/结果未知——活动行已被抑制，
+                            // 这里显式呈现原因，不静默（展示副本过终端过滤）
+                            None if name == "send_message_to_user_async" => Some(DriverEvent::Info(
+                                crate::display::sanitize_for_terminal(
+                                    &crate::message_to_user::failure_line(&result),
+                                ),
+                            )),
+                            None => None,
+                        }
                     }
                 };
                 if let Some(ev) = ev {
@@ -370,7 +502,14 @@ impl TuiHost {
                     }
                     Ok(crate::user_input_async::AsyncReplyChannel { receiver, live })
                 };
-            let result = turn::run_user_turn_with_context_and_hosts(
+            // 021：本轮接续通道实现（rx 由本线程持有；受理资格经短锁与提交侧互斥）
+            let mut steer_channel = TurnSteerChannel { slot: steer_slot, rx: steer_rx };
+            let extras = turn::TurnExtras {
+                // 021：每用户轮固定能力快照（声明与执行共用）
+                send_message: catalog::supports_send_message_to_user(&model),
+                steer: Some(&mut steer_channel),
+            };
+            let result = turn::run_user_turn_with_context_and_caps(
                 &mut history.lock().unwrap(),
                 &submission.text,
                 &mut sender,
@@ -386,7 +525,17 @@ impl TuiHost {
                 catalog::supports_image_input(&model),
                 // 020：用户附件载荷（切片4 接线 SubmittedTurn 后携带）
                 user_payload.as_ref(),
+                extras,
             );
+            // 021：轮收尾兜底封口（循环各出口已封口，此处幂等）；异常残留输入
+            // 交还驱动恢复，不丢弃
+            let late = steer_channel.close();
+            if !late.is_empty() {
+                let _ = tx.send(DriverEvent::SteerRestored {
+                    inputs: late.into_iter().map(steer_submission_of).collect(),
+                    reason: "轮已结束".to_string(),
+                });
+            }
             unsafe {
                 libc::signal(libc::SIGINT, libc::SIG_DFL);
             }
@@ -723,6 +872,9 @@ fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
                     AsyncHistoryEvent::Answer(response) => (Some(response.clone()), None),
                     AsyncHistoryEvent::Closed(reason) => (None, Some(reason.clone())),
                 });
+                let is_send_message = paired
+                    .as_ref()
+                    .is_some_and(|(name, _)| name == "send_message_to_user_async");
                 let restored = paired.and_then(|(name, arguments)| {
                     if name == "request_user_input_async" {
                         restored_async_item(tool_call_id, &arguments, content, async_event)
@@ -751,9 +903,20 @@ fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
                     }
                     item
                 });
-                let item = restored.unwrap_or(HostHistoryItem::Text {
-                    assistant: true,
-                    content: content.clone(),
+                // 021：消息工具失败/取消/结果未知——按事实文本呈现（与实时失败
+                // 提示同一文案），不伪造成功、不显示原始结果 JSON；其余保持通用降级
+                let item = restored.unwrap_or_else(|| {
+                    if is_send_message {
+                        HostHistoryItem::Text {
+                            assistant: true,
+                            content: crate::message_to_user::failure_line(content),
+                        }
+                    } else {
+                        HostHistoryItem::Text {
+                            assistant: true,
+                            content: content.clone(),
+                        }
+                    }
                 });
                 out.push(item);
             }
@@ -1109,6 +1272,17 @@ fn tool_end_item(
                 answerable: true,
             })
         }
+        // 021：消息成功结果→AssistantMessage（实时终态与 /resume 恢复同一转换；
+        // 只展示不重发）。失败/取消/结果未知返回 None——实时路径显式呈现原因，
+        // 恢复路径按普通文本降级，不推定发送成功。
+        "send_message_to_user_async" => crate::message_to_user::sent_message_from_record(
+            arguments,
+            result,
+        )
+        .map(|message| HostHistoryItem::AssistantMessage {
+            // §2.1：展示副本过终端过滤；调用参数与模型历史保留原值
+            content: crate::display::sanitize_for_terminal(&message),
+        }),
         _ => None,
     }
 }
@@ -1854,5 +2028,167 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&cfg);
         let _ = std::fs::remove_dir_all(&user);
+    }
+
+    /// 021：接续通道原子性——seal 在有受理输入时收取且保持开放；为空才封口；
+    /// 封口后提交得到"当前轮已结束"回执；close 幂等并排空残留。
+    #[test]
+    fn steer_channel_seal_close_atomicity() {
+        let slot = Arc::new(Mutex::new(SteerSlot::Closed));
+        let (tx, rx) = std_mpsc::channel();
+        let mut channel = TurnSteerChannel { slot: slot.clone(), rx };
+        // 封口态 seal＝Closed；close 幂等
+        assert!(matches!(channel.seal(), turn::SteerSeal::Closed));
+        assert!(channel.close().is_empty());
+        // 打开并受理一份输入
+        *slot.lock().unwrap() = SteerSlot::Open { tx: tx.clone() };
+        tx.send(turn::SteerInput {
+            id: 1,
+            text: "追问".into(),
+            image_paths: Vec::new(),
+            text_elements: Vec::new(),
+        })
+        .unwrap();
+        match channel.seal() {
+            turn::SteerSeal::Inputs(inputs) => {
+                assert_eq!(inputs.len(), 1);
+                assert_eq!(inputs[0].id, 1);
+            }
+            other => panic!("有受理输入时 seal 不得封口：{other:?}"),
+        }
+        // 受理仍开放：再次提交可达（drain 收取）
+        tx.send(turn::SteerInput {
+            id: 2,
+            text: "再问".into(),
+            image_paths: Vec::new(),
+            text_elements: Vec::new(),
+        })
+        .unwrap();
+        assert_eq!(channel.drain().len(), 1);
+        // 通道空时 seal 原子封口；此后提交得到"当前轮已结束"
+        assert!(matches!(channel.seal(), turn::SteerSeal::Closed));
+        let submit_failed = {
+            let guard = slot.lock().unwrap();
+            match &*guard {
+                SteerSlot::Open { tx } => tx
+                    .send(turn::SteerInput {
+                        id: 3,
+                        text: "迟到".into(),
+                        image_paths: Vec::new(),
+                        text_elements: Vec::new(),
+                    })
+                    .is_err(),
+                SteerSlot::Closed => true,
+            }
+        };
+        assert!(submit_failed, "封口后提交必须失败（当前轮已结束）");
+        // close 幂等：不再产生输入
+        assert!(channel.close().is_empty());
+    }
+
+    /// 021：消息工具终态转换——成功重建消息（实时与恢复同一转换）；失败/取消/
+    /// 结果未知返回 None（实时路径显式呈现原因，恢复按普通文本降级）。
+    #[test]
+    fn tool_end_item_send_message_shapes() {
+        use tchat_tui::chat_driver::HostHistoryItem as H;
+        // 成功：accepted＋参数 → AssistantMessage（trim 后原文）
+        match tool_end_item(
+            "send_message_to_user_async",
+            "m1",
+            r#"{"message":"  重要发现。  "}"#,
+            r#"{"accepted":true}"#,
+            None,
+            false,
+        ) {
+            Some(H::AssistantMessage { content }) => assert_eq!(content, "重要发现。"),
+            other => panic!("成功形状：{other:?}"),
+        }
+        // 展示副本过终端过滤（§2.1）：含转义序列的消息只影响展示副本
+        // 模型侧 JSON 转义形态（json! 宏产出 \u 转义，与真实响应一致）
+        let evil_args = serde_json::json!({ "message": "\u{1b}[2J清除\u{7}屏\rPWNED" }).to_string();
+        match tool_end_item(
+            "send_message_to_user_async",
+            "m-esc",
+            &evil_args,
+            r#"{"accepted":true}"#,
+            None,
+            false,
+        ) {
+            Some(H::AssistantMessage { content }) => {
+                assert_eq!(content, "清除屏PWNED", "展示副本已过滤：{content:?}");
+            }
+            other => panic!("转义消息形状：{other:?}"),
+        }
+        // 失败/取消/损坏：None（不伪造消息）
+        for result in [
+            r#"{"error":"message must not be empty"}"#,
+            r#"{"error":"用户取消，本调用未执行"}"#,
+            "not-json",
+        ] {
+            assert!(
+                tool_end_item(
+                    "send_message_to_user_async",
+                    "mx",
+                    r#"{"message":"m"}"#,
+                    result,
+                    None,
+                    false,
+                )
+                .is_none(),
+                "{result} 不得投影为消息"
+            );
+        }
+        // 失败提示行（宿主实时路径显式呈现）
+        assert!(crate::message_to_user::failure_line(r#"{"error":"x"}"#).contains("失败"));
+    }
+
+    /// 021：恢复投影——配对成功记录重建消息 cell（只展示不重发）；孤儿/失败
+    /// 结果按普通文本保留，不推定发送成功。
+    #[test]
+    fn project_history_items_restores_send_message() {
+        use tchat_tui::chat_driver::HostHistoryItem as H;
+        let history = vec![
+            HistoryItem::AssistantToolCalls {
+                tool_calls: vec![crate::prompt::ToolCallRecord {
+                    id: "m1".into(),
+                    name: "send_message_to_user_async".into(),
+                    arguments: r#"{"message":"中途说明"}"#.into(),
+                }],
+                content: None,
+            },
+            HistoryItem::ToolResult {
+                tool_call_id: "m1".into(),
+                content: r#"{"accepted":true}"#.into(),
+                display: None,
+                image: None,
+            },
+            // 失败结果（取消跳过）：不重建为消息
+            HistoryItem::AssistantToolCalls {
+                tool_calls: vec![crate::prompt::ToolCallRecord {
+                    id: "m2".into(),
+                    name: "send_message_to_user_async".into(),
+                    arguments: r#"{"message":"没发出去"}"#.into(),
+                }],
+                content: None,
+            },
+            HistoryItem::ToolResult {
+                tool_call_id: "m2".into(),
+                content: r#"{"error":"用户取消，本调用未执行"}"#.into(),
+                display: None,
+                image: None,
+            },
+        ];
+        let items = project_history_items(&history);
+        match &items[0] {
+            H::AssistantMessage { content } => assert_eq!(content, "中途说明"),
+            other => panic!("成功记录形状：{other:?}"),
+        }
+        match &items[1] {
+            H::Text { assistant, content } => {
+                assert!(*assistant);
+                assert!(content.contains("用户取消"), "失败结果按普通文本保留：{content}");
+            }
+            other => panic!("失败记录形状：{other:?}"),
+        }
     }
 }

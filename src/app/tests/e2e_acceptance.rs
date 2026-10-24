@@ -293,7 +293,11 @@ fn s96_tui_question_keeps_queued_chat_and_composer_draft_separate() {
     pty.wait_screen("? for shortcuts").unwrap();
     pty.send_line("先执行");
     wait_request_count(&mut pty, &mock, 1);
-    pty.send_line("S96-排队聊天");
+    // 显式排队键（Tab）提交聊天（021 起 Enter 运行中＝接续当前轮）：
+    // 排队聊天不得被问询窗口吞掉，也不得作为答案
+    pty.send_raw("S96-排队聊天".as_bytes());
+    std::thread::sleep(Duration::from_millis(250));
+    pty.send_raw(b"\t");
     pty.wait_screen("S96-排队聊天").unwrap();
     pty.send_raw("\x1b[200~S96-未发草稿\x1b[201~".as_bytes());
     pty.wait_screen("S96-未发草稿").unwrap();
@@ -2543,8 +2547,11 @@ fn s11_tui_queued_input_replayed_after_turn() {
         assert!(Instant::now() < deadline, "mock 未收到第一轮请求");
         std::thread::sleep(Duration::from_millis(50));
     }
-    // turn 在飞（响应延迟 1.5s）时提交第二条 → 排队
-    pty.send_line("排队消息");
+    // turn 在飞（响应延迟 1.5s）时以显式排队键（Tab）提交第二条 → 排队
+    //（021 起 Enter 运行中＝接续当前轮；显式排队保留 queue key，§2.3-1）
+    pty.send_raw("排队消息".as_bytes());
+    std::thread::sleep(Duration::from_millis(250));
+    pty.send_raw(b"\t");
     // 排队预览独有文案（第一轮完成前出现）——锚定排队路径本身（若退化为直接
     // 提交路径则本断言失败，防止回归被负载掩盖）
     pty.wait_screen("Queued follow-up inputs").unwrap();
@@ -2569,6 +2576,59 @@ fn s11_tui_queued_input_replayed_after_turn() {
     pty.wait_output("再见!", WATCHDOG).unwrap();
     let (out, status) = pty.finish();
     assert_eq!(status.code(), Some(0), "退出码契约（001），输出：{out}");
+}
+
+/// S11b（021 A09/A10/A11 L3）：运行中 Enter＝接续当前轮——工具批执行期间受理
+/// 的追问在完整批配对之后、下一次**本轮**模型请求之前入史；不另起第二条
+/// turn（恰两次请求；显式排队形态会退队成第三条请求，可区分）。
+#[test]
+fn s11b_tui_running_enter_steers_current_turn() {
+    let cfg = TempDir::new("s11b-cfg");
+    let user = TempDir::new("s11b-user");
+    let key = "s11b-key-value";
+    let tc = json!({"choices":[{"message":{"role":"assistant","content":null,
+        "tool_calls":[{"id":"s11b-e1","type":"function","function":{
+            "name":"exec_command",
+            "arguments": json!({"cmd":"true"}).to_string()}}]}}]}).to_string();
+    let mock = spawn_mock(vec![
+        MockResp::slow_json(200, tc, 1200),
+        MockResp::json(200, chat_body("S11B-已处理追问")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S11B_KEY");
+    let origin = catalog::origin_of(&mock.url).unwrap();
+    seed_grant(user.path(), &origin, &catalog::fingerprint(key));
+
+    let mut pty = PtySession::spawn(pty_cli(None, &[
+        ("TCHAT_CONFIG_DIR", cfg.path().to_str().unwrap()),
+        ("TCHAT_USER_DIR", user.path().to_str().unwrap()),
+        ("TCHAT_S11B_KEY", key),
+    ]));
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.send_line("开始任务");
+    let deadline = Instant::now() + WATCHDOG;
+    while mock.count() < 1 {
+        assert!(Instant::now() < deadline, "mock 未收到首轮请求");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // 请求在途（延迟 1.2s）时 Enter 提交追问 → 接续当前轮
+    pty.send_line("等等，先补充一点");
+    pty.wait_screen("S11B-已处理追问").unwrap();
+    assert_eq!(mock.count(), 2, "接续进入同一轮的下一次请求，不另起新 turn");
+    let body: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
+    let msgs = body["messages"].as_array().unwrap();
+    let tool_pos = msgs
+        .iter()
+        .position(|m| m["role"] == "tool" && m["tool_call_id"] == "s11b-e1")
+        .expect("工具结果在请求中");
+    let steer_pos = msgs
+        .iter()
+        .position(|m| m["role"] == "user" && m["content"] == "等等，先补充一点")
+        .expect("追问进入请求");
+    assert!(tool_pos < steer_pos, "追问在完整批结果之后：{body}");
+    pty.send_line("/exit");
+    pty.wait_output("再见!", WATCHDOG).unwrap();
+    let (out, status) = pty.finish();
+    assert_eq!(status.code(), Some(0), "{out}");
 }
 
 // ---------- S12：Ctrl+D 退出契约（001/J10）----------
@@ -8039,9 +8099,12 @@ fn s84_m7_queued_replay_single_user_turn() {
     ]));
     pty.wait_screen("? for shortcuts").unwrap();
     pty.send_line("第一轮输入");
-    // turn1 在慢响应上运行期间入队（不得触发新轮）
+    // turn1 在慢响应上运行期间以显式排队键入队（021 起 Enter＝接续当前轮，
+    // 显式排队保留 queue key；不得触发新轮）
     pty.dwell(300);
-    pty.send_line("排队的输入");
+    pty.send_raw("排队的输入".as_bytes());
+    std::thread::sleep(Duration::from_millis(250));
+    pty.send_raw(b"\t");
     pty.wait_screen("S84-第一轮完成").unwrap();
     // 重放作为新用户轮执行
     pty.wait_screen("S84-第二轮完成").unwrap();
@@ -8224,9 +8287,12 @@ fn s87_m7_queued_replay_spawn_count_via_status() {
     ]));
     pty.wait_screen("? for shortcuts").unwrap();
     pty.send_line("第一轮");
-    // turn1 慢响应期间：入队（不得触发）＋运行中查计数（只读命令可用）
+    // turn1 慢响应期间：显式排队键入队（021 起 Enter＝接续当前轮；不得触发）
+    // ＋运行中查计数（只读命令可用）
     pty.dwell(300);
-    pty.send_line("排队的输入");
+    pty.send_raw("排队的输入".as_bytes());
+    std::thread::sleep(Duration::from_millis(250));
+    pty.send_raw(b"\t");
     pty.dwell(200);
     pty.send_line("/memory-status");
     pty.wait_screen("本进程累计触发后台管线：1 次").unwrap();
@@ -8978,16 +9044,16 @@ fn s110_tui_rejected_dequeue_pauses_remaining_queue() {
     std::thread::sleep(Duration::from_millis(250));
     pty.send_raw(b"\r");
     std::thread::sleep(Duration::from_millis(500));
-    // 排队 B：坏图附件（粘贴路径→附件→Enter）
+    // 排队 B：坏图附件（粘贴路径→附件→显式排队键；021 起 Enter 运行中＝接续）
     pty.send_raw(format!("\x1b[200~{}\x1b[201~", bad.display()).as_bytes());
     pty.wait_screen_timeout("[Image #1]", Duration::from_secs(5)).unwrap();
     std::thread::sleep(Duration::from_millis(400));
-    pty.send_raw(b"\r");
+    pty.send_raw(b"\t");
     std::thread::sleep(Duration::from_millis(300));
-    // 排队 C：纯文本
+    // 排队 C：纯文本（显式排队键）
     pty.send_raw(b"second C");
     std::thread::sleep(Duration::from_millis(250));
-    pty.send_raw(b"\r");
+    pty.send_raw(b"\t");
     std::thread::sleep(Duration::from_millis(300));
     // 放行第一轮 → 重放 B → 宿主拒绝（能力未知）→ B 回草稿；
     // 断言：C 不自动发送（mock 仍只有第一轮 1 次请求）
@@ -9233,4 +9299,400 @@ fn s114a_tui_question_window_rejects_image_paste() {
     pty.send_raw(b"\x1b");
     std::thread::sleep(Duration::from_millis(800));
     let _ = pty.finish();
+}
+
+// ---------- S21：021 send_message_to_user_async（A15/A04 L3 行式管道）----------
+
+/// 021：声明 experimental_supported_tools 的 manual（消息能力 e2e 用）。
+fn write_manual_message_capable(dir: &Path, base_url: &str, key_ref: &str) {
+    let m = catalog::ManualRoot {
+        selected_provider: Some("deepseek".into()),
+        selected_model: Some("deepseek-flash".into()),
+        memories: None,
+        providers: [(
+            "deepseek".to_string(),
+            catalog::ManualProvider {
+                base_url: Some(base_url.into()),
+                key_ref: Some(key_ref.into()),
+                models: [(
+                    "deepseek-flash".to_string(),
+                    catalog::ModelInfo {
+                        id: "deepseek-flash".into(),
+                        experimental_supported_tools: Some(vec![
+                            "send_message_to_user_async".into()
+                        ]),
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+    };
+    std::fs::write(dir.join("manual.json"), serde_json::to_string_pretty(&m).unwrap())
+        .unwrap();
+}
+
+/// S21（021 A15/A04 L3）：行式管道——模型在终文前发出即时消息：通知先于最终
+/// 回复输出并 flush（stdout 重定向/纯管道同样成立）；下一请求含调用＋accepted
+/// 且无同文 assistant；不等待用户、不结束轮；工具活动行不重复打印正文。
+#[test]
+fn s21_pipe_send_message_displayed_before_final_and_flushed() {
+    let cfg = TempDir::new("s21-cfg");
+    let user = TempDir::new("s21-user");
+    let key = "s21-key-value";
+    let message = "S21-中途重要发现。\n继续核对。";
+    let tc = json!({"choices":[{"message":{
+        "role": "assistant",
+        "content": null,
+        "tool_calls":[{"id":"s21-m1","type":"function","function":{
+            "name":"send_message_to_user_async",
+            "arguments": json!({ "message": format!("  {message}  ") }).to_string()
+        }}]}}]}).to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc),
+        MockResp::json(200, chat_body("S21-最终回复")),
+    ]);
+    write_manual_message_capable(cfg.path(), &mock.url, "env:TCHAT_S21_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint(key),
+    );
+    let (out, err, code) = run_pipe(
+        None,
+        &[
+            ("TCHAT_CONFIG_DIR", cfg.path().to_str().unwrap()),
+            ("TCHAT_USER_DIR", user.path().to_str().unwrap()),
+            ("TCHAT_S21_KEY", key),
+            ("TERM", "dumb"),
+        ],
+        "开始\nexit\n",
+    );
+    assert_eq!(code, Some(0), "退出码：{out}\n{err}");
+    // 消息先于最终回复，且 trim 后输出（首尾空白删除，内部换行保留）
+    let msg_pos = out
+        .find("Agent：S21-中途重要发现。")
+        .expect("消息已在终文前输出");
+    let final_pos = out.find("Agent：S21-最终回复").expect("最终回复已输出");
+    assert!(msg_pos < final_pos, "通知先于最终回复：{out}");
+    assert!(!out.contains("Agent： "), "消息 trim 后输出：{out}");
+    // 工具活动行不重复打印正文（Begin 已抑制）
+    assert!(
+        !out.contains("[工具] send_message_to_user_async"),
+        "成功通知不打印活动行：{out}"
+    );
+    assert_eq!(mock.count(), 2, "通知不结束轮：终文前恰两次请求");
+    // 声明面：首请求声明该工具
+    let body1: Value = serde_json::from_str(&mock.requests()[0].body).unwrap();
+    assert!(body1["tools"].as_array().unwrap().iter().any(|t| {
+        t["function"]["name"] == json!("send_message_to_user_async")
+    }), "声明开启：{body1}");
+    // 请求面：第二请求含调用＋accepted，无同文 assistant
+    let body2: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
+    let msgs = body2["messages"].as_array().unwrap();
+    assert!(msgs.iter().any(|m| {
+        m["role"] == json!("tool")
+            && m["tool_call_id"] == json!("s21-m1")
+            && m["content"] == json!(r#"{"accepted":true}"#)
+    }), "第二请求含 accepted 结果：{body2}");
+    assert!(
+        !msgs.iter().any(|m| {
+            m["role"] == json!("assistant")
+                && m.get("tool_calls").is_none()
+                && m["content"].as_str().is_some_and(|c| c.contains("S21-中途"))
+        }),
+        "无额外同文 assistant 注入：{body2}"
+    );
+}
+
+/// S21b（021 A01/A08 L3 行式管道）：关闭态伪造调用拒绝；/save→/resume 恢复
+/// 只展示成功消息、零重发；失败结果不伪造成功。
+#[test]
+fn s21b_pipe_send_message_resume_display_without_resend() {
+    let cfg = TempDir::new("s21b-cfg");
+    let user = TempDir::new("s21b-user");
+    let key = "s21b-key-value";
+    // 两个能力关闭的响应（伪造调用被拒）后正常收尾
+    let tc_off = json!({"choices":[{"message":{"role":"assistant","content":null,
+        "tool_calls":[{"id":"s21b-x","type":"function","function":{
+            "name":"send_message_to_user_async",
+            "arguments": r#"{"message":"未声明不该发"}"#.to_string()
+        }}]}}]}).to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc_off),
+        MockResp::json(200, chat_body("S21B-关闭态完成")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S21B_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint(key),
+    );
+    let (out, err, code) = run_pipe(
+        None,
+        &[
+            ("TCHAT_CONFIG_DIR", cfg.path().to_str().unwrap()),
+            ("TCHAT_USER_DIR", user.path().to_str().unwrap()),
+            ("TCHAT_S21B_KEY", key),
+            ("TERM", "dumb"),
+        ],
+        "开始\nexit\n",
+    );
+    assert_eq!(code, Some(0), "{out}\n{err}");
+    assert!(
+        out.contains("send_message_to_user_async 不可用"),
+        "关闭态伪造调用被拒：{out}"
+    );
+    assert!(!out.contains("未声明不该发"), "关闭态无成功消息：{out}");
+    // 伪造调用有匹配结果且非 accepted
+    let body: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
+    let msgs = body["messages"].as_array().unwrap();
+    assert!(
+        msgs.iter().any(|m| {
+            m["role"] == json!("tool")
+                && m["tool_call_id"] == json!("s21b-x")
+                && m["content"].as_str().is_some_and(|c| c.contains("不可用"))
+        }),
+        "伪造调用有匹配错误结果：{body}"
+    );
+    let _ = code;
+}
+
+/// S21c（021 A08 L3）：/resume 恢复含即时消息的会话——成功记录重建为消息
+/// cell 恰一次显示（不显示原始 accepted JSON）；取消跳过的失败记录不伪造为
+/// 已发送；恢复零重执行、零模型请求。
+#[test]
+fn s21c_tui_resume_shows_message_without_resend() {
+    let cfg = TempDir::new("s21c-cfg");
+    let user = TempDir::new("s21c-user");
+    let key = "s21c-key";
+    let mock = spawn_mock(vec![]); // 零回复：/resume 只投影不重放
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S21C_KEY");
+    let origin = catalog::origin_of(&mock.url).unwrap();
+    seed_grant(user.path(), &origin, &catalog::fingerprint(key));
+
+    use terminal_chat::prompt::{HistoryItem, HistoryMessage, HistoryRole, ToolCallRecord};
+    let hist = vec![
+        HistoryItem::Text(HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
+            role: HistoryRole::User,
+            content: "S21C-历史输入".into(),
+            user_input_event: None,
+        }),
+        HistoryItem::AssistantToolCalls {
+            tool_calls: vec![ToolCallRecord {
+                id: "s21c-m1".into(),
+                name: "send_message_to_user_async".into(),
+                arguments: r#"{"message":"S21C-中途说明"}"#.into(),
+            }],
+            content: None,
+        },
+        HistoryItem::ToolResult {
+            tool_call_id: "s21c-m1".into(),
+            content: r#"{"accepted":true}"#.into(),
+            display: None,
+            image: None,
+        },
+        // 取消跳过：不伪造为已发送
+        HistoryItem::AssistantToolCalls {
+            tool_calls: vec![ToolCallRecord {
+                id: "s21c-m2".into(),
+                name: "send_message_to_user_async".into(),
+                arguments: r#"{"message":"S21C-被取消"}"#.into(),
+            }],
+            content: None,
+        },
+        HistoryItem::ToolResult {
+            tool_call_id: "s21c-m2".into(),
+            content: r#"{"error":"用户取消，本调用未执行"}"#.into(),
+            display: None,
+            image: None,
+        },
+    ];
+    terminal_chat::session::save_snapshot(&user.path().join("sessions"), "seed21c", &hist)
+        .unwrap();
+
+    let mut pty = PtySession::spawn(pty_cli(None, &[
+        ("TCHAT_CONFIG_DIR", cfg.path().to_str().unwrap()),
+        ("TCHAT_USER_DIR", user.path().to_str().unwrap()),
+        ("TCHAT_S21C_KEY", key),
+    ]));
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.send_line("/resume seed21c");
+    // 成功消息按 Markdown 展示恰一次；失败记录按普通文本呈现原因
+    pty.wait_screen("S21C-中途说明").unwrap();
+    // 取消跳过按事实文本呈现（与实时失败提示同一文案），不显示原始结果 JSON
+    pty.wait_screen("send_message_to_user_async 已取消").unwrap();
+    pty.wait_screen("恢复 5 条").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    pty.send_raw(b"\x03");
+    assert!(pty.finish().1.success());
+    assert!(
+        mock.requests().is_empty(),
+        "/resume 只投影不重放：{:?}",
+        mock.requests()
+    );
+}
+
+/// S21d（021 A04/A06 L3 TUI）：模型在任务中发出即时消息——消息以 Markdown cell
+/// 追加显示、终文不覆盖已显示消息、不抢输入焦点（composer 草稿保留）、
+/// 不结束当前轮（后续请求继续）。
+#[test]
+fn s21d_tui_message_displayed_and_not_overwritten_by_final() {
+    let cfg = TempDir::new("s21d-cfg");
+    let user = TempDir::new("s21d-user");
+    let key = "s21d-key-value";
+    let tc = json!({"choices":[{"message":{"role":"assistant","content":null,
+        "tool_calls":[{"id":"s21d-m1","type":"function","function":{
+            "name":"send_message_to_user_async",
+            "arguments": json!({"message":"S21D-中途重要发现"}).to_string()}}]}}]}).to_string();
+    let (last, gate) = MockResp::gated(200, chat_body("S21D-最终回复"));
+    let mock = spawn_mock(vec![MockResp::json(200, tc), last]);
+    write_manual_message_capable(cfg.path(), &mock.url, "env:TCHAT_S21D_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint(key),
+    );
+    let mut pty = PtySession::spawn(pty_cli(None, &[
+        ("TCHAT_CONFIG_DIR", cfg.path().to_str().unwrap()),
+        ("TCHAT_USER_DIR", user.path().to_str().unwrap()),
+        ("TCHAT_S21D_KEY", key),
+    ]));
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.send_line("开始任务");
+    // 消息即时显示
+    pty.wait_screen("S21D-中途重要发现").unwrap();
+    // 消息出现后任务仍在运行（第 2 请求被闸门挂起）——通知被当 Final 会提前
+    // 结束任务态，此断言即失败（变异可检出）
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut still_running = false;
+    while Instant::now() < deadline {
+        if pty.screen().contains("to interrupt") {
+            still_running = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(still_running, "消息出现后任务必须仍在运行（通知不是 Final）");
+    // 通知后仍可输入：留一份草稿（不提交）——消息不抢焦点、不清草稿
+    pty.send_raw("S21D-新草稿".as_bytes());
+    std::thread::sleep(Duration::from_millis(300));
+    gate.release();
+    pty.wait_screen("S21D-最终回复").unwrap();
+    // 终文不覆盖已显示通知、草稿仍在：三者同屏
+    pty.wait_screen("S21D-中途重要发现").unwrap();
+    pty.wait_screen("S21D-新草稿").unwrap();
+    assert_eq!(mock.count(), 2, "通知不结束轮");
+    // 清空草稿（8 字符退格）后退出
+    for _ in 0..8 {
+        pty.send_raw(b"\x7f");
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    pty.send_line("/exit");
+    pty.wait_output("再见!", WATCHDOG).unwrap();
+    let (out, status) = pty.finish();
+    assert_eq!(status.code(), Some(0), "{out}");
+}
+
+/// S21e（021 A14 安全门禁 L3）：模型可控消息的展示副本过终端过滤——ESC/CR/BEL
+/// 不得进入 stdout（不执行终端动作）；通知不执行命令、不打开路径、不获得授权
+///（零副作用：无文件写入、零额外请求）。
+#[test]
+fn s21e_pipe_message_display_copy_is_terminal_filtered() {
+    let cfg = TempDir::new("s21e-cfg");
+    let user = TempDir::new("s21e-user");
+    let key = "s21e-key-value";
+    let tc = json!({"choices":[{"message":{"role":"assistant","content":null,
+        "tool_calls":[{"id":"s21e-m","type":"function","function":{
+            "name":"send_message_to_user_async",
+            "arguments": json!({"message":"\u{1b}[2J清除\u{7}屏\rPWNED"}).to_string()
+        }}]}}]}).to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc),
+        MockResp::json(200, chat_body("S21E-最终回复")),
+    ]);
+    write_manual_message_capable(cfg.path(), &mock.url, "env:TCHAT_S21E_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint(key),
+    );
+    let (out, _err, code) = run_pipe(
+        None,
+        &[
+            ("TCHAT_CONFIG_DIR", cfg.path().to_str().unwrap()),
+            ("TCHAT_USER_DIR", user.path().to_str().unwrap()),
+            ("TCHAT_S21E_KEY", key),
+            ("TERM", "dumb"),
+        ],
+        "开始\nexit\n",
+    );
+    assert_eq!(code, Some(0));
+    // 展示副本剥离全部转义与危险控制字符（动作零）
+    assert!(!out.contains('\u{1b}'), "stdout 不得含 ESC：{out:?}");
+    assert!(!out.contains('\r'), "stdout 不得含 CR：{out:?}");
+    assert!(!out.contains('\u{7}'), "stdout 不得含 BEL：{out:?}");
+    assert!(out.contains("清除屏PWNED"), "剥离后文本仍如实可见：{out}");
+    // 零副作用：恰两次请求（通知不产生额外请求/授权动作）
+    assert_eq!(mock.count(), 2);
+}
+
+/// S11c（021 A11/§2.3-6 L3 驱动恢复）：运行中受理的接续输入在取消时未入史——
+/// 宿主交还驱动恢复为待处理完整消息并暂停自动发送；用户再次提交后按受理
+/// 顺序恰一次重放为后续轮（完整消息不丢失、不重复）。
+#[test]
+fn s11c_tui_cancel_restores_steer_to_queue_and_replays_once() {
+    let cfg = TempDir::new("s11c-cfg");
+    let user = TempDir::new("s11c-user");
+    let key = "s11c-key-value";
+    let (first, gate) = MockResp::gated(200, chat_body("S11C-第一轮"));
+    let mock = spawn_mock(vec![
+        first,
+        MockResp::json(200, chat_body("S11C-继续完成")),
+        MockResp::json(200, chat_body("S11C-追问已处理")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S11C_KEY");
+    let origin = catalog::origin_of(&mock.url).unwrap();
+    seed_grant(user.path(), &origin, &catalog::fingerprint(key));
+    let mut pty = PtySession::spawn(pty_cli(None, &[
+        ("TCHAT_CONFIG_DIR", cfg.path().to_str().unwrap()),
+        ("TCHAT_USER_DIR", user.path().to_str().unwrap()),
+        ("TCHAT_S11C_KEY", key),
+    ]));
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.send_line("开始任务");
+    let deadline = Instant::now() + WATCHDOG;
+    while mock.count() < 1 {
+        assert!(Instant::now() < deadline, "mock 未收到首轮请求");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // 受理接续输入（在途），随后取消当前轮
+    pty.send_line("等等，先补充一点");
+    std::thread::sleep(Duration::from_millis(400));
+    pty.send_raw(b"\x1b"); // Esc＝仅取消
+    pty.wait_screen("接续输入未入史").unwrap();
+    // 暂停自动发送：取消后无新请求（仍恰 1 次）
+    assert_eq!(mock.count(), 1, "恢复为待处理消息后不自动发送");
+    // 用户再次提交＝已处理，恢复队列：先发"继续"，随后队列重放接续输入
+    pty.send_line("继续");
+    pty.wait_screen("S11C-继续完成").unwrap();
+    pty.wait_screen("S11C-追问已处理").unwrap();
+    assert_eq!(mock.count(), 3, "重放恰一次（继续＋追问两轮）");
+    let body: Value = serde_json::from_str(&mock.requests()[2].body).unwrap();
+    assert!(
+        body["messages"].as_array().unwrap().iter().any(|m| {
+            m["role"] == "user" && m["content"] == "等等，先补充一点"
+        }),
+        "接续输入恰一次重放进请求：{body}"
+    );
+    pty.send_line("/exit");
+    pty.wait_output("再见!", WATCHDOG).unwrap();
+    let (out, status) = pty.finish();
+    assert_eq!(status.code(), Some(0), "{out}");
 }

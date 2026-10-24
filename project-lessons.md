@@ -146,3 +146,7 @@
 
 - 020 第二轮教训：给既有弹窗体系加"新弹窗变体"时，token 检测必须沿用上游的 editable 判定（`prefixed_token_range_is_editable`）——裸 `current_prefixed_token_range` 会匹配已绑定的 `@mention` 原子元素，既有"绑定 mention 不阻塞方向键导航"契约即被打破（全量回归抓到）；弹窗键分支早退还必须保留外层统一 `sync_popups`，否则候选停留旧 query。
 - PTY/集成测试之外，"合并重编号"这类状态重建逻辑必须有直接断言的组件测试：S110/S102 的 E2E 中 Dnew 恒为空，合并分支零覆盖，增量审查一句话就点破了"实现方向正确但无证据"。
+
+## 021 执行中消息规划依据（2026-10-23 实施，2026-10-24 批准交付本地 main）
+
+- Codex 的 `send_message_to_user_async` 发出的是 `delivery=Async` 的 assistant 消息：消息阶段即使是 FinalAnswer，也不结束 turn；成功只回 `accepted`，下一请求不另注入同文 assistant 正文。回应中途追问还依赖独立的普通输入接续，不能用本地原排队行为或 018 回答通道冒充；复用 020 完整消息，具体取舍与固定源码见 [021 调研记录](docs/records/2026-10-23-send-message-to-user-async-plan-research.md)。
