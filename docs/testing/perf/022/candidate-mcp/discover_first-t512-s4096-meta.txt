@@ -1,0 +1,1 @@
+{"scenario": "discover_first", "tools": 512, "schema": 4096, "n": 1, "wall_s": 0.25, "main_peak_kib": 888, "child_peak_kib": 0, "timed_out": false, "rc": 0, "stderr_tail": "tools_published=512\n"}

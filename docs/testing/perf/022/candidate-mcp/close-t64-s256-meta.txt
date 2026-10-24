@@ -1,0 +1,1 @@
+{"scenario": "close", "tools": 64, "schema": 256, "n": 1, "wall_s": 0.26, "main_peak_kib": 612, "child_peak_kib": 0, "timed_out": false, "rc": 0, "stderr_tail": ""}

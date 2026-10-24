@@ -1,0 +1,1 @@
+{"scenario": "call_rtt", "tools": 512, "schema": 256, "n": 20, "wall_s": 0.25, "main_peak_kib": 596, "child_peak_kib": 0, "timed_out": false, "rc": 0, "stderr_tail": ""}

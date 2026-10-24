@@ -179,12 +179,29 @@ impl McpManager {
             return None;
         }
         self.ensure_loaded();
-        // 留出在途通知的处理间隙：调用期间到达的 tools/list_changed 经服务
-        // 任务异步计数，此处短暂等待后读取（有界，50ms）。
-        self.runtime
-            .block_on(async {
+        // 方案 A（022 §2.2-6）：通知计数的读取基准在重列出列前取得；同步
+        // 等待是**条件性**的——仅当存在活动连接且其上次调用后可能有在途
+        // 通知（notify_grace）时等待一次到达窗口（50ms，计入轮准备耗时）。
+        // 无 MCP 配置／空闲连接／纯主动通知（到达即原子计数）均零等待。
+        let needs_settle: bool = {
+            let inner = self.lock();
+            inner.servers.iter().any(|s| {
+                s.connection
+                    .as_ref()
+                    .is_some_and(|c| c.state.notify_grace.load(Ordering::SeqCst))
+            })
+        };
+        if needs_settle {
+            self.runtime.block_on(async {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             });
+            let inner = self.lock();
+            for s in &inner.servers {
+                if let Some(c) = &s.connection {
+                    c.state.notify_grace.store(false, Ordering::SeqCst);
+                }
+            }
+        }
         // 逐服务器准备（固定 ID 顺序；单项失败不影响其他服务器与原生工具）。
         let plan: Vec<(String, u8)> = {
             let inner = self.lock();

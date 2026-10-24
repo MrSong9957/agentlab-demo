@@ -163,3 +163,9 @@
 - SDK 的 reqwest 适配器与 SSE 事件限额器是 `pub(crate)`：外部只能函数级移植；移植时把 JSON 体一并改为有界读取（SDK 默认 `bytes()`/`text()` 无界）。
 - serde_json 的 Map 反序列化会静默合并重复 JSON 键，「拒绝重复键」契约必须手写 visitor 逐键迭代。
 - 管理器同步桥接：专用 tokio runtime＋`block_on` 驱动 SDK 异步面；`sleep()` future 必须在 block_on 的 async 块内构造（块外构造会报「no reactor running」）。
+
+## 022 性能轮经验（2026-10-24 方案 A，同日批准交付本地 main）
+
+- 通知计数（stale_epoch）到达即原子可见；无条件 settle 兜的是**在途通知**（响应已回、通知尚在网络管道）——因此等待只需发生在「上次调用之后」（notify_grace 条件化），纯主动通知无需等待。等待须计入轮准备耗时，不得移出计时区间。
+- 「进程死亡边界」的调用分类（未发出 vs 已发出状态未知）取决于 send 与服务循环退出的相对时序，测试断言应要求**二选一且语义正确**（区分即可），不应钉死其一——过强断言会在无关改动引起的时序微移下假红。
+- 基线脚本/夹具/原始数据须归档进仓库（scripts/perf＋docs/testing/perf）后，/tmp 才可清理；历史版本测量一律走隔离 worktree＋专用 --target-dir。

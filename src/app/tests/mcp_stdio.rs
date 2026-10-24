@@ -520,7 +520,18 @@ fn a12_server_death_after_side_effect_marks_unknown_once() {
         text2.contains("MCP 客户端错误"),
         "断连按标准失败形态：{text2}"
     );
-    assert!(!text2.contains("未发送"), "进程死亡前请求已写入（状态未知）");
+    // 进程死亡落在「未发出／已发出」边界：两种分类都符合 §2.4（区分即可，
+    // 不强制其一——分类取决于 send 与服务循环退出的相对时序）。
+    assert!(
+        text2.contains("状态未知") || text2.contains("未发送"),
+        "分类必为二者之一：{text2}"
+    );
+    // 无重放副作用：进程已死，SECOND 不可能被写入。
+    assert_ne!(
+        std::fs::read_to_string(&target).unwrap_or_default(),
+        "SECOND",
+        "无第二次副作用（无重放）"
+    );
     // 断连后：下一轮不声明工具。
     let snapshot2 = manager
         .prepare_for_turn(&AtomicBool::new(false))
@@ -812,4 +823,138 @@ fn a13_notification_during_relist_keeps_stale_marker() {
         lists_three > lists_two,
         "重列期间的新通知保留：轮2 列 {lists_two} 次，轮3 列 {lists_three} 次"
     );
+}
+
+// ---------- 022 性能 P2（方案 A RED→GREEN）：条件化 settle ----------
+
+/// P2-a：无 MCP 配置时 prepare_for_turn 零等待（当前无条件 50ms settle 必失败）。
+/// debug 构建的阈值用宽松上界（50ms 的一半），release 复测在 scripts/perf 里做。
+#[test]
+fn p2a_prepare_without_mcp_config_has_no_settle_wait() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = TempDir::new("mcp-perf-empty");
+    std::env::set_var("TCHAT_USER_DIR", dir.path());
+    let manager = Arc::new(McpManager::new());
+    let cancel = AtomicBool::new(false);
+    // 首次（加载空配置）＋第二次（稳态）都计时。
+    let _ = manager.prepare_for_turn(&cancel).unwrap();
+    let t = std::time::Instant::now();
+    let snap = manager.prepare_for_turn(&cancel).unwrap();
+    let elapsed = t.elapsed();
+    assert_eq!(snap.len(), 0);
+    assert!(
+        elapsed < std::time::Duration::from_millis(25),
+        "无 MCP 配置的稳态 prepare 应零等待（P2）：{:?}",
+        elapsed
+    );
+    manager.close();
+    std::env::remove_var("TCHAT_USER_DIR");
+    drop(guard);
+}
+
+/// P2-b：有连接、无近期调用、无通知的稳态 prepare 应跳过 settle。
+#[test]
+fn p2b_steady_prepare_skips_settle_when_idle() {
+    let ctx = setup("echo", "");
+    let cancel = AtomicBool::new(false);
+    // 连接建立后不发起任何调用（无在途通知可等待）。
+    let t = std::time::Instant::now();
+    let snap = ctx.manager.prepare_for_turn(&cancel).unwrap();
+    let elapsed = t.elapsed();
+    assert_eq!(snap.len(), 1);
+    assert!(
+        elapsed < std::time::Duration::from_millis(25),
+        "空闲稳态 prepare 应跳过 settle（P2）：{:?}",
+        elapsed
+    );
+    ctx.close();
+}
+
+/// P2 语义保护：无近期调用时收到**主动**通知（服务器自发，非本机调用触发）
+/// ——下一轮必须完整重列（条件化 settle 不得丢掉这种通知）。
+/// 夹具 notify_on_list：每次 tools/list 后发一次目录变化通知（形成「上一轮
+/// 重列后无调用＋服务器主动通知」的组合）。
+#[test]
+fn p2_active_notification_without_recent_call_still_relists() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = TempDir::new("mcp-perf-notify");
+    std::env::set_var("TCHAT_USER_DIR", dir.path());
+    std::env::set_var(CANARY, CANARY_VALUE);
+    let record_dir = TempDir::new("mcp-record");
+    let record_path = record_dir.path().join("record.jsonl");
+    let fixture = FIXTURE.replace('\\', "/");
+    let json = format!(
+        r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "python3", "args": ["{fixture}", "--scenario", "notify_on_list", "--record", "{}"], "cwd": "{}"}}}}}}"#,
+        record_path.display().to_string().replace('\\', "/"),
+        std::env::temp_dir().display()
+    );
+    std::fs::write(dir.path().join("mcp.json"), json).expect("写入 mcp.json");
+    let manager = Arc::new(McpManager::new());
+    let cancel = AtomicBool::new(false);
+    // 轮 1：首连（list 触发一次主动通知——发布基准在列出前，本轮目录即过期）。
+    let _ = manager.prepare_for_turn(&cancel).unwrap();
+    let lists_1 = read_record(&record_path)
+        .iter()
+        .filter(|e| e["kind"] == "list")
+        .count();
+    // 受控同步：夹具在每轮 list 响应后 30ms 发通知——轮间停 100ms 确保通知
+    // 已由宿主受理（epoch 已增），再进入下一轮（消除「通知在网络在途」与
+    // 「宿主已受理」的混淆；受理后的重列才是本用例的判定对象）。
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let _ = manager.prepare_for_turn(&cancel).unwrap();
+    let lists_2 = read_record(&record_path)
+        .iter()
+        .filter(|e| e["kind"] == "list")
+        .count();
+    assert!(
+        lists_2 > lists_1,
+        "无近期调用时的主动通知必须触发下一轮重列：轮1={lists_1} 轮2={lists_2}"
+    );
+    // 轮 3：继续重列（每轮 list 都再发通知，链式过期持续）。
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let _ = manager.prepare_for_turn(&cancel).unwrap();
+    let lists_3 = read_record(&record_path)
+        .iter()
+        .filter(|e| e["kind"] == "list")
+        .count();
+    assert!(lists_3 > lists_2);
+    manager.close();
+    std::env::remove_var("TCHAT_USER_DIR");
+    std::env::remove_var(CANARY);
+    drop(guard);
+}
+
+// ---------- a12 分类确定性补充：发送前确定断连 → 未发出 ----------
+
+/// 类1（确定性，非竞态）：连接已显式关闭（service 已回收）后经旧快照调用——
+/// 请求**未发出**（NotSent），服务器调用计数为零；与 a11/a18 的「已发出状态
+/// 未知」（gate 确认在途）构成两类的确定性对照。a12 原用例的进程死亡边界为
+/// 竞态场景（二选一），不与本用例重复。
+#[test]
+fn a12_call_after_close_is_not_sent_with_zero_server_calls() {
+    let ctx = setup("echo", "");
+    let entry = ctx.snapshot.entry("mcp__fx__echo").unwrap();
+    // 显式关停（生产入口）：连接回收。
+    ctx.manager.close();
+    // 经旧快照调用：发送前即失败。
+    let (result, failed) = ctx.manager.call(
+        entry,
+        serde_json::json!({"text": "after-close"}),
+        &AtomicBool::new(false),
+    );
+    assert!(failed);
+    let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(v["isError"], true);
+    let text = v["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("未发送") && text.contains("MCP 客户端错误"),
+        "发送前确定断连＝未发出：{text}"
+    );
+    // 服务器零该次调用（write_before 任何 record 调用计数）。
+    let record = read_record(&ctx.record_path);
+    let calls = record
+        .iter()
+        .filter(|e| e["kind"] == "call" && e["arguments"]["text"] == "after-close")
+        .count();
+    assert_eq!(calls, 0, "服务器该次调用计数为零（请求未到达）");
 }

@@ -218,6 +218,13 @@ def main():
                 continue
             list_requests.append(mid)
             record(rec, {"kind": "list"})
+            if s == "notify_on_list":
+                # 每次 tools/list **响应之后** 30ms 再主动发目录变化通知：确保
+                # 通知在宿主该轮发现基准（请求前取得）之后到达且在轮时间窗内
+                # 受理（测试「无近期调用时收到主动通知」的受控同步）。
+                def _notify_later():
+                    w.send({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+                threading.Timer(0.03, _notify_later).start()
             page = len(list_requests)
             if s == "notify_twice" and page >= 2:
                 # 重列期间再次通知：过期标记必须保留到下一轮（A13）。

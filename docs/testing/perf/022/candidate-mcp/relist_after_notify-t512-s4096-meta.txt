@@ -1,0 +1,1 @@
+{"scenario": "relist_after_notify", "tools": 512, "schema": 4096, "n": 5, "wall_s": 1.25, "main_peak_kib": 39396, "child_peak_kib": 16864, "timed_out": false, "rc": 0, "stderr_tail": ""}

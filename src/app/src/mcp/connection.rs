@@ -136,6 +136,10 @@ pub struct ConnectionState {
     pub poisoned: Arc<AtomicBool>,
     /// stdio stderr 有界尾部（原始字节；展示／日志前必须先做凭证污染检查）。
     pub stderr_tail: Arc<std::sync::Mutex<Vec<u8>>>,
+    /// 调用后可能有**在途**目录变化通知（响应已回、通知尚在网络管道中）：
+    /// 调用发起时置位，prepare 见位则等待一次通知到达窗口后清除（方案 A
+    /// 条件化 settle 的判定依据；通知计数本身是原子的，无需等待即可见）。
+    pub notify_grace: AtomicBool,
     service: AsyncMutex<Option<RunningService<RoleClient, HostClientHandler>>>,
 }
 
@@ -147,6 +151,7 @@ impl ConnectionState {
         Self {
             stale_epoch: Arc::new(AtomicU64::new(0)),
             closed: AtomicBool::new(false),
+            notify_grace: AtomicBool::new(false),
             poisoned,
             stderr_tail,
             service: AsyncMutex::new(None),
@@ -360,6 +365,9 @@ impl McpConnection {
         timeout: Duration,
         cancel: &AtomicBool,
     ) -> Result<ServerResult, CallFailure> {
+        // 方案 A：调用可能在响应之后带回目录变化通知（notify 场景），标记
+        // 通知到达窗口，供下一轮 prepare 条件等待。
+        self.state.notify_grace.store(true, Ordering::SeqCst);
         let guard = self.state.service.lock().await;
         let service = match guard.as_ref() {
             Some(s) => s,
