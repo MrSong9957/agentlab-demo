@@ -9972,3 +9972,122 @@ fn s104_mcp_resume_replays_nothing_and_new_turn_uses_current_caps() {
         "V1 历史工具记录照常投影"
     );
 }
+
+/// A14 L3（023）：资源工具调用的 V1 历史恢复只展示；`/resume` 零 MCP
+/// 启动、零资源请求（配置仍在）；新提交取当前能力。
+#[test]
+fn s105_mcp_resources_resume_replays_nothing() {
+    let cfg = TempDir::new("s105-cfg");
+    let user = TempDir::new("s105-user");
+    let record_dir = TempDir::new("s105-record");
+    let record = record_dir.path().join("record.jsonl");
+    write_mcp_config(user.path(), "resources_only", &record, "");
+    let tc = json!({"choices":[{"message":{"tool_calls":[{"id":"s105-c1","type":"function","function":{
+        "name":"read_mcp_resource","arguments":json!({"server":"fx","uri":"tchat://guide/hello"}).to_string()}}]}}]})
+        .to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc),
+        MockResp::json(200, chat_body("S105-第一轮完成")),
+        MockResp::json(200, chat_body("S105-恢复后新轮")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S105_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s105"),
+    );
+    // 第一段：真实读取一次（用户可见资源工具执行与结果），产生自动会话。
+    {
+        let mut cmd =
+            input_pty_cmd(cfg.path(), user.path(), "TCHAT_S105_KEY", "fake-s105", false);
+        let mut pty = PtySession::spawn(cmd);
+        pty.wait_output("你> ", WATCHDOG).unwrap();
+        pty.send_line("读取资源");
+        pty.wait_output("read_mcp_resource", WATCHDOG)
+            .expect("用户看到资源工具执行");
+        pty.wait_output("S105-第一轮完成", WATCHDOG).unwrap();
+        pty.wait_output("你> ", WATCHDOG).unwrap();
+        pty.send_raw(b"\x04");
+        let (out, status) = pty.finish();
+        assert!(status.success(), "{out}");
+    }
+    let record_lines = mcp_record(&record);
+    assert_eq!(
+        record_lines
+            .iter()
+            .filter(|e| e["kind"] == "read_resource")
+            .count(),
+        1,
+        "历史恰一次真实读取"
+    );
+    // 配置保留：恢复后即使有 MCP 配置也不启动、不发资源请求。
+    let mock = spawn_mock(vec![MockResp::json(200, chat_body("S105-恢复后新轮"))]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S105_KEY2");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s105-2"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S105_KEY2",
+        "fake-s105-2",
+        false,
+    ));
+    pty.wait_output("你> ", WATCHDOG).unwrap();
+    pty.send_line("/resume");
+    pty.wait_output("恢复 5 条", WATCHDOG).unwrap();
+    pty.wait_output("你> ", WATCHDOG).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let record_after = mcp_record(&record);
+    assert_eq!(
+        record_after.iter().filter(|e| e["kind"] == "startup").count(),
+        1,
+        "恢复零 MCP 启动（配置仍在）"
+    );
+    assert_eq!(
+        record_after
+            .iter()
+            .filter(|e| e["kind"] == "read_resource")
+            .count(),
+        1,
+        "恢复零资源请求（不重放读取）"
+    );
+    assert_eq!(
+        record_after
+            .iter()
+            .filter(|e| e["kind"] == "list_resources")
+            .count(),
+        0,
+        "恢复不预读资源目录"
+    );
+    // 恢复后的新提交：当前能力生效（新进程首次用户轮启动 MCP），历史照常。
+    pty.send_line("恢复后的新输入");
+    pty.wait_output("S105-恢复后新轮", WATCHDOG).unwrap();
+    pty.send_raw(b"\x04");
+    let (out, status) = pty.finish();
+    assert!(status.success(), "{out}");
+    let body: Value = serde_json::from_str(&mock.requests()[0].body).unwrap();
+    let names: Vec<String> = body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "read_mcp_resource"),
+        "新进程声明资源工具：{names:?}"
+    );
+    let msgs = body["messages"].as_array().unwrap();
+    assert!(
+        msgs.iter().any(|m| m["tool_call_id"] == "s105-c1"),
+        "V1 历史资源工具记录照常投影"
+    );
+    let record_final = mcp_record(&record);
+    assert_eq!(
+        record_final.iter().filter(|e| e["kind"] == "startup").count(),
+        2,
+        "新进程首轮启动一次（恢复本身零启动）"
+    );
+}

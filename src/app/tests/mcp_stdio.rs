@@ -176,13 +176,15 @@ fn a05_empty_catalog_is_ready_with_zero_tools() {
 
 #[test]
 fn a05_no_tools_capability_fails() {
+    // 023：既无 tools 也无 resources 能力仍拒绝（仅资源服务器已合法，
+    // 错误文案相应更新）。
     let ctx = setup("no_tools_capability", "");
     assert_eq!(ctx.snapshot.len(), 0);
     assert!(ctx
         .manager
         .status_lines()
         .iter()
-        .any(|l| l.contains("未声明 tools 能力")));
+        .any(|l| l.contains("未声明 tools 或 resources 能力")));
     ctx.close();
 }
 

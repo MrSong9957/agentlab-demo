@@ -26,28 +26,33 @@ use super::catalog::{build_function_definition, build_server_catalog};
 use super::config::{load_mcp_file, McpServerConfig, McpTransport};
 use super::connection::{wait_cancel_flag, CallFailure, McpConnection};
 use super::naming::assign_model_names;
+use super::resources::{self, ResourceServerEntry};
 use super::secrets::{collect_sensitive_values, SensitiveValues};
 
 /// 每个用户轮冻结的 MCP 工具快照：定义＋原始身份映射＋连接句柄，
-/// 所有本轮模型请求和实际分派共用它（不可变）。
+/// 所有本轮模型请求和实际分派共用它（不可变）。023 起资源能力服务器
+/// 以独立条目进入快照，固定资源工具与动态工具共用同一份声明。
 #[derive(Default)]
 pub struct McpSnapshot {
     /// 按 (server_id, raw_tool) 稳定排序。
     entries: Vec<ToolEntry>,
-    /// 与 entries 同序的 CC 函数定义。
+    /// 与 entries 同序的 CC 函数定义，后接按资源能力条件声明的固定资源
+    /// 工具定义（023 §3.5：追加在动态工具之后）。
     definitions: Vec<Value>,
+    /// 按 server_id 稳定排序的资源能力服务器（023）。
+    resources: Vec<ResourceServerEntry>,
     /// 归属管理器（弱引用；调用分派经其 runtime 驱动）。
     manager: Option<Weak<McpManager>>,
 }
 
 impl McpSnapshot {
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.definitions.is_empty()
     }
 
-    /// 本快照发布的工具数。
+    /// 本快照发布的工具声明总数（动态工具＋固定资源工具）。
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.definitions.len()
     }
 
     /// CC 函数定义（追加在原生工具之后）。
@@ -55,9 +60,63 @@ impl McpSnapshot {
         &self.definitions
     }
 
+    /// 本轮是否存在可用资源服务器（固定资源工具的声明与执行条件）。
+    pub fn has_resources(&self) -> bool {
+        !self.resources.is_empty()
+    }
+
+    /// 快照内资源服务器（按 server_id 稳定排序）。
+    pub fn resource_servers(&self) -> &[ResourceServerEntry] {
+        &self.resources
+    }
+
     /// 按模型名精确查找（只查映射；不拆 `__`、不看前缀）。
     pub fn entry(&self, model_name: &str) -> Option<&ToolEntry> {
         self.entries.iter().find(|e| e.model_name == model_name)
+    }
+
+    /// 执行一次固定资源工具调用（023；分派入口）。参数字符串解析、
+    /// 结果投影、污染与预算检查在资源模块内完成。
+    pub fn call_resource_tool(
+        &self,
+        name: &str,
+        arguments: &str,
+        cancel: &AtomicBool,
+    ) -> (String, bool) {
+        if !self.has_resources() || !resources::is_resource_tool(name) {
+            return (
+                super::call::client_error_json("参数", &format!("未知资源工具：{name}")),
+                true,
+            );
+        }
+        match serde_json::from_str::<Value>(arguments) {
+            Err(e) => (
+                super::call::client_error_json("参数", &format!("arguments 不是有效 JSON：{e}")),
+                true,
+            ),
+            Ok(v) if !v.is_object() => (
+                super::call::client_error_json("参数", "arguments 必须是 JSON 对象"),
+                true,
+            ),
+            Ok(v) => match &self.manager {
+                Some(manager) => match manager.upgrade() {
+                    Some(manager) => manager.call_resource(
+                        &self.resources,
+                        name,
+                        &v,
+                        cancel,
+                    ),
+                    None => (
+                        super::call::client_error_json("内部", "MCP 管理器已释放"),
+                        true,
+                    ),
+                },
+                None => (
+                    super::call::client_error_json("内部", "MCP 管理器不可用"),
+                    true,
+                ),
+            },
+        }
     }
 
     /// 执行一次外部调用（分派入口；内部委托管理器——结果投影与凭证污染
@@ -202,6 +261,45 @@ impl McpManager {
                 }
             }
         }
+        // 023 §5.1：每轮开始同步一次断连真值——成功调用后死亡的进程在
+        // 下一轮 prepare 即被发现（022 §2.2「确认断开的连接不在后续新轮
+        // 声明」的实现缺口：此前只有调用失败路径会标记）。不重连，仅移出
+        // 发布状态（reload 可恢复）。
+        {
+            let ids: Vec<String> = {
+                let inner = self.lock();
+                inner
+                    .servers
+                    .iter()
+                    .filter(|s| s.connection.is_some())
+                    .map(|s| s.id.clone())
+                    .collect()
+            };
+            for id in ids {
+                let conn = {
+                    let inner = self.lock();
+                    match inner.servers.iter().find(|s| s.id == id) {
+                        Some(server) => match &server.connection {
+                            Some(conn) => conn.clone(),
+                            None => continue,
+                        },
+                        None => continue,
+                    }
+                };
+                // 查询在锁外进行：transport_closed 走连接的异步服务锁。
+                let sdk_closed = self
+                    .runtime
+                    .block_on(async { conn.state.transport_closed().await });
+                if sdk_closed || conn.is_transport_closed() {
+                    conn.state.closed.store(true, Ordering::SeqCst);
+                    let mut inner = self.lock();
+                    if let Some(server) = inner.servers.iter_mut().find(|s| s.id == id) {
+                        server.listing = None;
+                        server.error = Some("连接已断开（reload 可恢复）".to_string());
+                    }
+                }
+            }
+        }
         // 逐服务器准备（固定 ID 顺序；单项失败不影响其他服务器与原生工具）。
         let plan: Vec<(String, u8)> = {
             let inner = self.lock();
@@ -331,8 +429,18 @@ impl McpManager {
                 .is_some_and(|c| !c.is_transport_closed());
             match (connected, &server.listing) {
                 (true, Some(listing)) => {
+                    // 023 §3.5：/mcp 区分连接、工具与资源能力状态。
+                    let resources_state = if server
+                        .connection
+                        .as_ref()
+                        .is_some_and(|c| c.capabilities.resources.is_some())
+                    {
+                        "｜资源 可用"
+                    } else {
+                        ""
+                    };
                     lines.push(format!(
-                        "{0}（{transport_name}）：已连接｜工具 {1} 个（排除 {2} 项）",
+                        "{0}（{transport_name}）：已连接｜工具 {1} 个（排除 {2} 项）{resources_state}",
                         server.id,
                         listing.tools.len(),
                         server.excluded.len()
@@ -568,17 +676,10 @@ impl McpManager {
         }
     }
 
-    /// 调用后发现连接断开：从发布状态移除（后续新轮不声明工具）。
+    /// 调用后发现连接断开：从发布状态移除（后续新轮不声明工具；022
+    /// 工具调用与 023 资源调用共用的单一入口，按连接指针匹配）。
     fn note_disconnected(&self, entry: &ToolEntry) {
-        let mut inner = self.lock();
-        if let Some(server) = inner.servers.iter_mut().find(|s| {
-            s.connection
-                .as_ref()
-                .is_some_and(|c| Arc::ptr_eq(c, &entry.connection))
-        }) {
-            server.listing = None;
-            server.error = Some("连接已断开（reload 可恢复）".to_string());
-        }
+        self.note_connection_down(&entry.server_id, &entry.connection);
     }
 
     fn ensure_loaded(&self) {
@@ -630,10 +731,16 @@ impl McpManager {
                     // 发布基准在列出前记录：列出期间／之后到达的目录变化
                     // 计数大于基准 → 下一轮继续重列（不吞通知）。
                     let listed_epoch = connection.state.stale_epoch.load(Ordering::SeqCst);
-                    let tools = connection
-                        .list_all_tools(config.startup_timeout)
-                        .await
-                        .map_err(|e| PrepError::Failed(sanitize_owned(e.0, &sensitive)))?;
+                    // 023 §3.2：tools 能力独立判断——仅资源服务器不发
+                    // tools/list（资源目录在实际调用时获取）。
+                    let tools = if connection.capabilities.tools.is_some() {
+                        connection
+                            .list_all_tools(config.startup_timeout)
+                            .await
+                            .map_err(|e| PrepError::Failed(sanitize_owned(e.0, &sensitive)))?
+                    } else {
+                        Vec::new()
+                    };
                     Ok((connection, tools, listed_epoch))
                 }) => match outcome {
                     Ok(inner) => inner,
@@ -691,6 +798,9 @@ impl McpManager {
             Duration,
             Arc<McpConnection>,
         )> = Vec::new();
+        // 023：资源能力服务器按 server_id 稳定排序进入快照（与动态工具的
+        // 命名体系无关，固定资源工具共用该列表声明与执行）。
+        let mut resource_servers: Vec<ResourceServerEntry> = Vec::new();
         for server in &inner.servers {
             let Some(listing) = &server.listing else {
                 continue;
@@ -700,6 +810,14 @@ impl McpManager {
             };
             if connection.is_transport_closed() {
                 continue;
+            }
+            if connection.capabilities.resources.is_some() {
+                resource_servers.push(ResourceServerEntry {
+                    server_id: server.id.clone(),
+                    connection: connection.clone(),
+                    sensitive: listing.sensitive.clone(),
+                    tool_timeout: server.config.tool_timeout,
+                });
             }
             for (raw_tool, description, schema) in &listing.tools {
                 flattened.push((
@@ -716,6 +834,9 @@ impl McpManager {
         flattened.sort_by(|a, b| {
             (a.0.as_str(), a.1.as_str()).cmp(&(b.0.as_str(), b.1.as_str()))
         });
+        // 023 §3.3：资源服务器按 server_id 升序进入快照（汇总串行遍历的
+        // 稳定顺序；执行共用该快照，不再按实时状态重建）。
+        resource_servers.sort_by(|a, b| a.server_id.cmp(&b.server_id));
         let identities: Vec<(String, String)> = flattened
             .iter()
             .map(|(s, t, _, _, _, _, _)| (s.clone(), t.clone()))
@@ -727,6 +848,7 @@ impl McpManager {
                 return Arc::new(McpSnapshot {
                     entries: Vec::new(),
                     definitions: Vec::new(),
+                    resources: Vec::new(),
                     manager,
                 });
             }
@@ -752,17 +874,70 @@ impl McpManager {
                 },
             )
             .collect();
-        let definitions = entries
+        let mut definitions: Vec<Value> = entries
             .iter()
             .map(|e| {
                 build_function_definition(&e.model_name, e.description.as_deref(), &e.schema)
             })
             .collect();
+        // 023 §3.5：本轮存在可用资源服务器时，固定资源工具按能力条件声明
+        //（声明与执行一致：仅含已实现接口），追加在动态工具之后。
+        if !resource_servers.is_empty() {
+            definitions.push(resources::list_tool_definition());
+            definitions.push(resources::templates_tool_definition());
+            definitions.push(resources::read_tool_definition());
+        }
         Arc::new(McpSnapshot {
             entries,
             definitions,
+            resources: resource_servers,
             manager,
         })
+    }
+
+    /// 执行一次固定资源工具调用（023；同步桥接）。执行共用调用方快照的
+    /// 资源服务器列表（§3.2：声明与执行共用快照——轮内断连的台仍在列表
+    /// 中，按快照路由并返回不可用错误，不静默剔除）。断连标记与 022
+    /// `call` 同源：调用后发现连接断开，从发布状态移除（后续新轮不声明）。
+    pub fn call_resource(
+        &self,
+        servers: &[ResourceServerEntry],
+        name: &str,
+        arguments: &Value,
+        cancel: &AtomicBool,
+    ) -> (String, bool) {
+        let outcome = resources::execute(servers, &self.runtime, name, arguments, cancel);
+        // 断连标记：结果为失败且连接已断开时，该服务器不再发布（reload 恢复）。
+        if outcome.1 {
+            for server in servers {
+                let sdk_closed = self
+                    .runtime
+                    .block_on(server.connection.state.transport_closed());
+                if sdk_closed || server.connection.is_transport_closed() {
+                    server
+                        .connection
+                        .state
+                        .closed
+                        .store(true, Ordering::SeqCst);
+                    self.note_connection_down(&server.server_id, &server.connection);
+                }
+            }
+        }
+        outcome
+    }
+
+    /// 按服务器 ID＋连接指针定位并移出发布状态（断连共用入口）。
+    fn note_connection_down(&self, server_id: &str, connection: &Arc<McpConnection>) {
+        let mut inner = self.lock();
+        if let Some(server) = inner.servers.iter_mut().find(|s| {
+            s.id == server_id
+                && s.connection
+                    .as_ref()
+                    .is_some_and(|c| Arc::ptr_eq(c, connection))
+        }) {
+            server.listing = None;
+            server.error = Some("连接已断开（reload 可恢复）".to_string());
+        }
     }
 }
 
@@ -819,14 +994,9 @@ fn build_sensitive(config: &McpServerConfig) -> SensitiveValues {
     }
 }
 
-/// 诊断／错误文本脱敏：包含敏感值时替换为通用诊断（不回显匹配值、
-/// 原始片段或指纹）。
+/// 诊断／错误文本脱敏（022／023 共用语义；委托 [`secrets::sanitize_detail`]）。
 fn sanitize_owned(text: String, sensitive: &SensitiveValues) -> String {
-    if sensitive.contains_secret(&text) {
-        "（细节包含敏感数据，已省略）".to_string()
-    } else {
-        text
-    }
+    super::secrets::sanitize_detail(&text, sensitive)
 }
 
 /// stderr 尾部展示脱敏：污染时通用诊断；否则去除控制字符并截断。

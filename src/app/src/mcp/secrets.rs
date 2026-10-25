@@ -36,9 +36,27 @@ impl SensitiveValues {
         self.values.iter().any(|v| text.contains(v.as_str()))
     }
 
+    /// 字节串是否包含任一敏感值的 UTF-8 字节（023：blob 解码后检查；
+    /// 敏感值均为环境变量文本，按字节子串匹配覆盖多字节字符）。
+    pub fn contains_secret_bytes(&self, bytes: &[u8]) -> bool {
+        self.values
+            .iter()
+            .any(|v| contains_subslice(bytes, v.as_bytes()))
+    }
+
     /// 集合为空＝无敏感值（匿名、无显式环境引用的连接）。
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
+    }
+}
+
+/// 诊断／错误文本脱敏：包含敏感值时替换为通用诊断（不回显匹配值、
+/// 原始片段或指纹）。022／023 的错误与诊断出口共用。
+pub fn sanitize_detail(text: &str, sensitive: &SensitiveValues) -> String {
+    if sensitive.contains_secret(text) {
+        "（细节包含敏感数据，已省略）".to_string()
+    } else {
+        text.to_string()
     }
 }
 
@@ -53,6 +71,12 @@ pub fn bearer_sensitive_values(token: &str) -> Vec<String> {
         format!("Bearer {token}"),
         format!("Authorization: Bearer {token}"),
     ]
+}
+
+/// 字节子串匹配（空的敏感值不参与；`contains_secret_bytes` 辅助）。
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// HTTP 认证解析结果（只含环境变量名到实际值的映射，供传输层使用；

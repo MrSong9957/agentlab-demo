@@ -69,6 +69,17 @@ pub enum CallFailure {
     Unsupported(String),
 }
 
+impl std::fmt::Display for CallFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CallFailure::NotSent(d)
+            | CallFailure::SentUnknown(d)
+            | CallFailure::SentRejected(d)
+            | CallFailure::Unsupported(d) => write!(f, "{d}"),
+        }
+    }
+}
+
 /// 客户端 handler：显式 Initialize 版本、拒绝反向请求、转发目录变化计数。
 struct HostClientHandler {
     stale_epoch: Arc<AtomicU64>,
@@ -181,6 +192,8 @@ impl ConnectionState {
 /// 连接（stdio 进程句柄或 HTTP 会话）＋共享状态。
 pub struct McpConnection {
     pub state: Arc<ConnectionState>,
+    /// 连接时冻结的服务器能力（tools／resources 独立判断，023 §3.2）。
+    pub capabilities: rmcp::model::ServerCapabilities,
     /// stdio 进程句柄（有界关闭与进程组回收用；HTTP 为 None）。
     stdio: Option<Arc<transport::StdioProcess>>,
 }
@@ -290,7 +303,8 @@ impl McpConnection {
             serve_client_with_lifecycle(handler, transport, ClientLifecycleMode::Initialize)
                 .await
                 .map_err(|e| connect_err(format!("初始化失败：{e}")))?;
-        // 版本与能力校验：不兼容版本或未声明 tools 能力记为不可用。
+        // 版本与能力校验：不兼容版本，或既未声明 tools 也未声明 resources
+        // 能力的服务器记为不可用（023 §3.2：两种能力独立判断）。
         let info = service
             .peer_info()
             .ok_or_else(|| connect_err("初始化完成但缺少服务器信息"))?;
@@ -300,15 +314,21 @@ impl McpConnection {
                 info.protocol_version.as_str()
             )));
         }
-        if info.capabilities.tools.is_none() {
-            return Err(connect_err("服务器未声明 tools 能力"));
+        if info.capabilities.tools.is_none() && info.capabilities.resources.is_none() {
+            return Err(connect_err("服务器未声明 tools 或 resources 能力"));
         }
+        let capabilities = info.capabilities.clone();
         state.service.lock().await.replace(service);
-        Ok(Self { state, stdio })
+        Ok(Self {
+            state,
+            capabilities,
+            stdio,
+        })
     }
 
     /// 完整分页发现（022 §2.2：≤100 页、≤2048 项、游标 ≤64 KiB、重复游标
     /// 拒绝、整体时限；空字符串游标也是有效游标；失败不发布半份目录）。
+    /// 仅声明 resources 能力的服务器不调用（023 §3.2：不发 tools/list）。
     pub async fn list_all_tools(&self, overall: Duration) -> Result<Vec<Tool>, McpConnectError> {
         let guard = self.state.service.lock().await;
         let service = guard.as_ref().ok_or_else(|| connect_err("连接已关闭"))?;
@@ -424,6 +444,128 @@ impl McpConnection {
     /// 传输是否已断（断连后连接不再声明工具，仅显式 reload 重建）。
     pub fn is_transport_closed(&self) -> bool {
         self.state.closed.load(Ordering::SeqCst) || self.state.poisoned.load(Ordering::SeqCst)
+    }
+
+    /// 单次 `resources/list`（023 §3.3）：一页请求，游标原样传递（含空
+    /// 字符串）；超时／取消语义与 [`Self::call_tool_once`] 同源（单次请求
+    /// 句柄、本地等待立即返回、迟到结果按请求关联丢弃）。
+    pub async fn list_resources_once(
+        &self,
+        cursor: Option<String>,
+        timeout: Duration,
+        cancel: &AtomicBool,
+    ) -> Result<rmcp::model::ListResourcesResult, CallFailure> {
+        let params = cursor.map(|c| PaginatedRequestParams::default().with_cursor(Some(c)));
+        let request = ClientRequest::ListResourcesRequest(match params {
+            Some(p) => rmcp::model::ListResourcesRequest::with_param(p),
+            None => rmcp::model::ListResourcesRequest::default(),
+        });
+        self.resource_request_once(request, timeout, cancel, "资源列举", |result| {
+            match result {
+                rmcp::model::ServerResult::ListResourcesResult(page) => Ok(page),
+                other => Err(CallFailure::SentRejected(format!(
+                    "不支持的协议响应：{other:?}"
+                ))),
+            }
+        })
+        .await
+    }
+
+    /// 单次 `resources/templates/list`（023 §3.3）：语义与
+    /// [`Self::list_resources_once`] 同源。
+    pub async fn list_resource_templates_once(
+        &self,
+        cursor: Option<String>,
+        timeout: Duration,
+        cancel: &AtomicBool,
+    ) -> Result<rmcp::model::ListResourceTemplatesResult, CallFailure> {
+        let params = cursor.map(|c| PaginatedRequestParams::default().with_cursor(Some(c)));
+        let request = ClientRequest::ListResourceTemplatesRequest(match params {
+            Some(p) => rmcp::model::ListResourceTemplatesRequest::with_param(p),
+            None => rmcp::model::ListResourceTemplatesRequest::default(),
+        });
+        self.resource_request_once(request, timeout, cancel, "模板列举", |result| {
+            match result {
+                rmcp::model::ServerResult::ListResourceTemplatesResult(page) => Ok(page),
+                other => Err(CallFailure::SentRejected(format!(
+                    "不支持的协议响应：{other:?}"
+                ))),
+            }
+        })
+        .await
+    }
+
+    /// 单次 `resources/read`（023 §3.3）：URI 原样交指定服务器解释；超时／
+    /// 取消语义与 [`Self::list_resources_once`] 同源。
+    pub async fn read_resource_once(
+        &self,
+        uri: &str,
+        timeout: Duration,
+        cancel: &AtomicBool,
+    ) -> Result<rmcp::model::ReadResourceResult, CallFailure> {
+        let request = ClientRequest::ReadResourceRequest(rmcp::model::ReadResourceRequest::new(
+            rmcp::model::ReadResourceRequestParams::new(uri.to_string()),
+        ));
+        self.resource_request_once(request, timeout, cancel, "资源读取", |result| {
+            match result {
+                rmcp::model::ServerResult::ReadResourceResult(read) => Ok(read),
+                other => Err(CallFailure::SentRejected(format!(
+                    "不支持的协议响应：{other:?}"
+                ))),
+            }
+        })
+        .await
+    }
+
+    /// 资源类单次请求公共骨架：单次请求句柄＋本地等待，超时／取消立即
+    /// 返回并尽力发送有界取消通知；迟到结果按请求关联丢弃。
+    async fn resource_request_once<T>(
+        &self,
+        request: ClientRequest,
+        timeout: Duration,
+        cancel: &AtomicBool,
+        what: &str,
+        extract: impl FnOnce(rmcp::model::ServerResult) -> Result<T, CallFailure>,
+    ) -> Result<T, CallFailure> {
+        let guard = self.state.service.lock().await;
+        let service = match guard.as_ref() {
+            Some(s) => s,
+            None => return Err(CallFailure::NotSent("连接已关闭".into())),
+        };
+        let mut handle = service
+            .peer()
+            .send_cancellable_request(request, PeerRequestOptions::no_options())
+            .await
+            .map_err(|e| match e {
+                ServiceError::McpError(err) => CallFailure::SentRejected(format!("{err}")),
+                other => CallFailure::NotSent(format!("{other}")),
+            })?;
+        tokio::select! {
+            result = &mut handle.rx => {
+                match result {
+                    Ok(Ok(server_result)) => extract(server_result),
+                    Ok(Err(ServiceError::McpError(err))) => {
+                        Err(CallFailure::SentRejected(format!("{err}")))
+                    }
+                    Ok(Err(other)) => Err(CallFailure::SentUnknown(format!("{other}"))),
+                    Err(_) => Err(CallFailure::SentUnknown(
+                        "传输已关闭，响应未到达".into(),
+                    )),
+                }
+            }
+            _ = tokio::time::sleep(timeout) => {
+                spawn_bounded_cancel(handle, "资源请求超时");
+                Err(CallFailure::SentUnknown(format!(
+                    "{what}超时，远端执行状态未知"
+                )))
+            }
+            _ = wait_cancel_flag(cancel) => {
+                spawn_bounded_cancel(handle, "用户取消");
+                Err(CallFailure::SentUnknown(format!(
+                    "{what}被用户取消，远端执行状态未知"
+                )))
+            }
+        }
     }
 
     /// 有界关闭（022 §2.5）：结束服务循环；stdio 关 stdin 后最多等 3 秒，

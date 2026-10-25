@@ -41,6 +41,14 @@ impl TestCtx {
     }
 }
 
+impl Drop for TestCtx {
+    /// 兜底回收：断言失败（panic unwind）时也关闭连接并回收 hang 场景
+    /// 的夹具子进程（显式 close 幂等，正常路径行为不变）。
+    fn drop(&mut self) {
+        self.manager.close();
+    }
+}
+
 /// 组装 mcp.json（stdio 夹具）并完成首次 prepare。
 pub fn setup(scenario: &str, extra: &str) -> TestCtx {
     setup_with(scenario, extra, 0)
@@ -65,6 +73,40 @@ pub fn setup_with(scenario: &str, extra: &str, delay_ms: u64) -> TestCtx {
     let json = format!(
         r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "python3", "args": [{args}], "cwd": "{}"{extra}}}}}}}"#,
         std::env::temp_dir().display()
+    );
+    std::fs::write(dir.path().join("mcp.json"), json).expect("写入 mcp.json");
+    let manager = McpManager::new();
+    let snapshot = manager
+        .prepare_for_turn(&AtomicBool::new(false))
+        .expect("准备不应取消");
+    TestCtx {
+        _env: EnvGuard(guard),
+        manager,
+        snapshot,
+        _dir: dir,
+        _record_dir: record_dir,
+        record_path,
+    }
+}
+
+/// 组装两台服务器的 mcp.json（023 汇总／部分失败测试用），ID 固定
+/// `fx`、`fy`，各自独立 scenario；两台均声明 resources 场景由调用方
+/// 通过 scenario 控制。
+pub fn setup_two(scenario_fx: &str, scenario_fy: &str, extra_fx: &str, extra_fy: &str) -> TestCtx {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = TempDir::new("mcp-stdio");
+    std::env::set_var("TCHAT_USER_DIR", dir.path());
+    std::env::set_var(CANARY, CANARY_VALUE);
+    let record_dir = TempDir::new("mcp-record");
+    let record_path = record_dir.path().join("record.jsonl");
+    let fixture = FIXTURE.replace('\\', "/");
+    let tmp = std::env::temp_dir().display().to_string();
+    let json = format!(
+        r#"{{"mcp_servers": {{
+            "fx": {{"enabled": true, "command": "python3", "args": ["{fixture}", "--scenario", "{scenario_fx}", "--record", "{rec}"], "cwd": "{tmp}"{extra_fx}}},
+            "fy": {{"enabled": true, "command": "python3", "args": ["{fixture}", "--scenario", "{scenario_fy}", "--record", "{rec}"], "cwd": "{tmp}"{extra_fy}}}
+        }}}}"#,
+        rec = record_path.display().to_string().replace('\\', "/"),
     );
     std::fs::write(dir.path().join("mcp.json"), json).expect("写入 mcp.json");
     let manager = McpManager::new();

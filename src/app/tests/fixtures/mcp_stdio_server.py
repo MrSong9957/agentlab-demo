@@ -42,8 +42,12 @@ class Writer:
             sys.stdout.flush()
 
 
-def init_result(req, tools_capability=True):
-    caps = {"tools": {"listChanged": True}} if tools_capability else {}
+def init_result(req, tools_capability=True, resources_capability=False):
+    caps = {}
+    if tools_capability:
+        caps["tools"] = {"listChanged": True}
+    if resources_capability:
+        caps["resources"] = {"listChanged": True}
     return {
         "jsonrpc": "2.0",
         "id": req["id"],
@@ -206,6 +210,14 @@ def main():
                         {"protocolVersion": "2026-07-28",
                          "capabilities": {"tools": {}},
                          "serverInfo": {"name": "tchat-fixture", "version": "0.1"}}})
+            elif s == "tools_and_resources":
+                # 023：两者兼有。
+                w.send(init_result(msg, tools_capability=True,
+                                   resources_capability=True))
+            elif s.startswith("resources_"):
+                # 023：资源分页／容量／错误场景——仅资源服务器。
+                w.send(init_result(msg, tools_capability=False,
+                                   resources_capability=True))
             else:
                 caps = s != "no_tools_capability"
                 w.send(init_result(msg, tools_capability=caps))
@@ -308,6 +320,173 @@ def main():
                 list_page(mid, tools=[echo_tool()])
         elif method == "tools/call":
             handle_call(msg)
+        elif method == "resources/list":
+            params = msg.get("params") or {}
+            cursor = params.get("cursor")
+            record(rec, {"kind": "list_resources", "params": params})
+            if s == "resources_error":
+                w.send({"jsonrpc": "2.0", "id": mid, "error":
+                        {"code": -32000, "message": "list resources failed"}})
+            elif s == "resources_hang_list":
+                time.sleep(120)
+            elif s == "resources_polluted":
+                token = os.environ.get("TCHAT_MCP_TOKEN_A", "")
+                w.send({"jsonrpc": "2.0", "id": mid, "result": {"resources": [
+                    {"uri": "tchat://dirty/x", "name": "x",
+                     "description": f"leak {token} here"},
+                ]}})
+            elif s == "resources_malformed":
+                # 畸形响应：resources 非数组（SDK 反序列化失败路径）。
+                w.send({"jsonrpc": "2.0", "id": mid, "result":
+                        {"resources": "not-an-array"}})
+            elif s == "resources_paged":
+                if cursor is None:
+                    w.send({"jsonrpc": "2.0", "id": mid, "result": {"resources": [
+                        {"uri": "tchat://p/one", "name": "one"},
+                    ], "nextCursor": "page-2"}})
+                elif cursor == "page-2":
+                    w.send({"jsonrpc": "2.0", "id": mid, "result": {"resources": [
+                        {"uri": "tchat://p/two", "name": "two"},
+                    ]}})
+                else:
+                    w.send({"jsonrpc": "2.0", "id": mid, "result": {"resources": []}})
+            elif s == "resources_empty_cursor":
+                # 空字符串游标是有效游标：第一页返回 ""，第二页结束。
+                if cursor is None:
+                    w.send({"jsonrpc": "2.0", "id": mid, "result": {"resources": [
+                        {"uri": "tchat://e/first", "name": "first"},
+                    ], "nextCursor": ""}})
+                else:
+                    w.send({"jsonrpc": "2.0", "id": mid, "result": {"resources": [
+                        {"uri": "tchat://e/second", "name": "second"},
+                    ]}})
+            elif s == "resources_cursor_space":
+                # 游标带首尾空白：原样传递，不能 trim。
+                if cursor is None:
+                    w.send({"jsonrpc": "2.0", "id": mid, "result": {"resources": [
+                        {"uri": "tchat://s/first", "name": "first"},
+                    ], "nextCursor": " spaced "}})
+                else:
+                    w.send({"jsonrpc": "2.0", "id": mid, "result": {"resources": [
+                        {"uri": "tchat://s/second", "name": "second"},
+                    ]}})
+            elif s == "resources_loop":
+                w.send({"jsonrpc": "2.0", "id": mid, "result": {"resources": [
+                    {"uri": "tchat://l/x", "name": "x"},
+                ], "nextCursor": "loop"}})
+            elif s == "resources_101":
+                page = 1 if cursor is None else int(cursor[1:]) + 1
+                w.send({"jsonrpc": "2.0", "id": mid, "result": {"resources": [
+                    {"uri": f"tchat://h/{page}", "name": "h"},
+                ], "nextCursor": f"p{page}"}})
+            elif s == "resources_items_over":
+                resources = [{"uri": f"tchat://o/{i}", "name": "o",
+                              "mimeType": "text/plain"} for i in range(2049)]
+                w.send({"jsonrpc": "2.0", "id": mid, "result":
+                        {"resources": resources}})
+            elif s == "resources_items_paged_over":
+                if cursor is None:
+                    resources = [{"uri": f"tchat://po/a{i}", "name": "a"}
+                                 for i in range(1024)]
+                    w.send({"jsonrpc": "2.0", "id": mid, "result":
+                            {"resources": resources, "nextCursor": "p2"}})
+                else:
+                    resources = [{"uri": f"tchat://po/b{i}", "name": "b"}
+                                 for i in range(1025)]
+                    w.send({"jsonrpc": "2.0", "id": mid, "result":
+                            {"resources": resources}})
+            elif s == "resources_cursor_64k":
+                w.send({"jsonrpc": "2.0", "id": mid, "result": {"resources": [
+                    {"uri": "tchat://c/x", "name": "x"},
+                ], "nextCursor": "c" * (64 * 1024 + 1)}})
+            elif s == "resources_big":
+                # 单页 ~3MiB（低于 8MiB 传输上限），三页累计超 8MiB 预算。
+                # resources/list 的资源项没有 text 字段（正文属 contents），
+                # 大文本放 description。
+                page = 1 if cursor is None else int(cursor[1:]) + 1
+                huge = "x" * (3 * 1024 * 1024)
+                result = {"resources": [
+                    {"uri": f"tchat://big/{page}", "name": "big",
+                     "mimeType": "text/plain", "description": huge},
+                ]}
+                if page < 3:
+                    result["nextCursor"] = f"p{page}"
+                w.send({"jsonrpc": "2.0", "id": mid, "result": result})
+            else:
+                w.send({"jsonrpc": "2.0", "id": mid, "result": {"resources": [
+                    {"uri": "tchat://guide/hello", "name": "hello",
+                     "description": "问候资源", "mimeType": "text/plain"},
+                    {"uri": "tchat://guide/config", "name": "config",
+                     "mimeType": "application/json"},
+                ]}})
+        elif method == "resources/templates/list":
+            record(rec, {"kind": "list_templates",
+                         "params": msg.get("params") or {}})
+            w.send({"jsonrpc": "2.0", "id": mid, "result": {"resourceTemplates": [
+                {"uriTemplate": "tchat://guide/notes/{id}", "name": "note",
+                 "description": "按 ID 取笔记", "mimeType": "text/markdown"},
+                {"uriTemplate": "tchat://guide/img/{name}", "name": "img",
+                 "mimeType": "image/png"},
+            ]}})
+        elif method == "resources/read":
+            params = msg.get("params") or {}
+            uri = params.get("uri", "")
+            record(rec, {"kind": "read_resource", "params": params})
+            if s == "resources_slow_read":
+                # 迟到结果：指定 URI 1.5s 后正常回复（配合 1s tool_timeout）。
+                if uri == "tchat://guide/slow":
+                    time.sleep(1.5)
+            if uri == "tchat://guide/config":
+                w.send({"jsonrpc": "2.0", "id": mid, "result": {"contents": [
+                    {"uri": uri, "mimeType": "application/json",
+                     "text": "{\"theme\": \"dark\"}"},
+                ], "_meta": {"origin": "fixture"}}})
+            elif uri == "tchat://guide/logo":
+                import base64
+                blob = base64.b64encode(b"\x89PNG-fake-bytes").decode()
+                w.send({"jsonrpc": "2.0", "id": mid, "result": {"contents": [
+                    {"uri": uri, "mimeType": "image/png", "blob": blob},
+                ]}})
+            elif uri == "tchat://guide/multi":
+                w.send({"jsonrpc": "2.0", "id": mid, "result": {"contents": [
+                    {"uri": uri, "mimeType": "text/plain", "text": "第一段"},
+                    {"uri": uri + "#part2", "mimeType": "text/plain",
+                     "text": "第二段"},
+                ]}})
+            elif uri == "tchat://guide/polluted":
+                token = os.environ.get("TCHAT_MCP_TOKEN_A", "")
+                w.send({"jsonrpc": "2.0", "id": mid, "result": {"contents": [
+                    {"uri": uri, "text": f"leak {token} here"},
+                ]}})
+            elif uri == "tchat://guide/polluted_blob":
+                import base64
+                token = os.environ.get("TCHAT_MCP_TOKEN_A", "")
+                blob = base64.b64encode(token.encode()).decode()
+                w.send({"jsonrpc": "2.0", "id": mid, "result": {"contents": [
+                    {"uri": uri, "blob": blob},
+                ]}})
+            elif uri == "tchat://guide/polluted_meta":
+                token = os.environ.get("TCHAT_MCP_TOKEN_A", "")
+                w.send({"jsonrpc": "2.0", "id": mid, "result": {"contents": [
+                    {"uri": uri, "text": "clean"},
+                ], "_meta": {"note": token}}})
+            elif uri == "tchat://guide/hang_read":
+                time.sleep(120)
+            elif uri == "tchat://guide/huge":
+                # 单条消息超过 8 MiB 传输上限（接收有界性实测）。
+                w.send({"jsonrpc": "2.0", "id": mid, "result": {"contents": [
+                    {"uri": uri, "mimeType": "text/plain",
+                     "text": "x" * (9 * 1024 * 1024)},
+                ]}})
+            else:
+                w.send({"jsonrpc": "2.0", "id": mid, "result": {"contents": [
+                    {"uri": uri, "mimeType": "text/plain",
+                     "text": f"content of {uri}"},
+                ]}})
+            if s == "resources_die_after_read":
+                # 回复已发送，进程退出（023 断连场景）。
+                sys.stdout.flush()
+                os._exit(0)
         elif mid is not None and method:
             # 未知请求统一 method-not-found（含 ping 之外的探测）。
             if method == "ping":

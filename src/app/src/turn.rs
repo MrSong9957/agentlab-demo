@@ -1381,6 +1381,18 @@ pub fn run_tool_turn_with_hosts_extras(
                     None,
                     None,
                 )
+            } else if mcp_snapshot.is_some_and(|s| s.has_resources())
+                && crate::mcp::resources::is_resource_tool(&call.name)
+            {
+                // 023：固定资源工具分派——快照资源能力决定（合并轮已在上文
+                // 置 None 隔离）；参数校验、结果投影、污染与预算检查在快照
+                // 资源调用内完成。
+                let no_cancel = std::sync::atomic::AtomicBool::new(false);
+                let cancel_flag = cancel.unwrap_or(&no_cancel);
+                let (content, _failed) = mcp_snapshot
+                    .expect("已确认存在")
+                    .call_resource_tool(&call.name, &call.arguments, cancel_flag);
+                (content, None, None)
             } else if let Some(entry) = mcp_snapshot.and_then(|s| s.entry(&call.name)) {
                 // 022：MCP 分派——按快照精确命中（原始身份映射；不拆 `__`、
                 // 不看前缀）。参数错误在发送前返回；结果投影与凭证污染检查

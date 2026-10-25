@@ -540,6 +540,142 @@ fn a09_sse_response_projection() {
     ctx.close();
 }
 
+// ---------- 023 M4：HTTP 资源面（JSON 与 SSE） ----------
+
+fn init_ok_resources(id: serde_json::Value) -> String {
+    json_body(
+        id,
+        serde_json::json!({
+            "protocolVersion": "2025-11-25",
+            "capabilities": {"resources": {"listChanged": false}},
+            "serverInfo": {"name": "tchat-http-fixture", "version": "0.1"}
+        }),
+    )
+}
+
+fn resources_list_ok(id: serde_json::Value) -> String {
+    json_body(
+        id,
+        serde_json::json!({"resources": [{
+            "uri": "tchat://http/doc",
+            "name": "doc",
+            "mimeType": "text/plain",
+            "description": "HTTP 资源"
+        }]}),
+    )
+}
+
+fn resources_read_ok(id: serde_json::Value) -> String {
+    json_body(
+        id,
+        serde_json::json!({"contents": [{
+            "uri": "tchat://http/doc",
+            "mimeType": "text/plain",
+            "text": "http-resource-body"
+        }]}),
+    )
+}
+
+fn resource_server_shared(sse: bool) -> HttpServer {
+    start_shared(Arc::new(move |_index, req| {
+        let method = method_of(&req.body);
+        let id = request_id_of(&req.body);
+        let respond = |body: String| -> Vec<u8> {
+            if sse {
+                sse_response(&[body], Some("session-abc"))
+            } else {
+                json_response(200, &body, &[])
+            }
+        };
+        match req.method.as_str() {
+            "GET" => json_response(405, "{}", &[]),
+            "POST" if method == "initialize" => json_response(
+                200,
+                &init_ok_resources(id),
+                &[("MCP-Session-Id", "session-abc")],
+            ),
+            "POST" if method.starts_with("notifications/") => json_response(202, "", &[]),
+            "POST" if method == "resources/list" => respond(resources_list_ok(id)),
+            "POST" if method == "resources/read" => respond(resources_read_ok(id)),
+            _ => json_response(404, "{}", &[]),
+        }
+    }))
+}
+
+#[test]
+fn m4_http_json_resources_declare_list_and_read() {
+    let server = resource_server_shared(false);
+    let ctx = setup_http("", server);
+    // 仅资源服务器：不发 tools/list，快照只含三个固定资源工具。
+    assert!(ctx.snapshot.has_resources());
+    assert_eq!(ctx.snapshot.len(), 3, "三固定资源工具");
+    let (result, failed) = ctx.snapshot.call_resource_tool(
+        "list_mcp_resources",
+        r#"{"server":"web"}"#,
+        &AtomicBool::new(false),
+    );
+    assert!(!failed, "JSON 列举成功：{result}");
+    let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(v["server"], "web");
+    assert_eq!(v["resources"][0]["uri"], "tchat://http/doc");
+    let (read, failed) = ctx.snapshot.call_resource_tool(
+        "read_mcp_resource",
+        r#"{"server":"web","uri":"tchat://http/doc"}"#,
+        &AtomicBool::new(false),
+    );
+    assert!(!failed, "JSON 读取成功：{read}");
+    let rv: serde_json::Value = serde_json::from_str(&read).unwrap();
+    assert_eq!(rv["contents"][0]["text"], "http-resource-body");
+    ctx.close();
+    let requests = ctx.server.requests.lock().unwrap().clone();
+    let methods: Vec<String> = requests
+        .iter()
+        .filter(|r| r.method == "POST")
+        .map(|r| method_of(&r.body))
+        .collect();
+    assert!(!methods.iter().any(|m| m == "tools/list"), "不发 tools/list");
+    assert!(methods.iter().any(|m| m == "resources/list"));
+    assert!(methods.iter().any(|m| m == "resources/read"));
+    // read 请求体：URI 原样抵达。
+    let read_req = requests
+        .iter()
+        .find(|r| r.method == "POST" && method_of(&r.body) == "resources/read")
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_str(&read_req.body).unwrap();
+    assert_eq!(body["params"]["uri"], "tchat://http/doc");
+}
+
+#[test]
+fn m4_http_sse_resources_behave_identically() {
+    let server = resource_server_shared(true);
+    let ctx = setup_http("", server);
+    assert!(ctx.snapshot.has_resources());
+    let (result, failed) = ctx.snapshot.call_resource_tool(
+        "list_mcp_resources",
+        r#"{"server":"web"}"#,
+        &AtomicBool::new(false),
+    );
+    assert!(!failed, "SSE 列举成功：{result}");
+    let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(v["resources"][0]["uri"], "tchat://http/doc");
+    let (read, failed) = ctx.snapshot.call_resource_tool(
+        "read_mcp_resource",
+        r#"{"server":"web","uri":"tchat://http/doc"}"#,
+        &AtomicBool::new(false),
+    );
+    assert!(!failed, "SSE 读取成功：{read}");
+    let rv: serde_json::Value = serde_json::from_str(&read).unwrap();
+    assert_eq!(rv["contents"][0]["text"], "http-resource-body");
+    ctx.close();
+    let requests = ctx.server.requests.lock().unwrap().clone();
+    assert!(
+        requests
+            .iter()
+            .any(|r| r.method == "POST" && method_of(&r.body) == "resources/list"),
+        "SSE 形态下真实请求仍发出"
+    );
+}
+
 // ---------- A15：HTTP JSON 体与 SSE 事件 8 MiB ----------
 
 #[test]
