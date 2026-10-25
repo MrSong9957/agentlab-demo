@@ -326,12 +326,15 @@ impl TuiHost {
                 &mem_config,
                 autosave.lock().unwrap().current_target_stem(),
                 crate::memory::runner::ModelSend {
+                    provider_id:prov.provider_id.clone(),
                     conn: prov.conn.clone(),
                     key: cred.value.clone(),
                     model: model.clone(),
                     agent: agent.clone(),
                 },
             );
+            autosave.lock().unwrap().prepare_native_model(&prov.conn.protocol);
+            let provider_id = prov.provider_id;
             let conn = prov.conn;
             let key = cred.value;
             // 010 定点轮＋收尾轮（J10 契约②）：Ctrl+C 取消＝**停止本地等待**——
@@ -346,12 +349,13 @@ impl TuiHost {
             let mut sender = |body: &serde_json::Value| {
                 let (tx, rx) = std_mpsc::channel();
                 let conn = conn.clone();
+                let provider_id = provider_id.clone();
                 let key = key.clone();
                 let model = model.clone();
                 let agent = agent.clone();
                 let body = body.clone();
                 std::thread::spawn(move || {
-                    let _ = tx.send(api::chat_with_body(&conn, &key, &model, &body, &agent));
+                    let _ = tx.send(api::chat_with_provider_body(&provider_id, &conn, &key, &model, &body, &agent));
                 });
                 loop {
                     match rx.recv_timeout(std::time::Duration::from_millis(100)) {
@@ -895,7 +899,9 @@ fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
     let mut merged_events: HashMap<String, ()> = HashMap::new();
     let mut out = Vec::new();
     for item in history {
+        let item = item.portable();
         match item {
+            HistoryItem::NativeAssistant { .. } => {}, // portable 已解包，不展示原生块
             HistoryItem::Text(m) => {
                 // 015：自动上下文消息不作为真实用户发言展示（仅投影层过滤，
                 // 历史与请求面不变；识别与去重共用同一识别器）

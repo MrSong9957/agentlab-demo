@@ -1,0 +1,159 @@
+{
+  "smoke_only": true,
+  "metadata": {
+    "os": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "cpu": "13th Gen Intel(R) Core(TM) i5-13500H",
+    "memory": "MemTotal:       16236180 kB",
+    "rust": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1",
+    "build": "debug/locked/offline",
+    "cargo_lock_sha256": "e748cae0a0cdf3ebd76e67034f042ed70191fe1b2bbecc95abd89c39f7b2763c",
+    "concurrency": 1,
+    "latency": "真实 CLI 输入至最终文本可见；不含快照恢复；含工具循环和自动保存",
+    "rss": "预热后重置本子进程 VmHWM，再读正式轮峰值",
+    "client_control": "同一 CLI／ureq 客户端的 openai-chat 固定响应，本地 mock 不做推理；含 CLI 及协议处理开销",
+    "source_sha256": {
+      "src/app/src/api/native/anthropic.rs": "19cc9a8684448343ee7d708b1466fd6e4b24ed776129f5930189e0e7211e7c33",
+      "src/app/src/api/native/gemini.rs": "bea4842d7b3532b6c4387eb57ce57de5887ae7c745b2f2e7dafe6bbfc3ffd0fd",
+      "src/app/src/api/native.rs": "d7cf3a10221f3e6fd45a759b520011c95ec97c490055e515e3bea55b383b69ef",
+      "src/app/src/api/stream.rs": "221e0672a62ab874192a5b087c20275dc3221449f3ec39c39bf0967dcbdd06a4",
+      "src/app/src/api.rs": "e4964ceb84f239d0e54ccb937d36b8635a214e498f11b071b00c8c7e4eb818c6",
+      "src/app/src/apply_patch.rs": "ebe92b589d6b259cfad99461b9883a226bc379d33f8713caa889ff2ba477d87f",
+      "src/app/src/catalog.rs": "9bf938de3aaef1ed2f5d86b6c2c4fd49f062966ed4df80ad4fbdef040f21af74",
+      "src/app/src/context.rs": "b9c327bac181a350302514be8f82e4127a24a2e53047c008ec89e8f7d0bfc572",
+      "src/app/src/display.rs": "60b55913661ee6a225cdcf8fd4ddc62e327b91e87f7f21390b41ba04fe844d40",
+      "src/app/src/exec.rs": "d775604b7ddb654569589d909c5ae8c1ac7a4e0de714aa40ecd46ea5f704cf13",
+      "src/app/src/lib.rs": "facfd11112f5cd5258075d7da350e9f9695dbef750383f287b6699857da4e093",
+      "src/app/src/main.rs": "c0e1e2075c96ed406c360f0b14a1ad526f129563640092b5d048666439ce4d16",
+      "src/app/src/mcp/call.rs": "d590b0d0dfdf3a321f3645d9e7c57cbd58eeb596d27dcb37212506ba233cd4f8",
+      "src/app/src/mcp/catalog.rs": "c165401a0e01162c087d21cb7d76b6b82fc963b074e5737d160f3737d59809cf",
+      "src/app/src/mcp/config.rs": "f6518919ee813b2bc95ea9aabb25e16aa553eb4278d7114f9e632990ee856c19",
+      "src/app/src/mcp/connection.rs": "f83e58aded9a68c2a360d92c8dffe268344d40d2302ad727dd85efd467946c0b",
+      "src/app/src/mcp/manager.rs": "3bc05c17a3129e75e371ba913ff223df3d78e370de3a6ec7ba5721b941311010",
+      "src/app/src/mcp/mod.rs": "3e12fde9a5f1161e3220701015df20b89875db3489158c5f3725540dc50849eb",
+      "src/app/src/mcp/naming.rs": "a04c4d44f03858cff379299d8bb4a1184754fb80080d993d32c454cc4e30f6a0",
+      "src/app/src/mcp/secrets.rs": "32db3126c8d460033aaa32ecf469391c061f1815b9fcf649a963edafb710817c",
+      "src/app/src/mcp/transport.rs": "a79d03dca338aecdf226d344b2baaaacea4cb692d3be16b6ffef939575367a08",
+      "src/app/src/memory/candidates.rs": "4688e618cd778f48f9b52c5c784d188d2b83edcf757e836c94129079fddce04f",
+      "src/app/src/memory/config.rs": "0e4822cce83ba8bcc614b164083e72b4a53ea1554193a0fe7ce45ace04edbca1",
+      "src/app/src/memory/feedback.rs": "45a7c6311fefa20acdcc632ac2d1e9dee95f28ec3bca02df378f4fb22c0d362b",
+      "src/app/src/memory/feedback_tests.rs": "7b35d8214ed1dee10237c797e4de432af213945f166f9d2fc5e562d5bfd8bd3f",
+      "src/app/src/memory/inject.rs": "3e10291d2004a1a3b8adc438eadffae385daf06ca0b1b8c31178f7cbed944fb3",
+      "src/app/src/memory/mem_tools.rs": "b5e782ddbbeae2b79077267a145d588f738cbc174309450514bb0496948acc07",
+      "src/app/src/memory/mod.rs": "28556b23b9791754f7e6b063fd0f70e5751588caf52e834618b571be5af97e71",
+      "src/app/src/memory/phase1.rs": "a16965b852c61d9aba587481a542dbb7909969242db8b5f75016191db8552644",
+      "src/app/src/memory/phase1_output.rs": "3001ba8735ba2d7cdcc0d4c13884b4e8522aa4a997f274077c403961271cdfec",
+      "src/app/src/memory/phase2.rs": "8446bb3855af6335246272d8e905d6dc61585b6a017e5a615d31f8db51aea345",
+      "src/app/src/memory/retention.rs": "c717b6becb934f48066b8ab3dea8f33c35985b06bcf81881ba9c66b66ee819d8",
+      "src/app/src/memory/rollout_input.rs": "58ae9fe3a77ffcf2f8f79ff7cb3826cb6464cc3f95543f35409cbdd0a6994f29",
+      "src/app/src/memory/runner.rs": "e1e5563ad3320fe6af7b8757a9fc66b2e8f5cfcc0be7db5a12175ea0b5ab4b35",
+      "src/app/src/memory/secrets.rs": "1577d9a88711dba90be0c0e1338c471d37b820d8a8d1239a0cfd58e3d463bd26",
+      "src/app/src/memory/storage_files.rs": "35e42ec656503ecd23ee74b37649bb536268bddc106f221111afb389af7eed7a",
+      "src/app/src/memory/store.rs": "a2c16e759d0ae9da448beb11483322d17e4ea5f52b56f8ec951a07ba1c66dce5",
+      "src/app/src/memory/truncate.rs": "d2047096a27ed1baf96869b0cf0e5111c18f5b9fb0a88278257669e0ce194688",
+      "src/app/src/memory/workspace.rs": "6b49ac0855ee15c3284f6860ecb230c00302a56a565c29d4de327b4133a7e295",
+      "src/app/src/message_to_user.rs": "e6975aedd705aba849895e07a50ec76b474babf594db96920a04589ca2befb76",
+      "src/app/src/plan.rs": "82211d8883209130e2b314cebe32b58f70cdf4ca8319490677ac2e9841fa6e02",
+      "src/app/src/proc_session.rs": "c5b62c9d7ecf734e2c20740a05cb6b27ccdaded3126b46c1bafcb281e760e80e",
+      "src/app/src/prompt.rs": "b0921f8ade806e3c56c0002f4148252fa0af936c35275de28841d1988a846ac3",
+      "src/app/src/session.rs": "75a2b79e95c467742c964e65a3153b64c1a6fa112821f7f4fbef7e900a67d4f6",
+      "src/app/src/tui_host.rs": "795b33e159bd6e0e8d90c15134a1479c0435d42332bb9bdadf1166b39674d7bd",
+      "src/app/src/turn.rs": "845ae54f5a9846bfdcc89365018fe65a77f26abac4d7904739d83e9c8493ccf0",
+      "src/app/src/user_input.rs": "b94f193bc9e454e90ed1187a67d08cd488c0792587d384fa21e16354d98730fc",
+      "src/app/src/user_input_async.rs": "b891232fe1a7b7c9c07cf69d8fe8cc0f1c5dccf6c441714241067650c3fc1cfd",
+      "src/app/src/view_image.rs": "496ed75739a6205b5ec307043b77fb252bb702be662c74f48997a370a22e7589"
+    }
+  },
+  "rows": [
+    {
+      "case": "openai-chat/text/json",
+      "protocol": "openai-chat",
+      "load": "text",
+      "stream": false,
+      "warmup": 1,
+      "samples_per_round": 2,
+      "rounds": 1,
+      "p95_us": [
+        3290.833
+      ],
+      "worst_p95_us": 3290.833,
+      "peak_rss_kib": 21828,
+      "samples_us": [
+        [
+          3290.833,
+          2913.04
+        ]
+      ],
+      "requests": 3,
+      "request_bytes": [
+        27526,
+        27526
+      ],
+      "response_bytes": [
+        99,
+        99
+      ],
+      "rss_delta_vs_chat_kib": 0
+    },
+    {
+      "case": "google-interactions/calls32/sse",
+      "protocol": "google-interactions",
+      "load": "calls32",
+      "stream": true,
+      "warmup": 1,
+      "samples_per_round": 2,
+      "rounds": 1,
+      "p95_us": [
+        12068.389
+      ],
+      "worst_p95_us": 12068.389,
+      "peak_rss_kib": 23156,
+      "samples_us": [
+        [
+          12068.389,
+          10899.469
+        ]
+      ],
+      "requests": 6,
+      "request_bytes": [
+        27498,
+        37430
+      ],
+      "response_bytes": [
+        501,
+        7524
+      ],
+      "rss_delta_vs_chat_kib": 0
+    },
+    {
+      "case": "google-generate-content/image/sse",
+      "protocol": "google-generate-content",
+      "load": "image",
+      "stream": true,
+      "warmup": 1,
+      "samples_per_round": 2,
+      "rounds": 1,
+      "p95_us": [
+        3371.897
+      ],
+      "worst_p95_us": 3371.897,
+      "peak_rss_kib": 22512,
+      "samples_us": [
+        [
+          3371.897,
+          3104.938
+        ]
+      ],
+      "requests": 3,
+      "request_bytes": [
+        27597,
+        27597
+      ],
+      "response_bytes": [
+        142,
+        142
+      ],
+      "rss_delta_vs_chat_kib": 0
+    }
+  ],
+  "failed": []
+}

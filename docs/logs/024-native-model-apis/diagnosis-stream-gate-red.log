@@ -1,0 +1,6 @@
+   Compiling terminal-chat v0.1.0 (/workspace/.worktrees/024-native-model-apis/src/app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.93s
+test stream_requires_declared_capability_before_any_request_on_every_protocol ... FAILED
+thread 'stream_requires_declared_capability_before_any_request_on_every_protocol' (82152) panicked at src/app/tests/native_model_apis.rs:1928:13:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 26 filtered out; finished in 0.08s
+openai-responses 断言输出（证明请求已发出）：非预期 Content-Type：application/json，期望 text/event-stream（HTTP 200, request_id=offline-fixture）

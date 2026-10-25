@@ -23,7 +23,7 @@
 | 查看图片 | `view_image` | [019](../specs/019-view-image.md) 已实施（2026-10-23）：按路径加载真实图片并传给模型（Chat Completions 批末 user 附件）、能力开关、保存恢复与 TUI 卡片（[证据](2026-10-23-view-image-impl.md)） |
 | MCP 外部工具 | 按服务器动态注册工具 | [022](../specs/022-mcp-tools.md) 已实施并批准本地交付（2026-10-24）：stdio／Streamable HTTP、每轮快照、原始身份路由、真实调用与凭证污染拒绝（[证据](2026-10-24-022-mcp-tools-implementation.md)）；资源接口、工具搜索另定范围 |
 | MCP 资源 | `list_mcp_resources`、`list_mcp_resource_templates`、`read_mcp_resource` | 缺少；与 MCP 工具调用属于不同接口 |
-| 工具发现 | `tool_search` | 缺少。工具数量较多、需要按需加载时再补 |
+| 工具搜索与按需加载 | `tool_search` | 未实现；当前每次请求发送本轮全部可用工具的完整定义。需要减少这些定义的上下文占用时再补，机制见本文末尾的源码复核 |
 | 权限申请 | `request_permissions` | 缺少。必须与执行环境的权限控制配套 |
 | 上下文管理 | `get_context_remaining`、`new_context` | 缺少。应与上下文预算、压缩及历史管理一起设计 |
 | JavaScript 工具编排 | `exec`、`wait` | 缺少。用于组合工具调用，与 shell 的 `exec_command` 不同；暂缓 |
@@ -48,10 +48,30 @@ Codex 还包含 `clock.curr_time`、`clock.sleep`、`wait_for_environment`、`li
 
 3. **补结构化问询。** 先复用 Codex 同步工具的选项和回答结构，接通界面及专用回答回送，等待用户提交后继续原任务；需明确适配上游普通模式的自动空答行为。异步问询后置，不能把当前普通输入排队当作已具备晚到回答能力。详见[问询复核](2026-10-22-codex-user-input-comparison.md)。
 
-4. **接入 MCP，再按实际用途增加搜索、网页读取等工具。** 本项目当前采用 Chat Completions；通过 MCP 或普通函数工具接入外部服务，更容易保留现有多提供方架构。初期工具少时，可直接提供完整定义，暂不引入 `tool_search`。
+4. **接入 MCP，再按实际用途增加搜索、网页读取等工具。** 本项目当前采用 Chat Completions；通过 MCP 或普通函数工具接入外部服务，更容易保留现有多提供方架构。工具定义占用可接受时，继续全量提供；需要减少这部分上下文时，再单独设计 `tool_search` 的搜索和按需声明机制。
 
 Codex CLI 已支持 [`-i 图片路径`](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/utils/cli/src/shared_options.rs#L10)、[粘贴图片](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/chatwidget/clipboard.rs#L14)、[拖入或粘贴图片路径](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/bottom_pane/chat_composer.rs#L1260)、[`@` 选图](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tui/src/bottom_pane/chat_composer.rs#L2515)；模型也能用 [`view_image`](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/core/src/tools/handlers/view_image.rs#L95) 按路径看图。本项目目前[只传文本](../../src/app/src/prompt.rs)，还需接通图片内容和会话保存，并使用能看图的模型。
 
 暂时不建议新增独立的 Git、测试、目录和文本搜索工具，也不建议扩大用户侧记忆工具范围。若以后需要跨平台文件接口或受限的只读模式，再考虑 `read_file / search_files / list_dir`。多 Agent、代码编排和插件安装则可以后置。
 
 这些建议会扩展现有 [003 执行契约](../specs/003-exec-command.md)与 [006 调用循环契约](../specs/006-tool-call-loop.md)，后续应先明确新契约。原调研仅做只读检查，未修改代码、安装依赖或运行测试；本次仅保存报告。
+
+## 工具搜索与按需加载（2026-10-24 源码复核）
+
+沿用本文固定的 Codex 提交。以下讲普通工具调用模式：模型支持工具搜索、允许使用 `tool_search`，且存在可搜索的工具时，才开放这个入口。[注册条件](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/core/src/tools/spec_plan.rs#L392)
+
+核心理解如下：
+
+- **直接可用的工具，包括已开放的 `tool_search`：**先把完整定义交给模型，即名称、说明和参数格式；函数工具的参数格式就是 Schema。[初始工具声明](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/core/src/tools/spec_plan.rs#L628)、[搜索入口定义](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/core/src/tools/handlers/tool_search_spec.rs#L16)
+- **按需加载的工具：**完整目录留在 Codex 宿主。模型可以先看到来源的名称和简述，例如“mail：提供邮件收发能力”，不必先逐个看到所有工具的名字和用法。来源名、简述允许缺省，来源列表也允许省略，所以这不是每个工具都有一份简介的保证。[目录与来源信息](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/tools/src/tool_search.rs#L50)、[来源概览的生成](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/core/src/tools/handlers/tool_search_spec.rs#L34)
+- **搜索命中后：**Codex 把匹配工具的名称、说明和参数格式放进搜索结果，再交给下一次模型请求，模型才据此调用具体工具。[搜索处理](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/core/src/tools/handlers/tool_search.rs#L275)、[结果进入模型上下文](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/core/src/tools/context.rs#L218)
+
+这样省下的是尚未使用的工具定义占用的模型上下文，宿主仍保留工具目录。这里的“完整定义”指调用说明，不包含工具实现代码或资源正文。
+
+“来源”是提供这一组工具的服务、应用或命名空间。在已核对的 MCP 路径中，优先用应用连接器名，否则用配置的 MCP 服务名。它与本地／云端的部署位置是两个概念；Codex 内置工具也不因此属于某个 MCP 服务器。[MCP 来源名](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/core/src/tools/handlers/mcp.rs#L186)
+
+模型可以用“发送邮件”这类用途词搜索，不需要先知道准确工具名。Codex 用 BM25 对目录文本排序，搜索字段包括工具名、服务器名、说明和参数字段名等；具体工具目录由运行时提供，无须预先把用户安装的工具训练进模型。[搜索排序](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/core/src/tools/handlers/tool_search.rs#L153)、[MCP 搜索字段](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/core/src/tools/handlers/mcp.rs#L593)
+
+本项目目前没有这套按需加载流程：[定义构造](../../src/app/src/mcp/catalog.rs)保留名称、说明和参数 Schema，[请求组装](../../src/app/src/prompt.rs)每次加入本轮全部可用工具定义。这与 MCP 的 `tools/list` 和 023 的资源接口是独立能力。
+
+以上结论来自固定源码，只修订文档；未实施工具搜索。官方 API 的逐函数延迟、服务端搜索及 Codex 代码编排属于其他路径，不能把它们的初始可见信息直接套到本文流程。

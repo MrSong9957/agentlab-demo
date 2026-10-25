@@ -95,6 +95,54 @@ pub struct ToolCallRecord {
     pub arguments: String,
 }
 
+pub(crate) const MAX_TOOL_CALLS_PER_BATCH: usize = 32;
+
+impl ToolCallRecord {
+    // API 边界与工具循环共用结构校验；不解析 arguments 内的 JSON。
+    pub(crate) fn parse_batch(message: &Value) -> Result<Vec<Self>, String> {
+        let Some(tc) = message.get("tool_calls") else {
+            return Ok(Vec::new());
+        };
+        if tc.is_null() {
+            return Ok(Vec::new());
+        }
+        let arr = tc
+            .as_array()
+            .ok_or_else(|| "协议错误：tool_calls 不是数组".to_string())?;
+        let mut calls = Vec::with_capacity(arr.len());
+        let mut seen = std::collections::HashSet::new();
+        for c in arr {
+            let id = c.get("id").and_then(Value::as_str).unwrap_or("");
+            if id.trim().is_empty() {
+                return Err("协议错误：工具调用缺少非空 id".into());
+            }
+            if !seen.insert(id.to_string()) {
+                return Err(format!("协议错误：批内调用 id 重复：{id}"));
+            }
+            if c.get("type").and_then(Value::as_str) != Some("function") {
+                return Err("协议错误：工具调用 type 必须为 function".to_string());
+            }
+            let func = c
+                .get("function")
+                .ok_or_else(|| "协议错误：工具调用缺少 function 字段".to_string())?;
+            let name = func.get("name").and_then(Value::as_str).unwrap_or("");
+            if name.trim().is_empty() {
+                return Err("协议错误：工具调用缺少非空工具名".to_string());
+            }
+            let arguments = func
+                .get("arguments")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "协议错误：工具调用 arguments 必须是字符串".to_string())?;
+            calls.push(Self {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+            });
+        }
+        Ok(calls)
+    }
+}
+
 /// 012：apply_patch 逐文件展示差异——全部来自**执行时的真实前后内容**（Add＝新全文、
 /// Delete＝旧全文、Update＝对真实前后缓冲生成的统一 diff），不从补丁文本反推。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +189,24 @@ pub struct ToolResultImage {
     pub detail: String,
 }
 
+/// 024：原生续接状态只回到产生它的模型连接；不保存实际凭证。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeOwner {
+    pub provider_id: String,
+    pub protocol: String,
+    pub model_id: String,
+    pub base_url: String,
+    pub key_ref: Option<String>,
+    pub credential_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeState {
+    pub owner: NativeOwner,
+    /// 保留原生块和签名；仅适配器读取，不投影到界面或记忆。
+    pub payload: Value,
+}
+
 /// 历史条目（006）：文本轮（005 行为）或工具调用轮的调用与结果记录；原样投影进请求。
 /// 007 序列化表征（serde tagged 派生，字段与投影语义不变）：
 /// `{"type":"text",…}`/`{"type":"tool_calls",…}`/`{"type":"tool_result",…}`。
@@ -150,6 +216,14 @@ pub struct ToolResultImage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum HistoryItem {
+    /// 共同 assistant 记录与其原生状态同条提交，不维护第二套可变历史。
+    #[serde(rename = "native_assistant")]
+    NativeAssistant {
+        message: Box<HistoryItem>,
+        /// 缺失表示会话状态损坏：可展示，但不能据此续接。
+        #[serde(default)]
+        state: Option<NativeState>,
+    },
     #[serde(rename = "text")]
     Text(HistoryMessage),
     #[serde(rename = "tool_calls")]
@@ -171,6 +245,17 @@ pub enum HistoryItem {
     },
 }
 
+impl HistoryItem {
+    /// 展示／记忆只读取共同内容，opaque 状态留在模型适配器内。
+    pub fn portable(&self) -> &HistoryItem {
+        let mut item = self;
+        while let Self::NativeAssistant { message, .. } = item {
+            item = message;
+        }
+        item
+    }
+}
+
 impl From<HistoryMessage> for HistoryItem {
     fn from(m: HistoryMessage) -> Self {
         Self::Text(m)
@@ -187,11 +272,13 @@ pub(crate) fn project_history(history: &[HistoryItem]) -> Vec<Value> {
     let mut out = Vec::with_capacity(history.len() + 1);
     // 当前批待附的图片附件（批结束＝遇到下一条非 tool_result 消息或历史末尾）
     let mut pending_attachments: Vec<Value> = Vec::new();
-    let mut flush = |out: &mut Vec<Value>, pending: &mut Vec<Value>| {
+    let flush = |out: &mut Vec<Value>, pending: &mut Vec<Value>| {
         out.append(pending);
     };
     for h in history {
+        let h = h.portable();
         match h {
+            HistoryItem::NativeAssistant { .. } => {}, // portable 已解包
             HistoryItem::Text(m) => {
                 flush(&mut out, &mut pending_attachments);
                 // 020 §2.2：有图用户消息在同一条 user 消息内用 text＋按 images

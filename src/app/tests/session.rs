@@ -74,7 +74,7 @@ fn meta_gate_rejects_bad_meta_and_unknown_version() {
     for (tag, content) in [
         ("空文件", ""),
         ("坏 JSON meta", "{oops\n"),
-        ("v=2", "{\"v\":2}\n" ),
+        ("v=2", "{\"v\":3}\n" ),
         ("缺 v", "{\"x\":1}\n"),
         ("非对象 meta", "[1,2]\n"),
     ] {

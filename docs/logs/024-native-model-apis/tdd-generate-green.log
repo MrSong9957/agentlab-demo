@@ -1,0 +1,4448 @@
+warning: field `builtin` is never read
+   --> src/shims/codex-config/src/lib.rs:188:5
+    |
+187 | pub struct ConfigLayerStack {
+    |            ---------------- field in this struct
+188 |     builtin: std::collections::BTreeMap<String, toml::Value>,
+    |     ^^^^^^^
+    |
+    = note: `ConfigLayerStack` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `ConfigKeyAlias` is never constructed
+ --> src/shims/codex-config/src/key_aliases.rs:9:8
+  |
+9 | struct ConfigKeyAlias {
+  |        ^^^^^^^^^^^^^^
+
+warning: constant `CONFIG_KEY_ALIASES` is never used
+  --> src/shims/codex-config/src/key_aliases.rs:14:7
+   |
+14 | const CONFIG_KEY_ALIASES: &[ConfigKeyAlias] = &[
+   |       ^^^^^^^^^^^^^^^^^^
+
+warning: function `normalize_table_key_aliases` is never used
+  --> src/shims/codex-config/src/key_aliases.rs:29:4
+   |
+29 | fn normalize_table_key_aliases(path: &[String], table: &mut TomlMap<String, TomlValue>) {
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `normalize_key_aliases` is never used
+  --> src/shims/codex-config/src/key_aliases.rs:61:15
+   |
+61 | pub(crate) fn normalize_key_aliases(value: &TomlValue) -> TomlValue {
+   |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `normalize_key_aliases_at_path` is never used
+  --> src/shims/codex-config/src/key_aliases.rs:65:4
+   |
+65 | fn normalize_key_aliases_at_path(value: &TomlValue, path: &[String]) -> TomlValue {
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `normalize_base_key_aliases` is never used
+   --> src/shims/codex-config/src/key_aliases.rs:111:15
+    |
+111 | pub(crate) fn normalize_base_key_aliases(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `codex-config` (lib) generated 7 warnings
+warning: unused import: `codex_config::config_toml::ConfigToml`
+  --> src/shims/codex-app-server-client/src/lib.rs:58:13
+   |
+58 |         use codex_config::config_toml::ConfigToml;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `codex-app-server-client` (lib) generated 1 warning (run `cargo fix --lib -p codex-app-server-client` to apply 1 suggestion)
+warning: unused import: `footer::inset_footer_hint_area`
+  --> src/tui/src/bottom_pane/mod.rs:28:16
+   |
+28 | pub(crate) use footer::inset_footer_hint_area;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::terminal_palette::effective_stdout_color_level`
+  --> src/tui/src/bottom_pane/mod.rs:49:5
+   |
+49 | use crate::terminal_palette::effective_stdout_color_level;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ratatui::text::Span`
+  --> src/tui/src/bottom_pane/mod.rs:69:5
+   |
+69 | use ratatui::text::Span;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `view_stack::DialogOverlay`
+   --> src/tui/src/bottom_pane/mod.rs:129:16
+    |
+129 | pub(crate) use view_stack::DialogOverlay;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::tui::FrameRequester`
+ --> src/tui/src/bottom_pane/chat_composer/composer_layout.rs:5:5
+  |
+5 | use crate::tui::FrameRequester;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ratatui::buffer::Buffer`
+ --> src/tui/src/bottom_pane/chat_composer/composer_layout.rs:6:5
+  |
+6 | use ratatui::buffer::Buffer;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::app_event::AppEvent`
+  --> src/tui/src/bottom_pane/chat_composer/history_search.rs:48:5
+   |
+48 | use crate::app_event::AppEvent;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crossterm::event::KeyCode`
+ --> src/tui/src/bottom_pane/chat_composer/slash_input.rs:5:5
+  |
+5 | use crossterm::event::KeyCode;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crossterm::event::KeyEvent`
+ --> src/tui/src/bottom_pane/chat_composer/slash_input.rs:6:5
+  |
+6 | use crossterm::event::KeyEvent;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crossterm::event::KeyModifiers`
+ --> src/tui/src/bottom_pane/chat_composer/slash_input.rs:7:5
+  |
+7 | use crossterm::event::KeyModifiers;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::InputResult`
+  --> src/tui/src/bottom_pane/chat_composer/slash_input.rs:19:5
+   |
+19 | use super::InputResult;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ratatui::style::Color`
+   --> src/tui/src/bottom_pane/chat_composer.rs:446:5
+    |
+446 | use ratatui::style::Color;
+    |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::Path`
+    --> src/tui/src/bottom_pane/chat_composer.rs:9529:9
+     |
+9529 |     use std::path::Path;
+     |         ^^^^^^^^^^^^^^^
+
+warning: unused import: `list_selection_view::ListSelectionView`
+   --> src/tui/src/bottom_pane/mod.rs:175:16
+    |
+175 | pub(crate) use list_selection_view::ListSelectionView;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `list_selection_view::OnSelectionChangedCallback`
+   --> src/tui/src/bottom_pane/mod.rs:176:16
+    |
+176 | pub(crate) use list_selection_view::OnSelectionChangedCallback;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `list_selection_view::SearchMode`
+   --> src/tui/src/bottom_pane/mod.rs:178:16
+    |
+178 | pub(crate) use list_selection_view::SearchMode;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `list_selection_view::SelectionRowDisplay`
+   --> src/tui/src/bottom_pane/mod.rs:180:16
+    |
+180 | pub(crate) use list_selection_view::SelectionRowDisplay;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `list_selection_view::SelectionToggle`
+   --> src/tui/src/bottom_pane/mod.rs:181:16
+    |
+181 | pub(crate) use list_selection_view::SelectionToggle;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `list_selection_view::SideContentWidth`
+   --> src/tui/src/bottom_pane/mod.rs:184:16
+    |
+184 | pub(crate) use list_selection_view::SideContentWidth;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `list_selection_view::popup_content_width`
+   --> src/tui/src/bottom_pane/mod.rs:185:16
+    |
+185 | pub(crate) use list_selection_view::popup_content_width;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `list_selection_view::side_by_side_layout_widths`
+   --> src/tui/src/bottom_pane/mod.rs:186:16
+    |
+186 | pub(crate) use list_selection_view::side_by_side_layout_widths;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `picker_option::picker_option_list`
+   --> src/tui/src/bottom_pane/mod.rs:212:16
+    |
+212 | pub(crate) use picker_option::picker_option_list;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `picker_option::picker_option_row`
+   --> src/tui/src/bottom_pane/mod.rs:213:16
+    |
+213 | pub(crate) use picker_option::picker_option_row;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `selection_popup_common::menu_surface_padding_height`
+   --> src/tui/src/bottom_pane/mod.rs:217:16
+    |
+217 | pub(crate) use selection_popup_common::menu_surface_padding_height;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `selection_popup_common::render_menu_surface`
+   --> src/tui/src/bottom_pane/mod.rs:218:16
+    |
+218 | pub(crate) use selection_popup_common::render_menu_surface;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `selection_tabs::render_filled_tab_bar`
+   --> src/tui/src/bottom_pane/mod.rs:221:16
+    |
+221 | pub(crate) use selection_tabs::render_filled_tab_bar;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `selection_tabs::SelectionTab`
+   --> src/tui/src/bottom_pane/mod.rs:229:16
+    |
+229 | pub(crate) use selection_tabs::SelectionTab;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `chat_composer::QueuedInputAction`
+   --> src/tui/src/bottom_pane/mod.rs:266:16
+    |
+266 | pub(crate) use chat_composer::QueuedInputAction;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `list_selection_view::SELECTION_TOGGLE_BLOCKED_PREFIX`
+   --> src/tui/src/bottom_pane/mod.rs:276:16
+    |
+276 | pub(crate) use list_selection_view::SELECTION_TOGGLE_BLOCKED_PREFIX;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `list_selection_view::SELECTION_TOGGLE_UNAVAILABLE_PREFIX`
+   --> src/tui/src/bottom_pane/mod.rs:277:16
+    |
+277 | pub(crate) use list_selection_view::SELECTION_TOGGLE_UNAVAILABLE_PREFIX;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `list_selection_view::SelectionAction`
+   --> src/tui/src/bottom_pane/mod.rs:278:16
+    |
+278 | pub(crate) use list_selection_view::SelectionAction;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `list_selection_view::SelectionSecondaryAction`
+   --> src/tui/src/bottom_pane/mod.rs:280:16
+    |
+280 | pub(crate) use list_selection_view::SelectionSecondaryAction;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `policy::is_startup_cell`
+  --> src/tui/src/empty_state_animation.rs:27:16
+   |
+27 | pub(crate) use policy::is_startup_cell;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::exec_command::strip_bash_lc_and_escape`
+  --> src/tui/src/history_cell/mod.rs:23:5
+   |
+23 | use crate::exec_command::strip_bash_lc_and_escape;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::render::line_utils::line_to_static`
+  --> src/tui/src/history_cell/mod.rs:29:5
+   |
+29 | use crate::render::line_utils::line_to_static;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::style::proposed_plan_style`
+  --> src/tui/src/history_cell/mod.rs:34:5
+   |
+34 | use crate::style::proposed_plan_style;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::text_formatting::truncate_text`
+  --> src/tui/src/history_cell/mod.rs:44:5
+   |
+44 | use crate::text_formatting::truncate_text;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `codex_app_server_protocol::McpAuthStatus`
+  --> src/tui/src/history_cell/mod.rs:53:5
+   |
+53 | use codex_app_server_protocol::McpAuthStatus;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `codex_app_server_protocol::McpServerStatus`
+  --> src/tui/src/history_cell/mod.rs:54:5
+   |
+54 | use codex_app_server_protocol::McpServerStatus;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `codex_app_server_protocol::McpServerStatusDetail`
+  --> src/tui/src/history_cell/mod.rs:55:5
+   |
+55 | use codex_app_server_protocol::McpServerStatusDetail;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `codex_app_server_protocol::WebSearchAction`
+  --> src/tui/src/history_cell/mod.rs:56:5
+   |
+56 | use codex_app_server_protocol::WebSearchAction;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `codex_protocol::approvals::ExecPolicyAmendment`
+  --> src/tui/src/history_cell/mod.rs:61:5
+   |
+61 | use codex_protocol::approvals::ExecPolicyAmendment;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `codex_protocol::approvals::NetworkPolicyAmendment`
+  --> src/tui/src/history_cell/mod.rs:62:5
+   |
+62 | use codex_protocol::approvals::NetworkPolicyAmendment;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::time::Duration`
+  --> src/tui/src/history_cell/mod.rs:90:5
+   |
+90 | use std::time::Duration;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `codex_utils_path_uri::LegacyAppPathString`
+ --> src/tui/src/history_cell/patches.rs:6:5
+  |
+6 | use codex_utils_path_uri::LegacyAppPathString;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `exec::*`
+   --> src/tui/src/history_cell/mod.rs:129:16
+    |
+129 | pub(crate) use exec::*;
+    |                ^^^^^^^
+
+warning: unused import: `warnings::warning_count`
+   --> src/tui/src/history_cell/mod.rs:147:16
+    |
+147 | pub(crate) use warnings::warning_count;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `warnings::warning_entries`
+   --> src/tui/src/history_cell/mod.rs:148:16
+    |
+148 | pub(crate) use warnings::warning_entries;
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `bindings::KeymapActionId`
+  --> src/tui/src/keymap.rs:53:16
+   |
+53 | pub(crate) use bindings::KeymapActionId;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `bindings::configured_binding_for_action`
+  --> src/tui/src/keymap.rs:56:16
+   |
+56 | pub(crate) use bindings::configured_binding_for_action;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `bindings::keymap_action_ids`
+  --> src/tui/src/keymap.rs:58:16
+   |
+58 | pub(crate) use bindings::keymap_action_ids;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `chords::KEY_CHORD_TIMEOUT`
+  --> src/tui/src/keymap.rs:60:16
+   |
+60 | pub(crate) use chords::KEY_CHORD_TIMEOUT;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `chords::KeyChordMatch`
+  --> src/tui/src/keymap.rs:61:16
+   |
+61 | pub(crate) use chords::KeyChordMatch;
+   |                ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `chords::KeyChordMatcher`
+  --> src/tui/src/keymap.rs:62:16
+   |
+62 | pub(crate) use chords::KeyChordMatcher;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `chords::is_dispatch_token_event`
+  --> src/tui/src/keymap.rs:65:16
+   |
+65 | pub(crate) use chords::is_dispatch_token_event;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::style::proposed_plan_style`
+  --> src/tui/src/streaming/controller.rs:51:5
+   |
+51 | use crate::style::proposed_plan_style;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::terminal_hyperlinks::prefix_hyperlink_lines`
+  --> src/tui/src/streaming/controller.rs:53:5
+   |
+53 | use crate::terminal_hyperlinks::prefix_hyperlink_lines;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ratatui::text::Line`
+  --> src/tui/src/streaming/controller.rs:55:5
+   |
+55 | use ratatui::text::Line;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `card::StatusHistoryHandle`
+  --> src/tui/src/status/mod.rs:18:16
+   |
+18 | pub(crate) use card::StatusHistoryHandle;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `card::new_status_output_with_handle`
+  --> src/tui/src/status/mod.rs:21:16
+   |
+21 | pub(crate) use card::new_status_output_with_handle;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `helpers::format_directory_display`
+  --> src/tui/src/status/mod.rs:22:16
+   |
+22 | pub(crate) use helpers::format_directory_display;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `paragraph::HyperlinkText`
+  --> src/tui/src/terminal_hyperlinks.rs:11:16
+   |
+11 | pub(crate) use paragraph::HyperlinkText;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::history_cell::PrefixedWrappedHistoryCell`
+  --> src/tui/src/thread_transcript.rs:11:5
+   |
+11 | use crate::history_cell::PrefixedWrappedHistoryCell;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::history_cell::PlainHistoryCell`
+ --> src/tui/src/thread_transcript/other_items.rs:9:5
+  |
+9 | use crate::history_cell::PlainHistoryCell;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ratatui::style::Stylize as _`
+  --> src/tui/src/thread_transcript/other_items.rs:13:5
+   |
+13 | use ratatui::style::Stylize as _;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `activity_pages::fold_trailing_activity_details`
+  --> src/tui/src/thread_transcript.rs:28:16
+   |
+28 | pub(crate) use activity_pages::fold_trailing_activity_details;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `activity_pages::is_hidden_activity_detail`
+  --> src/tui/src/thread_transcript.rs:29:16
+   |
+29 | pub(crate) use activity_pages::is_hidden_activity_detail;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `exploration_groups::older_exploration_group`
+  --> src/tui/src/thread_transcript.rs:36:16
+   |
+36 | pub(crate) use exploration_groups::older_exploration_group;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::PathBuf`
+ --> src/tui/src/task_mentions.rs:3:5
+  |
+3 | use std::path::PathBuf;
+  |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::Arc`
+ --> src/tui/src/task_mentions.rs:4:5
+  |
+4 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::atomic::AtomicU64`
+ --> src/tui/src/task_mentions.rs:5:5
+  |
+5 | use std::sync::atomic::AtomicU64;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::sync::atomic::Ordering`
+ --> src/tui/src/task_mentions.rs:6:5
+  |
+6 | use std::sync::atomic::Ordering;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `codex_features::FEATURES`
+ --> src/tui/src/tooltips.rs:5:5
+  |
+5 | use codex_features::FEATURES;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `codex_features::Feature`
+ --> src/tui/src/tooltips.rs:6:5
+  |
+6 | use codex_features::Feature;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `codex_features::FeatureSpec`
+ --> src/tui/src/tooltips.rs:7:5
+  |
+7 | use codex_features::FeatureSpec;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::render::renderable::Renderable`
+ --> src/tui/src/bottom_pane/chat_composer/composer_layout.rs:4:5
+  |
+4 | use crate::render::renderable::Renderable;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::str::FromStr`
+  --> src/tui/src/chat_driver.rs:24:5
+   |
+24 | use std::str::FromStr;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ratatui::prelude::Stylize`
+  --> src/tui/src/streaming/controller.rs:54:5
+   |
+54 | use ratatui::prelude::Stylize;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `key`
+  --> src/tui/src/bottom_pane/chat_composer/agents_navigation.rs:34:55
+   |
+34 |     pub(super) fn handle_agents_navigation(&mut self, key: KeyEvent) -> bool {
+   |                                                       ^^^ help: if this is intentional, prefix it with an underscore: `_key`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `width`
+   --> src/tui/src/bottom_pane/footer.rs:238:50
+    |
+238 | pub(crate) fn footer_height(props: &FooterProps, width: u16) -> u16 {
+    |                                                  ^^^^^ help: if this is intentional, prefix it with an underscore: `_width`
+
+warning: unused variable: `turn_running`
+    --> src/tui/src/chat_driver.rs:1477:5
+     |
+1477 |     turn_running: bool,
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_turn_running`
+
+warning: irrefutable `if let` pattern
+   --> src/tui/src/thread_transcript.rs:168:20
+    |
+168 |                 if let UserInput::Text { text, text_elements: elements } = input {
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this pattern will always match, so the `if let` is useless
+    = help: consider replacing the `if let` with a `let`
+    = note: `#[warn(irrefutable_let_patterns)]` on by default
+
+warning: unused variable: `raw_reasoning_visibility`
+   --> src/tui/src/thread_transcript.rs:153:5
+    |
+153 |     raw_reasoning_visibility: RawReasoningVisibility,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_raw_reasoning_visibility`
+
+warning: type `warnings::WarningEntry` is more private than the item `history_cell::HistoryCell::warning_entries`
+   --> src/tui/src/history_cell/mod.rs:206:5
+    |
+206 |     fn warning_entries(&self) -> Vec<WarningEntry> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `history_cell::HistoryCell::warning_entries` is reachable at visibility `pub`
+    |
+note: but type `warnings::WarningEntry` is only usable at visibility `pub(crate)`
+   --> src/tui/src/history_cell/warnings.rs:18:1
+    |
+ 18 | pub(crate) struct WarningEntry {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `warnings::WarningKey<'_>` is more private than the item `history_cell::HistoryCell::warning_keys`
+   --> src/tui/src/history_cell/mod.rs:211:5
+    |
+211 |     fn warning_keys(&self) -> Vec<WarningKey<'_>> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `history_cell::HistoryCell::warning_keys` is reachable at visibility `pub`
+    |
+note: but type `warnings::WarningKey<'_>` is only usable at visibility `pub(crate)`
+   --> src/tui/src/history_cell/warnings.rs:43:1
+    |
+ 43 | pub(crate) enum WarningKey<'a> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `ActivityDisclosure` is more private than the item `history_cell::HistoryCell::activity_disclosure`
+   --> src/tui/src/history_cell/mod.rs:264:5
+    |
+264 |     fn activity_disclosure(&self, _width: u16) -> Option<ActivityDisclosure> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `history_cell::HistoryCell::activity_disclosure` is reachable at visibility `pub`
+    |
+note: but type `ActivityDisclosure` is only usable at visibility `pub(crate)`
+   --> src/tui/src/history_cell/activity_preview.rs:11:1
+    |
+ 11 | pub(crate) enum ActivityDisclosure {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `INITIAL_GUARD` is never used
+  --> src/tui/src/activation_key_guard.rs:11:7
+   |
+11 | const INITIAL_GUARD: Duration = Duration::from_secs(/*secs*/ 1);
+   |       ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `new_at` is never used
+  --> src/tui/src/activation_key_guard.rs:23:19
+   |
+22 | impl ActivationKeyGuard {
+   | ----------------------- associated function in this implementation
+23 |     pub(crate) fn new_at(key: KeyBinding, now: Instant, key_releases_reported: bool) -> Self {
+   |                   ^^^^^^
+
+warning: constant `QUIT_SHORTCUT_TIMEOUT` is never used
+   --> src/tui/src/bottom_pane/mod.rs:238:18
+    |
+238 | pub(crate) const QUIT_SHORTCUT_TIMEOUT: Duration = Duration::from_secs(1);
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED` is never used
+   --> src/tui/src/bottom_pane/mod.rs:247:18
+    |
+247 | pub(crate) const DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED: bool = false;
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `thread_id`, `has_input_focus`, `enhanced_keys_supported`, `esc_backtrack_hint`, `context_window_percent`, and `context_window_used_tokens` are never read
+   --> src/tui/src/bottom_pane/mod.rs:303:5
+    |
+289 | pub(crate) struct BottomPane {
+    |                   ---------- fields in this struct
+...
+303 |     thread_id: Option<ThreadId>,
+    |     ^^^^^^^^^
+304 |
+305 |     has_input_focus: bool,
+    |     ^^^^^^^^^^^^^^^
+306 |     enhanced_keys_supported: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+...
+309 |     esc_backtrack_hint: bool,
+    |     ^^^^^^^^^^^^^^^^^^
+...
+321 |     context_window_percent: Option<i64>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+322 |     context_window_used_tokens: Option<i64>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+    --> src/tui/src/bottom_pane/mod.rs:428:12
+     |
+ 365 | impl BottomPane {
+     | --------------- methods in this implementation
+...
+ 428 |     pub fn set_image_paste_enabled(&mut self, enabled: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 433 |     pub(crate) fn set_motion_preferences(&mut self, tui: &codex_config::types::Tui) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+ 447 |     pub fn set_token_activity_command_enabled(&mut self, enabled: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 452 |     pub fn set_mentions_v2_enabled(&mut self, enabled: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 457 |     pub fn take_mention_bindings(&mut self) -> Vec<MentionBinding> {
+     |            ^^^^^^^^^^^^^^^^^^^^^
+...
+ 461 |     pub fn take_recent_submission_mention_bindings(&mut self) -> Vec<MentionBinding> {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 469 |     pub(crate) fn record_pending_slash_command_history(&mut self) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 496 |     pub(crate) fn transcript_shortcut_hint(&self) -> Option<crate::key_hint::ShortcutHint> {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 502 |     pub(crate) fn drain_pending_submission_state(&mut self) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 509 |     pub fn set_collaboration_modes_enabled(&mut self, enabled: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 514 |     pub fn set_connectors_enabled(&mut self, enabled: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+ 524 |     pub fn set_collaboration_mode_indicator(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 532 |     pub fn set_goal_status_indicator(&mut self, indicator: Option<GoalStatusIndicator>) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 537 |     pub fn set_ide_context_active(&mut self, active: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+ 542 |     pub fn set_worktrees_enabled(&mut self, enabled: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^
+...
+ 547 |     pub fn set_service_tier_commands_enabled(&mut self, enabled: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 552 |     pub fn set_daybreak_command_description(&mut self, description: Option<&'static str>) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 557 |     pub fn set_service_tier_commands(&mut self, commands: Vec<ServiceTierCommand>) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 562 |     pub fn set_goal_command_enabled(&mut self, enabled: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 567 |     pub fn set_voice_command_enabled(&mut self, enabled: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 572 |     pub(crate) fn set_side_conversation_active(&mut self, active: bool) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 577 |     pub(crate) fn set_placeholder_text(&mut self, placeholder: String) {
+     |                   ^^^^^^^^^^^^^^^^^^^^
+...
+ 582 |     pub(crate) fn set_parent_owned_thread(&mut self) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 587 |     pub(crate) fn set_vim_enabled(&mut self, enabled: bool) {
+     |                   ^^^^^^^^^^^^^^^
+...
+ 593 |     pub(crate) fn take_kill_buffer_snapshot(&mut self) -> KillBufferSnapshot {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 597 |     pub(crate) fn restore_kill_buffer_snapshot(&mut self, snapshot: KillBufferSnapshot) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 601 |     pub(crate) fn toggle_vim_enabled(&mut self) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^
+...
+ 612 |     pub(crate) fn status_elapsed(&self) -> Option<Duration> {
+     |                   ^^^^^^^^^^^^^^
+...
+ 617 |     pub(crate) fn reset_status_timer(&mut self, elapsed: Duration) {
+     |                   ^^^^^^^^^^^^^^^^^^
+...
+ 621 |     pub(crate) fn set_status_timer_origin(&mut self, started_at: Option<Instant>) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 683 |     pub(crate) fn handle_restricted_key(
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+ 800 |     pub(crate) fn keymap_contexts(&self) -> KeymapContextSet {
+     |                   ^^^^^^^^^^^^^^^
+...
+ 818 |     pub(crate) fn on_ctrl_c(&mut self) -> CancellationEvent {
+     |                   ^^^^^^^^^
+...
+ 867 |     pub(crate) fn insert_str(&mut self, text: &str) {
+     |                   ^^^^^^^^^^
+...
+ 914 |     pub(crate) fn set_composer_text(
+     |                   ^^^^^^^^^^^^^^^^^
+...
+ 931 |     pub(crate) fn set_composer_text_with_mention_bindings(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 960 |     pub(crate) fn show_shutdown_in_progress(&mut self) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 973 |     pub(crate) fn clear_composer_for_ctrl_c(&mut self) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1003 |     pub(crate) fn composer_local_images(&self) -> Vec<LocalImageAttachment> {
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+1017 |     pub(crate) fn composer_input_enabled(&self) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+1021 |     pub(crate) fn composer_pending_pastes(&self) -> Vec<(String, String)> {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+1025 |     pub(crate) fn apply_external_edit(&mut self, text: String) {
+     |                   ^^^^^^^^^^^^^^^^^^^
+...
+1030 |     pub(crate) fn set_footer_hint_override(&mut self, items: Option<Vec<(String, String)>>) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1038 |     pub(crate) fn set_remote_image_urls(&mut self, urls: Vec<String>) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+1044 |     pub(crate) fn remote_image_urls(&self) -> Vec<String> {
+     |                   ^^^^^^^^^^^^^^^^^
+...
+1048 |     pub(crate) fn take_remote_image_urls(&mut self) -> Vec<String> {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+1054 |     pub(crate) fn set_composer_pending_pastes(&mut self, pending_pastes: Vec<(String, String)>) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1064 |     pub(crate) fn update_status(
+     |                   ^^^^^^^^^^^^^
+...
+1086 |     pub(crate) fn show_quit_shortcut_hint(&mut self, key: KeyBinding) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+1111 |     pub(crate) fn clear_quit_shortcut_hint(&mut self) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1131 |     pub(crate) fn show_esc_backtrack_hint(&mut self) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+1137 |     pub(crate) fn clear_esc_backtrack_hint(&mut self) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1179 |     pub(crate) fn set_queue_submissions(&mut self, queue_submissions: bool) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+1190 |     pub(crate) fn ensure_status_indicator(&mut self) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+1211 |     pub(crate) fn set_interrupt_hint_visible(&mut self, visible: bool) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1218 |     pub(crate) fn set_context_window(&mut self, percent: Option<i64>, used_tokens: Option<i64>) {
+     |                   ^^^^^^^^^^^^^^^^^^
+...
+1231 |     pub(crate) fn set_context_window_pending(&mut self, pending: bool) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1237 |     pub(crate) fn show_selection_view(
+     |                   ^^^^^^^^^^^^^^^^^^^
+...
+1250 |     fn apply_standard_popup_hint(&self, params: &mut list_selection_view::SelectionViewParams) {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1279 |     pub(crate) fn replace_selection_view_if_active(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1316 |     pub(crate) fn replace_selection_view_if_present(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1346 |     pub(crate) fn replace_view_if_present(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+1361 |     pub(crate) fn list_keymap(&self) -> crate::keymap::ListKeymap {
+     |                   ^^^^^^^^^^^
+...
+1367 |     pub(crate) fn replace_active_views_with_selection_view(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1399 |     pub(crate) fn selected_index_for_active_view(&self, view_id: &'static str) -> Option<usize> {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1406 |     pub(crate) fn selection_toggle_states_for_active_view(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1416 |     pub(crate) fn complete_selection_toggle_for_active_view(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1430 |     pub(crate) fn selected_index_for_present_view(&self, view_id: &'static str) -> Option<usize> {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1437 |     pub(crate) fn active_tab_id_for_active_view(&self, view_id: &'static str) -> Option<&str> {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1445 |     pub(crate) fn apply_text_suggestion(
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+1479 |     pub(crate) fn dismiss_view_by_id(&mut self, view_id: &'static str) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^
+...
+1519 |     pub(crate) fn composer_is_empty(&self) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^
+...
+1523 |     pub(crate) fn composer_is_vim_enabled(&self) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+1531 |     pub(crate) fn is_task_running(&self) -> bool {
+     |                   ^^^^^^^^^^^^^^^
+...
+1552 |     pub(crate) fn terminal_title_requires_action(&self) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1558 |     pub(crate) fn has_centered_view(&self) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^
+...
+1573 |     pub(crate) fn active_view_accepts_input_when_disconnected(&self) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1578 |     pub(crate) fn active_view_will_interrupt_turn_on_key_event(&self, key_event: KeyEvent) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1592 |     pub(crate) fn is_normal_backtrack_mode(&self) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1625 |     pub(crate) fn clear_composer_selection(&mut self) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1629 |     pub(crate) fn end_composer_drag(&mut self) {
+     |                   ^^^^^^^^^^^^^^^^^
+...
+1633 |     pub(crate) fn cancel_composer_primary(&mut self) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+1658 |     pub(crate) fn copy_composer_selection_on_release(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1678 |     pub(crate) fn clipboard_paste_target(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+1742 |     pub(crate) fn suppress_current_view_key_until_release(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1755 |     pub(crate) fn consume_view_transition_key_event(&mut self, key_event: KeyEvent) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1781 |     fn pause_status_timer_for_modal(&mut self) {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1801 |     pub(crate) fn set_history_metadata(
+     |                   ^^^^^^^^^^^^^^^^^^^^
+...
+1825 |     pub(crate) fn prepare_composer_clipboard_paste(&mut self) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1829 |     pub(crate) fn is_in_paste_burst(&self) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^
+...
+1837 |     pub(crate) fn on_history_lookup_response(&mut self, response: HistoryLookupResponse) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1862 |     pub(crate) fn record_replayed_user_message_history(&mut self, entry: HistoryEntry) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1945 |     pub(crate) fn prepare_inline_args_submission(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1963 |     pub(crate) fn centered_dialog(&self) -> Option<CenteredView<'_>> {
+     |                   ^^^^^^^^^^^^^^^
+...
+1970 |     pub(crate) fn backdrop_with_options<'a>(
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+2070 |     pub(crate) fn show_footer_flash(&mut self, line: Line<'static>, duration: Duration) {
+     |                   ^^^^^^^^^^^^^^^^^
+...
+2076 |     pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) {
+     |                   ^^^^^^^^^^^^^^^
+...
+2082 |     pub(crate) fn set_luna_reserve_active(&mut self, active: bool) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+2088 |     pub(crate) fn set_status_line_hyperlink(&mut self, url: Option<String>) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2094 |     pub(crate) fn set_status_line_enabled(&mut self, enabled: bool) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+2104 |     pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+2110 |     pub(crate) fn set_side_conversation_context_label(&mut self, label: Option<String>) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `empty_state_composer` is never used
+ --> src/tui/src/bottom_pane/empty_state_policy.rs:7:19
+  |
+6 | impl BottomPane {
+  | --------------- method in this implementation
+7 |     pub(crate) fn empty_state_composer(&self) -> Option<ComposerState> {
+  |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> src/tui/src/bottom_pane/bottom_pane_view.rs:41:8
+    |
+ 27 | pub(crate) trait BottomPaneView: Renderable {
+    |                  -------------- methods in this trait
+...
+ 41 |     fn config_editor_opened(&mut self) {}
+    |        ^^^^^^^^^^^^^^^^^^^^
+...
+ 44 |     fn interrupt_config_editor_transition(&mut self) {}
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 71 |     fn keymap_contexts(&self) -> KeymapContextSet {
+    |        ^^^^^^^^^^^^^^^
+...
+ 76 |     fn accepts_input_when_disconnected(&self) -> bool {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+105 |     fn selected_index(&self) -> Option<usize> {
+    |        ^^^^^^^^^^^^^^
+...
+110 |     fn selection_toggle_states(&self) -> Vec<Option<super::SelectionToggleState>> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+...
+115 |     fn complete_selection_toggle(&mut self, _index: usize) {}
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+118 |     fn search_query(&self) -> Option<&str> {
+    |        ^^^^^^^^^^^^
+...
+123 |     fn apply_text_suggestion(
+    |        ^^^^^^^^^^^^^^^^^^^^^
+...
+149 |     fn will_interrupt_turn_on_key_event(&self, _key_event: KeyEvent) -> bool {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+189 |     fn terminal_title_requires_action(&self) -> bool {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `DialogOverlay` is never constructed
+   --> src/tui/src/bottom_pane/view_stack.rs:102:19
+    |
+102 | pub(crate) struct DialogOverlay<'a> {
+    |                   ^^^^^^^^^^^^^
+
+warning: fields `task_mentions` and `mentions_v2_enabled` are never read
+   --> src/tui/src/bottom_pane/chat_composer.rs:631:5
+    |
+605 | pub(crate) struct ChatComposer {
+    |                   ------------ fields in this struct
+...
+631 |     task_mentions: Option<Vec<crate::task_mentions::TaskMention>>,
+    |     ^^^^^^^^^^^^^
+...
+639 |     mentions_v2_enabled: bool,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ComposerDraftSnapshot` is never constructed
+   --> src/tui/src/bottom_pane/chat_composer.rs:671:19
+    |
+671 | pub(crate) struct ComposerDraftSnapshot {
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+    --> src/tui/src/bottom_pane/chat_composer.rs:694:12
+     |
+ 684 | impl ChatComposer {
+     | ----------------- associated items in this implementation
+...
+ 694 |     pub fn new(
+     |            ^^^
+...
+ 835 |     pub(crate) fn set_task_mentions_enabled(&mut self, enabled: bool) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 841 |     pub(crate) fn task_mentions_enabled(&self) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+ 852 |     pub fn set_token_activity_command_enabled(&mut self, enabled: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 856 |     pub fn set_mentions_v2_enabled(&mut self, enabled: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 866 |     pub fn set_image_paste_enabled(&mut self, enabled: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 872 |     pub(crate) fn take_mention_bindings(&mut self) -> Vec<MentionBinding> {
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+ 891 |     pub fn set_collaboration_modes_enabled(&mut self, enabled: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 895 |     pub fn set_connectors_enabled(&mut self, enabled: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+ 899 |     pub fn set_service_tier_commands_enabled(&mut self, enabled: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 903 |     pub fn set_service_tier_commands(&mut self, commands: Vec<ServiceTierCommand>) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 908 |     pub fn set_goal_command_enabled(&mut self, enabled: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 912 |     pub fn set_voice_command_enabled(&mut self, enabled: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 968 |     pub(crate) fn keymap_contexts(&self) -> KeymapContextSet {
+     |                   ^^^^^^^^^^^^^^^
+...
+ 982 |     pub fn set_collaboration_mode_indicator(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 989 |     pub fn set_goal_status_indicator(&mut self, indicator: Option<GoalStatusIndicator>) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 993 |     pub fn set_ide_context_active(&mut self, active: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+ 997 |     pub fn set_side_conversation_active(&mut self, active: bool) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1021 |     pub fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+     |            ^^^^^^^^^^
+...
+1032 |     pub(crate) fn set_history_metadata(
+     |                   ^^^^^^^^^^^^^^^^^^^^
+...
+1047 |     pub(crate) fn on_history_entry_response(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1071 |     pub(crate) fn on_history_batch_response(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1092 |     pub(crate) fn on_history_batch_error(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+1103 |     fn apply_history_batch_result(&mut self, result: Option<HistorySearchResult>) -> bool {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1111 |     pub(crate) fn record_replayed_user_message_history(&mut self, entry: HistoryEntry) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1139 |     pub(crate) fn apply_external_edit(&mut self, text: String) {
+     |                   ^^^^^^^^^^^^^^^^^^^
+...
+1225 |     pub(crate) fn set_vim_enabled(&mut self, enabled: bool) {
+     |                   ^^^^^^^^^^^^^^^
+...
+1237 |     pub(crate) fn enable_vim_in_insert_mode(&mut self) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1243 |     pub(crate) fn resume_text_entry(&mut self) {
+     |                   ^^^^^^^^^^^^^^^^^
+...
+1247 |     pub(crate) fn take_kill_buffer_snapshot(&mut self) -> KillBufferSnapshot {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1251 |     pub(crate) fn restore_kill_buffer_snapshot(&mut self, snapshot: KillBufferSnapshot) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1256 |     pub(crate) fn restore_startup_local_history(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1270 |     pub(crate) fn toggle_vim_enabled(&mut self) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^
+...
+1277 |     pub(crate) fn is_vim_enabled(&self) -> bool {
+     |                   ^^^^^^^^^^^^^^
+...
+1350 |     pub(crate) fn input_enabled(&self) -> bool {
+     |                   ^^^^^^^^^^^^^
+...
+1375 |     pub(crate) fn remote_image_urls(&self) -> Vec<String> {
+     |                   ^^^^^^^^^^^^^^^^^
+...
+1379 |     pub(crate) fn take_remote_image_urls(&mut self) -> Vec<String> {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+1546 |     pub(crate) fn set_parent_owned_thread(&mut self) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+1596 |     pub(crate) fn clear_for_ctrl_c(&mut self) -> Option<String> {
+     |                   ^^^^^^^^^^^^^^^^
+...
+1690 |     pub(crate) fn take_recent_submission_mention_bindings(&mut self) -> Vec<MentionBinding> {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2121 |     fn current_prefixed_token(
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+...
+2133 |     fn current_at_token(textarea: &TextArea) -> Option<String> {
+     |        ^^^^^^^^^^^^^^^^
+...
+2399 |     pub(super) fn prepare_startup_submission(&mut self) -> InputResult {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2644 |     pub(crate) fn prepare_inline_args_submission(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3326 |     fn set_has_focus(&mut self, has_focus: bool) {
+     |        ^^^^^^^^^^^^^
+...
+3341 |     pub(crate) fn show_shutdown_in_progress(&mut self) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3353 |     pub(crate) fn set_queue_submissions(&mut self, queue_submissions: bool) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+3357 |     pub(crate) fn set_context_window(&mut self, percent: Option<i64>, used_tokens: Option<i64>) {
+     |                   ^^^^^^^^^^^^^^^^^^
+...
+3367 |     pub(crate) fn set_context_window_pending(&mut self, pending: bool) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3371 |     pub(crate) fn set_esc_backtrack_hint(&mut self, show: bool) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+3380 |     pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) -> bool {
+     |                   ^^^^^^^^^^^^^^^
+...
+3388 |     pub(crate) fn set_status_line_hyperlink(&mut self, url: Option<String>) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3396 |     pub(crate) fn set_status_line_enabled(&mut self, enabled: bool) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+3404 |     pub(crate) fn set_side_conversation_context_label(&mut self, label: Option<String>) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3417 |     pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `set_luna_reserve_active` is never used
+    --> src/tui/src/bottom_pane/chat_composer.rs:3557:19
+     |
+3556 | impl ChatComposer {
+     | ----------------- method in this implementation
+3557 |     pub(crate) fn set_luna_reserve_active(&mut self, active: bool) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `set_agents_navigation_enabled` is never used
+ --> src/tui/src/bottom_pane/chat_composer/agents_navigation.rs:9:19
+  |
+8 | impl ChatComposer {
+  | ----------------- method in this implementation
+9 |     pub(crate) fn set_agents_navigation_enabled(&mut self, enabled: bool) {
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `take_remote_image_urls` and `clear_remote_image_urls` are never used
+  --> src/tui/src/bottom_pane/chat_composer/attachment_state.rs:65:19
+   |
+33 | impl AttachmentState {
+   | -------------------- methods in this implementation
+...
+65 |     pub(super) fn take_remote_image_urls(&mut self, textarea: &mut TextArea) -> Vec<String> {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+72 |     pub(super) fn clear_remote_image_urls(&mut self) {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `show_quit_shortcut_hint`, `clear_quit_shortcut_hint`, and `empty_state_composer` are never used
+   --> src/tui/src/bottom_pane/chat_composer/footer_state.rs:179:12
+    |
+ 86 | impl super::ChatComposer {
+    | ------------------------ methods in this implementation
+...
+179 |     pub fn show_quit_shortcut_hint(&mut self, key: KeyBinding, has_focus: bool) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^
+...
+192 |     pub fn clear_quit_shortcut_hint(&mut self, has_focus: bool) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+221 |     pub(crate) fn empty_state_composer(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `status_line_hyperlink_url` is never read
+   --> src/tui/src/bottom_pane/chat_composer/footer_state.rs:360:16
+    |
+345 | pub(super) struct FooterState {
+    |                   ----------- field in this struct
+...
+360 |     pub(super) status_line_hyperlink_url: Option<String>,
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `draft_snapshot` and `edit_stored_draft` are never used
+  --> src/tui/src/bottom_pane/chat_composer/history_search_draft.rs:13:19
+   |
+12 | impl ChatComposer {
+   | ----------------- methods in this implementation
+13 |     pub(crate) fn draft_snapshot(&self) -> ComposerDraftSnapshot {
+   |                   ^^^^^^^^^^^^^^
+...
+37 |     pub(in crate::bottom_pane) fn edit_stored_draft(&mut self, edit: impl FnOnce(&mut Self)) {
+   |                                   ^^^^^^^^^^^^^^^^^
+
+warning: method `text_with_pending` is never used
+  --> src/tui/src/bottom_pane/chat_composer/inline_input.rs:11:35
+   |
+10 | impl ComposerDraft {
+   | ------------------ method in this implementation
+11 |     pub(in crate::bottom_pane) fn text_with_pending(&self) -> String {
+   |                                   ^^^^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> src/tui/src/bottom_pane/chat_composer/inline_input.rs:22:35
+    |
+ 21 | impl ChatComposer {
+    | ----------------- methods in this implementation
+ 22 |     pub(in crate::bottom_pane) fn append_recovered_drafts(&mut self, drafts: &str) {
+    |                                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 68 |     pub(in crate::bottom_pane) fn restore_inline_draft(&mut self, draft: ComposerDraft) {
+    |                                   ^^^^^^^^^^^^^^^^^^^^
+...
+ 73 |     pub(crate) fn inline_flash(&self) -> Option<Line<'static>> {
+    |                   ^^^^^^^^^^^^
+...
+ 87 |     pub(crate) fn copy_history_for_key(&mut self, composer: &Self, key: KeyEvent) {
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+107 |     pub(crate) fn handles_key_as_editing(&self, key: KeyEvent) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+121 |     pub(crate) fn flush_pending_input(&mut self) {
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+128 |     pub(crate) fn inline_input_height(&self, width: u16) -> u16 {
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+134 |     pub(crate) fn inline_cursor_pos(&self, mut area: Rect) -> Option<(u16, u16)> {
+    |                   ^^^^^^^^^^^^^^^^^
+...
+155 |     pub(crate) fn render_inline_input(&self, area: Rect, buf: &mut Buffer) {
+    |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: enum `ClipboardPasteTarget` is never used
+  --> src/tui/src/bottom_pane/chat_composer/mouse.rs:19:17
+   |
+19 | pub(crate) enum ClipboardPasteTarget {
+   |                 ^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `clipboard_paste_target`, `copy_selection_on_release`, `clear_mouse_selection`, and `cancel_primary` are never used
+   --> src/tui/src/bottom_pane/chat_composer/mouse.rs:26:19
+    |
+ 25 | impl ChatComposer {
+    | ----------------- methods in this implementation
+ 26 |     pub(crate) fn clipboard_paste_target(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+ 93 |     pub(crate) fn copy_selection_on_release(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+113 |     pub(crate) fn clear_mouse_selection(&mut self) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+121 |     pub(crate) fn cancel_primary(&mut self) {
+    |                   ^^^^^^^^^^^^^^
+
+warning: method `recovery_snapshot` is never used
+  --> src/tui/src/bottom_pane/chat_composer/paste_input.rs:39:19
+   |
+14 | impl ChatComposer {
+   | ----------------- method in this implementation
+...
+39 |     pub(crate) fn recovery_snapshot(&self) -> ComposerDraftSnapshot {
+   |                   ^^^^^^^^^^^^^^^^^
+
+warning: field `dismissed_command_token` is never read
+  --> src/tui/src/bottom_pane/chat_composer/popup_state.rs:90:16
+   |
+87 | pub(super) struct PopupState {
+   |                   ---------- field in this struct
+...
+90 |     pub(super) dismissed_command_token: Option<String>,
+   |                ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `RestrictedInputMode` is never used
+  --> src/tui/src/bottom_pane/chat_composer/reconnect.rs:11:17
+   |
+11 | pub(crate) enum RestrictedInputMode {
+   |                 ^^^^^^^^^^^^^^^^^^^
+
+warning: method `handle_restricted_key` is never used
+  --> src/tui/src/bottom_pane/chat_composer/reconnect.rs:56:19
+   |
+16 | impl ChatComposer {
+   | ----------------- method in this implementation
+...
+56 |     pub(crate) fn handle_restricted_key(
+   |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `set_daybreak_command_description` and `set_worktrees_enabled` are never used
+   --> src/tui/src/bottom_pane/chat_composer/slash_input.rs:201:12
+    |
+184 | impl ChatComposer {
+    | ----------------- methods in this implementation
+...
+201 |     pub fn set_daybreak_command_description(&mut self, description: Option<&'static str>) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+205 |     pub fn set_worktrees_enabled(&mut self, enabled: bool) {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `prepared_args` is never used
+   --> src/tui/src/bottom_pane/chat_composer/slash_input.rs:252:15
+    |
+252 | pub(super) fn prepared_args(prepared_text: &str) -> Option<(&str, usize)> {
+    |               ^^^^^^^^^^^^^
+
+warning: function `command_popup_filter_text` is never used
+   --> src/tui/src/bottom_pane/chat_composer/slash_input.rs:285:15
+    |
+285 | pub(super) fn command_popup_filter_text(first_line: &str, cursor: usize) -> Option<String> {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variant `Waiting` is never constructed
+  --> src/tui/src/bottom_pane/chat_composer/sparkle.rs:53:5
+   |
+50 | enum Phase {
+   |      ----- variant in this enum
+...
+53 |     Waiting,
+   |     ^^^^^^^
+   |
+   = note: `Phase` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: field `fresh` is never read
+  --> src/tui/src/bottom_pane/chat_composer/sparkle.rs:69:5
+   |
+63 | pub(super) struct Sparkle {
+   |                   ------- field in this struct
+...
+69 |     fresh: bool,
+   |     ^^^^^
+
+warning: multiple associated items are never used
+   --> src/tui/src/bottom_pane/chat_composer/sparkle.rs:87:19
+    |
+ 86 | impl BottomPane {
+    | --------------- associated items in this implementation
+ 87 |     pub(crate) fn is_sparkle_model(model: &str) -> bool {
+    |                   ^^^^^^^^^^^^^^^^
+...
+ 93 |     pub(crate) fn mark_fresh_task_for_sparkle(&mut self, model: &str, settings: &Tui) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+108 |     pub(crate) fn select_sparkle_model(&mut self, model: &str, settings: &Tui) {
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+114 |     pub(crate) fn stop_ineligible_sparkle(&self, model: &str, settings: &Tui) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+120 |     pub(crate) fn dismiss_composer_sparkle(&self) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+124 |     pub(crate) fn prepare_composer_sparkle_key(&self, key: KeyEvent) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+130 |     pub(crate) fn inherit_startup_sparkle(&self, draft: SparkleDraft) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+141 |     pub(crate) fn set_sparkle_terminal_focus(&mut self, focused: bool) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `cancel_vim_search` is never used
+ --> src/tui/src/bottom_pane/chat_composer/vim_search.rs:8:19
+  |
+7 | impl ChatComposer {
+  | ----------------- method in this implementation
+8 |     pub(crate) fn cancel_vim_search(&mut self) -> bool {
+  |                   ^^^^^^^^^^^^^^^^^
+
+warning: method `warning_notice_contains` is never used
+ --> src/tui/src/bottom_pane/chat_composer/warning_notice.rs:8:19
+  |
+7 | impl ChatComposer {
+  | ----------------- method in this implementation
+8 |     pub(crate) fn warning_notice_contains(&self, position: ratatui::layout::Position) -> bool {
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MAX_BATCH_READ_RETRIES` is never used
+  --> src/tui/src/bottom_pane/chat_composer_history.rs:36:7
+   |
+36 | const MAX_BATCH_READ_RETRIES: u8 = 2;
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `at_mention_restore_enabled` is never read
+   --> src/tui/src/bottom_pane/chat_composer_history.rs:163:5
+    |
+131 | pub(crate) struct ChatComposerHistory {
+    |                   ------------------- field in this struct
+...
+163 |     at_mention_restore_enabled: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `ChatComposerHistory` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: variant `Unavailable` is never constructed
+   --> src/tui/src/bottom_pane/chat_composer_history.rs:187:5
+    |
+182 | pub(crate) enum HistorySearchResult {
+    |                 ------------------- variant in this enum
+...
+187 |     Unavailable,
+    |     ^^^^^^^^^^^
+    |
+    = note: `HistorySearchResult` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: enum `HistoryEntryResponse` is never used
+   --> src/tui/src/bottom_pane/chat_composer_history.rs:195:17
+    |
+195 | pub(crate) enum HistoryEntryResponse {
+    |                 ^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> src/tui/src/bottom_pane/chat_composer_history.rs:276:12
+    |
+254 | impl ChatComposerHistory {
+    | ------------------------ methods in this implementation
+...
+276 |     pub fn set_at_mention_restore_enabled(&mut self, enabled: bool) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+292 |     pub fn set_metadata(&mut self, thread_id: ThreadId, log_id: u64, entry_count: usize) {
+    |            ^^^^^^^^^^^^
+...
+308 |     pub(crate) fn startup_local_history(&self) -> &[HistoryEntry] {
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+324 |     pub fn record_replayed_submission(&mut self, entry: HistoryEntry) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+359 |     pub(super) fn is_navigating(&self) -> bool {
+    |                   ^^^^^^^^^^^^^
+...
+484 |     pub fn on_entry_response(
+    |            ^^^^^^^^^^^^^^^^^
+...
+689 |     fn advance_search_after(
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `on_batch_response`, `on_batch_error`, `pending_batch`, `advance_older_search_after_entry_miss`, and `advance_older_search_with_batches_from` are never used
+   --> src/tui/src/bottom_pane/chat_composer_history/search_batch.rs:15:19
+    |
+ 12 | impl ChatComposerHistory {
+    | ------------------------ methods in this implementation
+...
+ 15 |     pub(crate) fn on_batch_response(
+    |                   ^^^^^^^^^^^^^^^^^
+...
+ 70 |     pub(crate) fn on_batch_error(
+    |                   ^^^^^^^^^^^^^^
+...
+111 |     fn pending_batch(&self, cursor: HistoryBatchCursor) -> Option<(bool, u8)> {
+    |        ^^^^^^^^^^^^^
+...
+127 |     pub(super) fn advance_older_search_after_entry_miss(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+149 |     fn advance_older_search_with_batches_from(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `queue_submissions`, `collaboration_modes_enabled`, and `is_wsl` are never read
+  --> src/tui/src/bottom_pane/footer.rs:76:16
+   |
+72 | pub(crate) struct FooterProps {
+   |                   ----------- fields in this struct
+...
+76 |     pub(crate) queue_submissions: bool,
+   |                ^^^^^^^^^^^^^^^^^
+77 |     pub(crate) collaboration_modes_enabled: bool,
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+78 |     pub(crate) is_wsl: bool,
+   |                ^^^^^^
+   |
+   = note: `FooterProps` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: variant `Plan` is never constructed
+  --> src/tui/src/bottom_pane/footer.rs:96:5
+   |
+95 | pub(crate) enum CollaborationModeIndicator {
+   |                 -------------------------- variant in this enum
+96 |     Plan,
+   |     ^^^^
+   |
+   = note: `CollaborationModeIndicator` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: variants `Active`, `Paused`, `Blocked`, `UsageLimited`, `BudgetLimited`, and `Complete` are never constructed
+   --> src/tui/src/bottom_pane/footer.rs:101:5
+    |
+100 | pub(crate) enum GoalStatusIndicator {
+    |                 ------------------- variants in this enum
+101 |     Active { usage: Option<String> },
+    |     ^^^^^^
+102 |     Paused,
+    |     ^^^^^^
+103 |     Blocked,
+    |     ^^^^^^^
+104 |     UsageLimited,
+    |     ^^^^^^^^^^^^
+105 |     BudgetLimited { usage: Option<String> },
+    |     ^^^^^^^^^^^^^
+106 |     Complete { usage: Option<String> },
+    |     ^^^^^^^^
+    |
+    = note: `GoalStatusIndicator` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: variant `Half` is never constructed
+  --> src/tui/src/bottom_pane/list_selection_view.rs:82:5
+   |
+78 | pub(crate) enum SideContentWidth {
+   |                 ---------------- variant in this enum
+...
+82 |     Half,
+   |     ^^^^
+   |
+   = note: `SideContentWidth` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: variant `SingleLine` is never constructed
+   --> src/tui/src/bottom_pane/list_selection_view.rs:121:5
+    |
+118 | pub(crate) enum SelectionRowDisplay {
+    |                 ------------------- variant in this enum
+...
+121 |     SingleLine,
+    |     ^^^^^^^^^^
+    |
+    = note: `SelectionRowDisplay` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: struct `SelectionToggleState` is never constructed
+   --> src/tui/src/bottom_pane/list_selection_view.rs:147:19
+    |
+147 | pub(crate) struct SelectionToggleState {
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `SelectionViewParams` is never constructed
+   --> src/tui/src/bottom_pane/list_selection_view.rs:214:19
+    |
+214 | pub(crate) struct SelectionViewParams {
+    |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: variant `OnDemand` is never constructed
+   --> src/tui/src/bottom_pane/list_selection_view.rs:331:5
+    |
+328 | pub(crate) enum SearchMode {
+    |                 ---------- variant in this enum
+...
+331 |     OnDemand(KeyBinding),
+    |     ^^^^^^^^
+    |
+    = note: `SearchMode` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: field `allow_input_when_disconnected` is never read
+   --> src/tui/src/bottom_pane/list_selection_view.rs:344:5
+    |
+339 | pub(crate) struct ListSelectionView {
+    |                   ----------------- field in this struct
+...
+344 |     allow_input_when_disconnected: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SELECTION_TOGGLE_UNAVAILABLE_PREFIX` is never used
+   --> src/tui/src/bottom_pane/list_selection_view.rs:394:18
+    |
+394 | pub(crate) const SELECTION_TOGGLE_UNAVAILABLE_PREFIX: &str = "[-] ";
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SELECTION_TOGGLE_BLOCKED_PREFIX` is never used
+   --> src/tui/src/bottom_pane/list_selection_view.rs:395:18
+    |
+395 | pub(crate) const SELECTION_TOGGLE_BLOCKED_PREFIX: &str = "[!] ";
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `search_query`, `set_search_query`, and `take_last_selected_index` are never used
+    --> src/tui/src/bottom_pane/list_selection_view.rs:463:12
+     |
+ 455 | impl ListSelectionView {
+     | ---------------------- associated items in this implementation
+...
+ 463 |     pub fn new(
+     |            ^^^
+...
+1019 |     pub(crate) fn search_query(&self) -> Option<&str> {
+     |                   ^^^^^^^^^^^^
+...
+1037 |     pub(crate) fn set_search_query(&mut self, query: String) {
+     |                   ^^^^^^^^^^^^^^^^
+...
+1053 |     pub(crate) fn take_last_selected_index(&mut self) -> Option<usize> {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `rendered_item_count` is never used
+    --> src/tui/src/bottom_pane/list_selection_view.rs:1899:19
+     |
+1898 | impl ListSelectionView {
+     | ---------------------- method in this implementation
+1899 |     pub(crate) fn rendered_item_count(&self) -> usize {
+     |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: associated functions `confirmation` and `picker` are never used
+  --> src/tui/src/bottom_pane/picker_presets.rs:13:19
+   |
+10 | impl SelectionViewParams {
+   | ------------------------ associated functions in this implementation
+...
+13 |     pub(crate) fn confirmation() -> Self {
+   |                   ^^^^^^^^^^^^
+...
+22 |     pub(crate) fn picker() -> Self {
+   |                   ^^^^^^
+
+warning: function `measure_rows_height` is never used
+  --> src/tui/src/bottom_pane/picker_rows.rs:29:15
+   |
+29 | pub(super) fn measure_rows_height(
+   |               ^^^^^^^^^^^^^^^^^^^
+
+warning: function `render_rows` is never used
+  --> src/tui/src/bottom_pane/picker_rows.rs:39:15
+   |
+39 | pub(super) fn render_rows(
+   |               ^^^^^^^^^^^
+
+warning: function `layout` is never used
+  --> src/tui/src/bottom_pane/picker_rows.rs:84:15
+   |
+84 | pub(super) fn layout(area: Rect, header: u16, search: u16, rows: u16) -> [Rect; 3] {
+   |               ^^^^^^
+
+warning: variant `Present` is never constructed
+  --> src/tui/src/bottom_pane/pending_input_preview.rs:35:5
+   |
+33 | enum QuestionPresence {
+   |      ---------------- variant in this enum
+34 |     Absent,
+35 |     Present,
+   |     ^^^^^^^
+
+warning: struct `PendingInputPreviewContent` is never constructed
+   --> src/tui/src/bottom_pane/pending_input_preview.rs:234:19
+    |
+234 | pub(super) struct PendingInputPreviewContent<'a>(pub(super) &'a PendingInputPreview);
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `picker_option_row` is never used
+  --> src/tui/src/bottom_pane/picker_option.rs:17:15
+   |
+17 | pub(crate) fn picker_option_row(
+   |               ^^^^^^^^^^^^^^^^^
+
+warning: function `picker_option_list` is never used
+  --> src/tui/src/bottom_pane/picker_option.rs:32:15
+   |
+32 | pub(crate) fn picker_option_list(
+   |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `numbered_row` is never used
+  --> src/tui/src/bottom_pane/picker_option.rs:49:4
+   |
+49 | fn numbered_row(index: usize, label: Line<'static>, is_selected: bool) -> GenericDisplayRow {
+   |    ^^^^^^^^^^^^
+
+warning: struct `PickerOptionRow` is never constructed
+  --> src/tui/src/bottom_pane/picker_option.rs:67:8
+   |
+67 | struct PickerOptionRow {
+   |        ^^^^^^^^^^^^^^^
+
+warning: struct `PickerOptionList` is never constructed
+  --> src/tui/src/bottom_pane/picker_option.rs:82:8
+   |
+82 | struct PickerOptionList {
+   |        ^^^^^^^^^^^^^^^^
+
+warning: function `picker_hint_line_for_keymap` is never used
+  --> src/tui/src/bottom_pane/popup_consts.rs:28:15
+   |
+28 | pub(crate) fn picker_hint_line_for_keymap(list_keymap: &ListKeymap) -> Line<'static> {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `accept_cancel_hint_line` is never used
+  --> src/tui/src/bottom_pane/popup_consts.rs:42:15
+   |
+42 | pub(crate) fn accept_cancel_hint_line(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variant `SelectedBelowWhenNarrow` is never constructed
+  --> src/tui/src/bottom_pane/selection_row_layout.rs:18:5
+   |
+12 | pub(crate) enum SelectionDescriptionLayout {
+   |                 -------------------------- variant in this enum
+...
+18 |     SelectedBelowWhenNarrow {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `SelectionDescriptionLayout` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: multiple methods are never used
+   --> src/tui/src/bottom_pane/startup.rs:18:19
+    |
+ 16 | impl BottomPane {
+    | --------------- methods in this implementation
+ 17 |     /// Use the effective submit binding for startup confirmation as soon as config is loaded.
+ 18 |     pub(crate) fn is_startup_submit_key(&self, key_event: KeyEvent) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+ 23 |     pub(crate) fn prepare_startup_submission(&mut self) -> super::InputResult {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 28 |     pub(crate) fn is_startup_composer_action(&self, key_event: KeyEvent) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 42 |     pub(crate) fn is_safe_startup_editor_key(&self, key_event: KeyEvent) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 61 |     pub(crate) fn is_startup_cursor_key(&self, key_event: KeyEvent) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+ 78 |     pub(crate) fn enable_vim_in_insert_mode(&mut self) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 84 |     pub(crate) fn set_disable_paste_burst(&mut self, disabled: bool) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 90 |     pub(crate) fn composer_draft_snapshot(&self) -> ComposerDraftSnapshot {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 97 |     pub(crate) fn composer_recovery_snapshot(&self) -> ComposerDraftSnapshot {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+102 |     pub(crate) fn set_composer_cursor(&mut self, cursor: usize) {
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+108 |     pub(crate) fn restore_startup_composer_state(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+120 |     pub(crate) fn has_pending_approval(&self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+126 |     pub(crate) fn flush_composer_paste_burst(&mut self) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `KillBufferSnapshot` is never constructed
+   --> src/tui/src/bottom_pane/textarea.rs:199:19
+    |
+199 | pub(crate) struct KillBufferSnapshot {
+    |                   ^^^^^^^^^^^^^^^^^^
+
+warning: methods `set_vim_enabled`, `keymap_context`, `take_kill_buffer_snapshot`, and `restore_kill_buffer_snapshot` are never used
+    --> src/tui/src/bottom_pane/textarea.rs:316:19
+     |
+ 210 | impl TextArea {
+     | ------------- methods in this implementation
+...
+ 316 |     pub(crate) fn set_vim_enabled(&mut self, enabled: bool) {
+     |                   ^^^^^^^^^^^^^^^
+...
+ 360 |     pub(crate) fn keymap_context(&self) -> KeymapContext {
+     |                   ^^^^^^^^^^^^^^
+...
+1324 |     pub(crate) fn take_kill_buffer_snapshot(&mut self) -> KillBufferSnapshot {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1331 |     pub(crate) fn restore_kill_buffer_snapshot(&mut self, snapshot: KillBufferSnapshot) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `primary_owner` is never read
+  --> src/tui/src/bottom_pane/textarea/mouse.rs:14:5
+   |
+12 | pub(super) struct MouseSelection {
+   |                   -------------- field in this struct
+13 |     pending_copy: Option<(u64, Range<usize>)>,
+14 |     primary_owner: Option<Arc<()>>,
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `MouseSelection` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: methods `retain_primary` and `cancel_primary` are never used
+  --> src/tui/src/bottom_pane/textarea/mouse.rs:30:35
+   |
+21 | impl TextArea {
+   | ------------- methods in this implementation
+...
+30 |     pub(in crate::bottom_pane) fn retain_primary(&mut self, owner: Option<Arc<()>>) {
+   |                                   ^^^^^^^^^^^^^^
+...
+36 |     pub(in crate::bottom_pane) fn cancel_primary(&mut self) {
+   |                                   ^^^^^^^^^^^^^^
+
+warning: associated function `new_single_line` is never used
+ --> src/tui/src/bottom_pane/textarea/single_line.rs:6:19
+  |
+5 | impl TextArea {
+  | ------------- associated function in this implementation
+6 |     pub(crate) fn new_single_line() -> Self {
+  |                   ^^^^^^^^^^^^^^^
+
+warning: methods `keymap_contexts` and `enable_vim_search` are never used
+  --> src/tui/src/bottom_pane/textarea/vim_search.rs:74:19
+   |
+73 | impl TextArea {
+   | ------------- methods in this implementation
+74 |     pub(crate) fn keymap_contexts(&self) -> KeymapContextSet {
+   |                   ^^^^^^^^^^^^^^^
+...
+89 |     pub(crate) fn enable_vim_search(&mut self) {
+   |                   ^^^^^^^^^^^^^^^^^
+
+warning: constant `FRAME_INTERVAL` is never used
+  --> src/tui/src/empty_state_animation.rs:32:18
+   |
+32 | pub(crate) const FRAME_INTERVAL: Duration = Duration::from_millis(/*millis*/ 50);
+   |                  ^^^^^^^^^^^^^^
+
+warning: constant `SETTLED_BLOSSOM` is never used
+  --> src/tui/src/empty_state_animation.rs:34:7
+   |
+34 | const SETTLED_BLOSSOM: f64 = 0.5;
+   |       ^^^^^^^^^^^^^^^
+
+warning: enum `ComposerState` is never used
+  --> src/tui/src/empty_state_animation.rs:37:17
+   |
+37 | pub(crate) enum ComposerState {
+   |                 ^^^^^^^^^^^^^
+
+warning: struct `EmptyStateAnimation` is never constructed
+  --> src/tui/src/empty_state_animation.rs:43:19
+   |
+43 | pub(crate) struct EmptyStateAnimation {
+   |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> src/tui/src/empty_state_animation.rs:57:19
+    |
+ 56 | impl EmptyStateAnimation {
+    | ------------------------ methods in this implementation
+ 57 |     pub(crate) fn is_eligible(&self) -> bool {
+    |                   ^^^^^^^^^^^
+...
+ 61 |     pub(crate) fn start_fresh(&mut self) {
+    |                   ^^^^^^^^^^^
+...
+ 72 |     pub(crate) fn continue_from(&mut self, source: &mut Self) {
+    |                   ^^^^^^^^^^^^^
+...
+ 80 |     pub(crate) fn dismiss(&mut self) {
+    |                   ^^^^^^^
+...
+ 85 |     pub(crate) fn cancel_replay(&mut self) {
+    |                   ^^^^^^^^^^^^^
+...
+ 92 |     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
+    |                   ^^^^^^^^^^^^
+...
+113 |     pub(crate) fn pause_clock(&mut self) {
+    |                   ^^^^^^^^^^^
+...
+119 |     pub(crate) fn render_in(
+    |                   ^^^^^^^^^
+...
+129 |     fn render_in_at(
+    |        ^^^^^^^^^^^^
+...
+193 |     pub(crate) fn render_first_screen(
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+235 |     fn paint_frame(&mut self, area: Rect, buffer: &mut Buffer, phase: f64, opacity: f32) {
+    |        ^^^^^^^^^^^
+
+warning: constant `GRID` is never used
+ --> src/tui/src/empty_state_animation/geometry.rs:7:18
+  |
+7 | pub(super) const GRID: usize = 160;
+  |                  ^^^^
+
+warning: constant `EXTENT` is never used
+ --> src/tui/src/empty_state_animation/geometry.rs:8:18
+  |
+8 | pub(super) const EXTENT: f64 = 1.08;
+  |                  ^^^^^^
+
+warning: constant `STEP` is never used
+ --> src/tui/src/empty_state_animation/geometry.rs:9:18
+  |
+9 | pub(super) const STEP: f64 = EXTENT * 2.0 / (GRID - 1) as f64;
+  |                  ^^^^
+
+warning: static `FIELDS` is never used
+  --> src/tui/src/empty_state_animation/geometry.rs:10:19
+   |
+10 | pub(super) static FIELDS: LazyLock<[Vec<f32>; 2]> =
+   |                   ^^^^^^
+
+warning: struct `Path` is never constructed
+  --> src/tui/src/empty_state_animation/geometry.rs:13:8
+   |
+13 | struct Path<'a> {
+   |        ^^^^
+
+warning: methods `number` and `point` are never used
+  --> src/tui/src/empty_state_animation/geometry.rs:22:8
+   |
+17 | impl Path<'_> {
+   | ------------- methods in this implementation
+...
+22 |     fn number(&mut self) -> f64 {
+   |        ^^^^^^
+...
+32 |     fn point(&mut self) -> [f64; 2] {
+   |        ^^^^^
+
+warning: function `field` is never used
+  --> src/tui/src/empty_state_animation/geometry.rs:37:4
+   |
+37 | fn field((path, bounds): (&str, [f64; 4])) -> Vec<f32> {
+   |    ^^^^^
+
+warning: struct `Lighting` is never constructed
+ --> src/tui/src/empty_state_animation/lighting.rs:5:19
+  |
+5 | pub(super) struct Lighting {
+  |                   ^^^^^^^^
+
+warning: associated items `terminal` and `shade` are never used
+  --> src/tui/src/empty_state_animation/lighting.rs:15:19
+   |
+14 | impl Lighting {
+   | ------------- associated items in this implementation
+15 |     pub(super) fn terminal(fg: (u8, u8, u8), bg: (u8, u8, u8)) -> Self {
+   |                   ^^^^^^^^
+...
+39 |     pub(super) fn shade(&self, [nx, ny, nz]: [f64; 3], depth: f64, grain: f64) -> u32 {
+   |                   ^^^^^
+
+warning: constant `CODEX` is never used
+ --> src/tui/src/empty_state_animation/paths.rs:3:18
+  |
+3 | pub(super) const CODEX: (&str, [f64; 4]) = (
+  |                  ^^^^^
+
+warning: constant `OPENAI` is never used
+ --> src/tui/src/empty_state_animation/paths.rs:7:18
+  |
+7 | pub(super) const OPENAI: (&str, [f64; 4]) = (
+  |                  ^^^^^^
+
+warning: enum `Presentation` is never used
+ --> src/tui/src/empty_state_animation/policy.rs:8:17
+  |
+8 | pub(crate) enum Presentation {
+  |                 ^^^^^^^^^^^^
+
+warning: function `is_startup_cell` is never used
+  --> src/tui/src/empty_state_animation/policy.rs:15:15
+   |
+15 | pub(crate) fn is_startup_cell(cell: &dyn HistoryCell) -> bool {
+   |               ^^^^^^^^^^^^^^^
+
+warning: constant `MAX_COLUMNS` is never used
+  --> src/tui/src/empty_state_animation/renderer.rs:13:18
+   |
+13 | pub(super) const MAX_COLUMNS: u16 = 60;
+   |                  ^^^^^^^^^^^
+
+warning: constant `MAX_ROWS` is never used
+  --> src/tui/src/empty_state_animation/renderer.rs:14:18
+   |
+14 | pub(super) const MAX_ROWS: u16 = 24;
+   |                  ^^^^^^^^
+
+warning: constant `DOT_BITS` is never used
+  --> src/tui/src/empty_state_animation/renderer.rs:15:7
+   |
+15 | const DOT_BITS: [u8; 8] = [1, 8, 2, 16, 4, 32, 64, 128];
+   |       ^^^^^^^^
+
+warning: constant `HALF_DEPTH` is never used
+  --> src/tui/src/empty_state_animation/renderer.rs:17:7
+   |
+17 | const HALF_DEPTH: f64 = 0.1642880353482906;
+   |       ^^^^^^^^^^
+
+warning: constant `WOBBLE` is never used
+  --> src/tui/src/empty_state_animation/renderer.rs:18:7
+   |
+18 | const WOBBLE: f64 = 0.11242630996974184;
+   |       ^^^^^^
+
+warning: constant `GRAIN_PHASE` is never used
+  --> src/tui/src/empty_state_animation/renderer.rs:19:7
+   |
+19 | const GRAIN_PHASE: f64 = 3.8990964158506114;
+   |       ^^^^^^^^^^^
+
+warning: function `smooth` is never used
+  --> src/tui/src/empty_state_animation/renderer.rs:21:4
+   |
+21 | fn smooth(value: f64) -> f64 {
+   |    ^^^^^^
+
+warning: struct `Cell` is never constructed
+  --> src/tui/src/empty_state_animation/renderer.rs:27:19
+   |
+27 | pub(super) struct Cell {
+   |                   ^^^^
+
+warning: struct `Renderer` is never constructed
+  --> src/tui/src/empty_state_animation/renderer.rs:32:19
+   |
+32 | pub(super) struct Renderer {
+   |                   ^^^^^^^^
+
+warning: method `frame` is never used
+  --> src/tui/src/empty_state_animation/renderer.rs:52:19
+   |
+51 | impl Renderer {
+   | ------------- method in this implementation
+52 |     pub(super) fn frame(
+   |                   ^^^^^
+
+warning: constant `STATIC_FADE` is never used
+ --> src/tui/src/empty_state_animation/sequence.rs:5:18
+  |
+5 | pub(super) const STATIC_FADE: Duration = Duration::from_millis(/*millis*/ 400);
+  |                  ^^^^^^^^^^^
+
+warning: constant `STATIC_OPACITY` is never used
+ --> src/tui/src/empty_state_animation/sequence.rs:6:18
+  |
+6 | pub(super) const STATIC_OPACITY: f32 = 0.18;
+  |                  ^^^^^^^^^^^^^^
+
+warning: constant `LOOP_SECONDS` is never used
+ --> src/tui/src/empty_state_animation/sequence.rs:8:18
+  |
+8 | pub(super) const LOOP_SECONDS: f64 = 7.2;
+  |                  ^^^^^^^^^^^^
+
+warning: constant `SPIN_DURATION` is never used
+ --> src/tui/src/empty_state_animation/sequence.rs:9:18
+  |
+9 | pub(super) const SPIN_DURATION: Duration = Duration::from_millis(/*millis*/ 10_800);
+  |                  ^^^^^^^^^^^^^
+
+warning: function `static_opacity` is never used
+  --> src/tui/src/empty_state_animation/sequence.rs:11:15
+   |
+11 | pub(super) fn static_opacity(elapsed: Duration, from: f32) -> f32 {
+   |               ^^^^^^^^^^^^^^
+
+warning: function `progress` is never used
+  --> src/tui/src/empty_state_animation/sequence.rs:15:15
+   |
+15 | pub(super) fn progress(elapsed: Duration, duration: Duration) -> f64 {
+   |               ^^^^^^^^
+
+warning: method `created_branch_cwd` is never used
+  --> src/tui/src/git_action_directives.rs:36:19
+   |
+35 | impl GitActionDirective {
+   | ----------------------- method in this implementation
+36 |     pub(crate) fn created_branch_cwd(&self) -> Option<&str> {
+   |                   ^^^^^^^^^^^^^^^^^^
+
+warning: method `last_created_branch_cwd` is never used
+  --> src/tui/src/git_action_directives.rs:51:19
+   |
+50 | impl ParsedAssistantMarkdown {
+   | ---------------------------- method in this implementation
+51 |     pub(crate) fn last_created_branch_cwd(&self) -> Option<&str> {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variants `Clipboard` and `Primary` are never constructed
+  --> src/tui/src/clipboard_copy/worker.rs:95:5
+   |
+94 | pub(crate) enum PasteSource {
+   |                 ----------- variants in this enum
+95 |     Clipboard,
+   |     ^^^^^^^^^
+96 |     Primary,
+   |     ^^^^^^^
+   |
+   = note: `PasteSource` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: variants `WarmTextReader` and `Read` are never constructed
+   --> src/tui/src/clipboard_copy/worker.rs:100:5
+    |
+ 99 | enum Request {
+    |      ------- variants in this enum
+100 |     WarmTextReader,
+    |     ^^^^^^^^^^^^^^
+...
+107 |     Read {
+    |     ^^^^
+
+warning: field `source` is never read
+   --> src/tui/src/clipboard_copy/worker.rs:117:5
+    |
+114 | struct PendingRead {
+    |        ----------- field in this struct
+...
+117 |     source: PasteSource,
+    |     ^^^^^^
+
+warning: methods `warm_text_reader`, `read_text`, `start_read`, `take_text_result`, and `advance` are never used
+   --> src/tui/src/clipboard_copy/worker.rs:226:19
+    |
+140 | impl ClipboardWorker {
+    | -------------------- methods in this implementation
+...
+226 |     pub(crate) fn warm_text_reader(&mut self, frames: FrameRequester) -> Result<(), String> {
+    |                   ^^^^^^^^^^^^^^^^
+...
+262 |     pub(crate) fn read_text(
+    |                   ^^^^^^^^^
+...
+290 |     fn start_read(&mut self) -> Result<(), String> {
+    |        ^^^^^^^^^^
+...
+309 |     pub(crate) fn take_text_result(&mut self) -> Option<Result<String, String>> {
+    |                   ^^^^^^^^^^^^^^^^
+...
+322 |     pub(crate) fn advance(&mut self, frames: FrameRequester) {
+    |                   ^^^^^^^
+
+warning: enum `ClockFormat` is never used
+ --> src/tui/src/clock_format.rs:7:17
+  |
+7 | pub(crate) enum ClockFormat {
+  |                 ^^^^^^^^^^^
+
+warning: associated items `system`, `date_time_format`, and `time_format` are never used
+  --> src/tui/src/clock_format.rs:13:19
+   |
+12 | impl ClockFormat {
+   | ---------------- associated items in this implementation
+13 |     pub(crate) fn system() -> Self {
+   |                   ^^^^^^
+...
+18 |     pub(crate) fn date_time_format(self) -> &'static str {
+   |                   ^^^^^^^^^^^^^^^^
+...
+25 |     pub(crate) fn time_format(self) -> &'static str {
+   |                   ^^^^^^^^^^^
+
+warning: function `time_locale` is never used
+  --> src/tui/src/clock_format.rs:34:4
+   |
+34 | fn time_locale(
+   |    ^^^^^^^^^^^
+
+warning: function `detect` is never used
+  --> src/tui/src/clock_format.rs:43:4
+   |
+43 | fn detect() -> Option<ClockFormat> {
+   |    ^^^^^^
+
+warning: function `detect_time_locale` is never used
+  --> src/tui/src/clock_format.rs:49:4
+   |
+49 | fn detect_time_locale(locale: &str) -> Option<ClockFormat> {
+   |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `parse_strftime` is never used
+  --> src/tui/src/clock_format.rs:80:4
+   |
+80 | fn parse_strftime(pattern: &[u8]) -> Option<ClockFormat> {
+   |    ^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+   --> src/tui/src/diff_render.rs:317:19
+    |
+316 | impl DiffSummary {
+    | ---------------- associated function in this implementation
+317 |     pub(crate) fn new(changes: HashMap<PathBuf, FileChange>, cwd: AbsolutePathBuf) -> Self {
+    |                   ^^^
+
+warning: function `push_wrapped_diff_line_with_style_context` is never used
+   --> src/tui/src/diff_render.rs:838:15
+    |
+838 | pub(crate) fn push_wrapped_diff_line_with_style_context(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `push_wrapped_diff_line_with_syntax_and_style_context` is never used
+   --> src/tui/src/diff_render.rs:864:15
+    |
+864 | pub(crate) fn push_wrapped_diff_line_with_syntax_and_style_context(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `push_str` and `push_truncated_str` are never used
+  --> src/tui/src/exec_cell/live_output.rs:32:19
+   |
+30 | impl LiveCommandOutput {
+   | ---------------------- methods in this implementation
+31 |     /// Appends a delta, preserving `str::lines` semantics across arbitrary chunk boundaries.
+32 |     pub(super) fn push_str(&mut self, chunk: &str) {
+   |                   ^^^^^^^^
+...
+56 |     fn push_truncated_str(&mut self, chunk: &str) {
+   |        ^^^^^^^^^^^^^^^^^^
+
+warning: methods `add_call`, `prepend`, `mark_failed`, `freeze_snapshot`, and `append_output` are never used
+   --> src/tui/src/exec_cell/model.rs:92:19
+    |
+ 84 | impl ExecCell {
+    | ------------- methods in this implementation
+...
+ 92 |     pub(crate) fn add_call(
+    |                   ^^^^^^^^
+...
+133 |     pub(crate) fn prepend(&mut self, older: Self) {
+    |                   ^^^^^^^
+...
+168 |     pub(crate) fn mark_failed(&mut self) {
+    |                   ^^^^^^^^^^^
+...
+204 |     pub(crate) fn freeze_snapshot(&mut self) {
+    |                   ^^^^^^^^^^^^^^^
+...
+212 |     pub(crate) fn append_output(&mut self, call_id: &str, chunk: &str) -> bool {
+    |                   ^^^^^^^^^^^^^
+
+warning: function `split_command_string` is never used
+  --> src/tui/src/exec_command.rs:19:15
+   |
+19 | pub(crate) fn split_command_string(command: &str) -> Vec<String> {
+   |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `as_any_mut` is never used
+   --> src/tui/src/history_cell/mod.rs:377:19
+    |
+372 | impl dyn HistoryCell {
+    | -------------------- method in this implementation
+...
+377 |     pub(crate) fn as_any_mut(&mut self) -> &mut dyn Any {
+    |                   ^^^^^^^^^^
+
+warning: method `prepend` is never used
+  --> src/tui/src/history_cell/activity_group.rs:28:19
+   |
+16 | impl<T> ActivityGroup<T> {
+   | ------------------------ method in this implementation
+...
+28 |     pub(crate) fn prepend(&mut self, older: Self) {
+   |                   ^^^^^^^
+
+warning: struct `WebHyperlinkHistoryCell` is never constructed
+  --> src/tui/src/history_cell/base.rs:28:19
+   |
+28 | pub(crate) struct WebHyperlinkHistoryCell {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated functions `new` and `new_hyperlink_lines` are never used
+  --> src/tui/src/history_cell/base.rs:33:19
+   |
+32 | impl WebHyperlinkHistoryCell {
+   | ---------------------------- associated functions in this implementation
+33 |     pub(crate) fn new(lines: Vec<Line<'static>>) -> Self {
+   |                   ^^^
+...
+39 |     pub(crate) fn new_hyperlink_lines(lines: Vec<HyperlinkLine>) -> Self {
+   |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+   --> src/tui/src/history_cell/base.rs:114:19
+    |
+113 | impl CompositeHistoryCell {
+    | ------------------------- associated function in this implementation
+114 |     pub(crate) fn new(parts: Vec<Box<dyn HistoryCell>>) -> Self {
+    |                   ^^^
+
+warning: struct `UnifiedExecInteractionCell` is never constructed
+  --> src/tui/src/history_cell/exec.rs:12:19
+   |
+12 | pub(crate) struct UnifiedExecInteractionCell {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> src/tui/src/history_cell/exec.rs:18:19
+   |
+17 | impl UnifiedExecInteractionCell {
+   | ------------------------------- associated function in this implementation
+18 |     pub(crate) fn new(command_display: Option<String>, stdin: String) -> Self {
+   |                   ^^^
+
+warning: function `new_unified_exec_interaction` is never used
+   --> src/tui/src/history_cell/exec.rs:110:15
+    |
+110 | pub(crate) fn new_unified_exec_interaction(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `UnifiedExecProcessesCell` is never constructed
+   --> src/tui/src/history_cell/exec.rs:118:8
+    |
+118 | struct UnifiedExecProcessesCell {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+   --> src/tui/src/history_cell/exec.rs:123:8
+    |
+122 | impl UnifiedExecProcessesCell {
+    | ----------------------------- associated function in this implementation
+123 |     fn new(processes: Vec<UnifiedExecProcessDetails>) -> Self {
+    |        ^^^
+
+warning: struct `UnifiedExecProcessDetails` is never constructed
+   --> src/tui/src/history_cell/exec.rs:129:19
+    |
+129 | pub(crate) struct UnifiedExecProcessDetails {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `new_unified_exec_processes_output` is never used
+   --> src/tui/src/history_cell/exec.rs:255:15
+    |
+255 | pub(crate) fn new_unified_exec_processes_output(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `set_source_item_id` and `new` are never used
+   --> src/tui/src/history_cell/messages.rs:339:19
+    |
+334 | impl ReasoningSummaryCell {
+    | ------------------------- associated items in this implementation
+...
+339 |     pub(crate) fn set_source_item_id(&mut self, id: String) {
+    |                   ^^^^^^^^^^^^^^^^^^
+...
+353 |     pub(crate) fn new(header: String, content: String, cwd: &Path, transcript_only: bool) -> Self {
+    |                   ^^^
+
+warning: field `spoken_artifacts` is never read
+   --> src/tui/src/history_cell/messages.rs:509:5
+    |
+503 | pub struct AgentMarkdownCell { // 008-ADAPT：pub（A7 安全门禁测试）
+    |            ----------------- field in this struct
+...
+509 |     spoken_artifacts: bool,
+    |     ^^^^^^^^^^^^^^^^
+    |
+    = note: `AgentMarkdownCell` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: associated items `with_copy_source` and `new_spoken` are never used
+   --> src/tui/src/history_cell/messages.rs:513:19
+    |
+512 | impl AgentMarkdownCell {
+    | ---------------------- associated items in this implementation
+513 |     pub(crate) fn with_copy_source(mut self, source: Option<String>) -> Self {
+    |                   ^^^^^^^^^^^^^^^^
+...
+552 |     pub(crate) fn new_spoken(markdown_source: String, cwd: &Path) -> Self {
+    |                   ^^^^^^^^^^
+
+warning: struct `StreamingAgentTailCell` is never constructed
+   --> src/tui/src/history_cell/messages.rs:665:19
+    |
+665 | pub(crate) struct StreamingAgentTailCell {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+   --> src/tui/src/history_cell/messages.rs:678:19
+    |
+677 | impl StreamingAgentTailCell {
+    | --------------------------- associated function in this implementation
+678 |     pub(crate) fn new(lines: Vec<HyperlinkLine>, is_first_line: bool) -> Self {
+    |                   ^^^
+
+warning: function `new_user_prompt` is never used
+   --> src/tui/src/history_cell/messages.rs:717:15
+    |
+717 | pub(crate) fn new_user_prompt(
+    |               ^^^^^^^^^^^^^^^
+
+warning: function `new_spoken_user_prompt` is never used
+   --> src/tui/src/history_cell/messages.rs:732:15
+    |
+732 | pub(crate) fn new_spoken_user_prompt(message: String) -> UserHistoryCell {
+    |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `new_reasoning_summary_block` is never used
+   --> src/tui/src/history_cell/messages.rs:745:15
+    |
+745 | pub(crate) fn new_reasoning_summary_block(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_reasoning_summary_parts` is never used
+   --> src/tui/src/history_cell/messages.rs:756:15
+    |
+756 | pub(crate) fn split_reasoning_summary_parts(reasoning_parts: &[String]) -> (String, String) {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `new_warning_event` is never used
+  --> src/tui/src/history_cell/notices.rs:96:15
+   |
+96 | pub(crate) fn new_warning_event(message: String) -> WarningHistoryCell {
+   |               ^^^^^^^^^^^^^^^^^
+
+warning: function `new_usage_warning_event` is never used
+   --> src/tui/src/history_cell/notices.rs:111:15
+    |
+111 | pub(crate) fn new_usage_warning_event(message: String) -> WarningHistoryCell {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `SafetyAccessBlockCell` is never constructed
+   --> src/tui/src/history_cell/notices.rs:120:19
+    |
+120 | pub(crate) struct SafetyAccessBlockCell {
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SAFETY_ACCESS_BLOCK_LEARN_MORE_URL` is never used
+   --> src/tui/src/history_cell/notices.rs:126:7
+    |
+126 | const SAFETY_ACCESS_BLOCK_LEARN_MORE_URL: &str = "https://help.openai.com/en/articles/20001326";
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `new_safety_access_block_event` is never used
+   --> src/tui/src/history_cell/notices.rs:128:15
+    |
+128 | pub(crate) fn new_safety_access_block_event() -> SafetyAccessBlockCell {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `DeprecationNoticeCell` is never constructed
+   --> src/tui/src/history_cell/notices.rs:201:19
+    |
+201 | pub(crate) struct DeprecationNoticeCell {
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `new_deprecation_notice` is never used
+   --> src/tui/src/history_cell/notices.rs:206:15
+    |
+206 | pub(crate) fn new_deprecation_notice(
+    |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ThreadRecapLoadingCell` is never constructed
+   --> src/tui/src/history_cell/notices.rs:281:19
+    |
+281 | pub(crate) struct ThreadRecapLoadingCell {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+   --> src/tui/src/history_cell/notices.rs:287:19
+    |
+286 | impl ThreadRecapLoadingCell {
+    | --------------------------- associated function in this implementation
+287 |     pub(crate) fn new(animations_enabled: bool) -> Self {
+    |                   ^^^
+
+warning: function `new_image_generation_call` is never used
+   --> src/tui/src/history_cell/patches.rs:242:15
+    |
+242 | pub(crate) fn new_image_generation_call(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `FinalMessageSeparator` is never constructed
+  --> src/tui/src/history_cell/separators.rs:19:12
+   |
+19 | pub struct FinalMessageSeparator {
+   |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `with_completed_at`, `with_runtime_metrics`, and `label` are never used
+  --> src/tui/src/history_cell/separators.rs:28:19
+   |
+26 | impl FinalMessageSeparator {
+   | -------------------------- associated items in this implementation
+27 |     /// Creates completion metadata using the protocol turn duration when available.
+28 |     pub(crate) fn new(
+   |                   ^^^
+...
+41 |     pub(crate) fn with_completed_at(
+   |                   ^^^^^^^^^^^^^^^^^
+...
+51 |     pub(crate) fn with_runtime_metrics(
+   |                   ^^^^^^^^^^^^^^^^^^^^
+...
+59 |     fn label(&self, today: NaiveDate) -> Option<String> {
+   |        ^^^^^
+
+warning: function `runtime_metrics_label` is never used
+   --> src/tui/src/history_cell/separators.rs:126:15
+    |
+126 | pub(crate) fn runtime_metrics_label(summary: RuntimeMetricsSummary) -> Option<String> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `format_duration_ms` is never used
+   --> src/tui/src/history_cell/separators.rs:212:4
+    |
+212 | fn format_duration_ms(duration_ms: u64) -> String {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `pluralize` is never used
+   --> src/tui/src/history_cell/separators.rs:221:4
+    |
+221 | fn pluralize(count: u64, singular: &'static str, plural: &'static str) -> &'static str {
+    |    ^^^^^^^^^
+
+warning: function `with_border_with_inner_width` is never used
+  --> src/tui/src/history_cell/session.rs:14:15
+   |
+14 | pub(crate) fn with_border_with_inner_width(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> src/tui/src/history_cell/session.rs:59:8
+   |
+58 | impl TooltipHistoryCell {
+   | ----------------------- associated function in this implementation
+59 |     fn new(tip: String, cwd: &Path) -> Self {
+   |        ^^^
+
+warning: struct `SessionNoticeCell` is never constructed
+  --> src/tui/src/history_cell/session.rs:94:19
+   |
+94 | pub(crate) struct SessionNoticeCell(pub(crate) PlainHistoryCell);
+   |                   ^^^^^^^^^^^^^^^^^
+
+warning: function `new_session_info` is never used
+   --> src/tui/src/history_cell/session.rs:172:15
+    |
+172 | pub(crate) fn new_session_info(
+    |               ^^^^^^^^^^^^^^^^
+
+warning: function `is_yolo_mode` is never used
+   --> src/tui/src/history_cell/session.rs:252:15
+    |
+252 | pub(crate) fn is_yolo_mode(config: &Config) -> bool {
+    |               ^^^^^^^^^^^^
+
+warning: function `has_yolo_permissions` is never used
+   --> src/tui/src/history_cell/session.rs:259:15
+    |
+259 | pub(crate) fn has_yolo_permissions(
+    |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `SessionHeaderHistoryCell` is never constructed
+   --> src/tui/src/history_cell/session.rs:275:19
+    |
+275 | pub(crate) struct SessionHeaderHistoryCell {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `with_yolo_mode`, `format_directory`, `format_directory_inner`, and `reasoning_label` are never used
+   --> src/tui/src/history_cell/session.rs:284:19
+    |
+283 | impl SessionHeaderHistoryCell {
+    | ----------------------------- associated items in this implementation
+284 |     pub(crate) fn new(
+    |                   ^^^
+...
+299 |     pub(crate) fn with_yolo_mode(mut self, yolo_mode: bool) -> Self {
+    |                   ^^^^^^^^^^^^^^
+...
+304 |     fn format_directory(&self, max_width: Option<usize>) -> String {
+    |        ^^^^^^^^^^^^^^^^
+...
+308 |     pub(crate) fn format_directory_inner(directory: &Path, max_width: Option<usize>) -> String {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+331 |     fn reasoning_label(&self) -> Option<&str> {
+    |        ^^^^^^^^^^^^^^^
+
+warning: struct `StartupWarningsCell` is never constructed
+  --> src/tui/src/history_cell/startup_warnings.rs:10:19
+   |
+10 | pub(crate) struct StartupWarningsCell {
+   |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: associated functions `new` and `mcp` are never used
+  --> src/tui/src/history_cell/startup_warnings.rs:21:19
+   |
+20 | impl StartupWarningsCell {
+   | ------------------------ associated functions in this implementation
+21 |     pub(crate) fn new(messages: Vec<String>) -> Self {
+   |                   ^^^
+...
+29 |     pub(crate) fn mcp(
+   |                   ^^^
+
+warning: variants `Message` and `McpServer` are never constructed
+  --> src/tui/src/history_cell/warnings.rs:12:5
+   |
+11 | pub(crate) enum WarningId {
+   |                 --------- variants in this enum
+12 |     Message(String),
+   |     ^^^^^^^
+13 |     McpServer(String),
+   |     ^^^^^^^^^
+   |
+   = note: `WarningId` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `warning_entries` is never used
+  --> src/tui/src/history_cell/warnings.rs:24:15
+   |
+24 | pub(crate) fn warning_entries(cells: &[Arc<dyn HistoryCell>]) -> Vec<WarningEntry> {
+   |               ^^^^^^^^^^^^^^^
+
+warning: variants `Message` and `McpServer` are never constructed
+  --> src/tui/src/history_cell/warnings.rs:44:5
+   |
+43 | pub(crate) enum WarningKey<'a> {
+   |                 ---------- variants in this enum
+44 |     Message(&'a str),
+   |     ^^^^^^^
+45 |     McpServer(&'a str),
+   |     ^^^^^^^^^
+   |
+   = note: `WarningKey` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: struct `WarningHistoryCell` is never constructed
+  --> src/tui/src/history_cell/warnings.rs:49:19
+   |
+49 | pub(crate) struct WarningHistoryCell {
+   |                   ^^^^^^^^^^^^^^^^^^
+
+warning: function `warning_count` is never used
+  --> src/tui/src/history_cell/warnings.rs:95:15
+   |
+95 | pub(crate) fn warning_count(cells: &[Arc<dyn HistoryCell>]) -> usize {
+   |               ^^^^^^^^^^^^^
+
+warning: fields `markdown_label`, `display_label`, and `markdown_destination_label` are never read
+   --> src/tui/src/inline_visualization.rs:176:16
+    |
+174 | pub(crate) struct TrustedFileLink {
+    |                   --------------- fields in this struct
+175 |     pub(crate) destination: Url,
+176 |     pub(crate) markdown_label: String,
+    |                ^^^^^^^^^^^^^^
+177 |     pub(crate) display_label: String,
+    |                ^^^^^^^^^^^^^
+178 |     pub(crate) markdown_destination_label: String,
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `chord_hints` is never read
+   --> src/tui/src/keymap.rs:136:5
+    |
+131 | pub(crate) struct ChatKeymap {
+    |                   ---------- field in this struct
+...
+136 |     chord_hints: Arc<RuntimeChordKeymap>,
+    |     ^^^^^^^^^^^
+    |
+    = note: `ChatKeymap` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: method `voice_mute_hint` is never used
+   --> src/tui/src/keymap.rs:156:19
+    |
+155 | impl ChatKeymap {
+    | --------------- method in this implementation
+156 |     pub(crate) fn voice_mute_hint(&self) -> Option<ShortcutHint> {
+    |                   ^^^^^^^^^^^^^^^
+
+warning: field `chord_hints` is never read
+   --> src/tui/src/keymap.rs:445:5
+    |
+432 | pub(crate) struct AgentsKeymap {
+    |                   ------------ field in this struct
+...
+445 |     chord_hints: Arc<RuntimeChordKeymap>,
+    |     ^^^^^^^^^^^
+    |
+    = note: `AgentsKeymap` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: method `primary_hint` is never used
+   --> src/tui/src/keymap.rs:449:19
+    |
+448 | impl AgentsKeymap {
+    | ----------------- method in this implementation
+449 |     pub(crate) fn primary_hint(
+    |                   ^^^^^^^^^^^^
+
+warning: field `chord_hints` is never read
+   --> src/tui/src/keymap.rs:473:5
+    |
+464 | pub(crate) struct ApprovalKeymap {
+    |                   -------------- field in this struct
+...
+473 |     chord_hints: Arc<RuntimeChordKeymap>,
+    |     ^^^^^^^^^^^
+    |
+    = note: `ApprovalKeymap` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: methods `primary_hint` and `hint_for_bindings` are never used
+   --> src/tui/src/keymap.rs:477:19
+    |
+476 | impl ApprovalKeymap {
+    | ------------------- methods in this implementation
+477 |     pub(crate) fn primary_hint(
+    |                   ^^^^^^^^^^^^
+...
+486 |     pub(crate) fn hint_for_bindings(&self, bindings: &[KeyBinding]) -> Option<ShortcutHint> {
+    |                   ^^^^^^^^^^^^^^^^^
+
+warning: constant `KEY_CHORD_TIMEOUT` is never used
+  --> src/tui/src/keymap/chords.rs:31:18
+   |
+31 | pub(crate) const KEY_CHORD_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 1);
+   |                  ^^^^^^^^^^^^^^^^^
+
+warning: constant `RAW_KEY_CAPTURE` is never used
+  --> src/tui/src/keymap/chords.rs:51:7
+   |
+51 | const RAW_KEY_CAPTURE: u32 = 1 << 18;
+   |       ^^^^^^^^^^^^^^^
+
+warning: associated items `activity`, `warnings`, `raw_key_capture`, and `with_voice_toggle` are never used
+  --> src/tui/src/keymap/chords.rs:63:25
+   |
+56 | impl KeymapContextSet {
+   | --------------------- associated items in this implementation
+...
+63 |     pub(crate) const fn activity() -> Self {
+   |                         ^^^^^^^^
+...
+83 |     pub(crate) const fn warnings() -> Self {
+   |                         ^^^^^^^^
+...
+91 |     pub(crate) const fn raw_key_capture() -> Self {
+   |                         ^^^^^^^^^^^^^^^
+...
+97 |     pub(crate) fn with_voice_toggle(self, keymap: &RuntimeKeymap) -> Self {
+   |                   ^^^^^^^^^^^^^^^^^
+
+warning: method `binding_for_completion` is never used
+   --> src/tui/src/keymap/chords.rs:359:8
+    |
+235 | impl RuntimeChordKeymap {
+    | ----------------------- method in this implementation
+...
+359 |     fn binding_for_completion(
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `KeyChordMatch` is never used
+   --> src/tui/src/keymap/chords.rs:438:17
+    |
+438 | pub(crate) enum KeyChordMatch {
+    |                 ^^^^^^^^^^^^^
+
+warning: struct `PendingChord` is never constructed
+   --> src/tui/src/keymap/chords.rs:447:8
+    |
+447 | struct PendingChord {
+    |        ^^^^^^^^^^^^
+
+warning: struct `KeyChordMatcher` is never constructed
+   --> src/tui/src/keymap/chords.rs:456:19
+    |
+456 | pub(crate) struct KeyChordMatcher {
+    |                   ^^^^^^^^^^^^^^^
+
+warning: methods `is_pending`, `pending_hint_items`, `cancel`, `expire`, and `advance` are never used
+   --> src/tui/src/keymap/chords.rs:461:19
+    |
+460 | impl KeyChordMatcher {
+    | -------------------- methods in this implementation
+461 |     pub(crate) fn is_pending(&self) -> bool {
+    |                   ^^^^^^^^^^
+...
+466 |     pub(crate) fn pending_hint_items(
+    |                   ^^^^^^^^^^^^^^^^^^
+...
+524 |     pub(crate) fn cancel(&mut self) -> bool {
+    |                   ^^^^^^
+...
+528 |     pub(crate) fn expire(&mut self, contexts: KeymapContextSet) -> bool {
+    |                   ^^^^^^
+...
+541 |     pub(crate) fn advance(
+    |                   ^^^^^^^
+
+warning: function `dispatch_event` is never used
+   --> src/tui/src/keymap/chords.rs:640:4
+    |
+640 | fn dispatch_event(action: KeymapActionId) -> Option<KeyEvent> {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `is_dispatch_token_event` is never used
+   --> src/tui/src/keymap/chords.rs:655:15
+    |
+655 | pub(crate) fn is_dispatch_token_event(event: KeyEvent) -> bool {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `chord_stroke_matches` is never used
+   --> src/tui/src/keymap/chords.rs:662:4
+    |
+662 | fn chord_stroke_matches(binding: KeyBinding, key_event: KeyEvent) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `LocalSettings` is never constructed
+  --> src/tui/src/local_settings.rs:25:19
+   |
+25 | pub(crate) struct LocalSettings {
+   |                   ^^^^^^^^^^^^^
+
+warning: associated items `with_accessibility_preferences`, `from_bootstrap`, and `apply_host_preferences` are never used
+   --> src/tui/src/local_settings.rs:47:8
+    |
+ 46 | impl LocalSettings {
+    | ------------------ associated items in this implementation
+ 47 |     fn with_accessibility_preferences(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+113 |     pub(crate) fn from_bootstrap(
+    |                   ^^^^^^^^^^^^^^
+...
+154 |     fn apply_host_preferences(
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `custom_notification_filters` is never used
+   --> src/tui/src/local_settings.rs:183:4
+    |
+183 | fn custom_notification_filters(layers: &ConfigLayerStack) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `for_tui`, `reloaded`, `copy_on_select`, and `terminal_resize_reflow` are never used
+   --> src/tui/src/local_settings.rs:194:19
+    |
+192 | impl LocalSettings {
+    | ------------------ associated items in this implementation
+193 |     /// Adopt the screen selected before first paint, including command-line restrictions.
+194 |     pub(crate) fn for_tui(config: &Config, tui: &crate::tui::Tui) -> Self {
+    |                   ^^^^^^^
+...
+206 |     pub(crate) fn reloaded(&self, config: &Config) -> Self {
+    |                   ^^^^^^^^
+...
+222 |     pub(crate) fn copy_on_select(&self, terminal: &TerminalInfo) -> bool {
+    |                   ^^^^^^^^^^^^^^
+...
+264 |     pub(crate) fn terminal_resize_reflow(&self) -> TerminalResizeReflowConfig {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `append_markdown` is never used
+  --> src/tui/src/markdown.rs:42:15
+   |
+42 | pub(crate) fn append_markdown(
+   |               ^^^^^^^^^^^^^^^
+
+warning: function `followup_labels` is never used
+  --> src/tui/src/markdown_render/inline_directives.rs:22:15
+   |
+22 | pub(crate) fn followup_labels(input: &str) -> Cow<'_, str> {
+   |               ^^^^^^^^^^^^^^^
+
+warning: function `init` is never used
+  --> src/tui/src/markdown_render/preferences.rs:17:15
+   |
+17 | pub(crate) fn init(rendering: TuiRendering) {
+   |               ^^^^
+
+warning: field `width` is never read
+  --> src/tui/src/markdown_stream.rs:35:5
+   |
+30 | pub(crate) struct MarkdownStreamCollector {
+   |                   ----------------------- field in this struct
+...
+35 |     width: Option<usize>,
+   |     ^^^^^
+
+warning: methods `set_width`, `clear`, and `finalize_and_take_source` are never used
+   --> src/tui/src/markdown_stream.rs:62:12
+    |
+ 40 | impl MarkdownStreamCollector {
+    | ---------------------------- methods in this implementation
+...
+ 62 |     pub fn set_width(&mut self, width: Option<usize>) {
+    |            ^^^^^^^^^
+...
+ 67 |     pub fn clear(&mut self) {
+    |            ^^^^^
+...
+114 |     pub fn finalize_and_take_source(&mut self) -> String {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `loading_glyph` is never used
+  --> src/tui/src/motion.rs:41:15
+   |
+41 | pub(crate) fn loading_glyph(
+   |               ^^^^^^^^^^^^^
+
+warning: function `loading_glyph_with_delay` is never used
+  --> src/tui/src/motion.rs:51:15
+   |
+51 | pub(crate) fn loading_glyph_with_delay(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variant `Static` is never constructed
+  --> src/tui/src/pager_overlay.rs:46:5
+   |
+44 | pub(crate) enum Overlay {
+   |                 ------- variant in this enum
+45 |     Transcript(TranscriptOverlay),
+46 |     Static(StaticOverlay),
+   |     ^^^^^^
+
+warning: associated items `with_copy_on_select_clear_selection`, `new_static_with_lines`, and `new_static_with_renderables` are never used
+  --> src/tui/src/pager_overlay.rs:64:19
+   |
+50 | impl Overlay {
+   | ------------ associated items in this implementation
+...
+64 |     pub(crate) fn with_copy_on_select_clear_selection(mut self, enabled: bool) -> Self {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+86 |     pub(crate) fn new_static_with_lines(
+   |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+94 |     pub(crate) fn new_static_with_renderables(
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+   --> src/tui/src/pager_overlay.rs:194:8
+    |
+193 | impl PagerView {
+    | -------------- associated function in this implementation
+194 |     fn new(
+    |        ^^^
+
+warning: struct `CachedRenderable` is never constructed
+   --> src/tui/src/pager_overlay.rs:375:8
+    |
+375 | struct CachedRenderable {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+   --> src/tui/src/pager_overlay.rs:382:8
+    |
+381 | impl CachedRenderable {
+    | --------------------- associated function in this implementation
+382 |     fn new(renderable: impl Into<Box<dyn Renderable>>) -> Self {
+    |        ^^^
+
+warning: variant `Complete` is never constructed
+   --> src/tui/src/pager_overlay.rs:418:5
+    |
+411 | pub(crate) enum TranscriptHistoryState {
+    |                 ---------------------- variant in this enum
+...
+418 |     Complete,
+    |     ^^^^^^^^
+    |
+    = note: `TranscriptHistoryState` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: associated functions `with_title` and `with_renderables` are never used
+   --> src/tui/src/pager_overlay.rs:438:19
+    |
+435 | impl StaticOverlay {
+    | ------------------ associated functions in this implementation
+...
+438 |     pub(crate) fn with_title(
+    |                   ^^^^^^^^^^
+...
+451 |     pub(crate) fn with_renderables(
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> src/tui/src/pager_overlay/transcript.rs:40:19
+    |
+ 39 | impl TranscriptOverlay {
+    | ---------------------- methods in this implementation
+ 40 |     pub(crate) fn bookmark(&mut self) -> TranscriptBookmark {
+    |                   ^^^^^^^^
+...
+ 44 |     pub(crate) fn restore_bookmark(&mut self, bookmark: TranscriptBookmark) {
+    |                   ^^^^^^^^^^^^^^^^
+...
+ 50 |     pub(crate) fn set_presentation(&mut self, detailed: bool, mode: HistoryRenderMode) {
+    |                   ^^^^^^^^^^^^^^^^
+...
+ 54 |     pub(crate) fn is_detailed(&self) -> bool {
+    |                   ^^^^^^^^^^^
+...
+349 |     pub(crate) fn is_scrolled_to_bottom(&self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+353 |     pub(crate) fn set_keymap_bindings(&mut self, keymap: &RuntimeKeymap) {
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+357 |     pub(crate) fn begin_search(&mut self) {
+    |                   ^^^^^^^^^^^^
+...
+361 |     pub(crate) fn is_search_editing(&self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^
+...
+365 |     pub(crate) fn owns_interaction_key(&self, key: KeyEvent) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+369 |     pub(crate) fn has_active_interaction(&self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+373 |     pub(crate) fn needs_history(&mut self) -> bool {
+    |                   ^^^^^^^^^^^^^
+...
+377 |     pub(crate) fn history_state(&self) -> TranscriptHistoryState {
+    |                   ^^^^^^^^^^^^^
+...
+381 |     pub(crate) fn set_history_state(
+    |                   ^^^^^^^^^^^^^^^^^
+...
+394 |     pub(crate) fn should_load_older(&mut self, key: KeyEvent) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^
+...
+406 |     pub(crate) fn should_load_from_start(&self, key: KeyEvent) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+410 |     pub(crate) fn insert_cell(&mut self, cell: Arc<dyn HistoryCell>) {
+    |                   ^^^^^^^^^^^
+...
+415 |     pub(crate) fn prepend(&mut self, cells: Vec<Arc<dyn HistoryCell>>) -> usize {
+    |                   ^^^^^^^
+...
+453 |     pub(crate) fn regroup_cells(
+    |                   ^^^^^^^^^^^^^
+...
+464 |     pub(crate) fn absorb_tail_into_live(&mut self, previous_revision: u64, hydrated_revision: u64) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+470 |     pub(crate) fn consolidate_cells(
+    |                   ^^^^^^^^^^^^^^^^^
+...
+497 |     pub(crate) fn sync_live_tail(
+    |                   ^^^^^^^^^^^^^^
+...
+506 |     pub(crate) fn sync_search_live_tail(
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+515 |     pub(crate) fn set_highlight_cell(&mut self, cell: Option<usize>) {
+    |                   ^^^^^^^^^^^^^^^^^^
+...
+522 |     pub(crate) fn scroll(&mut self, rows: isize) {
+    |                   ^^^^^^
+...
+561 |     pub(crate) fn cancel_pending_jump(&mut self) {
+    |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: function `set_theme_override` is never used
+   --> src/tui/src/render/highlight.rs:106:15
+    |
+106 | pub(crate) fn set_theme_override(
+    |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_theme_name` is never used
+   --> src/tui/src/render/highlight.rs:134:15
+    |
+134 | pub(crate) fn validate_theme_name(name: Option<&str>, codex_home: Option<&Path>) -> Option<String> {
+    |               ^^^^^^^^^^^^^^^^^^^
+
+warning: function `adaptive_default_theme_name` is never used
+   --> src/tui/src/render/highlight.rs:224:15
+    |
+224 | pub(crate) fn adaptive_default_theme_name() -> &'static str {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `set_syntax_theme` is never used
+   --> src/tui/src/render/highlight.rs:268:15
+    |
+268 | pub(crate) fn set_syntax_theme(theme: Theme) {
+    |               ^^^^^^^^^^^^^^^^
+
+warning: function `configured_theme_name` is never used
+   --> src/tui/src/render/highlight.rs:382:15
+    |
+382 | pub(crate) fn configured_theme_name() -> String {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ThemeEntry` is never constructed
+   --> src/tui/src/render/highlight.rs:414:19
+    |
+414 | pub(crate) struct ThemeEntry {
+    |                   ^^^^^^^^^^
+
+warning: function `list_available_themes` is never used
+   --> src/tui/src/render/highlight.rs:424:15
+    |
+424 | pub(crate) fn list_available_themes(codex_home: Option<&Path>) -> Vec<ThemeEntry> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BUILTIN_THEME_NAMES` is never used
+   --> src/tui/src/render/highlight.rs:475:7
+    |
+475 | const BUILTIN_THEME_NAMES: &[&str] = &[
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new` and `push` are never used
+   --> src/tui/src/render/renderable.rs:247:12
+    |
+246 | impl<'a> ColumnRenderable<'a> {
+    | ----------------------------- associated items in this implementation
+247 |     pub fn new() -> Self {
+    |            ^^^
+...
+261 |     pub fn push(&mut self, child: impl Into<Box<dyn Renderable + 'a>>) {
+    |            ^^^^
+
+warning: trait `RenderableExt` is never used
+   --> src/tui/src/render/renderable.rs:482:11
+    |
+482 | pub trait RenderableExt<'a> {
+    |           ^^^^^^^^^^^^^
+
+warning: field `cells` is never read
+  --> src/tui/src/rendered_selection.rs:26:16
+   |
+24 | pub(crate) struct RenderedSelection {
+   |                   ----------------- field in this struct
+25 |     pub(crate) view: TranscriptView,
+26 |     pub(crate) cells: Vec<Arc<dyn HistoryCell>>,
+   |                ^^^^^
+
+warning: enum `RegionAction` is never used
+  --> src/tui/src/rendered_selection.rs:32:17
+   |
+32 | pub(crate) enum RegionAction {
+   |                 ^^^^^^^^^^^^
+
+warning: methods `render`, `needs_refresh`, `handle_event`, and `handle_mouse` are never used
+   --> src/tui/src/rendered_selection.rs:60:19
+    |
+ 38 | impl RenderedSelection {
+    | ---------------------- methods in this implementation
+...
+ 60 |     pub(crate) fn render(&mut self, buffer: &mut Buffer) {
+    |                   ^^^^^^
+...
+ 81 |     pub(crate) fn needs_refresh(&self, event: MouseEvent) -> bool {
+    |                   ^^^^^^^^^^^^^
+...
+ 89 |     pub(crate) fn handle_event(
+    |                   ^^^^^^^^^^^^
+...
+113 |     fn handle_mouse(&mut self, mut event: MouseEvent, completed: &Buffer) -> Option<RegionAction> {
+    |        ^^^^^^^^^^^^
+
+warning: function `surface_lines` is never used
+   --> src/tui/src/rendered_selection.rs:170:4
+    |
+170 | fn surface_lines(surface: &Buffer) -> Vec<Line<'static>> {
+    |    ^^^^^^^^^^^^^
+
+warning: constant `DETECTION_TIMEOUT` is never used
+  --> src/tui/src/screen_reader.rs:17:7
+   |
+17 | const DETECTION_TIMEOUT: Duration = Duration::from_millis(/*millis*/ 450);
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: static `ANIMATION_DEFAULT` is never used
+  --> src/tui/src/screen_reader.rs:18:8
+   |
+18 | static ANIMATION_DEFAULT: OnceLock<MotionMode> = OnceLock::new();
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: function `initialize` is never used
+  --> src/tui/src/screen_reader.rs:20:21
+   |
+20 | pub(crate) async fn initialize(stack: &ConfigLayerStack) -> anyhow::Result<()> {
+   |                     ^^^^^^^^^^
+
+warning: function `animation_default` is never used
+  --> src/tui/src/screen_reader.rs:26:15
+   |
+26 | pub(crate) fn animation_default() -> MotionMode {
+   |               ^^^^^^^^^^^^^^^^^
+
+warning: function `initialize_with_probe` is never used
+  --> src/tui/src/screen_reader.rs:33:10
+   |
+33 | async fn initialize_with_probe(
+   |          ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `initialize_file` is never used
+  --> src/tui/src/screen_reader.rs:59:10
+   |
+59 | async fn initialize_file(
+   |          ^^^^^^^^^^^^^^^
+
+warning: function `read_config` is never used
+   --> src/tui/src/screen_reader.rs:101:4
+    |
+101 | fn read_config(path: &Path) -> anyhow::Result<DocumentMut> {
+    |    ^^^^^^^^^^^
+
+warning: function `detect` is never used
+   --> src/tui/src/screen_reader.rs:144:10
+    |
+144 | async fn detect() -> bool {
+    |          ^^^^^^
+
+warning: struct `SessionNetworkProxyRuntime` is never constructed
+  --> src/tui/src/session_state.rs:17:19
+   |
+17 | pub(crate) struct SessionNetworkProxyRuntime {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `MessageHistoryMetadata` is never constructed
+  --> src/tui/src/session_state.rs:23:19
+   |
+23 | pub(crate) struct MessageHistoryMetadata {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ThreadSessionState` is never constructed
+  --> src/tui/src/session_state.rs:29:19
+   |
+29 | pub(crate) struct ThreadSessionState {
+   |                   ^^^^^^^^^^^^^^^^^^
+
+warning: method `set_cwd_retargeting_implicit_runtime_workspace_root` is never used
+  --> src/tui/src/session_state.rs:61:19
+   |
+60 | impl ThreadSessionState {
+   | ----------------------- method in this implementation
+61 |     pub(crate) fn set_cwd_retargeting_implicit_runtime_workspace_root(
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `SYSTEM_MOTION` is never used
+  --> src/tui/src/system_motion.rs:11:8
+   |
+11 | static SYSTEM_MOTION: OnceLock<MotionMode> = OnceLock::new();
+   |        ^^^^^^^^^^^^^
+
+warning: function `initialize` is never used
+  --> src/tui/src/system_motion.rs:13:21
+   |
+13 | pub(crate) async fn initialize() {
+   |                     ^^^^^^^^^^
+
+warning: function `mode` is never used
+  --> src/tui/src/system_motion.rs:18:15
+   |
+18 | pub(crate) fn mode() -> MotionMode {
+   |               ^^^^
+
+warning: function `detect` is never used
+  --> src/tui/src/system_motion.rs:51:10
+   |
+51 | async fn detect() -> Option<MotionMode> {
+   |          ^^^^^^
+
+warning: enum `StatusDetailsCapitalization` is never used
+  --> src/tui/src/status_indicator_widget.rs:49:17
+   |
+49 | pub(crate) enum StatusDetailsCapitalization {
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `set_motion_preferences`, `update_header`, `update_details`, `update_inline_message`, `update_hook_status_message`, and `header` are never used
+   --> src/tui/src/status_indicator_widget.rs:118:19
+    |
+ 91 | impl StatusIndicatorWidget {
+    | -------------------------- methods in this implementation
+...
+118 |     pub(crate) fn set_motion_preferences(&mut self, tui: &codex_config::types::Tui) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+124 |     pub(crate) fn update_header(&mut self, header: String) {
+    |                   ^^^^^^^^^^^^^
+...
+132 |     pub(crate) fn update_details(
+    |                   ^^^^^^^^^^^^^^
+...
+155 |     pub(crate) fn update_inline_message(&mut self, message: Option<String>) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+161 |     pub(crate) fn update_hook_status_message(&mut self, message: Option<String>) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+165 |     pub(crate) fn header(&self) -> &str {
+    |                   ^^^^^^
+
+warning: method `pause_at` is never used
+  --> src/tui/src/status_indicator_widget/timer.rs:35:19
+   |
+27 | impl StatusTimer {
+   | ---------------- method in this implementation
+...
+35 |     pub(crate) fn pause_at(&mut self, now: Instant) {
+   |                   ^^^^^^^^
+
+warning: field `enqueued_at` is never read
+  --> src/tui/src/streaming/mod.rs:33:5
+   |
+31 | struct QueuedLine {
+   |        ---------- field in this struct
+32 |     line: HyperlinkLine,
+33 |     enqueued_at: Instant,
+   |     ^^^^^^^^^^^
+
+warning: methods `clear`, `drain_n`, and `oldest_queued_age` are never used
+  --> src/tui/src/streaming/mod.rs:56:19
+   |
+43 | impl StreamState {
+   | ---------------- methods in this implementation
+...
+56 |     pub(crate) fn clear(&mut self) {
+   |                   ^^^^^
+...
+73 |     pub(crate) fn drain_n(&mut self, max_lines: usize) -> Vec<HyperlinkLine> {
+   |                   ^^^^^^^
+...
+93 |     pub(crate) fn oldest_queued_age(&self, now: Instant) -> Option<Duration> {
+   |                   ^^^^^^^^^^^^^^^^^
+
+warning: constant `ENTER_QUEUE_DEPTH_LINES` is never used
+  --> src/tui/src/streaming/chunking.rs:85:7
+   |
+85 | const ENTER_QUEUE_DEPTH_LINES: usize = 8;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ENTER_OLDEST_AGE` is never used
+  --> src/tui/src/streaming/chunking.rs:90:7
+   |
+90 | const ENTER_OLDEST_AGE: Duration = Duration::from_millis(120);
+   |       ^^^^^^^^^^^^^^^^
+
+warning: constant `EXIT_QUEUE_DEPTH_LINES` is never used
+  --> src/tui/src/streaming/chunking.rs:95:7
+   |
+95 | const EXIT_QUEUE_DEPTH_LINES: usize = 2;
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `EXIT_OLDEST_AGE` is never used
+   --> src/tui/src/streaming/chunking.rs:100:7
+    |
+100 | const EXIT_OLDEST_AGE: Duration = Duration::from_millis(40);
+    |       ^^^^^^^^^^^^^^^
+
+warning: constant `EXIT_HOLD` is never used
+   --> src/tui/src/streaming/chunking.rs:103:7
+    |
+103 | const EXIT_HOLD: Duration = Duration::from_millis(250);
+    |       ^^^^^^^^^
+
+warning: constant `REENTER_CATCH_UP_HOLD` is never used
+   --> src/tui/src/streaming/chunking.rs:108:7
+    |
+108 | const REENTER_CATCH_UP_HOLD: Duration = Duration::from_millis(250);
+    |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SEVERE_QUEUE_DEPTH_LINES` is never used
+   --> src/tui/src/streaming/chunking.rs:113:7
+    |
+113 | const SEVERE_QUEUE_DEPTH_LINES: usize = 64;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SEVERE_OLDEST_AGE` is never used
+   --> src/tui/src/streaming/chunking.rs:116:7
+    |
+116 | const SEVERE_OLDEST_AGE: Duration = Duration::from_millis(300);
+    |       ^^^^^^^^^^^^^^^^^
+
+warning: enum `ChunkingMode` is never used
+   --> src/tui/src/streaming/chunking.rs:119:17
+    |
+119 | pub(crate) enum ChunkingMode {
+    |                 ^^^^^^^^^^^^
+
+warning: struct `QueueSnapshot` is never constructed
+   --> src/tui/src/streaming/chunking.rs:129:19
+    |
+129 | pub(crate) struct QueueSnapshot {
+    |                   ^^^^^^^^^^^^^
+
+warning: enum `DrainPlan` is never used
+   --> src/tui/src/streaming/chunking.rs:137:17
+    |
+137 | pub(crate) enum DrainPlan {
+    |                 ^^^^^^^^^
+
+warning: struct `ChunkingDecision` is never constructed
+   --> src/tui/src/streaming/chunking.rs:146:19
+    |
+146 | pub(crate) struct ChunkingDecision {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `AdaptiveChunkingPolicy` is never constructed
+   --> src/tui/src/streaming/chunking.rs:157:19
+    |
+157 | pub(crate) struct AdaptiveChunkingPolicy {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> src/tui/src/streaming/chunking.rs:165:19
+    |
+163 | impl AdaptiveChunkingPolicy {
+    | --------------------------- methods in this implementation
+164 |     /// Returns the policy mode used by the most recent decision.
+165 |     pub(crate) fn mode(&self) -> ChunkingMode {
+    |                   ^^^^
+...
+170 |     pub(crate) fn reset(&mut self) {
+    |                   ^^^^^
+...
+180 |     pub(crate) fn decide(&mut self, snapshot: QueueSnapshot, now: Instant) -> ChunkingDecision {
+    |                   ^^^^^^
+...
+216 |     fn maybe_enter_catch_up(&mut self, snapshot: QueueSnapshot, now: Instant) -> bool {
+    |        ^^^^^^^^^^^^^^^^^^^^
+...
+233 |     fn maybe_exit_catch_up(&mut self, snapshot: QueueSnapshot, now: Instant) {
+    |        ^^^^^^^^^^^^^^^^^^^
+...
+252 |     fn note_catch_up_exit(&mut self, now: Instant) {
+    |        ^^^^^^^^^^^^^^^^^^
+...
+258 |     fn reentry_hold_active(&self, now: Instant) -> bool {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: function `should_enter_catch_up` is never used
+   --> src/tui/src/streaming/chunking.rs:267:4
+    |
+267 | fn should_enter_catch_up(snapshot: QueueSnapshot) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `should_exit_catch_up` is never used
+   --> src/tui/src/streaming/chunking.rs:278:4
+    |
+278 | fn should_exit_catch_up(snapshot: QueueSnapshot) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_severe_backlog` is never used
+   --> src/tui/src/streaming/chunking.rs:289:4
+    |
+289 | fn is_severe_backlog(snapshot: QueueSnapshot) -> bool {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: enum `CommitTickScope` is never used
+  --> src/tui/src/streaming/commit_tick.rs:30:17
+   |
+30 | pub(crate) enum CommitTickScope {
+   |                 ^^^^^^^^^^^^^^^
+
+warning: struct `CommitTickOutput` is never constructed
+  --> src/tui/src/streaming/commit_tick.rs:38:19
+   |
+38 | pub(crate) struct CommitTickOutput {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: function `run_commit_tick` is never used
+  --> src/tui/src/streaming/commit_tick.rs:68:15
+   |
+68 | pub(crate) fn run_commit_tick(
+   |               ^^^^^^^^^^^^^^^
+
+warning: function `stream_queue_snapshot` is never used
+  --> src/tui/src/streaming/commit_tick.rs:91:4
+   |
+91 | fn stream_queue_snapshot(
+   |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `resolve_chunking_plan` is never used
+   --> src/tui/src/streaming/commit_tick.rs:114:4
+    |
+114 | fn resolve_chunking_plan(
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `apply_commit_tick_plan` is never used
+   --> src/tui/src/streaming/commit_tick.rs:138:4
+    |
+138 | fn apply_commit_tick_plan(
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `drain_stream_controller` is never used
+   --> src/tui/src/streaming/commit_tick.rs:163:4
+    |
+163 | fn drain_stream_controller(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `max_duration` is never used
+   --> src/tui/src/streaming/commit_tick.rs:178:4
+    |
+178 | fn max_duration(lhs: Option<Duration>, rhs: Option<Duration>) -> Option<Duration> {
+    |    ^^^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> src/tui/src/streaming/controller.rs:212:8
+    |
+120 | impl StreamCore {
+    | --------------- methods in this implementation
+...
+212 |     fn finalize_remaining(&mut self) -> (Vec<HyperlinkLine>, String) {
+    |        ^^^^^^^^^^^^^^^^^^
+...
+234 |     fn tick_batch(&mut self, max_lines: usize) -> Vec<HyperlinkLine> {
+    |        ^^^^^^^^^^
+...
+255 |     fn queued_lines(&self) -> usize {
+    |        ^^^^^^^^^^^^
+...
+260 |     fn oldest_queued_age(&self, now: Instant) -> Option<Duration> {
+    |        ^^^^^^^^^^^^^^^^^
+...
+281 |     fn has_tail(&self) -> bool {
+    |        ^^^^^^^^
+...
+294 |     fn set_width(&mut self, width: Option<usize>) {
+    |        ^^^^^^^^^
+...
+333 |     fn reset(&mut self) {
+    |        ^^^^^
+...
+343 |     fn set_render_mode(&mut self, render_mode: HistoryRenderMode) {
+    |        ^^^^^^^^^^^^^^^
+...
+376 |     fn recompute_render(
+    |        ^^^^^^^^^^^^^^^^
+...
+492 |     fn rebuild_stable_queue_from_render(&mut self) {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> src/tui/src/streaming/controller.rs:635:19
+    |
+595 | impl StreamController {
+    | --------------------- methods in this implementation
+...
+635 |     pub(crate) fn finalize(&mut self) -> (Option<Box<dyn HistoryCell>>, Option<String>) {
+    |                   ^^^^^^^^
+...
+652 |     pub(crate) fn on_commit_tick_batch(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+664 |     pub(crate) fn queued_lines(&self) -> usize {
+    |                   ^^^^^^^^^^^^
+...
+668 |     pub(crate) fn oldest_queued_age(&self, now: Instant) -> Option<Duration> {
+    |                   ^^^^^^^^^^^^^^^^^
+...
+678 |     pub(crate) fn tail_starts_stream(&self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^
+...
+683 |     pub(crate) fn has_live_tail(&self) -> bool {
+    |                   ^^^^^^^^^^^^^
+...
+688 |     pub(crate) fn needs_scrollback_reflow(&self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+709 |     pub(crate) fn clear_queue(&mut self) {
+    |                   ^^^^^^^^^^^
+...
+714 |     pub(crate) fn set_width(&mut self, width: Option<usize>) {
+    |                   ^^^^^^^^^
+...
+718 |     pub(crate) fn set_render_mode(&mut self, render_mode: HistoryRenderMode) {
+    |                   ^^^^^^^^^^^^^^^
+
+warning: method `clear` is never used
+  --> src/tui/src/streaming/render.rs:59:19
+   |
+43 | impl StreamingRender {
+   | -------------------- method in this implementation
+...
+59 |     pub(super) fn clear(&mut self) {
+   |                   ^^^^^
+
+warning: method `available_when_thread_unavailable` is never used
+   --> src/tui/src/slash_command.rs:241:19
+    |
+ 99 | impl SlashCommand {
+    | ----------------- method in this implementation
+...
+241 |     pub(crate) fn available_when_thread_unavailable(self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `StatusHistoryHandle` is never constructed
+  --> src/tui/src/status/card.rs:54:19
+   |
+54 | pub(crate) struct StatusHistoryHandle {
+   |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: method `copy_text` is never used
+  --> src/tui/src/status/card.rs:59:19
+   |
+58 | impl StatusHistoryHandle {
+   | ------------------------ method in this implementation
+59 |     pub(crate) fn copy_text(&self) -> String {
+   |                   ^^^^^^^^^
+
+warning: function `new_status_output_with_handle` is never used
+   --> src/tui/src/status/card.rs:117:15
+    |
+117 | pub(crate) fn new_status_output_with_handle(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+   --> src/tui/src/status/card.rs:153:8
+    |
+152 | impl StatusHistoryCell {
+    | ---------------------- associated function in this implementation
+153 |     fn new(
+    |        ^^^
+
+warning: function `compose_model_display` is never used
+  --> src/tui/src/status/helpers.rs:13:15
+   |
+13 | pub(crate) fn compose_model_display(
+   |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `StatusTone` is never used
+  --> src/tui/src/style.rs:30:17
+   |
+30 | pub(crate) enum StatusTone {
+   |                 ^^^^^^^^^^
+
+warning: function `status_style` is never used
+  --> src/tui/src/style.rs:37:15
+   |
+37 | pub(crate) fn status_style(tone: StatusTone) -> Style {
+   |               ^^^^^^^^^^^^
+
+warning: function `status_style_for` is never used
+  --> src/tui/src/style.rs:41:4
+   |
+41 | fn status_style_for(
+   |    ^^^^^^^^^^^^^^^^
+
+warning: function `footer_hint_label_style` is never used
+   --> src/tui/src/style.rs:204:15
+    |
+204 | pub(crate) fn footer_hint_label_style() -> Style {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `TrustedWorkspaceFile` is never constructed
+  --> src/tui/src/terminal_hyperlinks.rs:58:19
+   |
+58 | pub(crate) struct TrustedWorkspaceFile(Url);
+   |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SAFE_WORKSPACE_EXTENSIONS` is never used
+  --> src/tui/src/terminal_hyperlinks.rs:60:7
+   |
+60 | const SAFE_WORKSPACE_EXTENSIONS: &[&str] = &[
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `validate` is never used
+  --> src/tui/src/terminal_hyperlinks.rs:66:19
+   |
+65 | impl TrustedWorkspaceFile {
+   | ------------------------- associated function in this implementation
+66 |     pub(crate) fn validate(workspace: &Path, candidate: &str) -> Option<Self> {
+   |                   ^^^^^^^^
+
+warning: associated function `trusted_workspace_file` is never used
+   --> src/tui/src/terminal_hyperlinks.rs:116:19
+    |
+ 99 | impl TerminalHyperlink {
+    | ---------------------- associated function in this implementation
+...
+116 |     pub(crate) fn trusted_workspace_file(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `osc8_hyperlink` is never used
+   --> src/tui/src/terminal_hyperlinks.rs:639:15
+    |
+639 | pub(crate) fn osc8_hyperlink(destination: &str, text: &str) -> String {
+    |               ^^^^^^^^^^^^^^
+
+warning: function `mark_url_hyperlink` is never used
+   --> src/tui/src/terminal_hyperlinks.rs:851:15
+    |
+851 | pub(crate) fn mark_url_hyperlink(buf: &mut Buffer, area: Rect, destination: &str) {
+    |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `mark_underlined_hyperlink` is never used
+   --> src/tui/src/terminal_hyperlinks.rs:857:15
+    |
+857 | pub(crate) fn mark_underlined_hyperlink(buf: &mut Buffer, area: Rect, destination: &str) {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `mark_matching_cells` is never used
+   --> src/tui/src/terminal_hyperlinks.rs:863:4
+    |
+863 | fn mark_matching_cells(
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: struct `HyperlinkText` is never constructed
+  --> src/tui/src/terminal_hyperlinks/paragraph.rs:19:19
+   |
+19 | pub(crate) struct HyperlinkText(Vec<HyperlinkLine>);
+   |                   ^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> src/tui/src/terminal_hyperlinks/paragraph.rs:22:19
+   |
+21 | impl HyperlinkText {
+   | ------------------ associated function in this implementation
+22 |     pub(crate) fn new(lines: Vec<Line<'static>>) -> Self {
+   |                   ^^^
+
+warning: constant `MAX_TERMINAL_TITLE_CHARS` is never used
+  --> src/tui/src/terminal_title.rs:36:7
+   |
+36 | const MAX_TERMINAL_TITLE_CHARS: usize = 240;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `TitleEncoding` is never used
+  --> src/tui/src/terminal_title.rs:39:17
+   |
+39 | pub(crate) enum TitleEncoding {
+   |                 ^^^^^^^^^^^^^
+
+warning: enum `SetTerminalTitleResult` is never used
+  --> src/tui/src/terminal_title.rs:46:17
+   |
+46 | pub(crate) enum SetTerminalTitleResult {
+   |                 ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `set_terminal_title` is never used
+  --> src/tui/src/terminal_title.rs:67:15
+   |
+67 | pub(crate) fn set_terminal_title(title: &str) -> io::Result<SetTerminalTitleResult> {
+   |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `clear_terminal_title` is never used
+  --> src/tui/src/terminal_title.rs:92:15
+   |
+92 | pub(crate) fn clear_terminal_title() -> io::Result<()> {
+   |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `SetWindowTitle` is never constructed
+   --> src/tui/src/terminal_title.rs:101:8
+    |
+101 | struct SetWindowTitle(String);
+    |        ^^^^^^^^^^^^^^
+
+warning: function `sanitize_terminal_title` is never used
+   --> src/tui/src/terminal_title.rs:129:15
+    |
+129 | pub(crate) fn sanitize_terminal_title(title: &str, encoding: TitleEncoding) -> String {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_disallowed_terminal_title_char` is never used
+   --> src/tui/src/terminal_title.rs:185:4
+    |
+185 | fn is_disallowed_terminal_title_char(ch: char) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `ProgramStatus` is never used
+  --> src/tui/src/terminal_program_status.rs:86:17
+   |
+86 | pub(crate) enum ProgramStatus {
+   |                 ^^^^^^^^^^^^^
+
+warning: methods `iterm_label`, `iterm_indicator`, and `protocol_state` are never used
+   --> src/tui/src/terminal_program_status.rs:93:8
+    |
+ 92 | impl ProgramStatus {
+    | ------------------ methods in this implementation
+ 93 |     fn iterm_label(self) -> &'static str {
+    |        ^^^^^^^^^^^
+...
+101 |     fn iterm_indicator(self) -> &'static str {
+    |        ^^^^^^^^^^^^^^^
+...
+109 |     fn protocol_state(self) -> &'static str {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `set_terminal_program_status` is never used
+   --> src/tui/src/terminal_program_status.rs:118:15
+    |
+118 | pub(crate) fn set_terminal_program_status(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `sanitize_iterm_session_detail` is never used
+   --> src/tui/src/terminal_program_status.rs:176:4
+    |
+176 | fn sanitize_iterm_session_detail(detail: &str) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `SetTerminalProgramStatus` is never constructed
+   --> src/tui/src/terminal_program_status.rs:217:8
+    |
+217 | struct SetTerminalProgramStatus<'a> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `capitalize_first` is never used
+ --> src/tui/src/text_formatting.rs:5:15
+  |
+5 | pub(crate) fn capitalize_first(input: &str) -> String {
+  |               ^^^^^^^^^^^^^^^^
+
+warning: function `format_json_compact` is never used
+  --> src/tui/src/text_formatting.rs:23:15
+   |
+23 | pub(crate) fn format_json_compact(text: &str) -> Option<String> {
+   |               ^^^^^^^^^^^^^^^^^^^
+
+warning: function `truncate_text` is never used
+  --> src/tui/src/text_formatting.rs:70:15
+   |
+70 | pub(crate) fn truncate_text(text: &str, max_graphemes: usize) -> String {
+   |               ^^^^^^^^^^^^^
+
+warning: function `proper_join` is never used
+   --> src/tui/src/text_formatting.rs:315:15
+    |
+315 | pub(crate) fn proper_join<T: AsRef<str>>(items: &[T]) -> String {
+    |               ^^^^^^^^^^^
+
+warning: variant `Visible` is never constructed
+  --> src/tui/src/thread_transcript.rs:58:5
+   |
+56 | pub(crate) enum RawReasoningVisibility {
+   |                 ---------------------- variant in this enum
+57 |     Hidden,
+58 |     Visible,
+   |     ^^^^^^^
+   |
+   = note: `RawReasoningVisibility` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `thread_to_transcript_cells` is never used
+  --> src/tui/src/thread_transcript.rs:64:15
+   |
+64 | pub(crate) fn thread_to_transcript_cells(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `join_exploration_groups` is never used
+  --> src/tui/src/thread_transcript/exploration_groups.rs:10:15
+   |
+10 | pub(crate) fn join_exploration_groups(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `older_exploration_group` is never used
+  --> src/tui/src/thread_transcript/exploration_groups.rs:27:15
+   |
+27 | pub(crate) fn older_exploration_group(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `ids_for` is never used
+  --> src/tui/src/thread_transcript/exploration_groups.rs:45:4
+   |
+45 | fn ids_for<'a>(older: &'a ExecCell, newer: &'a ExecCell) -> Vec<&'a str> {
+   |    ^^^^^^^
+
+warning: constant `MAX_SEARCH_RESULTS` is never used
+  --> src/tui/src/task_mentions.rs:16:7
+   |
+16 | const MAX_SEARCH_RESULTS: u32 = 50;
+   |       ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SEARCH_DEBOUNCE` is never used
+  --> src/tui/src/task_mentions.rs:17:7
+   |
+17 | const SEARCH_DEBOUNCE: Duration = Duration::from_millis(/*millis*/ 100);
+   |       ^^^^^^^^^^^^^^^
+
+warning: constant `MAX_REFERENCED_TASKS` is never used
+  --> src/tui/src/task_mentions.rs:18:18
+   |
+18 | pub(crate) const MAX_REFERENCED_TASKS: usize = 16;
+   |                  ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MAX_REFERENCED_THREAD_ID_BYTES` is never used
+  --> src/tui/src/task_mentions.rs:20:7
+   |
+20 | const MAX_REFERENCED_THREAD_ID_BYTES: usize = 768;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `REQUEST_HEADING` is never used
+  --> src/tui/src/task_mentions.rs:21:7
+   |
+21 | const REQUEST_HEADING: &str = "## My request for Codex:";
+   |       ^^^^^^^^^^^^^^^
+
+warning: function `apply_task_references` is never used
+  --> src/tui/src/task_mentions.rs:74:15
+   |
+74 | pub(crate) fn apply_task_references(
+   |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `decode_task_links` is never used
+   --> src/tui/src/task_mentions.rs:174:15
+    |
+174 | pub(crate) fn decode_task_links(
+    |               ^^^^^^^^^^^^^^^^^
+
+warning: constant `BASELINE_TOKENS` is never used
+ --> src/tui/src/token_usage.rs:9:7
+  |
+9 | const BASELINE_TOKENS: i64 = 12000;
+  |       ^^^^^^^^^^^^^^^
+
+warning: methods `tokens_in_context_window` and `percent_of_context_window_remaining` are never used
+  --> src/tui/src/token_usage.rs:39:19
+   |
+20 | impl TokenUsage {
+   | --------------- methods in this implementation
+...
+39 |     pub(crate) fn tokens_in_context_window(&self) -> i64 {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+43 |     pub(crate) fn percent_of_context_window_remaining(&self, context_window: i64) -> i64 {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `TokenUsageInfo` is never constructed
+  --> src/tui/src/token_usage.rs:57:19
+   |
+57 | pub(crate) struct TokenUsageInfo {
+   |                   ^^^^^^^^^^^^^^
+
+warning: method `push_hyperlink_line` is never used
+  --> src/tui/src/tool_output.rs:59:19
+   |
+45 | impl ToolOutputPreview {
+   | ---------------------- method in this implementation
+...
+59 |     pub(crate) fn push_hyperlink_line(&mut self, line: HyperlinkLine) {
+   |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `IS_MACOS` is never used
+  --> src/tui/src/tooltips.rs:20:7
+   |
+20 | const IS_MACOS: bool = cfg!(target_os = "macos");
+   |       ^^^^^^^^
+
+warning: constant `IS_WINDOWS` is never used
+  --> src/tui/src/tooltips.rs:21:7
+   |
+21 | const IS_WINDOWS: bool = cfg!(target_os = "windows");
+   |       ^^^^^^^^^^
+
+warning: constant `WINDOWS_APP_TOOLTIP` is never used
+  --> src/tui/src/tooltips.rs:23:7
+   |
+23 | const WINDOWS_APP_TOOLTIP: &str = "Use the **desktop app**. Install it from https://chatgpt.com/codex?app-landing-page=true and run ...
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MACOS_APP_TOOLTIP` is never used
+  --> src/tui/src/tooltips.rs:24:7
+   |
+24 | const MACOS_APP_TOOLTIP: &str =
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `LINUX_APP_TOOLTIP` is never used
+  --> src/tui/src/tooltips.rs:26:7
+   |
+26 | const LINUX_APP_TOOLTIP: &str = "Use the **desktop app**. Install it from https://learn.chatgpt.com/docs/linux/linux-app and run `ch...
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `RAW_TOOLTIPS` is never used
+  --> src/tui/src/tooltips.rs:28:7
+   |
+28 | const RAW_TOOLTIPS: &str = include_str!("../assets/tooltips.txt");
+   |       ^^^^^^^^^^^^
+
+warning: function `get_tooltip` is never used
+  --> src/tui/src/tooltips.rs:42:15
+   |
+42 | pub(crate) fn get_tooltip(plan: Option<PlanType>, keymap: &TuiKeymap) -> Option<String> {
+   |               ^^^^^^^^^^^
+
+warning: struct `LinuxDesktopSession` is never constructed
+  --> src/tui/src/tooltips.rs:49:8
+   |
+49 | struct LinuxDesktopSession {
+   |        ^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `current` is never used
+  --> src/tui/src/tooltips.rs:55:8
+   |
+54 | impl LinuxDesktopSession {
+   | ------------------------ associated function in this implementation
+55 |     fn current() -> Self {
+   |        ^^^^^^^
+
+warning: function `linux_app_tooltip` is never used
+  --> src/tui/src/tooltips.rs:75:4
+   |
+75 | fn linux_app_tooltip(session: LinuxDesktopSession) -> Option<&'static str> {
+   |    ^^^^^^^^^^^^^^^^^
+
+warning: function `app_tooltip` is never used
+  --> src/tui/src/tooltips.rs:79:4
+   |
+79 | fn app_tooltip() -> Option<&'static str> {
+   |    ^^^^^^^^^^^
+
+warning: function `pick_tooltip` is never used
+  --> src/tui/src/tooltips.rs:89:4
+   |
+89 | fn pick_tooltip<R: Rng + ?Sized>(rng: &mut R, keymap: &TuiKeymap) -> Option<String> {
+   |    ^^^^^^^^^^^^
+
+warning: function `resolved_tooltips` is never used
+   --> src/tui/src/tooltips.rs:110:15
+    |
+110 | pub(crate) fn resolved_tooltips(
+    |               ^^^^^^^^^^^^^^^^^
+
+warning: function `tooltip_templates` is never used
+   --> src/tui/src/tooltips.rs:118:15
+    |
+118 | pub(crate) fn tooltip_templates() -> impl Iterator<Item = &'static str> {
+    |               ^^^^^^^^^^^^^^^^^
+
+warning: function `render_tooltip` is never used
+   --> src/tui/src/tooltips.rs:124:15
+    |
+124 | pub(crate) fn render_tooltip(mut template: &str, keymap: Option<&RuntimeKeymap>) -> Option<String> {
+    |               ^^^^^^^^^^^^^^
+
+warning: struct `TranscriptReflowState` is never constructed
+  --> src/tui/src/transcript_reflow.rs:27:19
+   |
+27 | pub(crate) struct TranscriptReflowState {
+   |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> src/tui/src/transcript_reflow.rs:43:19
+    |
+ 37 | impl TranscriptReflowState {
+    | -------------------------- methods in this implementation
+...
+ 43 |     pub(crate) fn clear(&mut self) {
+    |                   ^^^^^
+...
+ 48 |     pub(crate) fn set_visible_history_rows(&mut self, rows: u16) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 53 |     pub(crate) fn visible_history_rows(&self) -> Option<u16> {
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+ 62 |     pub(crate) fn note_width(&mut self, width: u16) -> TranscriptWidthChange {
+    |                   ^^^^^^^^^^
+...
+ 79 |     pub(crate) fn reflow_needed_for_width(&self, width: u16) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 89 |     pub(crate) fn schedule_debounced(&mut self, target_width: Option<u16>) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^
+...
+102 |     pub(crate) fn schedule_immediate(&mut self) {
+    |                   ^^^^^^^^^^^^^^^^^^
+...
+112 |     pub(crate) fn pending_is_due(&self, now: Instant) -> bool {
+    |                   ^^^^^^^^^^^^^^
+...
+116 |     pub(crate) fn pending_until(&self) -> Option<Instant> {
+    |                   ^^^^^^^^^^^^^
+...
+120 |     pub(crate) fn has_pending_reflow(&self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^
+...
+124 |     pub(crate) fn clear_pending_reflow(&mut self) {
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+134 |     pub(crate) fn mark_reflowed_width(&mut self, width: u16) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+143 |     pub(crate) fn mark_ran_during_stream(&mut self) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+...
+153 |     pub(crate) fn mark_resize_requested_during_stream(&mut self) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+162 |     pub(crate) fn take_stream_finish_reflow_needed(&mut self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+173 |     pub(crate) fn clear_stream_flags(&mut self) {
+    |                   ^^^^^^^^^^^^^^^^^^
+
+warning: struct `TranscriptWidthChange` is never constructed
+   --> src/tui/src/transcript_reflow.rs:183:19
+    |
+183 | pub(crate) struct TranscriptWidthChange {
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `remaining_area`, `sync_live_activity_tail`, `is_detailed`, `needs_history`, and `near_start` are never used
+   --> src/tui/src/transcript_view.rs:173:19
+    |
+170 | impl TranscriptView {
+    | ------------------- methods in this implementation
+...
+173 |     pub(crate) fn remaining_area(&self) -> Rect {
+    |                   ^^^^^^^^^^^^^^
+...
+320 |     pub(crate) fn sync_live_activity_tail(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+394 |     pub(crate) fn is_detailed(&self) -> bool {
+    |                   ^^^^^^^^^^^
+...
+515 |     pub(crate) fn needs_history(&mut self, cells: &[Arc<dyn HistoryCell>]) -> bool {
+    |                   ^^^^^^^^^^^^^
+...
+520 |     pub(crate) fn near_start(&mut self, cells: &[Arc<dyn HistoryCell>]) -> bool {
+    |                   ^^^^^^^^^^
+
+warning: method `composer_gap_has_content` is never used
+  --> src/tui/src/transcript_view/composer_gap.rs:19:19
+   |
+18 | impl TranscriptView {
+   | ------------------- method in this implementation
+19 |     pub(crate) fn composer_gap_has_content(
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `begin_copy_mode` is never used
+  --> src/tui/src/transcript_view/copy_mode.rs:21:19
+   |
+20 | impl TranscriptView {
+   | ------------------- method in this implementation
+21 |     pub(crate) fn begin_copy_mode(
+   |                   ^^^^^^^^^^^^^^^
+
+warning: method `sync_live_activity` is never used
+  --> src/tui/src/transcript_view/disclosure.rs:51:19
+   |
+41 | impl TranscriptView {
+   | ------------------- method in this implementation
+...
+51 |     pub(crate) fn sync_live_activity(
+   |                   ^^^^^^^^^^^^^^^^^^
+
+warning: methods `replace_range`, `replace_group`, and `absorb_tail_into_live` are never used
+   --> src/tui/src/transcript_view/mutations.rs:29:19
+    |
+  7 | impl TranscriptView {
+    | ------------------- methods in this implementation
+...
+ 29 |     pub(crate) fn replace_range(
+    |                   ^^^^^^^^^^^^^
+...
+ 76 |     pub(crate) fn replace_group(
+    |                   ^^^^^^^^^^^^^
+...
+137 |     pub(crate) fn absorb_tail_into_live(
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `remap` is never used
+   --> src/tui/src/transcript_view/mutations.rs:216:4
+    |
+216 | fn remap(
+    |    ^^^^^
+
+warning: methods `set_keymap_bindings` and `retain_search_origin` are never used
+   --> src/tui/src/transcript_view/search.rs:129:19
+    |
+ 99 | impl TranscriptView {
+    | ------------------- methods in this implementation
+...
+129 |     pub(crate) fn set_keymap_bindings(&mut self, keymap: &RuntimeKeymap) {
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+210 |     pub(super) fn retain_search_origin(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `needs_history` and `allows_viewport_paging` are never used
+   --> src/tui/src/transcript_view/search.rs:676:19
+    |
+652 | impl Search {
+    | ----------- methods in this implementation
+...
+676 |     pub(super) fn needs_history(&self, history: TranscriptHistoryState) -> bool {
+    |                   ^^^^^^^^^^^^^
+...
+681 |     pub(super) fn allows_viewport_paging(&self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `sync_search_live_tail` is never used
+  --> src/tui/src/transcript_view/search_presentation.rs:55:19
+   |
+ 6 | impl TranscriptView {
+   | ------------------- method in this implementation
+...
+55 |     pub(crate) fn sync_search_live_tail(
+   |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `render_with_turn_tip_space` is never used
+ --> src/tui/src/transcript_view/turn_tip.rs:8:19
+  |
+7 | impl TranscriptView {
+  | ------------------- method in this implementation
+8 |     pub(crate) fn render_with_turn_tip_space(
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `running_in_vscode_terminal` is never used
+   --> src/tui/src/tui.rs:115:15
+    |
+115 | pub(crate) fn running_in_vscode_terminal() -> bool {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variant `Keep` is never constructed
+   --> src/tui/src/tui.rs:313:5
+    |
+311 | enum RawModeRestore {
+    |      -------------- variant in this enum
+312 |     Disable,
+313 |     Keep,
+    |     ^^^^
+    |
+    = note: `RawModeRestore` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: variant `KeepScreen` is never constructed
+   --> src/tui/src/tui.rs:325:5
+    |
+323 | pub(crate) enum TerminalHandoff {
+    |                 --------------- variant in this enum
+324 |     Restore,
+325 |     KeepScreen,
+    |     ^^^^^^^^^^
+    |
+    = note: `TerminalHandoff` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: function `restore_keep_raw` is never used
+   --> src/tui/src/tui.rs:423:4
+    |
+423 | fn restore_keep_raw(handoff: TerminalHandoff) -> Result<()> {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: variants `Onboarding` and `Usage` are never constructed
+   --> src/tui/src/tui.rs:644:5
+    |
+641 | pub(crate) enum OverlayInput {
+    |                 ------------ variants in this enum
+...
+644 |     Onboarding,
+    |     ^^^^^^^^^^
+...
+647 |     Usage,
+    |     ^^^^^
+    |
+    = note: `OverlayInput` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: multiple methods are never used
+    --> src/tui/src/tui.rs:713:19
+     |
+ 712 | impl Tui {
+     | -------- methods in this implementation
+ 713 |     pub(crate) fn is_alt_screen_enabled(&self) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+ 775 |     pub(crate) fn prepare_owned_screen(&mut self, owned: bool) -> Result<()> {
+     |                   ^^^^^^^^^^^^^^^^^^^^
+...
+ 849 |     pub(crate) fn set_notification_condition(&mut self, condition: NotificationCondition) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 898 |     pub(crate) fn recover_after_caught_panic(&mut self) -> Result<()> {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 925 |     pub(crate) fn discard_pending_input_before_interactive_screen(&mut self) -> Result<()> {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 937 |     pub(crate) async fn with_restored<R, F, Fut>(&mut self, handoff: TerminalHandoff, f: F) -> R
+     |                         ^^^^^^^^^^^^^
+...
+1208 |     pub(crate) fn defer_thread_switch_clear(&mut self) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1212 |     pub(crate) fn has_deferred_thread_switch_clear(&self) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `set_link_pointer` is never used
+  --> src/tui/src/tui/alternate_screen.rs:72:19
+   |
+71 | impl AlternateScreen {
+   | -------------------- method in this implementation
+72 |     pub(super) fn set_link_pointer(&self, writer: &mut impl Write, over_link: bool) -> Result<()> {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: method `replace_visible_history_tail` is never used
+  --> src/tui/src/tui/history_tail.rs:25:19
+   |
+16 | impl Tui {
+   | -------- method in this implementation
+...
+25 |     pub(crate) fn replace_visible_history_tail(
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `replace_visible_terminal_history_tail` is never used
+  --> src/tui/src/tui/history_tail.rs:53:4
+   |
+53 | fn replace_visible_terminal_history_tail<B>(
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `discard_pending_terminal_input` is never used
+  --> src/tui/src/tui/input_boundary.rs:28:15
+   |
+28 | pub(crate) fn discard_pending_terminal_input() -> Result<()> {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `terminal_input_is_readable` is never used
+  --> src/tui/src/tui/input_boundary.rs:68:15
+   |
+68 | pub(super) fn terminal_input_is_readable() -> Result<bool> {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `running_in_vscode_terminal` is never used
+  --> src/tui/src/tui/keyboard_modes.rs:83:15
+   |
+83 | pub(super) fn running_in_vscode_terminal() -> bool {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `observe` is never used
+  --> src/tui/src/tui/link_pointer.rs:23:19
+   |
+22 | impl LinkHover {
+   | -------------- method in this implementation
+23 |     pub(crate) fn observe(&mut self, event: &TuiEvent) {
+   |                   ^^^^^^^
+
+warning: method `update` is never used
+  --> src/tui/src/tui/link_pointer.rs:53:19
+   |
+48 | impl LinkPointer {
+   | ---------------- method in this implementation
+...
+53 |     pub(super) fn update(&self, writer: &mut impl Write, over_link: bool) -> std::io::Result<()> {
+   |                   ^^^^^^
+
+warning: method `set_link_pointer` is never used
+  --> src/tui/src/tui/link_pointer.rs:94:19
+   |
+93 | impl Tui {
+   | -------- method in this implementation
+94 |     pub(crate) fn set_link_pointer(&mut self, over_link: bool) -> std::io::Result<()> {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: method `notify_test` is never used
+ --> src/tui/src/tui/notification_preview.rs:7:19
+  |
+6 | impl Tui {
+  | -------- method in this implementation
+7 |     pub(crate) fn notify_test(&mut self, message: &str) -> bool {
+  |                   ^^^^^^^^^^^
+
+warning: methods `defer_screen_size` and `prepare_draw_size` are never used
+  --> src/tui/src/tui/screen_size.rs:73:19
+   |
+20 | impl Tui {
+   | -------- methods in this implementation
+...
+73 |     pub(crate) fn defer_screen_size(&mut self, size: Size) {
+   |                   ^^^^^^^^^^^^^^^^^
+...
+78 |     pub(crate) fn prepare_draw_size(&mut self) -> io::Result<Size> {
+   |                   ^^^^^^^^^^^^^^^^^
+
+warning: method `recover_after_caught_panic` is never used
+  --> src/tui/src/tui/terminal_stderr.rs:57:19
+   |
+44 | impl TerminalStderrGuard {
+   | ------------------------ method in this implementation
+...
+57 |     pub(super) fn recover_after_caught_panic(&mut self) -> io::Result<()> {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: call to `.clone()` on a reference in this situation does nothing
+    --> src/tui/src/chat_driver.rs:1697:26
+     |
+1697 |     let cells_ref = cells.clone();
+     |                          ^^^^^^^^ help: remove this redundant call
+     |
+     = note: the type `[std::sync::Arc<dyn history_cell::HistoryCell>]` does not implement `Clone`, so calling `clone` on `&[std::sync::Arc<dyn history_cell::HistoryCell>]` copies the reference, which does not do anything and can be removed
+     = note: `#[warn(noop_method_call)]` on by default
+
+warning: `tchat-tui` (lib) generated 463 warnings (run `cargo fix --lib -p tchat-tui` to apply 80 suggestions)
+   Compiling terminal-chat v0.1.0 (/workspace/.worktrees/024-native-model-apis/src/app)
+warning: variable does not need to be mutable
+   --> src/app/src/prompt.rs:227:9
+    |
+227 |     let mut flush = |out: &mut Vec<Value>, pending: &mut Vec<Value>| {
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `terminal-chat` (lib) generated 1 warning (run `cargo fix --lib -p terminal-chat` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 09s
+     Running tests/native_model_apis.rs (target/debug/deps/native_model_apis-f9eebcfa3f19c75e)
+
+running 6 tests
+test generate_content_cli_preserves_parts_and_does_not_invent_wire_call_ids ... ok
+test interactions_cli_replays_steps_and_links_function_result ... ok
+test messages_cli_preserves_thinking_and_returns_native_tool_result ... ok
+test native_session_upgrades_v1_without_rewriting_and_replays_v2_after_restart ... ok
+test responses_cli_tool_loop_preserves_reasoning_items_and_raw_call_id ... ok
+test responses_text_uses_native_endpoint_and_stateless_input ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.41s
+

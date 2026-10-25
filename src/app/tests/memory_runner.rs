@@ -68,6 +68,7 @@ fn write_session(dir: &Path, name: &str, items: &[HistoryItem]) -> PathBuf {
 
 fn send_for_mock(mock: &common::Mock) -> ModelSend {
     ModelSend {
+        provider_id: "memory-fixture".into(),
         conn: catalog::EffectiveConnection {
             base_url: mock.url.clone(),
             protocol: catalog::SUPPORTED_PROTOCOL.into(),
