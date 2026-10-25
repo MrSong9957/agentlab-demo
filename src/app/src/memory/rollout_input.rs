@@ -100,7 +100,7 @@ fn read_range(file: &mut std::fs::File, start: usize, end: usize) -> Result<Vec<
     Ok(buf)
 }
 
-/// 头部校验：首行须在单条上限内是有效 meta（`{"v":1}`，007 契约）。
+/// 头部校验：007 的 V1 与 024 的 V2；原生状态在提炼投影时剥离。
 fn validate_session_header(file: &mut std::fs::File) -> Result<(), String> {
     let mut buf = Vec::new();
     file.seek(SeekFrom::Start(0))
@@ -118,7 +118,7 @@ fn validate_session_header(file: &mut std::fs::File) -> Result<(), String> {
     let meta: serde_json::Value = serde_json::from_str(line)
         .map_err(|_| "提炼要求会话元数据在单条上限内有效".to_string())?;
     match meta.get("v").and_then(|v| v.as_i64()) {
-        Some(1) => Ok(()),
+        Some(1 | 2) => Ok(()),
         _ => Err("提炼要求会话元数据在单条上限内有效".to_string()),
     }
 }
@@ -166,6 +166,7 @@ pub fn serialize_filtered_history_items(items: &[HistoryItem]) -> Result<String,
 /// 为单一文本，整条匹配即整条剔除）。上游对 user 消息清 status/加密内容，
 /// 本地 `HistoryMessage` 无这些字段（无对应概念）。
 pub fn sanitize_history_item_for_memories(item: &HistoryItem) -> Option<HistoryItem> {
+    let item = item.portable();
     match item {
         HistoryItem::Text(HistoryMessage { role, content, ..})
             if matches!(role, HistoryRole::User) && is_memory_excluded_fragment(content) =>
@@ -261,7 +262,7 @@ mod tests {
         let p = t.0.join("a.jsonl");
         std::fs::write(&p, serde_json::to_string(&user("x")).unwrap()).unwrap();
         assert!(read_recent_rollout_items(&p).is_err());
-        std::fs::write(&p, "{\"v\":2}\n").unwrap();
+        std::fs::write(&p, "{\"v\":3}\n").unwrap();
         assert!(read_recent_rollout_items(&p).is_err(), "未知版本整拒");
     }
 

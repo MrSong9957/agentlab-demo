@@ -1,5 +1,4 @@
-//! 协议适配与请求执行：当前实现 openai-chat 协议的对话与模型列表查询。
-//! 未支持的协议明确报错；错误分类说明原因；重试不归本轮负责。
+//! 模型协议适配、原生模型目录与有界 HTTP；不自动重试或切换协议。
 
 use crate::catalog::{
     check_request_param, now_secs, AutoCatalog, EffectiveConnection, ModelInfo, SUPPORTED_PROTOCOL,
@@ -8,6 +7,9 @@ use serde_json::{json, Value};
 use std::io::Read;
 use std::time::Duration;
 use url::Url;
+
+mod native;
+mod stream;
 
 pub fn agent() -> ureq::Agent {
     agent_with_timeouts(Duration::from_secs(10), Duration::from_secs(180))
@@ -26,6 +28,48 @@ pub fn agent_with_timeouts(connect: Duration, total: Duration) -> ureq::Agent {
 
 fn auth_header(key: &str) -> String {
     format!("Bearer {key}")
+}
+
+fn http_context(response:&ureq::Response,key:&str)->String {
+    let id=response.header("x-request-id").or_else(||response.header("request-id"))
+        .map(|s|crate::display::sanitize_for_terminal(&crate::display::truncate_chars(&redact_credential(s.into(),key),200)));
+    format!("（HTTP {}{}）",response.status(),id.map(|s|format!(", request_id={s}")).unwrap_or_default())
+}
+
+fn model_error(conn:&EffectiveConnection,key:&str,model:&ModelInfo,request:&Value,error:String)->String {
+    let provider=request.get("_provider_id").and_then(Value::as_str).unwrap_or("未指定厂商配置");
+    redact_data_urls(redact_credential(format!("厂商 {provider}，模型 {}，协议 {}：{error}",model.id,conn.protocol),key))
+}
+
+fn validate_model_base(base_url:&str)->Result<(),String> {
+    crate::catalog::validate_base_url(base_url)?;
+    let url=Url::parse(base_url).map_err(|_|"基础地址无效")?;
+    if !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+        return Err("模型基础地址不能包含用户名、密码、query 或 fragment；鉴权使用 key_ref".into());
+    }
+    Ok(())
+}
+
+fn validate_request(conn:&EffectiveConnection,key:&str,request:&Value)->Result<(),String> {
+    validate_model_base(&conn.base_url)?;
+    check_key_header_safe(key)?;
+    if !request.is_object() || !request.get("messages").is_some_and(Value::is_array) {
+        return Err("模型请求必须是对象并包含 messages 数组".into());
+    }
+    if request.get("tools").is_some_and(|t|!t.is_array()) {return Err("工具定义必须是数组".into());}
+    if conn.request_params.get("stream").is_some_and(|s|!s.is_boolean()) {return Err("stream 必须是布尔值".into());}
+    Ok(())
+}
+
+fn validate_assistant(message: &Value) -> Result<(), String> {
+    if !message.is_object() { return Err("响应的 assistant 必须是对象".into()); }
+    if let Some(calls)=message.get("tool_calls").and_then(Value::as_array) {
+        if calls.len()>crate::prompt::MAX_TOOL_CALLS_PER_BATCH {
+            return Err(format!("单批工具调用 {} 条超过上限 32，整批拒绝",calls.len()));
+        }
+    }
+    crate::prompt::ToolCallRecord::parse_batch(message)?;
+    Ok(())
 }
 
 /// 响应体读取上限：按实际读到的字节计，防止恶意服务端耗尽内存。
@@ -237,14 +281,35 @@ impl std::io::Write for LimitCountingWriter {
     }
 }
 
-/// 发送已构造完成的对话请求并返回响应体文本：chat 与 chat_with_body 共用的
-/// URL 构造、鉴权头、重定向拒绝、请求体上限与错误映射路径。
-fn post_chat_text(
+/// 发送已构造完成的对话请求，返回解析后的响应 JSON 与 HTTP 上下文：chat 与
+/// chat_with_body 共用的 URL 构造、鉴权头、重定向拒绝、请求体上限与错误映射路径。
+fn post_chat_json(
     conn: &EffectiveConnection,
     key: &str,
-    body: Value,
+    mut body: Value,
     agent: &ureq::Agent,
-) -> Result<String, String> {
+) -> Result<(Value,String), String> {
+    let streaming=body.get("stream")==Some(&json!(true));
+    let mut url=Url::parse(&conn.base_url).map_err(|e|format!("基础地址无效：{e}"))?;
+    {
+        let mut path=url.path_segments_mut().map_err(|_|"基础地址不能拼接操作路径")?;
+        path.pop_if_empty();
+        match conn.protocol.as_str() {
+            "openai-responses" => { path.push("responses"); }
+            "anthropic-messages" => { path.push("messages"); }
+            "google-interactions" => { path.push("interactions"); }
+            "google-generate-content" => {
+                let model=body.as_object_mut().and_then(|b|b.remove("model"))
+                    .and_then(|v|v.as_str().map(str::to_owned)).ok_or("Gemini 请求缺少模型 ID")?;
+                // 资源名前缀只去一次，其余整体作为一个路径段编码，不解释已有 % 转义。
+                let operation=if streaming {"streamGenerateContent"} else {"generateContent"};
+                path.push("models").push(&format!("{}:{operation}",model.strip_prefix("models/").unwrap_or(&model)));
+                body.as_object_mut().expect("已检查对象").remove("stream");
+            }
+            _ => { path.push("chat").push("completions"); }
+        }
+    }
+    if conn.protocol=="google-generate-content" && streaming {url.query_pairs_mut().append_pair("alt","sse");}
     // N4b：发送前限计量序列化检查（超限零发送，本轮由调用方结束且不重发）
     let mut counter = LimitCountingWriter { written: 0, limit: MAX_REQUEST_BODY_BYTES };
     if serde_json::to_writer(&mut counter, &body).is_err() {
@@ -253,23 +318,54 @@ fn post_chat_text(
             MAX_REQUEST_BODY_BYTES / 1024 / 1024
         ));
     }
-    let url = format!("{}/chat/completions", conn.base_url.trim_end_matches('/'));
-    let req = agent
-        .post(&url)
-        .set("Authorization", &auth_header(key))
-        .set("Content-Type", "application/json");
+    let req = agent.post(url.as_str()).set("Content-Type", "application/json")
+        .set("Accept",if streaming {"text/event-stream"} else {"application/json"});
+    let req = if conn.protocol == "anthropic-messages" {
+        req.set("x-api-key", key).set("anthropic-version", "2026-10-21")
+    } else if matches!(conn.protocol.as_str(), "google-interactions" | "google-generate-content") {
+        req.set("x-goog-api-key", key)
+    } else {
+        req.set("Authorization", &auth_header(key))
+    };
     match req.send_json(body) {
         Ok(r) => {
             let status = r.status();
+            let context=http_context(&r,key);
             if (300..400).contains(&status) {
-                return Err(describe_status_error(status, "", Some(key)));
+                return Err(format!("{}{context}",describe_status_error(status, "", Some(key))));
             }
-            read_limited_string(r)
+            let content_type=r.header("Content-Type").unwrap_or("").split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+            let result=(|| {
+                let expected=if streaming {"text/event-stream"} else {"application/json"};
+                if content_type!=expected {return Err(format!("非预期 Content-Type：{content_type}，期望 {expected}"));}
+                let text=read_limited_string(r)?;
+                let value:Value=if streaming {stream::decode(&conn.protocol,&text)} else {
+                    serde_json::from_str(&text).map_err(|e|format!("响应解析失败：{e}"))
+                }?;
+                if value.get("error").is_some_and(|e|!e.is_null()) {
+                    return Err("响应包含服务端 error，已拒绝继续".into());
+                }
+                if conn.protocol=="openai-chat" {
+                    if let Some(message)=value.pointer("/choices/0/message") {
+                        validate_assistant(message)?;
+                        if message.get("tool_calls").and_then(Value::as_array).is_some_and(|calls|!calls.is_empty())
+                            && value.pointer("/choices/0/finish_reason").and_then(Value::as_str)
+                                .is_some_and(|r|!matches!(r,"stop"|"tool_calls")) {
+                            return Err("工具响应未完整结束，整批拒绝".into());
+                        }
+                    }
+                }
+                Ok(value)
+            })();
+            result.map(|value|(value,context.clone())).map_err(|e|format!("{e}{context}"))
         }
-        Err(ureq::Error::Status(code, r)) => match read_limited_string(r) {
-            Ok(text) => Err(describe_status_error(code, &text, Some(key))),
-            Err(e) => Err(format!("状态码 {code}：{e}")),
-        },
+        Err(ureq::Error::Status(code, r)) => {
+            let context=http_context(&r,key);
+            match read_limited_string(r) {
+                Ok(text) => Err(format!("{}{context}",describe_status_error(code,&text,Some(key)))),
+                Err(e) => Err(format!("状态码 {code}：{e}{context}")),
+            }
+        }
         Err(e) => Err(format!("网络错误：{e}")),
     }
 }
@@ -282,6 +378,10 @@ pub fn chat(
     input: &str,
     agent: &ureq::Agent,
 ) -> Result<String, String> {
+    if native::is_native(&conn.protocol) {
+        return reply_text(&chat_with_body(conn, key, model,
+            &json!({"messages":[{"role":"user","content":input}]}), agent)?);
+    }
     if conn.protocol != SUPPORTED_PROTOCOL {
         return Err(format!(
             "协议 {} 未支持，当前仅支持 {}",
@@ -292,12 +392,11 @@ pub fn chat(
         "model": model.id,
         "messages": [{ "role": "user", "content": input }],
     });
+    validate_request(conn,key,&body).map_err(|e|model_error(conn,key,model,&body,e))?;
     checked_params(conn, model, &mut body)?;
     check_key_header_safe(key)?;
-    let text = post_chat_text(conn, key, body, agent).map_err(|e| redact_credential(e, key))?;
-    let v: Value = serde_json::from_str(&text)
-        .map_err(|e| redact_credential(format!("响应解析失败：{e}"), key))?;
-    reply_text(&v).map_err(|e| redact_credential(e, key))
+    let (v,context) = post_chat_json(conn,key,body,agent).map_err(|e|model_error(conn,key,model,&Value::Null,e))?;
+    reply_text(&v).map_err(|e|model_error(conn,key,model,&Value::Null,format!("{e}{context}")))
 }
 
 /// 从 chat 响应 JSON 提取回复文本（`chat` 与 013-M3 提炼采样共用；错误文案
@@ -305,7 +404,8 @@ pub fn chat(
 /// 截断提示。
 pub(crate) fn reply_text(v: &Value) -> Result<String, String> {
     let content = v
-        .pointer("/choices/0/message/content")
+        .pointer("/assistant/content")
+        .or_else(|| v.pointer("/choices/0/message/content"))
         .and_then(|c| c.as_str())
         .unwrap_or("");
     if content.is_empty() {
@@ -349,6 +449,19 @@ fn request_has_image_content(request: &Value) -> bool {
 /// 完整请求体对话（006 工具循环）：`request` 为 005 组装产物 `{messages, tools}`，
 /// 附上 `model` 与已校验的 request_params 后发送，返回完整响应 JSON（含 tool_calls）。
 /// 协议检查、鉴权、重定向拒绝与错误映射与 `chat` 完全一致；`chat` 原行为不变。
+pub fn chat_with_provider_body(
+    provider_id: &str,
+    conn: &EffectiveConnection,
+    key: &str,
+    model: &ModelInfo,
+    request: &Value,
+    agent: &ureq::Agent,
+) -> Result<Value, String> {
+    let mut request = request.clone();
+    request.as_object_mut().ok_or("模型请求必须是对象")?.insert("_provider_id".into(),json!(provider_id));
+    chat_with_body(conn, key, model, &request, agent)
+}
+
 pub fn chat_with_body(
     conn: &EffectiveConnection,
     key: &str,
@@ -356,6 +469,16 @@ pub fn chat_with_body(
     request: &Value,
     agent: &ureq::Agent,
 ) -> Result<Value, String> {
+    chat_with_body_inner(conn,key,model,request,agent).map_err(|e|model_error(conn,key,model,request,e))
+}
+
+fn chat_with_body_inner(
+    conn:&EffectiveConnection,key:&str,model:&ModelInfo,request:&Value,agent:&ureq::Agent,
+)->Result<Value,String> {
+    validate_request(conn,key,request)?;
+    if native::is_native(&conn.protocol) {
+        return native::request(conn, key, model, request, agent);
+    }
     if conn.protocol != SUPPORTED_PROTOCOL {
         return Err(format!(
             "协议 {} 未支持，当前仅支持 {}",
@@ -367,29 +490,30 @@ pub fn chat_with_body(
     if let Some(k) = conn
         .request_params
         .keys()
-        .find(|k| matches!(k.as_str(), "model" | "messages" | "tools"))
+        .find(|k| matches!(k.as_str(), "model" | "messages" | "tools" | "_history" | "_provider_id"))
     {
         return Err(format!("request_params 不能包含保留字段 {k}"));
     }
     // 019 §3.2：发送前再次检查图片消息与所选模型能力——恢复图片历史后切到
     // 文本/能力未知模型时明确本地拒绝（零发送），不静默丢图、不发不支持的请求。
-    if request_has_image_content(request)
-        && !crate::catalog::supports_image_input(model)
-    {
-        return Err(format!(
-            "当前模型 {} 未确认支持图片输入（input_modalities 缺少 image）：已拒绝发送含图片的请求；\
-             请改用支持图片的模型（在模型配置中声明 input_modalities 含 image）或新建会话",
-            model.id
-        ));
-    }
     let mut body = request.clone();
+    if request.get("_history").is_some() {
+        let current=native::owner(conn,key,model,request);
+        let items=native::for_owner(native::history(request)?,&current)?;
+        let mut messages:Vec<Value>=request.get("messages").and_then(Value::as_array).into_iter().flatten()
+            .filter(|m|m["role"]=="system").cloned().collect();
+        messages.extend(crate::prompt::project_history(&items));
+        body["messages"]=json!(messages);
+    }
+    if request_has_image_content(&body) && !crate::catalog::supports_image_input(model) {
+        return Err(format!("当前模型 {} 未确认支持图片输入（input_modalities 缺少 image），已拒绝发送",model.id));
+    }
+    body.as_object_mut().ok_or("模型请求必须是对象")?.remove("_history");
+    body.as_object_mut().expect("已确认对象").remove("_provider_id");
     body["model"] = json!(model.id);
     checked_params(conn, model, &mut body)?;
     check_key_header_safe(key)?;
-    let text =
-        post_chat_text(conn, key, body, agent).map_err(|e| redact_credential(e, key))?;
-    serde_json::from_str(&text)
-        .map_err(|e| redact_credential(format!("响应解析失败：{e}"), key))
+    post_chat_json(conn,key,body,agent).map(|(value,_)|value)
 }
 
 /// 查询厂商模型列表；有分页（has_more/after 游标）就读完整。
@@ -398,34 +522,43 @@ pub fn list_models(
     key: &str,
     agent: &ureq::Agent,
 ) -> Result<Vec<ModelInfo>, String> {
-    if conn.protocol != SUPPORTED_PROTOCOL {
+    if conn.protocol != SUPPORTED_PROTOCOL && !native::is_native(&conn.protocol) {
         return Err(format!(
             "协议 {} 未支持，当前仅支持 {}",
             conn.protocol, SUPPORTED_PROTOCOL
         ));
     }
+    validate_model_base(&conn.base_url)?;
     check_key_header_safe(key)?;
+    let google=conn.protocol.starts_with("google-");
+    let messages=conn.protocol=="anthropic-messages";
     let base = conn.base_url.trim_end_matches('/');
     let mut url =
         Url::parse(&format!("{base}/models")).map_err(|e| format!("基础地址无效：{e}"))?;
     let mut out = Vec::new();
-    let mut last_cursor: Option<String> = None;
+    let mut cursors=std::collections::HashSet::new();
     for page in 1..=100 {
-        let text = send(agent.get(url.as_str()).set("Authorization", &auth_header(key)), Some(key))
+        let request=agent.get(url.as_str());
+        let request=if google {request.set("x-goog-api-key",key)}
+            else if messages {request.set("x-api-key",key).set("anthropic-version","2026-10-21")}
+            else {request.set("Authorization",&auth_header(key))};
+        let text = send(request, Some(key))
             .map_err(|e| redact_credential(e, key))?;
         let v: Value = serde_json::from_str(&text)
             .map_err(|e| redact_credential(format!("模型列表响应解析失败：{e}"), key))?;
-        let Some(items) = v.get("data").and_then(|d| d.as_array()) else {
-            return Err("模型列表响应缺少 data 数组".into());
+        let field=if google {"models"} else {"data"};
+        let Some(items) = v.get(field).and_then(|d| d.as_array()) else {
+            return Err(format!("模型列表响应缺少 {field} 数组"));
         };
         for (idx, item) in items.iter().enumerate() {
             // 缺 ID / 非法 ID 条目使名单完整性无法确认：整次查询按失败处理，不写半份名单
-            let Some(id) = item.get("id").and_then(|x| x.as_str()) else {
+            let Some(raw_id) = item.get(if google {"name"} else {"id"}).and_then(|x| x.as_str()) else {
                 return Err(format!(
                     "模型列表第 {page} 页第 {} 条缺少 id，无法确认名单完整，已放弃本次替换",
                     idx + 1
                 ));
             };
+            let id=if google {raw_id.strip_prefix("models/").ok_or("Google 模型资源名缺少 models/ 前缀")?} else {raw_id};
             if !valid_model_id(id) {
                 return Err(format!(
                     "模型列表第 {page} 页第 {} 条 id 非法（含空白/控制字符或超长），已放弃本次替换",
@@ -434,34 +567,37 @@ pub fn list_models(
             }
             let mut info = ModelInfo { id: id.to_string(), ..Default::default() };
             // 只映射响应里明确返回的能力字段，没返回的不补造；展示文字过显示边界
-            if let Some(n) = item.get("name").and_then(|x| x.as_str()) {
+            if let Some(n) = item.get(if google {"displayName"} else if messages {"display_name"} else {"name"}).and_then(|x| x.as_str()) {
                 info.display_name = Some(crate::display::sanitize_for_terminal(
                     &crate::display::truncate_chars(n, 200),
                 ));
             }
-            if let Some(c) = item.get("context_window").and_then(|x| x.as_u64()) {
+            if let Some(c) = item.get(if google {"inputTokenLimit"} else {"context_window"}).and_then(|x| x.as_u64()) {
                 info.context_length = Some(c);
             }
-            if let Some(o) = item.get("max_output_tokens").and_then(|x| x.as_u64()) {
+            if let Some(o) = item.get(if google {"outputTokenLimit"} else {"max_output_tokens"}).and_then(|x| x.as_u64()) {
                 info.max_output = Some(o);
             }
             out.push(info);
         }
-        let has_more = v.get("has_more").and_then(|x| x.as_bool()).unwrap_or(false);
+        let has_more = if google {v.get("nextPageToken").is_some_and(|t|t!="" && !t.is_null())}
+            else {v.get("has_more").and_then(Value::as_bool).unwrap_or(false)};
         if !has_more {
             return Ok(out);
         }
         // 分页必须能确认完整：空页无游标、游标不前进都按失败处理，不空转
-        let Some(cursor) = items.last().and_then(|i| i.get("id")).and_then(|x| x.as_str()) else {
+        let cursor=if google {v.get("nextPageToken").and_then(Value::as_str)}
+            else if messages {v.get("last_id").and_then(Value::as_str)}
+            else {items.last().and_then(|i|i.get("id")).and_then(Value::as_str)};
+        let Some(cursor) = cursor.filter(|s|!s.is_empty()) else {
             return Err(format!("分页异常：第 {page} 页声明还有更多数据但没有可用游标"));
         };
-        if last_cursor.as_deref() == Some(cursor) {
+        if !cursors.insert(cursor.to_owned()) {
             return Err(format!("分页异常：游标未前进（{cursor}），中止读取"));
         }
-        last_cursor = Some(cursor.to_string());
         // 游标经查询参数接口整体编码后再拼接，服务端可控数据不进入 URL 结构
         url.set_query(None);
-        url.query_pairs_mut().append_pair("after", cursor);
+        url.query_pairs_mut().append_pair(if google {"pageToken"} else if messages {"after_id"} else {"after"}, cursor);
     }
     Err("分页超过 100 页仍未读完，中止".into())
 }

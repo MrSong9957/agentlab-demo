@@ -20,7 +20,16 @@ use std::path::Path;
 /// 每用户轮模型请求上限（006：固定常量，无配置系统）。
 pub const MAX_MODEL_REQUESTS_PER_TURN: usize = 8;
 /// 单批 tool_calls 上限（2026-10-10 安全修复 N3：入史/执行前检查，超限整批拒绝）。
-pub const MAX_TOOL_CALLS_PER_BATCH: usize = 32;
+pub const MAX_TOOL_CALLS_PER_BATCH: usize = crate::prompt::MAX_TOOL_CALLS_PER_BATCH;
+
+fn with_native(message: HistoryItem, state: &Option<crate::prompt::NativeState>) -> HistoryItem {
+    match state {
+        Some(state) => HistoryItem::NativeAssistant {
+            message: Box::new(message), state: Some(state.clone()),
+        },
+        None => message,
+    }
+}
 
 /// 一轮的工具面（013-M5 D3 参数化；017 四工具）：`User`＝既有用户轮契约
 /// （恰 `exec_command`/`apply_patch`/`write_stdin`/`update_plan`，此外无新工具）；
@@ -231,46 +240,13 @@ pub struct ParsedToolCall {
 /// 与分派均使用原始值；`arguments` 字符串内的 JSON 无效不在此检查——那属参数错误，
 /// 按工具失败结构回传。
 fn parse_tool_calls(message: &Value) -> Result<Vec<ParsedToolCall>, String> {
-    let Some(tc) = message.get("tool_calls") else {
-        return Ok(Vec::new());
-    };
-    if tc.is_null() {
-        return Ok(Vec::new());
-    }
-    let arr = tc
-        .as_array()
-        .ok_or_else(|| "协议错误：tool_calls 不是数组".to_string())?;
-    let mut calls = Vec::with_capacity(arr.len());
-    let mut seen = std::collections::HashSet::new();
-    for c in arr {
-        let id = c.get("id").and_then(Value::as_str).unwrap_or("");
-        if id.trim().is_empty() {
-            return Err("协议错误：工具调用缺少非空 id".into());
-        }
-        if !seen.insert(id.to_string()) {
-            return Err(format!("协议错误：批内调用 id 重复：{id}"));
-        }
-        if c.get("type").and_then(Value::as_str) != Some("function") {
-            return Err("协议错误：工具调用 type 必须为 function".to_string());
-        }
-        let func = c
-            .get("function")
-            .ok_or_else(|| "协议错误：工具调用缺少 function 字段".to_string())?;
-        let name = func.get("name").and_then(Value::as_str).unwrap_or("");
-        if name.trim().is_empty() {
-            return Err("协议错误：工具调用缺少非空工具名".to_string());
-        }
-        let arguments = func
-            .get("arguments")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "协议错误：工具调用 arguments 必须是字符串".to_string())?;
-        calls.push(ParsedToolCall {
-            id: id.to_string(),
-            name: name.to_string(),
-            arguments: arguments.to_string(),
-        });
-    }
-    Ok(calls)
+    ToolCallRecord::parse_batch(message).map(|records| {
+        records.into_iter().map(|call| ParsedToolCall {
+            id: call.id,
+            name: call.name,
+            arguments: call.arguments,
+        }).collect()
+    })
 }
 
 /// 执行单个调用：按当前 [`ToolMode`] 的注册表分派；参数错误与工具失败按各
@@ -972,7 +948,7 @@ pub fn run_tool_turn_with_hosts_extras(
         let mcp_definitions: &[Value] = mcp_snapshot
             .map(|s| s.definitions())
             .unwrap_or(&empty_tools);
-        let body = match &mode {
+        let mut body = match &mode {
             ToolMode::User => crate::prompt::build_turn_request_with_mcp(
                 history,
                 None,
@@ -997,6 +973,9 @@ pub fn run_tool_turn_with_hosts_extras(
                 system,
             ),
         };
+        // 024：共同历史作为宿主数据交给适配器；兼容的 messages 投影仍供旧发送者
+        // 使用。此字段和原生状态绝不直接出现在厂商请求中。
+        body["_history"] = serde_json::to_value(&*history).expect("共同历史可序列化");
         // 022：工具总数上限（含本轮条件原生工具）在模型请求发送前按组装结果
         // 检查，超限明确报错、不静默截断。
         let declared_tools = body["tools"].as_array().map(|t| t.len()).unwrap_or(0);
@@ -1047,10 +1026,21 @@ pub fn run_tool_turn_with_hosts_extras(
         }
         // 先整条校验消息与整批调用结构，再写入历史、执行；协议级失败
         // 收尾统一先保存已受理回答（§8.5），未答项才按 model_error 关闭
-        let Some(message) = resp.pointer("/choices/0/message").cloned() else {
+        let Some(message) = resp.get("assistant").or_else(|| resp.pointer("/choices/0/message")).cloned() else {
             close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
             close_pending_on_model_error(history, on_record, notify, &mut pending_async);
             return Err("协议错误：响应缺少 choices[0].message".to_string());
+        };
+        let native_state = match resp.get("native_state") {
+            None => None,
+            Some(value) => match serde_json::from_value::<crate::prompt::NativeState>(value.clone()) {
+                Ok(state) => Some(state),
+                Err(_) => {
+                    close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
+                    close_pending_on_model_error(history, on_record, notify, &mut pending_async);
+                    return Err("协议错误：原生续接状态无效".into());
+                }
+            },
         };
         let calls = match parse_tool_calls(&message) {
             Ok(calls) => calls,
@@ -1101,13 +1091,13 @@ pub fn run_tool_turn_with_hosts_extras(
             // 018-B 结束检查：已受理回答先于终文——继续原轮让模型处理，
             // 不把该终文提前交付为任务完成（§8.4）。
             if let Some(p) = pending_async.as_ref().filter(|p| p.answer.is_some()) {
-                history.push(HistoryItem::Text(HistoryMessage {
+                history.push(with_native(HistoryItem::Text(HistoryMessage {
                     images: None,
                     text_elements: Vec::new(),
                     role: HistoryRole::Assistant,
                     content: reply.clone(),
                     user_input_event: None,
-                }));
+                }), &native_state));
                 on_record(history);
                 record_async_answer(history, on_record, notify, p);
                 recorded_answer_ids.push(pending_async.take().unwrap().request_id);
@@ -1125,32 +1115,32 @@ pub fn run_tool_turn_with_hosts_extras(
                 None => Vec::new(),
             };
             if !late.is_empty() {
-                history.push(HistoryItem::Text(HistoryMessage {
+                history.push(with_native(HistoryItem::Text(HistoryMessage {
                     images: None,
                     text_elements: Vec::new(),
                     role: HistoryRole::Assistant,
                     content: reply.clone(),
                     user_input_event: None,
-                }));
+                }), &native_state));
                 on_record(history);
                 for input in late {
                     ingest_steer_input(history, on_record, input, image_input, cancel, notify);
                 }
                 continue;
             }
-            history.push(HistoryItem::Text(HistoryMessage {
+            history.push(with_native(HistoryItem::Text(HistoryMessage {
                 images: None,
                 text_elements: Vec::new(),
                 role: HistoryRole::Assistant,
                 content: reply.clone(),
                 user_input_event: None,
-            }));
+            }), &native_state));
             on_record(history);
             close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_TASK_COMPLETED);
             return Ok(reply);
         }
         // 合法批：记录 assistant（content 原样保留），按返回顺序串行执行并逐条追加结果
-        history.push(HistoryItem::AssistantToolCalls {
+        history.push(with_native(HistoryItem::AssistantToolCalls {
             tool_calls: calls
                 .iter()
                 .map(|c| ToolCallRecord {
@@ -1160,7 +1150,7 @@ pub fn run_tool_turn_with_hosts_extras(
                 })
                 .collect(),
             content,
-        });
+        }, &native_state));
         on_record(history);
         let mut cancelled_batch = false;
         let mut input_end: Option<crate::user_input::InputError> = None;

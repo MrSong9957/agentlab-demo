@@ -204,13 +204,13 @@ fn unsupported_protocol_rejected_before_request() {
     let mock = spawn_mock(vec![]);
     let conn = catalog::EffectiveConnection {
         base_url: mock.url.clone(),
-        protocol: "anthropic-messages".into(),
+        protocol: "unknown-native".into(),
         key_ref: None,
         request_params: Default::default(),
     };
     let model = catalog::ModelInfo { id: "m".into(), ..Default::default() };
     let err = api::chat(&conn, "k", &model, "hi", &api::agent()).unwrap_err();
-    assert!(err.contains("anthropic-messages 未支持"), "实际错误：{err}");
+    assert!(err.contains("unknown-native 未支持"), "实际错误：{err}");
     assert_eq!(mock.count(), 0);
 }
 
@@ -432,7 +432,9 @@ fn json_error_message_capped_at_300_chars() {
         x_count <= 300,
         "error.message 超过 300 字符的部分不得回显：{err}"
     );
-    assert!(err.chars().count() < 340, "总长度应有界：{}", err.chars().count());
+    // 024 §1.6：错误须包含厂商／模型／协议与 HTTP 上下文（约 +90 字符），
+    // 上限随契约更新；核心仍是 message 截断到 300 且总量有界。
+    assert!(err.chars().count() < 420, "总长度应有界：{}", err.chars().count());
 }
 
 // ---------- 刷新流程 ----------

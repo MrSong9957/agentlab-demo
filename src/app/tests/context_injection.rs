@@ -1014,7 +1014,9 @@ fn t15_skipped_sources_never_enter_requests_and_valid_rules_coexist_with_memory(
     assert_eq!(messages[0]["role"], "system");
     assert_eq!(messages[1], json!({"role":"user", "content":expected}));
     assert_eq!(messages[2], json!({"role":"user", "content":"继续当前任务"}));
-    let sent = serde_json::to_string(&requests[0]).unwrap();
+    // 024：body 额外携带 _history（宿主交给适配器的共同历史，发送前移除），
+    // 注入边界断言针对发给厂商的 messages 面。
+    let sent = serde_json::to_string(&requests[0]["messages"]).unwrap();
     assert_eq!(sent.matches("VALID-PROJECT-RULE").count(), 1);
     assert_eq!(sent.matches("MEMORY-REFERENCE").count(), 1);
     assert!(!sent.contains("OUTSIDE-RULES-MUST-NOT-SEND"));

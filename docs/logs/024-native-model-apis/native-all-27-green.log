@@ -1,0 +1,31 @@
+   Compiling terminal-chat v0.1.0 (/workspace/.worktrees/024-native-model-apis/src/app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.49s
+running 27 tests
+test batch_structure_is_atomic_but_bad_tool_parameters_are_individual_failures ... ok
+test corrupt_v2_history_is_visible_but_blocks_continuation_without_http_or_replay ... ok
+test damaged_native_payload_or_mismatched_saved_call_is_rejected_before_http ... ok
+test eighth_batch_executes_and_persists_before_request_limit_stops_the_turn ... ok
+test every_protocol_assembles_sse_text_and_rejects_missing_completion ... ok
+test every_protocol_enforces_exact_serialized_request_and_response_byte_limits ... ok
+test every_protocol_runs_memory_extraction_and_real_restricted_merge ... ok
+test generate_content_cli_preserves_parts_and_does_not_invent_wire_call_ids ... ok
+test generate_content_missing_args_is_empty_object_but_non_object_is_rejected ... ok
+test interactions_cli_replays_steps_and_links_function_result ... ok
+test malformed_interactions_sse_is_a_protocol_error_not_a_crash ... ok
+test malformed_local_request_or_connection_never_reaches_http ... ok
+test messages_cli_preserves_thinking_and_returns_native_tool_result ... ok
+test model_and_gateway_encodings_do_not_change_the_selected_resource ... ok
+test native_errors_identify_source_and_request_without_credentials_or_retry ... ok
+test native_images_reach_user_and_tool_result_and_require_declared_capability ... ok
+test native_model_lists_use_provider_auth_and_read_every_page_without_guessing_capabilities ... ok
+test native_session_upgrades_v1_without_rewriting_and_replays_v2_after_restart ... ok
+test responses_cli_tool_loop_preserves_reasoning_items_and_raw_call_id ... ok
+test responses_text_uses_native_endpoint_and_stateless_input ... ok
+test sse_raw_total_and_assembled_output_have_separate_limits ... ok
+test sse_tool_arguments_and_signatures_are_complete_before_execution_or_save ... ok
+test stream_requires_declared_capability_before_any_request_on_every_protocol ... ok
+test structured_output_uses_explicit_native_parameters_and_unknown_capability_is_local_error ... ok
+test switching_source_keeps_closed_visible_history_but_never_transfers_opaque_or_open_calls ... ok
+test tui_renders_native_tool_reply_and_discards_late_response_after_cancel ... ok
+test untrusted_error_or_incomplete_reply_never_executes_tools_or_exposes_the_key ... ok
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 27.72s

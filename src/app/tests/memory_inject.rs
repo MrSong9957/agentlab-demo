@@ -769,9 +769,16 @@ fn m6_read_failure_does_not_block_current_task() {
         &mut history,
         "继续当前任务",
         &mut |body| {
+            // 024：_history 是宿主交给适配器的共同历史（openai-chat 发送前移除），
+            // 不属于记忆注入面；其余字段须逐字节一致。
+            let mut expected = build_turn_request(&history_for_request());
+            expected
+                .as_object_mut()
+                .unwrap()
+                .insert("_history".into(), body["_history"].clone());
             assert_eq!(
                 serde_json::to_vec(body).unwrap(),
-                serde_json::to_vec(&build_turn_request(&history_for_request())).unwrap()
+                serde_json::to_vec(&expected).unwrap()
             );
             Ok(answer("继续成功"))
         },

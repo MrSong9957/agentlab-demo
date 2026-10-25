@@ -161,6 +161,7 @@ pub fn load_memories_config_from(config_dir: &Path) -> MemoriesConfig {
 /// 后台管线的模型发送面（D6：当前 `selected_model`，由触发轮的 route 快照）。
 #[derive(Clone)]
 pub struct ModelSend {
+    pub provider_id:String,
     pub conn: EffectiveConnection,
     pub key: String,
     pub model: ModelInfo,
@@ -209,7 +210,7 @@ pub fn spawn_memory_pipeline_in(
     let sessions_dir = sessions_dir.to_path_buf();
     Some(std::thread::spawn(move || {
         let chat = |body: &serde_json::Value| {
-            api::chat_with_body(&send.conn, &send.key, &send.model, body, &send.agent)
+            api::chat_with_provider_body(&send.provider_id,&send.conn,&send.key,&send.model,body,&send.agent)
         };
         run_memory_pipeline_once(
             &root,

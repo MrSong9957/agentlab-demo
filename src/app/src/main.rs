@@ -681,6 +681,7 @@ fn cmd_chat(
                         &mem_config,
                         autosave.current_target_stem(),
                         terminal_chat::memory::runner::ModelSend {
+                            provider_id:prov.provider_id.clone(),
                             conn: prov.conn.clone(),
                             key: cred.value.clone(),
                             model: model.clone(),
@@ -688,12 +689,13 @@ fn cmd_chat(
                         },
                     );
                     // 006：工具调用循环——组装→请求→串行执行→结果回传→再请求
+                    autosave.prepare_native_model(&prov.conn.protocol);
                     // N2b：仅工具轮期间接管 SIGINT（只置取消标志），轮结束恢复默认——
                     // 001 的动画/输入提示符 Ctrl+C 语义保持不变
                     let conn = &prov.conn;
                     let key = &cred.value;
                     let mut sender =
-                        |body: &serde_json::Value| api::chat_with_body(conn, key, &model, body, agent);
+                        |body: &serde_json::Value| api::chat_with_provider_body(&prov.provider_id, conn, key, &model, body, agent);
                     // 012：工具活动结构化事件——行式路径保持历史输出逐字节不变
                     //（ToolBegin 打印同一活动行；ToolEnd 仅落史不打印，与 006 一致）；
                     // 016：运行中／已取消但进程仍存活的工具，明确展示会话编号；

@@ -20,6 +20,7 @@ pub struct Req {
     pub method: String,
     pub path: String,
     pub auth: Option<String>,
+    pub headers: std::collections::BTreeMap<String, String>,
     pub body: String,
 }
 
@@ -127,6 +128,10 @@ impl Mock {
 
 /// 启动本地 mock 服务：每个请求按顺序取 responses；用尽后重复最后一条。
 pub fn spawn_mock(responses: Vec<MockResp>) -> Mock {
+    spawn_mock_with_content_type(responses, "application/json")
+}
+
+pub fn spawn_mock_with_content_type(responses: Vec<MockResp>, content_type: &'static str) -> Mock {
     let listener = TcpListener::bind("127.0.0.1:0").expect("绑定端口失败");
     let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
     let responses = Arc::new(Mutex::new(responses));
@@ -139,7 +144,7 @@ pub fn spawn_mock(responses: Vec<MockResp>) -> Mock {
             let responses = responses.clone();
             let req_log = req_log.clone();
             let served = served.clone();
-            thread::spawn(move || handle_conn(stream, responses, req_log, served));
+            thread::spawn(move || handle_conn(stream, responses, req_log, served, content_type));
         }
     });
     Mock { url, requests }
@@ -150,6 +155,7 @@ fn handle_conn(
     responses: Arc<Mutex<Vec<MockResp>>>,
     req_log: Arc<Mutex<Vec<Req>>>,
     served: Arc<Mutex<usize>>,
+    content_type: &str,
 ) {
     let mut reader = BufReader::new(stream.try_clone().expect("clone 流失败"));
     let mut line = String::new();
@@ -161,6 +167,7 @@ fn handle_conn(
     let path = parts.next().unwrap_or("").to_string();
     let mut content_length = 0usize;
     let mut auth = None;
+    let mut headers = std::collections::BTreeMap::new();
     loop {
         let mut h = String::new();
         if reader.read_line(&mut h).is_err() {
@@ -176,6 +183,7 @@ fn handle_conn(
         }
         // 头名大小写不敏感；值保持原样（Authorization 的 Bearer 大小写有断言价值）
         if let Some((name, value)) = h.split_once(':') {
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
             if name.trim().eq_ignore_ascii_case("authorization") {
                 auth = Some(value.trim().to_string());
             }
@@ -187,7 +195,7 @@ fn handle_conn(
         reader.read_exact(&mut body).ok();
     }
     let body = String::from_utf8_lossy(&body).to_string();
-    req_log.lock().unwrap().push(Req { method, path, auth, body });
+    req_log.lock().unwrap().push(Req { method, path, auth, headers, body });
 
     let resp = {
         let mut guard = responses.lock().unwrap();
@@ -221,7 +229,7 @@ fn handle_conn(
         .map(|l| format!("Location: {l}\r\n"))
         .unwrap_or_default();
     let head = format!(
-        "HTTP/1.1 {} {}\r\n{location}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\n{location}Content-Type: {content_type}\r\nX-Request-Id: offline-fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         resp.status,
         reason(resp.status),
         bytes.len()

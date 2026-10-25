@@ -24,6 +24,14 @@ pub const SESSIONS_DIR: &str = "sessions";
 /// 首行 meta：仅 `{"v":1}`（§6-D：不绑定模型/配置/目录）。
 pub const META_LINE: &str = "{\"v\":1}";
 
+fn needs_v2(history: &[HistoryItem]) -> bool {
+    history.iter().any(|item| matches!(item, HistoryItem::NativeAssistant { .. }))
+}
+
+fn meta_line(version: u64) -> &'static str {
+    if version == 2 { "{\"v\":2}" } else { META_LINE }
+}
+
 /// 悬空调用合成结果的固定文案（§6-A：只表达结果未知，禁言未执行/取消/失败）。
 pub const UNKNOWN_RESULT_ERROR: &str = "会话中断，该调用可能已执行，执行结果未知";
 
@@ -67,6 +75,7 @@ pub enum TailState {
 /// 装载结果：修复后的历史投影＋计数（修复不回写磁盘，投影确定性，§3 规则 6）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Loaded {
+    pub version: u64,
     pub history: Vec<HistoryItem>,
     pub skipped_lines: usize,
     /// 坏行行号（1 起，含 meta 行）。
@@ -133,6 +142,7 @@ enum Entry {
 /// 只接受 `data:image/(png|jpeg|gif|webp);base64,` 形态、可解码 base64、
 /// detail 恰为 `high`、解码字节不超过准备后图片上限的本地图片 data URL。
 fn image_payload_ok(item: &HistoryItem) -> bool {
+    let item = item.portable();
     let HistoryItem::ToolResult { image: Some(img), .. } = item else {
         return user_images_payload_ok(item);
     };
@@ -213,6 +223,13 @@ fn user_images_payload_ok(item: &HistoryItem) -> bool {
 
 /// 批内/跨批 id 校验：同一 id 在行内或更早批出现 → 该行按坏行（§3 加载规则 3）。
 fn batch_line_ok(item: &HistoryItem, seen: &mut HashSet<String>) -> bool {
+    if let HistoryItem::NativeAssistant { message, .. } = item {
+        if !matches!(message.as_ref(), HistoryItem::AssistantToolCalls { .. }
+            | HistoryItem::Text(HistoryMessage { role: HistoryRole::Assistant, .. })) {
+            return false;
+        }
+        return batch_line_ok(message, seen);
+    }
     let HistoryItem::AssistantToolCalls { tool_calls, .. } = item else {
         return true;
     };
@@ -243,6 +260,7 @@ pub fn load_from_reader<R: Read>(reader: R) -> Result<Loaded, String> {
     let mut last_had_newline = true;
     let mut last_accepted = true;
     let mut meta_pending = true;
+    let mut version = 1;
 
     loop {
         let (had_newline, over_limit) = read_line_bounded(&mut reader, &mut line_buf)
@@ -252,15 +270,15 @@ pub fn load_from_reader<R: Read>(reader: R) -> Result<Loaded, String> {
         }
         line_no += 1;
         if meta_pending {
-            // meta 门：v==1 通过（多余字段忽略）；坏 meta/未知 v 整文件拒绝
-            let meta_ok = !over_limit
-                && serde_json::from_slice::<serde_json::Value>(&line_buf)
+            // meta 门：v==1/2 通过（多余字段忽略）；坏 meta/未知 v 整文件拒绝
+            let parsed_version = serde_json::from_slice::<serde_json::Value>(&line_buf)
                     .ok()
-                    .and_then(|v| v.get("v").and_then(|v| v.as_u64()))
-                    == Some(1);
+                    .and_then(|v| v.get("v").and_then(|v| v.as_u64()));
+            let meta_ok = !over_limit && matches!(parsed_version, Some(1 | 2));
             if !meta_ok {
                 return Err(format!("会话首行 meta 无效（期望 {META_LINE}）：整文件拒绝"));
             }
+            version = parsed_version.expect("已确认支持的版本");
             meta_pending = false;
             last_had_newline = had_newline;
             last_accepted = true;
@@ -274,6 +292,9 @@ pub fn load_from_reader<R: Read>(reader: R) -> Result<Loaded, String> {
         } else {
             serde_json::from_slice::<HistoryItem>(&line_buf).ok()
         };
+        if version == 1 && parsed.as_ref().is_some_and(|item| matches!(item, HistoryItem::NativeAssistant { .. })) {
+            return Err("V1 会话含原生状态，拒绝按旧格式装载".into());
+        }
         // 019 §5.1：图片载荷校验——只接受有界且有效的本地图片 data URL；
         // 远程 URL、非法 base64、错误 MIME、错误 detail 或超限额按坏行处理
         //（配对修复补未知结果；不为校验加载原路径或访问网络）。
@@ -298,7 +319,17 @@ pub fn load_from_reader<R: Read>(reader: R) -> Result<Loaded, String> {
         return Err("会话文件为空或缺少 meta 行".into());
     }
 
-    let (repairs, history) = repair_pairs(entries);
+    let (repairs, mut history) = repair_pairs(entries);
+    if version == 2 && skipped > 0 {
+        // 损坏行可能就是必要签名，不能像普通文本一样丢掉后继续请求。
+        // 保留可显示历史，并把不可续接事实持久保存，禁止恢复时补执行工具。
+        history.push(HistoryItem::NativeAssistant {
+            message: Box::new(HistoryItem::Text(HistoryMessage {
+                role: HistoryRole::Assistant, content: String::new(),
+                user_input_event: None, images: None, text_elements: Vec::new(),
+            })), state: None,
+        });
+    }
     let tail = if last_had_newline {
         TailState::Terminated
     } else if last_accepted {
@@ -306,7 +337,7 @@ pub fn load_from_reader<R: Read>(reader: R) -> Result<Loaded, String> {
     } else {
         TailState::Bad
     };
-    Ok(Loaded { history, skipped_lines: skipped, skipped_line_numbers, repairs, tail })
+    Ok(Loaded { version, history, skipped_lines: skipped, skipped_line_numbers, repairs, tail })
 }
 
 /// 结束开放批：未获结果的调用合成通用未知错误结果（插在该批已保留结果之后）。
@@ -342,6 +373,13 @@ fn repair_pairs(entries: Vec<Entry>) -> (usize, Vec<HistoryItem>) {
     for entry in entries {
         match entry {
             Entry::Bad => finalize_open_batch(&mut out, &mut open, &mut repairs),
+            Entry::Item(item @ HistoryItem::NativeAssistant { .. }) => {
+                finalize_open_batch(&mut out, &mut open, &mut repairs);
+                if let HistoryItem::AssistantToolCalls { tool_calls, .. } = item.portable() {
+                    open = Some(tool_calls.iter().map(|c| (c.id.clone(), false)).collect());
+                }
+                out.push(item);
+            }
             Entry::Item(HistoryItem::Text(m)) => {
                 finalize_open_batch(&mut out, &mut open, &mut repairs);
                 out.push(HistoryItem::Text(m));
@@ -553,7 +591,7 @@ pub fn save_snapshot(dir: &Path, name: &str, history: &[HistoryItem]) -> Result<
         #[cfg(not(unix))]
         let mut f =
             std::fs::File::create(&tmp).map_err(|e| format!("写 {} 失败：{e}", tmp.display()))?;
-        f.write_all(format!("{META_LINE}\n").as_bytes())
+        f.write_all(format!("{}\n", meta_line(if needs_v2(history) { 2 } else { 1 })).as_bytes())
             .map_err(|e| format!("写 {} 失败：{e}", tmp.display()))?;
         for item in history {
             let line = record_line(item);
@@ -603,6 +641,10 @@ pub struct ResumeInfo {
 /// 一次 `write_all` 成功；半写失败截回 `durable_len`；游标 `persisted_upto`
 /// 只在提交后推进（§3 自动保存语义）。内存历史本身即待写缓冲，无重复缓存。
 pub struct Session {
+    version: u64,
+    /// 增量游标：已检查过原生记录的历史前缀长度（256 MiB 档全量扫描会使
+    /// 每条追加 O(n)，见 session_perf 回归）。
+    native_seen: usize,
     dir: PathBuf,
     state: State,
     persisted_upto: usize,
@@ -614,6 +656,8 @@ pub struct Session {
 impl Session {
     pub fn new(dir: PathBuf) -> Self {
         Session {
+            version: 1,
+            native_seen: 0,
             dir,
             state: State::Idle,
             persisted_upto: 0,
@@ -625,6 +669,17 @@ impl Session {
     /// 每条记录入史的同时调用：确保目标存在（首次追加时创建，完整上下文开篇），
     /// 然后按序提交整个待写段。返回需要打印一次的错误提示（正常为 None）。
     pub fn on_history(&mut self, history: &[HistoryItem]) -> Option<String> {
+        // 只扫新增段：历史可能已达数百万条，全量扫描会把单条追加拖成 O(n)。
+        if self.version == 1 {
+            let from = self.native_seen.min(history.len());
+            let has_native = history[from..]
+                .iter()
+                .any(|item| matches!(item, HistoryItem::NativeAssistant { .. }));
+            self.native_seen = history.len();
+            if has_native {
+                self.prepare_native_model("native");
+            }
+        }
         if let Some(msg) = self.ensure_target(history) {
             return Some(msg);
         }
@@ -638,6 +693,18 @@ impl Session {
                 }
             }
             None => None,
+        }
+    }
+
+    /// 在新轮入史前选择格式，避免恢复 V1 后先把 user 写回旧文件。
+    /// 只换追加目标，不立即建文件；旧文件和已提交前缀保持原样。
+    pub fn prepare_native_model(&mut self, protocol: &str) {
+        if protocol != "openai-chat" && self.version == 1 && !matches!(self.state, State::Disabled) {
+            self.version = 2;
+            self.state = State::Idle;
+            self.persisted_upto = 0;
+            self.durable_len = 0;
+            self.error_reported = false;
         }
     }
 
@@ -689,6 +756,8 @@ impl Session {
         if !stem.starts_with("auto-") {
             // 手动快照：只读装载（快照文件字节不变），本运行新记录写新 auto 文件
             let loaded = load_session_file(&path)?;
+            self.version = loaded.version;
+            self.native_seen = loaded.history.len();
             self.state = State::Idle;
             self.persisted_upto = 0;
             self.durable_len = 0;
@@ -728,6 +797,8 @@ impl Session {
                     .map_err(|e| format!("会话 {} 尾置处理失败：{e}", path.display()))?,
             };
             self.persisted_upto = loaded.history.len();
+            self.version = loaded.version;
+            self.native_seen = loaded.history.len();
             self.durable_len = durable_len;
             self.error_reported = false;
             return Ok(ResumeInfo { loaded, degraded: false });
@@ -759,6 +830,8 @@ impl Session {
                 };
                 // 合成记录视为虚拟持久化：游标＝装载后历史长度，补写不重写它们
                 self.persisted_upto = loaded.history.len();
+                self.version = loaded.version;
+                self.native_seen = loaded.history.len();
                 self.durable_len = durable_len;
                 self.error_reported = false;
                 self.state = State::Writing { _path: path, file };
@@ -769,6 +842,8 @@ impl Session {
                 // 装载为获锁失败时点快照，写者进行中半行按坏行跳过
                 drop(file);
                 let loaded = load_session_file(&path)?;
+                self.version = loaded.version;
+                self.native_seen = loaded.history.len();
                 self.state = State::Idle;
                 self.persisted_upto = 0;
                 self.durable_len = 0;
@@ -848,7 +923,7 @@ impl Session {
             }
             let mut bytes = 0u64;
             let outcome = (|| -> Result<(), String> {
-                let meta = format!("{META_LINE}\n");
+                let meta = format!("{}\n", meta_line(self.version));
                 file.write_all(meta.as_bytes())
                     .map_err(|e| format!("自动会话写入失败：{e}"))?;
                 bytes += meta.len() as u64;
@@ -990,6 +1065,8 @@ mod tests {
             .open("/dev/full")
             .expect("本测试需要 /dev/full（Linux 标准字符设备）");
         let mut session = Session {
+            version: 1,
+            native_seen: 0,
             dir: dir.clone(),
             state: State::Writing { _path: PathBuf::from("/dev/full"), file: dev },
             persisted_upto: 2,
