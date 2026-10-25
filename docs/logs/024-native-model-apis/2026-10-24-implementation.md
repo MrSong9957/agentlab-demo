@@ -83,3 +83,16 @@
 - Clippy（此前未运行）：024 引入的警告仅 `native.rs` 一处 if-collapse（已修）；其余 app 层
   警告（catalog／memory.store／tui_host／turn.rs 两处／common/pty.rs 等）经 diff hunk 核对
   均为原有代码，按精准修改原则不触碰。见 `clippy-final.log`、`clippy-final-rerun.log`。
+
+## 交付（2026-10-25）
+
+经用户批准：任务提交 `83c5dd3`（99 文件）合并到 main（merge `2d10f19`），本地任务分支删除。
+main 上的 024 旧副本经逐文件核对为新版所覆盖后入 stash 并清理；`src/app/config/manual.json`（本地个人配置）与 worktree 内 023 规格旧副本不属交付，未提交。合并与 023 无冲突（023 提交未触碰 024 修改的文档文件；turn.rs 仅叠加 023 的 12 行资源工具分派分支，语义正交）。
+
+合并后复验（main 工作树，`--locked --offline`）：
+
+- `cargo check`＋`cargo test --workspace --no-fail-fast`：exit 0，64 目标 3476 通过／0 失败／3 忽略（`full-verify-merged.log`）。
+- Clippy：exit 0；024 相关文件（api/native、api/stream、api.rs、session.rs、prompt.rs、native_model_apis 等）零警告，其余为 tui／023／既有测试的原有基线。
+- 性能复测（合并版二进制、冻结阈值）：30 组零超限，最差用量 34.4% 阈值，p95 2.88–10.93 ms、RSS 22,060–23,940 KiB（`performance-merged.{json,log}`）。
+
+验证边界不变：真实官方服务、用量与费用未验证；TUI×原生×图片三重组合未单独实测。
