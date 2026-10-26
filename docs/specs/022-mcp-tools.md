@@ -246,3 +246,17 @@ Codex 已将连接、目录及名称处理拆到 `codex-mcp`，底层是 `rmcp-c
 最终核验（2026-10-24 第三轮，性能记录 §7）：修正版受控闸门探针（27 格×两侧）证实**已受理通知一律在到达后的第一次 prepare 生效**——无「下下轮」回归（首轮探针因 NOTIFY_DELAY_MS 未经 env_vars 转交而失效，数据作废并归档标注）；a12 两类断连状态各有确定性用例（close 后 NotSent＋零计数 ｜ a11/a18 闸门确认在途后 SentUnknown），原进程死亡边界用例的「二选一」仅作竞态补充。
 
 不作为达标手段：放松安全校验、改变 8/32/128 预算、延迟应有刷新、新增目录资源上限（后者属行为变化需单独确认）。单样本发现耗时不宣称稳定提升；未采到子进程 RSS 标为不可测。
+
+## 5.4 修订（2026-10-26）：TLS 特性补齐（远程 HTTPS 可用性）
+
+> 状态：待验收（2026-10-26 实现完成：reqwest rustls feature＋测试接缝＋mcp_tls 三场景；证据 docs/logs/022-mcp-tls/）。原验收与交付状态不变。
+
+2026-10-25 只读核实证实规格符合性缺口：§1 承诺"支持远程 Streamable HTTP"、§2.2 强制"远程 HTTPS"、§3.2 要求启用"TLS 特性"，但实现侧 `reqwest` 以 `default-features=false` 引入且 rmcp 的 `transport-streamable-http-client-reqwest` 仅 `__reqwest`（无 TLS）——合并后无任何 TLS 后端，远程 HTTPS MCP 服务器实际连接失败（明确报错、不降级、凭证不出网），且 mcp_http 测试全部使用 `http://127.0.0.1`，远程 HTTPS 路径从未被实测覆盖。
+
+修订要求：
+
+1. `src/app/Cargo.toml` 的 reqwest 启用 rustls TLS feature（与 ureq 同栈，选 webpki-roots 根），Cargo.lock 随之更新；版本收敛与终态审计归 028 规格。
+2. 生产 URL 安全校验不变（远程必须 HTTPS、http 仅回环、拒 userinfo/fragment、禁自动重定向）；生产客户端不做任何"接受无效证书"配置。
+3. 测试：本地 TLS mock（自签证书）覆盖——(a) 正常 HTTPS 连接与工具调用往返；(b) 错误证书（不信任 CA/主机名不符）被拒绝且错误脱敏；(c) 回环 HTTP 既有用例回归不破坏。测试对自签证书的信任注入仅存在于测试构建的客户端接缝（transport 的 client 构建提供测试可注入根证书的参数化点），不进入生产默认配置。
+4. 验收（假服务器、无真实端点）：三场景各一条可判定结果；`.gitleaks.toml`/hook 无涉；证据入 `docs/logs/022-mcp-tls/`。
+5. 已确认故障的 RED：远程 HTTPS 场景在 feature 启用前连接失败（已核实，2026-10-25 记录），作为本修订的既有 RED 证据；证书拒绝与回环回归为补覆盖，首次即通过则如实记录。

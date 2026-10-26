@@ -1,0 +1,8 @@
+error[E0433]: cannot find module or crate `rustls` in this scope
+error[E0433]: cannot find module or crate `rustls` in this scope
+error[E0433]: cannot find module or crate `rustls` in this scope
+error[E0433]: cannot find module or crate `rustls` in this scope
+error[E0433]: cannot find module or crate `rustls` in this scope
+error[E0433]: cannot find module or crate `rustls` in this scope
+error[E0425]: cannot find function `set_extra_root_certificate_for_tests` in module `terminal_chat::mcp::transport`
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `terminal_chat::mcp::transport`

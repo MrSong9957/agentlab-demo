@@ -115,7 +115,7 @@ fn open_store_if_valid(root: &Path, epoch: u64, clock: crate::memory::Clock) -> 
         if read_epoch(root) != epoch {
             return None;
         }
-        return MemoryStore::open(root, clock).ok();
+        MemoryStore::open(root, clock).ok()
     }
     #[cfg(not(unix))]
     {

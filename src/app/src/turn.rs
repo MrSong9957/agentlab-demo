@@ -344,7 +344,12 @@ fn execute_tool(
         },
         "apply_patch" => match serde_json::from_str::<Value>(&call.arguments) {
             Ok(v) => {
-                let (r, changes) = crate::apply_patch::apply_patch_with_display(&v);
+                // 027 B：隔离模式下读、判型、写全部在目标用户侧子进程完成
+                let (r, changes) = if crate::catalog::isolated_tool_user().is_some() {
+                    crate::apply_patch::apply_patch_isolated(&v)
+                } else {
+                    crate::apply_patch::apply_patch_with_display(&v)
+                };
                 (
                     serde_json::to_string(&r).expect("ApplyPatchResult 可序列化"),
                     Some(ToolDisplay::Patch { changes }),

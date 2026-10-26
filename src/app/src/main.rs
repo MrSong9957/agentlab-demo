@@ -56,6 +56,11 @@ fn parse_image_args(args: impl Iterator<Item = String>) -> Result<Vec<std::path:
 }
 
 fn main() {
+    // 027 B：隔离模式内部入口（经 sudo 以目标用户运行 apply_patch；不属于模型
+    // 工具契约，参数仅此一个、补丁走 stdin）——先于任何交互入口检测。
+    if std::env::args().nth(1).as_deref() == Some("--internal-apply") {
+        std::process::exit(terminal_chat::apply_patch::run_internal_apply());
+    }
     // .env 是环境变量的可选来源：启动时载入，已存在的变量不覆盖
     catalog::load_dotenv_from(std::path::Path::new(".env"));
     // 020 A04：-i/--image 启动图片（TUI 存宿主待就绪提交；行式随首条输入）
@@ -81,10 +86,13 @@ fn main() {
         // F7 权限审计：与行式同源同参（内容/脱敏/收紧行为不变）；置于授权前＝
         // 行式"审计→读配置"顺序（0000 权限等角落先自愈再读，独立复审 P2-4）；
         // TUI 以启动通知 cell 展示（008-REVIEW 独立审查 P2-7）
-        let startup_notices = catalog::audit_file_permissions(
+        let mut startup_notices = catalog::audit_file_permissions(
             Some(std::path::Path::new(".env")),
             &catalog::config_dir(),
         );
+        if let Some(n) = catalog::isolated_mode_notice() {
+            startup_notices.push(n); // 027 B：隔离模式启用确认
+        }
         // 启动期 origin 授权（raw mode 之前的普通终端交互）
         if let Err(e) = host.authorize_startup_origin(&mut |q| prompt_y_n(&mut rl, q)) {
             println!("错误：{e}");
@@ -114,7 +122,7 @@ fn main() {
     banner();
 
     // 权限审计（F7）：.env/配置文件收紧、上级目录可写告警；只读元数据，不含秘密值
-    for line in catalog::audit_file_permissions(Some(std::path::Path::new(".env")), &catalog::config_dir()) {
+    for line in catalog::audit_file_permissions(Some(std::path::Path::new(".env")), &catalog::config_dir()).into_iter().chain(catalog::isolated_mode_notice()) {
         say(&line);
     }
 

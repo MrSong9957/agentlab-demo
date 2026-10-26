@@ -182,7 +182,7 @@ fn valid_local_image_data_url(url: &str) -> bool {
 ///   区间文字恰为 `[Image #N]`，N 指向存在的图片（1..=len）且不重复绑定。
 fn user_images_payload_ok(item: &HistoryItem) -> bool {
     let HistoryItem::Text(m) = item else { return true };
-    let images = m.images.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+    let images = m.images.as_deref().unwrap_or(&[]);
     if images.is_empty() && m.text_elements.is_empty() {
         return true;
     }

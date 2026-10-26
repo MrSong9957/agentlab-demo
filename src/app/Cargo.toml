@@ -28,4 +28,8 @@ futures = "0.3"  # 022：SDK HTTP 适配器移植所需的 Stream 工具（工�
 http = "1"  # 022：env_http_headers 的 HeaderName/HeaderValue（rmcp 同源）
 bytes = "1"  # 022：SSE 字节流限额器（rmcp 同源）
 sse-stream = "0.2"  # 022：SSE 事件流解析（rmcp 同源）
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }  # 022：有界 HTTP 客户端移植（与 rmcp 的 reqwest 依赖同版本合并）
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }  # 022：有界 HTTP 客户端移植（与 rmcp 的 reqwest 依赖同版本合并）；022 §5.4：官方 rustls 组合（aws-lc-rs＋platform-verifier 系统根）使远程 HTTPS 可用；0.13 已无 webpki-roots 直选 feature，与 ureq（ring/webpki）为两个独立 TLS 栈
+
+[dev-dependencies]
+# 022 §5.4：TLS mock 服务器（自签证书）；与 reqwest 传递的 rustls 同版本同 provider，避免双 provider。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

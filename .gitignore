@@ -9,3 +9,6 @@ db
 
 # 根目录 pytest 缓存
 /.pytest_cache/
+
+# Python 验收脚本缓存
+__pycache__/

@@ -960,3 +960,54 @@ fn a12_call_after_close_is_not_sent_with_zero_server_calls() {
         .count();
     assert_eq!(calls, 0, "服务器该次调用计数为零（请求未到达）");
 }
+
+// ---------- 027 B：隔离模式（sudo 以目标用户启动 stdio 服务器） ----------
+
+/// 027 B：隔离模式下 stdio 服务器经 sudo 以目标用户（默认 nobody）启动；
+/// mcp.json 显式 env（TCHAT_MCP_TOKEN_A 契约注入）在 sudo env_reset 之后经
+/// /usr/bin/env 保留；主进程污染 env 不进入服务器（白名单语义不变）。
+/// 用 setup_no_prepare：record 目录先放开权限再启动（服务器以目标用户写 JSONL）。
+#[test]
+fn a027_isolated_stdio_runs_as_target_user_with_explicit_env() {
+    let (_env, _dir, record_dir, record_path, manager) =
+        setup_no_prepare("echo", r#", "env_vars": ["TCHAT_MCP_TOKEN_A"]"#);
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(record_dir.path(), std::fs::Permissions::from_mode(0o777))
+            .expect("放开 record 目录");
+    }
+    std::env::set_var("TCHAT_ISOLATED_TOOLS", "nobody");
+    std::env::set_var("TCHAT_POISON_KEY", "poison-027");
+
+    let snapshot = manager.prepare_for_turn(&AtomicBool::new(false)).expect("隔离下发现工具");
+    let entry = snapshot.entry("mcp__fx__echo").expect("快照含 echo");
+    let (result, failed) =
+        manager.call(&entry, serde_json::json!({"text": "iso"}), &AtomicBool::new(false));
+    manager.close();
+    std::env::remove_var("TCHAT_ISOLATED_TOOLS");
+    std::env::remove_var("TCHAT_POISON_KEY");
+    assert!(!failed, "隔离下工具调用失败：{result}");
+    let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(v["content"][0]["text"], "echo:iso");
+
+    let startup = read_record(&record_path)
+        .into_iter()
+        .find(|e| e["kind"] == "startup")
+        .expect("服务器 startup 记录");
+    let expect_uid: u32 = std::process::Command::new("/usr/bin/id")
+        .args(["-u", "nobody"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().parse().unwrap())
+        .unwrap();
+    assert_eq!(startup["uid"], expect_uid, "服务器进程身份应为目标用户");
+    let env = startup["env"].as_object().expect("env 快照");
+    assert_eq!(
+        env.get("TCHAT_MCP_TOKEN_A").and_then(|v| v.as_str()),
+        Some(CANARY_VALUE),
+        "显式 env 注入在隔离下保留"
+    );
+    assert!(
+        !env.contains_key("TCHAT_POISON_KEY"),
+        "主进程污染 env 不得进入服务器"
+    );
+}

@@ -779,7 +779,6 @@ impl McpManager {
                 }
             })?;
         publish_tools(config, tools, &sensitive, listed_epoch)
-            .map(|(l, u, e)| (l, u, e))
             .map_err(PrepError::Failed)
     }
 
@@ -958,7 +957,7 @@ fn publish_tools(
             (raw.clone(), tool.description.as_deref().map(String::from), schema.clone())
         })
         .collect();
-    tools_out.sort_by(|a, b| a.0.as_str().cmp(&b.0.as_str()));
+    tools_out.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
     let excluded: Vec<String> = catalog
         .excluded
         .iter()
