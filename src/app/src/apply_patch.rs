@@ -98,83 +98,86 @@ pub fn apply_patch(input: &serde_json::Value) -> ApplyPatchResult {
     apply_patch_with_display(input).0
 }
 
-/// 027 B：隔离模式（`TCHAT_ISOLATED_TOOLS`）下以目标用户身份应用补丁——补丁文本
-/// 经 stdin 传给 sudo 启动的本二进制 `--internal-apply`，读、判型、写全部发生在
-/// 目标用户侧子进程（复用进程内同套边界与 /proc/self/fd 同 inode 语义）；结果
-/// (ApplyPatchResult, 展示变更, 子进程 uid) JSON 经 stdout 返回（uid 见
-/// [`apply_patch_isolated_with_exe`]）。不经 shell（execve 数组直传）。
-pub fn apply_patch_isolated(
+/// 033：沙箱模式（`TCHAT_SANDBOX`）下以 bwrap 包装的本二进制 `--internal-apply`
+/// 子进程应用补丁——补丁文本经 stdin 传入，读、判型、写全部发生在沙箱子进程
+/// （复用进程内同套边界与 /proc/self/fd 同 inode 语义）；结果
+/// (ApplyPatchResult, 展示变更) JSON 经 stdout 返回。不经 shell（execve 数组
+/// 直传）。沙箱不可用＝结果内显式错误，不静默回退为进程内执行。
+pub fn apply_patch_sandboxed(
     input: &serde_json::Value,
 ) -> (ApplyPatchResult, Vec<crate::prompt::PatchChange>) {
     // 生产入口＝当前二进制。集成测试进程的 current_exe 是测试 harness，
-    // 由测试经 [`apply_patch_isolated_with_exe`] 传 CARGO_BIN_EXE 解析。
+    // 由测试经 [`apply_patch_sandboxed_with_exe`] 传 CARGO_BIN_EXE 解析。
     match std::env::current_exe() {
-        Ok(exe) => {
-            let (r, c, _uid) = apply_patch_isolated_with_exe(&exe, input);
-            (r, c)
-        }
-        Err(e) => (ApplyPatchResult::error(format!("定位自身二进制失败：{e}"), Vec::new(), false), Vec::new()),
+        Ok(exe) => apply_patch_sandboxed_with_exe(&exe, input),
+        Err(e) => (
+            ApplyPatchResult::error(format!("定位自身二进制失败：{e}"), Vec::new(), false),
+            Vec::new(),
+        ),
     }
 }
 
-/// [`apply_patch_isolated`] 的显式二进制变体（测试注入 CARGO_BIN_EXE）。
-/// 返回第三项＝执行子进程真实 uid（隔离身份证明）；None＝子进程未执行
-/// （前置失败，无从取证）。不以 0 作哨兵——0 是 root 的 uid，语义双关。
-pub fn apply_patch_isolated_with_exe(
+/// [`apply_patch_sandboxed`] 的显式二进制变体（测试注入 CARGO_BIN_EXE）。
+pub fn apply_patch_sandboxed_with_exe(
     exe: &std::path::Path,
     input: &serde_json::Value,
-) -> (ApplyPatchResult, Vec<crate::prompt::PatchChange>, Option<u32>) {
+) -> (ApplyPatchResult, Vec<crate::prompt::PatchChange>) {
     let err =
-        |msg: String, state_known: bool| (ApplyPatchResult::error(msg, Vec::new(), state_known), Vec::new(), None);
+        |msg: String, state_known: bool| (ApplyPatchResult::error(msg, Vec::new(), state_known), Vec::new());
     let args = match ApplyPatchArgs::from_value(input) {
         Ok(a) => a,
         Err(msg) => return err(msg, true),
     };
-    let Some(user) = crate::catalog::isolated_tool_user() else {
-        return err("隔离模式未启用（TCHAT_ISOLATED_TOOLS 未设置）".into(), false);
+    // 策略锚定主进程 cwd（G1 修复，sandbox 内部取用）；补丁路径的解析基准
+    // 与进程内执行一致＝主进程 cwd。
+    let (program, sandbox_args, child_env) = match crate::sandbox::tool_launch_argv(vec![
+        exe.to_string_lossy().into_owned(),
+        "--internal-apply".to_string(),
+    ]) {
+        Ok(Some(t)) => t,
+        Ok(None) => return err("沙箱模式未启用（TCHAT_SANDBOX 未设置）".into(), false),
+        Err(e) => return err(format!("沙箱不可用：{e}"), false),
     };
     use std::io::Write;
     use std::process::Stdio;
-    let child = std::process::Command::new(crate::catalog::SUDO_BIN)
-        .args(["-n", "-u", &user, "--"])
-        .arg(exe)
-        .arg("--internal-apply")
-        .env_clear() // 027 B：与其余两路一致——不继承主进程凭据环境（env_reset 前减面）
+    let child = std::process::Command::new(program)
+        .args(sandbox_args)
+        .env_clear() // 033：凭据环境不进补丁子进程（027 R1 环境面防线保留）
+        .envs(child_env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
     let mut child = match child {
         Ok(c) => c,
-        Err(e) => return err(format!("隔离执行启动失败：{e}"), false),
+        Err(e) => return err(format!("沙箱执行启动失败：{e}"), false),
     };
     if let Err(e) = child.stdin.take().unwrap().write_all(args.patch.as_bytes()) {
         return err(format!("补丁传输失败：{e}"), false);
     }
     let out = match child.wait_with_output() {
         Ok(o) => o,
-        Err(e) => return err(format!("隔离执行等待失败：{e}"), false),
+        Err(e) => return err(format!("沙箱执行等待失败：{e}"), false),
     };
     if !out.status.success() {
         let all = String::from_utf8_lossy(&out.stderr);
         let skip = all.chars().count().saturating_sub(200);
         let tail: String = all.chars().skip(skip).collect();
-        return err(format!("隔离执行失败（exit {:?}）：{tail}", out.status.code()), false);
+        return err(format!("沙箱执行失败（exit {:?}）：{tail}", out.status.code()), false);
     }
     match serde_json::from_slice::<(
         ApplyPatchResult,
         Vec<crate::prompt::PatchChange>,
-        Option<u32>,
     )>(&out.stdout) {
         Ok(parsed) => parsed,
-        Err(e) => err(format!("隔离执行结果解析失败：{e}"), false),
+        Err(e) => err(format!("沙箱执行结果解析失败：{e}"), false),
     }
 }
 
-/// 027 B：`--internal-apply` 入口（仅由 [`apply_patch_isolated`] 经 sudo 以目标用户
-/// 运行；不属于模型工具契约）。stdin 读补丁 → 进程内同一 run() → (结果, 变更,
-/// 本进程 uid) JSON 写 stdout——uid 即执行身份证明（测试经隔离链路断言目标
-/// 用户，无需额外接缝）。退出码：0＝完成（结果看 JSON）、2＝协议失败。
+/// 033：`--internal-apply` 入口（仅由 [`apply_patch_sandboxed`] 经 bwrap 包装
+/// 运行；不属于模型工具契约，沿用 027 引入的子进程模式）。stdin 读补丁 →
+/// 进程内同一 run() → (结果, 变更) JSON 写 stdout。退出码：0＝完成（结果看
+/// JSON）、2＝协议失败。
 pub fn run_internal_apply() -> i32 {
     use std::io::Read;
     // 流式限量：至多读 MAX_PATCH_BYTES+1 字节，超限即拒（先于整段入内存/转字符串）
@@ -196,10 +199,7 @@ pub fn run_internal_apply() -> i32 {
         }
     };
     let (result, changes) = run(&patch);
-    // 027 B：附带本进程真实 uid＝执行身份的直接证据（隔离链路下应为目标
-    // 用户；sudo env_reset 下测试接缝 env 不可达，身份比标记更本质）。
-    let uid = unsafe { libc::getuid() };
-    match serde_json::to_writer(std::io::stdout(), &(result, changes, uid)) {
+    match serde_json::to_writer(std::io::stdout(), &(result, changes)) {
         Ok(()) => {
             println!();
             0

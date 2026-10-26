@@ -12,6 +12,7 @@ pub mod message_to_user;
 pub mod plan;
 pub mod proc_session;
 pub mod prompt;
+pub mod sandbox;
 pub mod session;
 pub mod turn;
 pub mod user_input;

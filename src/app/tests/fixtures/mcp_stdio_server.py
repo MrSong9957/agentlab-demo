@@ -100,7 +100,7 @@ def main():
     w = Writer()
     rec = args.record
     record(rec, {"kind": "startup", "argv": sys.argv, "cwd": os.getcwd(),
-                 "env": snap_env(), "pid": os.getpid(), "uid": os.getuid()})
+                 "env": snap_env(), "pid": os.getpid()})
 
     initialized = False
 

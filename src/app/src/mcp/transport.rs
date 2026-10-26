@@ -201,35 +201,36 @@ impl StdioProcess {
         env: &[(String, String)],
     ) -> io::Result<(Self, BoundedStdioTransport)> {
         use std::process::Stdio;
-        // 027 B：隔离模式（TCHAT_ISOLATED_TOOLS）下经 sudo 以目标用户启动——
-        // `sudo -n -u <user> -- /usr/bin/env K=V… -- <command> <args…>`：显式 env
-        // 在 sudo env_reset 之后经 /usr/bin/env 注入保留（契约不变）；数组直传
-        // 不经 shell。普通模式按原样启动，行为零变化。
-        let mut cmd = match crate::catalog::isolated_tool_user() {
-            Some(user) => {
-                let mut c = tokio::process::Command::new(crate::catalog::SUDO_BIN);
-                c.args(["-n", "-u", &user, "--", crate::catalog::ENV_BIN]);
-                // 实测（GNU coreutils 9.4）：`env K=V -- cmd` 报 rc=127
-                //（`--` 被当作程序名）；`env -- K=V cmd` 可用。本处 K=V 自带
-                // 边界（首个非 K=V 参数即程序名）、且 sudo 的 `--` 已隔离选项
-                // 解析，故不加 env 的 `--`。边角：command 首字符为 `-` 时会被
-                // env 当选项——命令来自管理员维护的 mcp.json（隔离模式下
-                // mcp.json 随 HOME 归管理员），非模型面。
-                for (k, v) in env {
-                    c.arg(format!("{k}={v}"));
-                }
-                c.arg(command).args(args);
-                c
+        // 033：沙箱模式（TCHAT_SANDBOX）下经 bwrap 包装启动——文件系统策略在
+        // 主进程构造（全盘只读＋cwd 可写＋.env 遮蔽）；沙箱不可用＝错误，不静默
+        // 回退。普通模式按原样启动，行为零变化。
+        let mut cmd_parts = vec![command.to_string()];
+        cmd_parts.extend(args.iter().cloned());
+        let mut cmd;
+        let sandbox_env = match crate::sandbox::tool_launch_argv(cmd_parts)? {
+            Some((program, sandbox_args, child_env)) => {
+                cmd = tokio::process::Command::new(program);
+                cmd.args(sandbox_args);
+                // 白名单环境在下方 env_clear **之后**注入（env_clear 是清除不是
+                // 覆盖——先注会被清掉，033 审查轮修正）。
+                Some(child_env)
             }
             None => {
-                let mut c = tokio::process::Command::new(command);
-                c.args(args);
-                c
+                cmd = tokio::process::Command::new(command);
+                cmd.args(args);
+                None
             }
         };
         cmd.current_dir(cwd)
             .env_clear()
+            // 注入顺序（2026-10-27 宿主验收实测修正）：平台缺省白名单＋mcp.json
+            // 显式 env 先落地，沙箱白名单**最后**落地——普通模式（sandbox_env
+            // 为空）与既有行为完全一致；沙箱模式下 HOME/PATH/TERM 以沙箱策略值
+            //（HOME＝锚定根）优先。初版顺序相反：平台白名单的 HOME（主进程值，
+            // 如 /home/dev）后落覆盖了沙箱锚定 HOME——真实分支首跑即暴露
+            //（a033_sandboxed_stdio 断言）。
             .envs(env.iter().map(|(k, v)| (k, v)))
+            .envs(sandbox_env.unwrap_or_default())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
