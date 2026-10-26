@@ -56,8 +56,9 @@ fn parse_image_args(args: impl Iterator<Item = String>) -> Result<Vec<std::path:
 }
 
 fn main() {
-    // 027 B：隔离模式内部入口（经 sudo 以目标用户运行 apply_patch；不属于模型
-    // 工具契约，参数仅此一个、补丁走 stdin）——先于任何交互入口检测。
+    // 033（沿用 027 引入的子进程模式）：沙箱模式下 apply_patch 经 bwrap 包装
+    // 以本入口运行补丁子进程；不属于模型工具契约，参数仅此一个、补丁走 stdin
+    // ——先于任何交互入口检测。
     if std::env::args().nth(1).as_deref() == Some("--internal-apply") {
         std::process::exit(terminal_chat::apply_patch::run_internal_apply());
     }
@@ -90,8 +91,8 @@ fn main() {
             Some(std::path::Path::new(".env")),
             &catalog::config_dir(),
         );
-        if let Some(n) = catalog::isolated_mode_notice() {
-            startup_notices.push(n); // 027 B：隔离模式启用确认
+        if let Some(n) = terminal_chat::sandbox::startup_notice() {
+            startup_notices.push(n); // 033：沙箱模式启用确认／不可用预告
         }
         // 启动期 origin 授权（raw mode 之前的普通终端交互）
         if let Err(e) = host.authorize_startup_origin(&mut |q| prompt_y_n(&mut rl, q)) {
@@ -122,7 +123,7 @@ fn main() {
     banner();
 
     // 权限审计（F7）：.env/配置文件收紧、上级目录可写告警；只读元数据，不含秘密值
-    for line in catalog::audit_file_permissions(Some(std::path::Path::new(".env")), &catalog::config_dir()).into_iter().chain(catalog::isolated_mode_notice()) {
+    for line in catalog::audit_file_permissions(Some(std::path::Path::new(".env")), &catalog::config_dir()).into_iter().chain(terminal_chat::sandbox::startup_notice()) {
         say(&line);
     }
 

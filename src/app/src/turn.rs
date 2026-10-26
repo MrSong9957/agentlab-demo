@@ -344,9 +344,10 @@ fn execute_tool(
         },
         "apply_patch" => match serde_json::from_str::<Value>(&call.arguments) {
             Ok(v) => {
-                // 027 B：隔离模式下读、判型、写全部在目标用户侧子进程完成
-                let (r, changes) = if crate::catalog::isolated_tool_user().is_some() {
-                    crate::apply_patch::apply_patch_isolated(&v)
+                // 033：沙箱模式下补丁经 bwrap 包装的本二进制 --internal-apply
+                // 子进程应用（读、判型、写全部在沙箱内完成）；普通模式进程内执行。
+                let (r, changes) = if crate::sandbox::sandbox_requested() {
+                    crate::apply_patch::apply_patch_sandboxed(&v)
                 } else {
                     crate::apply_patch::apply_patch_with_display(&v)
                 };

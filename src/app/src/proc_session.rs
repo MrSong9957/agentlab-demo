@@ -520,29 +520,6 @@ static TEST_CLOCK_SHIFT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 #[cfg(test)]
 static SEAM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// 027 B：隔离模式跨 uid 补杀——killpg 的信号发送受 uid 检查（主进程对组内
-/// 目标用户成员返回 EPERM，实测），主进程只能杀到组内同 uid 成员（sudo 链
-/// 自身）；组内降权后代由 sudo 以目标用户身份补发同一信号。幂等：组已空时
-/// 失败被忽略。仅隔离模式产生额外进程，普通模式零变化。
-/// **调用侧须在会话锁外**：内部同步等待 sudo 子进程，锁内执行会拖住监控轮询。
-fn kill_group_cross_uid(pgid: libc::pid_t, sig: libc::c_int) {
-    if let Some(user) = crate::catalog::isolated_tool_user() {
-        let _ = std::process::Command::new(crate::catalog::SUDO_BIN)
-            .args([
-                "-n",
-                "-u",
-                &user,
-                crate::catalog::KILL_BIN,
-                &format!("-{sig}"),
-                "--",
-                &format!("-{pgid}"),
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
-}
-
 /// 终止进程组的受检入口：返回 Ok（已发信号）／Gone（组已不存在）／Failed
 ///（失败，含 errno）。测试注入仅对 [`TEST_KILLPG_FAIL_PGD`] 匹配的组生效。
 fn kill_group_checked(pgid: libc::pid_t) -> KillOutcome {
@@ -718,21 +695,11 @@ impl Session {
 
     /// 管道会话的 Ctrl+C：向进程组发送 SIGINT（只请求中断，不保证退出）。
     fn interrupt(&self) {
-        let pgid = {
-            let st = self.lock();
-            match st.phase {
-                Phase::Running { pgid } => {
-                    unsafe {
-                        libc::killpg(pgid, libc::SIGINT);
-                    }
-                    Some(pgid)
-                }
-                _ => None,
+        let st = self.lock();
+        if let Phase::Running { pgid } = st.phase {
+            unsafe {
+                libc::killpg(pgid, libc::SIGINT);
             }
-        };
-        // 027 B：组内目标用户成员收不到主进程的 SIGINT（uid 检查），锁外补发。
-        if let Some(pgid) = pgid {
-            kill_group_cross_uid(pgid, libc::SIGINT);
         }
     }
 
@@ -1078,34 +1045,36 @@ struct Spawned {
     stderr: Option<std::process::ChildStderr>,
 }
 
-/// 027 B：构造 exec_command 的启动命令——普通模式 `/bin/sh -c <cmd>`（既有行为）；
-/// 隔离模式（`TCHAT_ISOLATED_TOOLS`）`sudo -n -u <user> -- /usr/bin/env [TERM=…]
-/// /bin/sh -c <cmd>`：Command env_clear（不继承主进程凭据环境）＋sudo env_reset
-/// （HOME/PATH/USER 重置为目标用户，E1 已证零继承）；TERM 显式透传保交互行为。
-/// sudo/sh 均为绝对路径；不经 shell 解析 sudo 参数（execve 数组直传）。
-fn build_tool_command(cmd: &str) -> Command {
-    match crate::catalog::isolated_tool_user() {
-        Some(user) => {
-            let mut c = Command::new(crate::catalog::SUDO_BIN);
-            c.args(["-n", "-u", &user, "--", crate::catalog::ENV_BIN]);
-            if let Ok(term) = std::env::var("TERM") {
-                c.arg(format!("TERM={term}"));
-            }
-            c.args([SHELL, "-c", cmd]);
+/// 033：构造 exec_command 的启动命令——普通模式 `/bin/sh -c <cmd>`（既有行为，
+/// 环境按现状继承）；沙箱模式（`TCHAT_SANDBOX` 非空）`<bwrap> <沙箱参数> --
+/// /bin/sh -c <cmd>`：Command env_clear＋白名单环境（PATH/HOME/TERM，主进程
+/// 凭据 env 不进工具——027 R1 环境面防线在此保留）；沙箱不可用时返回 Err，
+/// 由调用侧显式报错（禁止静默回退到无沙箱执行）。策略锚定主进程 cwd（G1 修
+/// 复），workdir 仅作沙箱内 --chdir，不参与策略。
+fn build_tool_command(cmd: &str) -> std::io::Result<Command> {
+    match crate::sandbox::tool_launch_argv(vec![
+        SHELL.to_string(),
+        "-c".to_string(),
+        cmd.to_string(),
+    ])? {
+        Some((program, args, child_env)) => {
+            let mut c = Command::new(program);
+            c.args(args);
             c.env_clear();
-            c
+            c.envs(child_env);
+            Ok(c)
         }
         None => {
             let mut c = Command::new(SHELL);
             c.arg("-c").arg(cmd);
-            c
+            Ok(c)
         }
     }
 }
 
 /// 管道模式：stdin 关闭，stdout/stderr 管道；独立进程组。
 fn spawn_piped(cmd: &str, workdir: &std::path::Path) -> std::io::Result<Spawned> {
-    let mut c = build_tool_command(cmd);
+    let mut c = build_tool_command(cmd)?;
     c.current_dir(workdir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1125,7 +1094,7 @@ fn spawn_pty(cmd: &str, workdir: &std::path::Path) -> std::io::Result<Spawned> {
     let in_f = slave.try_clone()?;
     let out_f = slave.try_clone()?;
     let err_f = slave;
-    let mut c = build_tool_command(cmd);
+    let mut c = build_tool_command(cmd)?;
     c.current_dir(workdir)
         .stdin(Stdio::from(in_f))
         .stdout(Stdio::from(out_f))
@@ -1213,12 +1182,10 @@ fn monitor_thread(session: Arc<Session>, mut child: Child, deadline: Option<Inst
             }
         }
         if let Some(reason) = reason {
-            // killpg 本身快速，可持锁；跨 uid 补杀（隔离模式）涉及 spawn sudo，
-            // 必须在释放会话锁之后执行（同步等待子进程，锁内会拖住轮询）。
+            // killpg 本身快速，可持锁。
             match kill_group_checked(pgid) {
                 KillOutcome::Ok => {
                     drop(st);
-                    kill_group_cross_uid(pgid, libc::SIGKILL);
                     let _ = child.wait(); // 回收组长
                     break match reason {
                         KillReq::Deadline => Phase::TimedOut,
