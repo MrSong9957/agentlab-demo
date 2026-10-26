@@ -693,7 +693,7 @@ impl TuiHost {
             out.push_str("\n  （名单为空）");
             return out;
         }
-        for (id, _m) in &prov.models {
+        for id in prov.models.keys() {
             let sel = if dict.selected_model.as_deref() == Some(id.as_str()) { " *" } else { "" };
             out.push_str(&format!("\n  {id}{sel}"));
         }

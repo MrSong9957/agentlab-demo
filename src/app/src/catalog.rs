@@ -233,10 +233,13 @@ pub struct FinalDict {
 /// 不得经它重定位配置/授权记录/凭证根或目录来源（2026-10-09 安全报告 F1）。
 /// 名单来自全库 env 读取点审计：`config_dir`、`user_dir`、公共目录 URL 回退。
 /// 注意不能用 `TCHAT_` 前缀一刀切：普通凭证变量允许从 .env 加载。
-const TRUST_CONTROL_VARS: [&str; 7] = [
+const TRUST_CONTROL_VARS: [&str; 8] = [
     "TCHAT_CONFIG_DIR",
     "TCHAT_USER_DIR",
     "TCHAT_PUBLIC_CATALOG_URL",
+    // 027 B：隔离模式只能由管理员 wrapper（真实环境）启用；.env 不是信任根，
+    // 不得借它开启或改换隔离目标（安全攻防 F2）
+    "TCHAT_ISOLATED_TOOLS",
     // 007 会话时钟/pid 注入提供者：仅测试子进程经真实环境注入；.env 固定时间戳
     // 会破坏 auto 文件名"字典序＝时间序"的最近会话选择，按 F1 先例跳过
     "TCHAT_SESSION_TS",
@@ -869,6 +872,33 @@ pub fn check_request_param(model: &ModelInfo, param: &str) -> Result<(), String>
 }
 
 // ---------- 文件保存与加载 ----------
+
+/// 027 B：工具隔离模式（`TCHAT_ISOLATED_TOOLS=<用户名>` 非空启用）——exec_command、
+/// MCP stdio 与 apply_patch 经 sudo 以该用户身份执行。由管理员 wrapper 固定导出
+/// （环境不属模型或 cwd 配置可篡改面）；未设＝普通模式，既有行为零变化；非 unix 忽略。
+/// 027 B：隔离链路的固定绝对路径（部署前提：sudo 位于 /usr/bin/sudo）。
+pub const SUDO_BIN: &str = "/usr/bin/sudo";
+pub const ENV_BIN: &str = "/usr/bin/env";
+pub const KILL_BIN: &str = "/bin/kill";
+
+/// 启动审计提示：隔离模式启用时输出目标用户（用户可见的启用确认）。
+pub fn isolated_mode_notice() -> Option<String> {
+    isolated_tool_user().map(|u| format!("工具隔离模式：exec/MCP/apply_patch 以 {u} 身份执行"))
+}
+
+pub fn isolated_tool_user() -> Option<String> {
+    #[cfg(unix)]
+    {
+        std::env::var("TCHAT_ISOLATED_TOOLS")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
 
 pub fn config_dir() -> PathBuf {
     std::env::var("TCHAT_CONFIG_DIR")

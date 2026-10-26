@@ -18,7 +18,7 @@
 //!   变更操作可能已部分修改目标（坑003），`state_known=false` 须重读。
 //! - 按引用语法 `add_line+` 要求 Add 块至少一行 `+` 内容（Codex 解析器未强制）。
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
@@ -59,7 +59,7 @@ impl ApplyPatchArgs {
 }
 
 /// 文件动作类型。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {
     Add,
@@ -68,7 +68,7 @@ pub enum Action {
 }
 
 /// 一条确认生效的变更。
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChangedFile {
     /// 实际目标的绝对路径。
     pub path: String,
@@ -76,7 +76,7 @@ pub struct ChangedFile {
 }
 
 /// 执行结果：四个字段始终存在。
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct ApplyPatchResult {
     pub ok: bool,
     /// 按执行顺序列出确认生效的变更。
@@ -96,6 +96,116 @@ impl ApplyPatchResult {
 /// 工具入口：解析校验入参，完整解析补丁后按顺序应用。
 pub fn apply_patch(input: &serde_json::Value) -> ApplyPatchResult {
     apply_patch_with_display(input).0
+}
+
+/// 027 B：隔离模式（`TCHAT_ISOLATED_TOOLS`）下以目标用户身份应用补丁——补丁文本
+/// 经 stdin 传给 sudo 启动的本二进制 `--internal-apply`，读、判型、写全部发生在
+/// 目标用户侧子进程（复用进程内同套边界与 /proc/self/fd 同 inode 语义）；结果
+/// (ApplyPatchResult, 展示变更, 子进程 uid) JSON 经 stdout 返回（uid 见
+/// [`apply_patch_isolated_with_exe`]）。不经 shell（execve 数组直传）。
+pub fn apply_patch_isolated(
+    input: &serde_json::Value,
+) -> (ApplyPatchResult, Vec<crate::prompt::PatchChange>) {
+    // 生产入口＝当前二进制。集成测试进程的 current_exe 是测试 harness，
+    // 由测试经 [`apply_patch_isolated_with_exe`] 传 CARGO_BIN_EXE 解析。
+    match std::env::current_exe() {
+        Ok(exe) => {
+            let (r, c, _uid) = apply_patch_isolated_with_exe(&exe, input);
+            (r, c)
+        }
+        Err(e) => (ApplyPatchResult::error(format!("定位自身二进制失败：{e}"), Vec::new(), false), Vec::new()),
+    }
+}
+
+/// [`apply_patch_isolated`] 的显式二进制变体（测试注入 CARGO_BIN_EXE）。
+/// 返回第三项＝执行子进程真实 uid（隔离身份证明）；None＝子进程未执行
+/// （前置失败，无从取证）。不以 0 作哨兵——0 是 root 的 uid，语义双关。
+pub fn apply_patch_isolated_with_exe(
+    exe: &std::path::Path,
+    input: &serde_json::Value,
+) -> (ApplyPatchResult, Vec<crate::prompt::PatchChange>, Option<u32>) {
+    let err =
+        |msg: String, state_known: bool| (ApplyPatchResult::error(msg, Vec::new(), state_known), Vec::new(), None);
+    let args = match ApplyPatchArgs::from_value(input) {
+        Ok(a) => a,
+        Err(msg) => return err(msg, true),
+    };
+    let Some(user) = crate::catalog::isolated_tool_user() else {
+        return err("隔离模式未启用（TCHAT_ISOLATED_TOOLS 未设置）".into(), false);
+    };
+    use std::io::Write;
+    use std::process::Stdio;
+    let child = std::process::Command::new(crate::catalog::SUDO_BIN)
+        .args(["-n", "-u", &user, "--"])
+        .arg(exe)
+        .arg("--internal-apply")
+        .env_clear() // 027 B：与其余两路一致——不继承主进程凭据环境（env_reset 前减面）
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => return err(format!("隔离执行启动失败：{e}"), false),
+    };
+    if let Err(e) = child.stdin.take().unwrap().write_all(args.patch.as_bytes()) {
+        return err(format!("补丁传输失败：{e}"), false);
+    }
+    let out = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => return err(format!("隔离执行等待失败：{e}"), false),
+    };
+    if !out.status.success() {
+        let all = String::from_utf8_lossy(&out.stderr);
+        let skip = all.chars().count().saturating_sub(200);
+        let tail: String = all.chars().skip(skip).collect();
+        return err(format!("隔离执行失败（exit {:?}）：{tail}", out.status.code()), false);
+    }
+    match serde_json::from_slice::<(
+        ApplyPatchResult,
+        Vec<crate::prompt::PatchChange>,
+        Option<u32>,
+    )>(&out.stdout) {
+        Ok(parsed) => parsed,
+        Err(e) => err(format!("隔离执行结果解析失败：{e}"), false),
+    }
+}
+
+/// 027 B：`--internal-apply` 入口（仅由 [`apply_patch_isolated`] 经 sudo 以目标用户
+/// 运行；不属于模型工具契约）。stdin 读补丁 → 进程内同一 run() → (结果, 变更,
+/// 本进程 uid) JSON 写 stdout——uid 即执行身份证明（测试经隔离链路断言目标
+/// 用户，无需额外接缝）。退出码：0＝完成（结果看 JSON）、2＝协议失败。
+pub fn run_internal_apply() -> i32 {
+    use std::io::Read;
+    // 流式限量：至多读 MAX_PATCH_BYTES+1 字节，超限即拒（先于整段入内存/转字符串）
+    let mut bytes = Vec::new();
+    let mut limited = std::io::stdin().take(MAX_PATCH_BYTES as u64 + 1);
+    if limited.read_to_end(&mut bytes).is_err() {
+        eprintln!("internal-apply：读取补丁失败");
+        return 2;
+    }
+    if bytes.len() > MAX_PATCH_BYTES {
+        eprintln!("internal-apply：补丁超过 {} 字节上限", MAX_PATCH_BYTES);
+        return 2;
+    }
+    let patch = match String::from_utf8(bytes) {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("internal-apply：补丁不是合法 UTF-8");
+            return 2;
+        }
+    };
+    let (result, changes) = run(&patch);
+    // 027 B：附带本进程真实 uid＝执行身份的直接证据（隔离链路下应为目标
+    // 用户；sudo env_reset 下测试接缝 env 不可达，身份比标记更本质）。
+    let uid = unsafe { libc::getuid() };
+    match serde_json::to_writer(std::io::stdout(), &(result, changes, uid)) {
+        Ok(()) => {
+            println!();
+            0
+        }
+        Err(_) => 2,
+    }
 }
 
 /// 012：应用补丁并返回**展示用逐文件差异**（与结果并行返回；不混入结果 JSON——

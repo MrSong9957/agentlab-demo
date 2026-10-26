@@ -161,6 +161,11 @@ fn run_git_env(
         "commit.gpgsign=false",
         "-c",
         "core.quotePath=false",
+        // 027 B⑤：私有仓库钩子一律不执行（E6：已植入钩子会以 git 进程身份运行，
+        // 固定 argv 不构成防线）；/dev/null 子路径 stat 恒失败＝无钩子可执行。
+        // 只影响本仓库调用，不改全局配置、不影响项目提交扫描 hook。
+        "-c",
+        "core.hooksPath=/dev/null",
     ];
     argv.extend_from_slice(args);
 
@@ -939,6 +944,39 @@ mod tests {
         let b = previous_char_boundary(&s, 1024 * 1024 + 1);
         assert!(s.is_char_boundary(b));
         assert!(b <= 1024 * 1024 + 1);
+    }
+
+    /// 027 B⑤：私有仓库钩子一律不执行（E6 证实固定 argv 不防已植入钩子）。
+    /// 假 pre-commit 仅 `touch` 标记文件（无副作用面）；断言提交成功且标记
+    /// 不出现＝hooksPath 覆盖生效，钩子（及其宿主）未被信任。
+    #[test]
+    fn commit_does_not_execute_planted_hooks() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp =
+            std::env::temp_dir().join(format!("tchat-027-hooks-{}-{nanos}", std::process::id()));
+        let root = tmp.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        git_ok(&root, &["init"], None).expect("init 仓库");
+        std::fs::write(root.join("f.txt"), "x\n").unwrap();
+        git_ok(&root, &["add", "."], None).expect("add 文件");
+        let hooks = root.join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\ntouch hook-marker\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let marker = root.join("hook-marker");
+        git_ok(&root, &["commit", "-m", "t1"], None).expect("提交成功（钩子不阻断）");
+        assert!(
+            !marker.exists(),
+            "植入的 pre-commit 钩子不得被执行（027 B⑤ hooksPath=/dev/null）"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// M8 D12-A：便条文件名合同＝上游 V2 add_ad_hoc_note 校验原文。

@@ -149,14 +149,14 @@ impl PtyCli {
                     Ok(Some(st)) => panic!(
                         "等待屏幕 {:?} 时子进程已退出（{st}）。屏幕：\n{}\n原始输出：\n{}",
                         needle,
-                        self.vt.to_string(),
+                        self.vt,
                         String::from_utf8_lossy(&self.captured)
                     ),
                     _ => panic!(
                         "等待屏幕 {:?} 超时（子进程状态 {:?}）。屏幕：\n{}\n原始输出：\n{}",
                         needle,
                         state,
-                        self.vt.to_string(),
+                        self.vt,
                         String::from_utf8_lossy(&self.captured)
                     ),
                 }

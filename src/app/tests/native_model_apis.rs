@@ -2195,3 +2195,92 @@ fn generate_content_null_args_is_treated_as_missing() {
         "{}"
     );
 }
+
+#[test]
+fn tui_native_image_request_carries_anthropic_image_block() {
+    // 024 N07 修订：TUI×原生协议×图片三重组合——`-i` 初始图经 PTY 提交，
+    // 断言 anthropic-messages 请求实际携带 base64 图片块并完成 TUI 响应流程。
+    use std::process::Command;
+    const PNG_2X2: [u8; 74] = [
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2,
+        8, 6, 0, 0, 0, 114, 182, 13, 36, 0, 0, 0, 17, 73, 68, 65, 84, 120, 156, 99, 224, 18,
+        145, 251, 15, 194, 12, 48, 6, 0, 38, 140, 4, 237, 162, 200, 71, 131, 0, 0, 0, 0, 73,
+        69, 78, 68, 174, 66, 96, 130,
+    ];
+    let dir = NativeDir::new();
+    let service = spawn_mock(vec![MockResp::json(
+        200,
+        final_response("anthropic-messages", "初始图已收").to_string(),
+    )]);
+    let config = dir.0.join("config");
+    let user = dir.0.join("user");
+    let work = dir.0.join("work");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(config.join("manual.json"), json!({
+        "selected_provider":"native","selected_model":"fixture-model",
+        "providers":{"native":{"protocol":"anthropic-messages","base_url":service.url,
+            "key_ref":"env:NATIVE_FIXTURE_KEY","models":{"fixture-model":{
+                "id":"fixture-model","max_output":256,
+                "input_modalities":["text","image"]}}}}
+    }).to_string()).unwrap();
+    std::fs::write(user.join("authorized-origins.json"), json!({"grants":[{
+        "origin":catalog::origin_of(&service.url).unwrap(),
+        "cred_fp":catalog::fingerprint("fixture-key"),"added_at":0}]}).to_string()).unwrap();
+    let shot = work.join("init.png");
+    std::fs::write(&shot, PNG_2X2).unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_terminal-chat"));
+    cmd.env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("TERM", "xterm-256color")
+        .env("TCHAT_CONFIG_DIR", &config)
+        .env("TCHAT_USER_DIR", &user)
+        .env("NATIVE_FIXTURE_KEY", "fixture-key")
+        .env("TCHAT_SESSION_TS", "20261026T120000")
+        .env("TCHAT_SESSION_PID", "26")
+        .env("TZ", "UTC")
+        .env("LANG", "C.UTF-8")
+        .arg("-i")
+        .arg(shot.display().to_string())
+        .current_dir(&work);
+    let mut tui = common::pty::PtyCli::spawn(cmd);
+    tui.wait_screen("? for shortcuts");
+    // 020 语义：`-i` 初始图待 UI 就绪自动提交（纯图首条，无用户文本）。
+    tui.wait_screen("初始图已收");
+    assert_eq!(service.count(), 1, "初始图恰随首次提交发送一次");
+    let body: Value = serde_json::from_str(&service.requests()[0].body).unwrap();
+    // anthropic-messages 结构：content 为块数组，含 base64 图片块。
+    let messages = body["messages"].as_array().unwrap();
+    let image_blocks: Vec<&Value> = messages
+        .iter()
+        .filter(|m| m["role"] == "user")
+        .filter_map(|m| m["content"].as_array())
+        .flatten()
+        .filter(|b| b["type"] == "image")
+        .collect();
+    assert_eq!(image_blocks.len(), 1, "恰一个图片块：{body}");
+    assert_eq!(image_blocks[0]["source"]["type"], "base64");
+    assert_eq!(image_blocks[0]["source"]["media_type"], "image/png");
+    let expected = {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(PNG_2X2)
+    };
+    assert_eq!(image_blocks[0]["source"]["data"], json!(expected), "载荷与本地图片一致");
+    let image_message = messages
+        .iter()
+        .find(|m| m["role"] == "user" && m["content"].as_array()
+            .is_some_and(|b| b.iter().any(|p| p["type"] == "image")))
+        .expect("含图片块的用户消息");
+    let texts: Vec<&str> = image_message["content"].as_array().unwrap()
+        .iter().filter(|p| p["type"] == "text")
+        .filter_map(|p| p["text"].as_str()).collect();
+    // 020 语义：纯图首提交的文本块为空；environment_context（ctx）按 anthropic
+    // 投影与图片合并进同一条 user 消息。
+    assert!(texts.iter().any(|t| t.is_empty()), "纯图首提交含空文本块：{texts:?}");
+    assert!(texts.iter().all(|t| t.is_empty() || t.starts_with("<environment_context>")),
+        "其余仅 ctx：{texts:?}");
+    tui.send("exit");
+    let (output, code) = tui.finish();
+    assert_eq!(code, Some(0), "{output}");
+}

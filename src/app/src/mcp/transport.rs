@@ -201,9 +201,33 @@ impl StdioProcess {
         env: &[(String, String)],
     ) -> io::Result<(Self, BoundedStdioTransport)> {
         use std::process::Stdio;
-        let mut cmd = tokio::process::Command::new(command);
-        cmd.args(args)
-            .current_dir(cwd)
+        // 027 B：隔离模式（TCHAT_ISOLATED_TOOLS）下经 sudo 以目标用户启动——
+        // `sudo -n -u <user> -- /usr/bin/env K=V… -- <command> <args…>`：显式 env
+        // 在 sudo env_reset 之后经 /usr/bin/env 注入保留（契约不变）；数组直传
+        // 不经 shell。普通模式按原样启动，行为零变化。
+        let mut cmd = match crate::catalog::isolated_tool_user() {
+            Some(user) => {
+                let mut c = tokio::process::Command::new(crate::catalog::SUDO_BIN);
+                c.args(["-n", "-u", &user, "--", crate::catalog::ENV_BIN]);
+                // 实测（GNU coreutils 9.4）：`env K=V -- cmd` 报 rc=127
+                //（`--` 被当作程序名）；`env -- K=V cmd` 可用。本处 K=V 自带
+                // 边界（首个非 K=V 参数即程序名）、且 sudo 的 `--` 已隔离选项
+                // 解析，故不加 env 的 `--`。边角：command 首字符为 `-` 时会被
+                // env 当选项——命令来自管理员维护的 mcp.json（隔离模式下
+                // mcp.json 随 HOME 归管理员），非模型面。
+                for (k, v) in env {
+                    c.arg(format!("{k}={v}"));
+                }
+                c.arg(command).args(args);
+                c
+            }
+            None => {
+                let mut c = tokio::process::Command::new(command);
+                c.args(args);
+                c
+            }
+        };
+        cmd.current_dir(cwd)
             .env_clear()
             .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::piped())
@@ -495,13 +519,34 @@ impl BoundedHttpClient {
     /// 关闭自动重定向（认证头不得重放到跳转目标）＋禁用空闲连接池
     /// （沿用 SDK 默认客户端配置）。
     pub fn new() -> Result<Self, String> {
-        let inner = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .pool_max_idle_per_host(0)
-            .redirect(reqwest::redirect::Policy::none())
+            .redirect(reqwest::redirect::Policy::none());
+        // 022 §5.4：测试注入的自签根（doc(hidden) 接缝）；生产默认 None，
+        // 只用系统/WebPKI 根，不放宽任何证书校验。
+        if let Some(pem) = extra_root().as_ref() {
+            let cert = reqwest::tls::Certificate::from_pem(pem)
+                .map_err(|e| format!("测试根证书无效：{e}"))?;
+            builder = builder.add_root_certificate(cert);
+        }
+        let inner = builder
             .build()
             .map_err(|e| format!("构建 HTTP 客户端失败：{e}"))?;
         Ok(Self { inner })
     }
+}
+
+/// 022 §5.4：仅测试用的额外信任根（进程级、默认空）。生产代码不调用 setter。
+static EXTRA_ROOT: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+
+fn extra_root() -> Option<Vec<u8>> {
+    EXTRA_ROOT.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// 测试接缝：注入/复位 TLS mock 的自签根证书。不进入任何生产默认路径。
+#[doc(hidden)]
+pub fn set_extra_root_certificate_for_tests(pem: Option<&[u8]>) {
+    *EXTRA_ROOT.lock().unwrap_or_else(|e| e.into_inner()) = pem.map(<[u8]>::to_vec);
 }
 
 fn apply_custom_headers(

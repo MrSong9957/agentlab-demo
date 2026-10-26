@@ -1,0 +1,12 @@
+#!/bin/sh
+# 026：提交前密钥扫描——扫描暂存区实际内容；gitleaks 缺失或失败一律拒绝（fail closed）。
+# 绕过边界：本地钩子可被 git commit --no-verify 绕过；远端/CI 扫描属后续独立决策。
+# 输出经 gitleaks --redact 脱敏，只显示文件与规则名，不回显命中值。
+set -e
+ROOT="$(git rev-parse --show-toplevel)"
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "[pre-commit] gitleaks 不可用，已拒绝提交（fail closed）。" >&2
+  echo "[pre-commit] 安装：见 $ROOT/scripts/hooks/README.md（官方 release + checksums 校验）。" >&2
+  exit 1
+fi
+exec gitleaks protect --staged --config "$ROOT/.gitleaks.toml" --redact -v
