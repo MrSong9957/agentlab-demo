@@ -1,6 +1,6 @@
 # 规格：TLS 依赖升级
 
-- 状态：待验收（2026-10-26 实现完成：rustls 0.23.46、webpki-roots 1.0.11、rustls-webpki 0.103.16，audit exit 0）
+- 状态：已交付本地 main（8df9278，2026-10-26）（rustls 0.23.46、webpki-roots 1.0.11、rustls-webpki 0.103.16，audit exit 0）
 - 更新时间：2026-10-26
 
 ## 1. 要做什么，有哪些要求

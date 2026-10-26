@@ -178,7 +178,7 @@ Anthropic、Gemini 优先检查 Rig 等成熟 Rust 客户端的协议转换，�
 | N04 | 返回多调用、文字混排、Unicode、原始空白和对象参数 | 顺序正确；该保留的字符串原样保留；对象不被误当原始字符串 | 通过：32 项批、分段参数重组、对象参数不经原始字符串（batch_structure、sse_tool_arguments） |
 | N05 | Responses reasoning、Messages thinking／签名、两种 Gemini 原生状态 | 下一请求含完整必需内容及原顺序，不出现在可见正文和记忆摘要 | 通过：reasoning／thinking／签名／steps／Parts 原样回传且不入可见正文（各协议 CLI 测试） |
 | N06 | 五协议的 JSON、逐字 SSE、多调用交错和流中途断开 | 完成时结果等价；不完整、错配或协议结构错误时整批零执行 | 通过：JSON/SSE 等价；断流、错配零执行（every_protocol_assembles_sse、sse_tool_arguments 中断分支） |
-| N07 | 现有用户图片和 `view_image` 图片，分别运行 CLI／TUI | 原生请求含正确图片和工具结果位置；不支持时发送／执行前拒绝 | 通过（分解）：CLI×五协议图片组装与能力门实测；TUI×原生与 TUI×图片（020）分别实测，三重组合未单独实测。**修订（2026-10-26，待实现）**：三重组合将由 fix/025-security-hardening 批次补测（PTY×`-i` 图片×原生协议，断言实际请求含图片结构），届时更新本行 |
+| N07 | 现有用户图片和 `view_image` 图片，分别运行 CLI／TUI | 原生请求含正确图片和工具结果位置；不支持时发送／执行前拒绝 | 通过（分解）：CLI×五协议图片组装与能力门实测；TUI×原生与 TUI×图片（020）分别实测，三重组合未单独实测。**修订（2026-10-26，已交付本地 main 8df9278）**：三重组合已由 fix/025-security-hardening 批次补测（`tui_native_image_request_carries_anthropic_image_block`，PTY×`-i` 图片×anthropic-messages，断言请求含 base64 图片块与空文本块；证据 docs/logs/025-batch-summary-2026-10-26.md §7） |
 | N08 | 五协议运行记忆提取、合并及结构化输出 | 请求和解析都使用所选协议；合并工具白名单不扩大 | 通过：五协议记忆提取与真实受限合并（every_protocol_runs_memory_extraction…） |
 | N09 | 参数冲突、未知协议、缺输出上限、能力不支持、非法地址 | 明确本地错误；边界服务收到 0 个请求 | 通过：参数冲突／未知协议／缺上限／能力不支持零请求（malformed_local、structured_output、stream_requires） |
 | N10 | 五协议返回 HTTP 错误、坏响应、超时、重定向，随后观察请求计数 | 只发送一次、不换协议；不泄露 Key；无新增工具副作用 | 通过：单次请求不换协议；401/200 空体实测凭证保护（native_errors…），重定向/网络错误沿用 llm_flow B 系列 |

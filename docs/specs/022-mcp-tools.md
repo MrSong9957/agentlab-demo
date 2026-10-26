@@ -249,7 +249,7 @@ Codex 已将连接、目录及名称处理拆到 `codex-mcp`，底层是 `rmcp-c
 
 ## 5.4 修订（2026-10-26）：TLS 特性补齐（远程 HTTPS 可用性）
 
-> 状态：待验收（2026-10-26 实现完成：reqwest rustls feature＋测试接缝＋mcp_tls 三场景；证据 docs/logs/022-mcp-tls/）。原验收与交付状态不变。
+> 状态：已交付本地 main（8df9278，2026-10-26）（reqwest rustls feature＋测试接缝＋mcp_tls 三场景；证据 docs/logs/022-mcp-tls/）。原验收与交付状态不变。
 
 2026-10-25 只读核实证实规格符合性缺口：§1 承诺"支持远程 Streamable HTTP"、§2.2 强制"远程 HTTPS"、§3.2 要求启用"TLS 特性"，但实现侧 `reqwest` 以 `default-features=false` 引入且 rmcp 的 `transport-streamable-http-client-reqwest` 仅 `__reqwest`（无 TLS）——合并后无任何 TLS 后端，远程 HTTPS MCP 服务器实际连接失败（明确报错、不降级、凭证不出网），且 mcp_http 测试全部使用 `http://127.0.0.1`，远程 HTTPS 路径从未被实测覆盖。
 

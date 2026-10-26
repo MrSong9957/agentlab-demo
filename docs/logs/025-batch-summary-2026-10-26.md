@@ -132,3 +132,18 @@
 - 竞态测试互斥（并行假红修复）；027 规格第 6 条与部署回滚清单（独立恢复入口＋
   备份前提＋完整步骤）同步。
 - 最终全量 exit 0（65 目标 3490/0/3）。候选未提交（未合并未推送）。
+
+## 交付记录（2026-10-26）
+
+- 任务提交：7949b4a（feat: 025 安全批次…）；合并：8df9278（no-ff，merge into main，
+  树与任务分支零差异）；main HEAD＝8df9278。
+- 交付门禁：暂存区 gitleaks 扫描 exit 0（交付豁免四向验证
+  2026-10-26-delivery-exemptions.md：原命中放行/同文件他值/他钥/同值异径均拦截）；
+  pre-commit hook 随提交执行通过；main 上 cargo check --locked --offline 通过；
+  全量证据（2026-10-26-parent-race-full.log，65 目标 3490/0/3）因合并树与验证时
+  完全一致而复用（git diff 零差异）。
+- 规格收口：025/026/028/022§5.4/024 N07 → 已交付本地 main（8df9278）；027 保持
+  「实现中，受阻」（产品已交付本地 main，管理员部署及强制隔离验收未完成）。
+- 未纳入（外部任务/个人内容，保留工作区）：AGENTS.md 未提交修改、rules/、029/030
+  规格与日志、docs/index.md 删除、docs/项目规则.md、src/app/config/。
+- 本地任务分支 fix/025-security-hardening 于收口提交后安全删除（git branch -d）。
