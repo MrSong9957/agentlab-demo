@@ -1,11 +1,17 @@
 # 规格：工具执行面迁移系统级沙箱（027 B 替代评估）
 
-- 状态：**宿主真实沙箱验收通过（2026-10-27，待合并决策）**——实现轮收口后，宿主
-  （Docker Desktop 29.8.2）独立验收容器完成真实验收：12 项全 PASS（probe 干跑、
+- 状态：**已交付本地 main（2026-10-27）**——任务提交 `9d26236`、合并提交 `53ebf05`
+  （no-ff；main 自基线 a14a57c 无新提交，合并零内容冲突）。合并结果与已验收候选的
+  内容一致性由 git 树级比对独立证明（`git diff feat/033-tool-sandbox main` 为空）；
+  候选验收时未提交、无独立源码快照存档，一致性另依据执行记录确认（宿主验收基于
+  该工作树内容运行），mtime 类比对仅作辅助证据。合并后 `cargo check --locked
+  --offline` 通过（0 error；warning 均为 shims 存量，非本次引入）。验收证据复用
+  宿主真实沙箱验收（Docker Desktop 29.8.2 独立验收容器）：12 项全 PASS（probe 干跑、
   .env 遮蔽、三型工具真实分支、PID 隔离、普通回归零变化、全量 68 目标 3506/0/3）；
   验收中发现并修复两处产品缺陷（/run/WSL 遮蔽条件化、MCP 环境注入顺序），证据与
-  处置见 `docs/logs/033-tool-sandbox/2026-10-27-host-acceptance.md`。dev 容器部署
-  变更（bwrap＋seccomp）仍待管理员批准实施。027 B 双账号机制已随实现轮删除。
+  处置见 `docs/logs/033-tool-sandbox/2026-10-27-host-acceptance.md`。**共享 dev 容器
+  尚未部署沙箱**（bwrap＋seccomp 变更仍待管理员批准实施，共享/生产环境隔离未启用）。
+  027 B 双账号机制已由本规格替代并从 main 删除。
 - 更新时间：2026-10-27
 - 证据：`docs/logs/033-tool-sandbox/2026-10-26-feasibility-probe.md`（评估轮）；实现记录见文末「实现轮收口」
 
