@@ -5,8 +5,8 @@
 - 对应原表项目：文件补丁。严格以原表「能力」列的一行为一项任务；本项同时包含规格文档与实施计划，下面的小节和验收用例不另立任务。
 - 来源：[工具能力对照表](../records/2026-10-21-codex-tools-comparison.md)中的「文件补丁」、[差异复核](../records/2026-10-22-codex-apply-patch-comparison.md)。
 - 关联契约：[004 文本补丁](004-apply-patch.md)、[006 工具调用循环](006-tool-call-loop.md)、[007 会话保存](007-session-persistence.md)、[012 补丁展示](012-tui-tool-details.md)、[027 凭证边界历史与保留修复](027-credential-access-boundary.md)、[033 当前工具沙箱](033-tool-sandbox.md)。
-- 本轮交付：规格与实施计划，供用户审阅；未改程序行为。实施后由本规格修订 004 中与 `Move to` 及三级匹配有关的限制，其余契约继续适用。
-- 2026-10-27 同步：执行前提与计划按 033 已交付及共享 dev 已部署状态更新，见[同步记录](../records/2026-10-27-sandbox-spec-sync.md)；本项仍待实现。
+- 2026-10-28 实现完成（M1–M6）：004 中与 `Move to` 及匹配限制相关的条款已随交付修订（其余契约不变）。
+- 2026-10-27 同步：执行前提与计划按 033 已交付及共享 dev 已部署状态更新，见[同步记录](../records/2026-10-27-sandbox-spec-sync.md)。
 
 ## 1. 要做什么，有哪些要求
 
@@ -161,7 +161,7 @@ M1–M5 可按测试名称排查；M5 另运行 `env -u TCHAT_SANDBOX cargo test
 
 ## 4. 踩过的坑，怎样解决
 
-本项尚未实施，没有运行失败或修复经验。任务分项约定见 [项目经验 §7](../../rules/project-lessons.md#7-实现取舍与问题根因)。已确认的现状与方案依据见[本轮核对记录](../logs/029-file-patch/2026-10-26-spec-research.md)。实际问题出现后记录根因与处理；有复用价值的结论提炼到 `rules/project-lessons.md`，此处只留引用。
+实施期已发生的真实失败与修复：M6 安全攻防发现 lone-CR 绕过行数上限（F-1）与 procfs 伪文件物化（F-2），均已修复并附红绿回归（[安全报告](../security/reports/2026-10-28-029-apply-patch-move-security.md)、[修复日志](../logs/029-file-patch/2026-10-28-m6-security-fixes.log)）；独立代码审查另确认并发截断短读缺口（修复轮 `!=` 收口）。任务分项约定见 [项目经验 §7](../../rules/project-lessons.md#7-实现取舍与问题根因)。已确认的现状与方案依据见[本轮核对记录](../logs/029-file-patch/2026-10-26-spec-research.md)。实际问题出现后记录根因与处理；有复用价值的结论提炼到 `rules/project-lessons.md`，此处只留引用。
 
 ## 5. 先预测，再实测，最后确认是否合格
 
@@ -177,7 +177,7 @@ M1–M5 可按测试名称排查；M5 另运行 `env -u TCHAT_SANDBOX cargo test
 | A8 | A→B→C 的有序块，再加入失败块；另重复同一移动补丁 | 清单反映每次真实操作且不去重；失败停止、无回滚；重提不改已成功目标 | ✅ 已测（move_chain_and_repeat_patch），2026-10-28，待验收 |
 | A9 | 构造达到和超过补丁/文件字节与行数上限的固定数据 → Move | 适用上限内成功；超限在当前块写入前拒绝，源与目标不变 | ✅ 已测（move_respects_size_limits（字节/行数/生成内容）），2026-10-28，待验收 |
 | A10 | 本地 HTTP mock 返回 Move 调用 → 真实 CLI 与 PTY 执行 → 保存并恢复 | 下一次请求含正确结果；终端显示两条真实变更；恢复一致且不重放，旧会话仍可读 | ✅ 已测（tool_loop t2b（循环回传）＋e2e s29b（PTY/保存/恢复）＋session 往返），2026-10-28，待验收 |
-| A11 | 临时工作区、假 .env、工作区及系统临时目录以外的目标 → 走 033 真实沙箱入口；另制造包装不可用 | 允许范围内成功；假凭据正文不可得，越界创建/删除拒绝；换 workdir 不转移策略锚点；包装失败零执行，无主进程代办；返回值、磁盘状态和展示相符 | ✅ 已测（apply_patch_sandbox：sandbox_move_roundtrip_with_unicode_context / _out_of_writable_root_rejected / _masked_env_source_rejected / _wrapper_unavailable_zero_execution），2026-10-28，待验收 |
+| A11 | 临时工作区、假 .env、工作区及系统临时目录以外的目标 → 走 033 真实沙箱入口；另制造包装不可用 | 允许范围内成功；假凭据正文不可得，越界创建/删除拒绝；换 workdir 不转移策略锚点；包装失败零执行，无主进程代办；返回值、磁盘状态和展示相符 | ✅ 已测（apply_patch_sandbox：sandbox_move_roundtrip_with_unicode_context / _out_of_writable_root_rejected / _masked_env_source_rejected / _wrapper_unavailable_zero_execution），2026-10-28，待验收；整目标运行记录见[补正日志](../logs/029-file-patch/2026-10-28-m5-sandbox-full.log)（bwrap 0.9.0 正例分支 7/7） |
 | A12 | 关键用例断言不变 → 对照旧实现或临时破坏行为 → 恢复实现 | A1/A2 在旧实现失败；绕过目标排他创建、写前删源、丢弃块内部分成功分别被 A5/A6/A7 捕获；恢复后通过 | ✅ 已测（2026-10-28-m2-mutations.log（排他创建绕过/写前删源/丢弃部分成功均被捕获）），2026-10-28，待验收 |
 | B1 | 在行内位置覆盖全部 28 个码点与对应 ASCII 的固定双向/同组数据（防止被 trim 先行消除） → 普通 Update | `@@` 定位与旧行匹配均成功；只允许指定映射，目标字节与预期一致 | ✅ 已测（seek_level4_maps_all_unicode_punct_to_ascii＋update_level4_matches_all_groups_inline），2026-10-28，待验收 |
 | B2 | 在同一文件设置较早宽松候选、较晚精确候选，并覆盖 start、多块和 EOF → 更新 | 四级按完整搜索范围依次尝试，较严格结果优先；同级最早；不得越过 start/EOF | ✅ 已测（seek_level4_priority_start_and_eof），2026-10-28，待验收 |

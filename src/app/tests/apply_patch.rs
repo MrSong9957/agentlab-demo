@@ -1997,3 +1997,28 @@ fn move_rejects_procfs_pseudo_file_source() {
     assert!(src.exists(), "procfs 对象本就不应被删");
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// 审查发现 #5 补强：A2 输入列「多个修改块」——Move＋**两个** @@ 修改块的组合
+/// （此前所有 Move 用例只有单块；若实现只应用首个块，目标会静默缺改且套件全绿）。
+#[test]
+fn move_with_multiple_change_blocks_applies_all() {
+    let dir = temp_dir("move-multi-block");
+    let src = dir.join("多块-旧 名.txt");
+    let dst = dir.join("多块-新 名.txt");
+    fs::write(&src, "head\none\ntwo\nthree\ntail\n").unwrap();
+    // 两个带定位上下文的 @@ 块：定位行与被替换行相邻不重合
+    let r = call(&format!(
+        "*** Update File: {s}\n*** Move to: {d}\n@@ head\n-one\n+ONE\n@@ two\n-three\n+THREE",
+        s = src.display(),
+        d = dst.display()
+    ));
+    assert!(r.ok, "{r:?}");
+    assert!(!src.exists());
+    // 两个块都生效：one→ONE 与 three→THREE，未涉及行原样
+    assert_eq!(
+        fs::read_to_string(&dst).unwrap(),
+        "head\nONE\ntwo\nTHREE\ntail\n",
+        "两个 @@ 块均应用到移动目标"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
