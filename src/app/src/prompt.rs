@@ -502,7 +502,8 @@ fn write_stdin_tool() -> Value {
 }
 
 /// apply_patch 工具定义：描述复用 Codex `apply_patch_spec.rs` 首句（删除 FREEFORM 措辞）；
-/// 参数为本地 004 JSON 契约（唯一必填字符串 patch）；语法说明不含 Move to。
+/// 参数为本地 004 JSON 契约（唯一必填字符串 patch）；029：语法说明补充 Move to
+/// 与第四级 Unicode 匹配容差（与实现同步，勿退回「不支持 Move」）。
 fn apply_patch_tool() -> Value {
     json!({
         "type": "function",
@@ -514,7 +515,7 @@ fn apply_patch_tool() -> Value {
                 "properties": {
                     "patch": {
                         "type": "string",
-                        "description": "Patch text in Codex apply_patch format, framed by \"*** Begin Patch\" and \"*** End Patch\"; Add/Update/Delete hunks only. Max 1 MiB per patch; per-file read and generated content max 4 MiB / 100000 lines."
+                        "description": "Patch text in Codex apply_patch format, framed by \"*** Begin Patch\" and \"*** End Patch\"; Add/Update/Delete hunks. An Update hunk may carry one \"*** Move to: <path>\" line directly after \"*** Update File: <path>\" to move/rename, optionally followed by @@ change hunks (a bare Move with no changes is a pure move; it is recorded as target add + source delete and never overwrites an existing target). Context matching falls back to exact → ignore trailing/leading whitespace → additionally mapping Unicode dashes/quotes/space variants to ASCII. Max 1 MiB per patch; per-file read and generated content max 4 MiB / 100000 lines."
                     }
                 },
                 "required": ["patch"],
