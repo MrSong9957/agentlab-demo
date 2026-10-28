@@ -1,0 +1,134 @@
+034 JavaScript 工具编排：源码文本核对与文档检查（2026-10-26）
+只做文档检查，不构建或运行功能；所有命令工作目录 /workspace。
+
+$ git rev-parse --short HEAD
+工作目录：/workspace
+a14a57c
+退出码：0
+
+$ python3 -c 'from pathlib import Path
+import hashlib,re
+root=Path('"'"'/workspace'"'"')
+for name in ['"'"'src/app/Cargo.toml'"'"','"'"'src/app/src/turn.rs'"'"','"'"'src/app/src/prompt.rs'"'"','"'"'src/app/src/session.rs'"'"','"'"'src/app/src/memory/rollout_input.rs'"'"']:
+    data=(root/name).read_bytes()
+    print(f'"'"'{name}: sha256={hashlib.sha256(data).hexdigest()[:16]}, bytes={len(data)}'"'"')
+turn=(root/'"'"'src/app/src/turn.rs'"'"').read_text()
+prompt=(root/'"'"'src/app/src/prompt.rs'"'"').read_text()
+cargo=(root/'"'"'src/app/Cargo.toml'"'"').read_text()
+session=(root/'"'"'src/app/src/session.rs'"'"').read_text()
+assert '"'"'MAX_MODEL_REQUESTS_PER_TURN: usize = 8'"'"' in turn
+assert '"'"'OrchestrationEvent'"'"' not in prompt and '"'"'rquickjs'"'"' not in cargo
+assert '"'"'Some(1 | 2)'"'"' in session
+assert '"'"'HistoryItem::ToolResult'"'"' in turn and '"'"'call_resource_tool'"'"' in turn
+assert '"'"'isolated_tool_user()'"'"' in turn
+print('"'"'OK 当前源码仍为8次模型请求、V1/V2会话；无rquickjs依赖/编排事件；MCP/隔离分派入口存在'"'"')
+print('"'"'仅核对源码文本，不是运行行为或安全边界验收'"'"')
+'
+工作目录：/workspace
+src/app/Cargo.toml: sha256=c8a4b6b0d86a4032, bytes=2909
+src/app/src/turn.rs: sha256=d445aa2238ccf50c, bytes=105038
+src/app/src/prompt.rs: sha256=6019e16185caf948, bytes=33263
+src/app/src/session.rs: sha256=da25a7e1c9a8cf7e, bytes=48151
+src/app/src/memory/rollout_input.rs: sha256=6d405ececb564007, bytes=21742
+OK 当前源码仍为8次模型请求、V1/V2会话；无rquickjs依赖/编排事件；MCP/隔离分派入口存在
+仅核对源码文本，不是运行行为或安全边界验收
+退出码：0
+
+$ python3 -c 'from pathlib import Path
+from urllib.parse import unquote
+import re,json
+root=Path('"'"'/workspace'"'"')
+paths=[root/'"'"'docs/specs/034-javascript-tool-orchestration.md'"'"',root/'"'"'docs/logs/034-javascript-tool-orchestration/2026-10-26-spec-research.md'"'"',root/'"'"'docs/records/2026-10-21-codex-tools-comparison.md'"'"']
+def anchor(h):
+    h=re.sub(r'"'"'[^\w\s-]'"'"','"'"''"'"',h.lower())
+    return re.sub(r'"'"'\s'"'"','"'"'-'"'"',h)
+links=0
+for p in paths:
+    data=p.read_bytes()
+    s=data.decode('"'"'utf-8'"'"')
+    assert data.endswith(b'"'"'\n'"'"') and b'"'"'\r'"'"' not in data,p
+    assert not any(x.rstrip()!=x for x in s.splitlines()),p
+    assert not re.search(r'"'"'^(<<<<<<<|=======|>>>>>>>)'"'"',s,re.M),p
+    assert sum(x.startswith('"'"'```'"'"') for x in s.splitlines())%2==0,p
+    for target in re.findall(r'"'"'\]\(([^)]+)\)'"'"',s):
+        if re.match(r'"'"'[a-zA-Z]+:'"'"',target): continue
+        path,sep,frag=unquote(target).partition('"'"'#'"'"')
+        dest=(p.parent/path).resolve() if path else p
+        assert dest.is_file(),(p,target)
+        if sep:
+            heads=re.findall(r'"'"'^#{1,6}\s+(.+)$'"'"',dest.read_text(),re.M)
+            assert frag in [anchor(h) for h in heads],(p,target,heads)
+        links+=1
+    print(f'"'"'OK UTF-8/LF/空白/围栏/本地链接：{p.relative_to(root)}（{len(s.splitlines())}行）'"'"')
+spec=paths[0].read_text()
+assert re.findall(r'"'"'^## (\d)\.'"'"',spec,re.M)==list('"'"'12345'"'"')
+assert '"'"'- 状态：待实现'"'"' in spec and '"'"'- 更新时间：2026-10-26'"'"' in spec
+for n in range(8): assert re.search(r'"'"'^\| M'"'"'+str(n)+r'"'"' '"'"',spec,re.M),n
+cases=re.findall(r'"'"'^\| (C\d\d) \|.*?\| (.*?) \|$'"'"',spec,re.M)
+assert [x[0] for x in cases]==[f'"'"'C{n:02}'"'"' for n in range(1,19)]
+assert all(x[1]=='"'"'待测'"'"' for x in cases)
+examples=re.findall(r'"'"'```json\n(.*?)\n```'"'"',spec,re.S)
+assert len(examples)==2
+config,result=map(json.loads,examples)
+assert config=={'"'"'experimental_supported_tools'"'"':['"'"'exec'"'"','"'"'wait'"'"']}
+assert set(result)=={'"'"'ok'"'"','"'"'status'"'"','"'"'cell_id'"'"','"'"'output'"'"','"'"'output_truncated'"'"','"'"'error'"'"'}
+assert result['"'"'status'"'"']=='"'"'running'"'"' and result['"'"'ok'"'"'] is True and result['"'"'error'"'"'] is None
+required=['"'"'031/033'"'"','"'"'032 的 V3'"'"','"'"'当前032仍待实现'"'"','"'"'先原子扣额'"'"','"'"'下一次wait'"'"','"'"'CELL_BUSY'"'"','"'"'env_clear'"'"','"'"'64 MiB'"'"','"'"'128次叶子'"'"','"'"'unknown'"'"','"'"'未测'"'"','"'"'memory/rollout_input.rs'"'"']
+for term in required: assert term in spec,term
+comparison=paths[2].read_text()
+table=comparison.split('"'"'| 能力 | Codex 工具 | 本项目与建议 |'"'"',1)[1].split('"'"'\n\n'"'"',1)[0]
+rows=[x for x in table.splitlines() if x.startswith('"'"'| '"'"') and not x.startswith('"'"'|---'"'"')]
+names=[x.split('"'"'|'"'"')[1].strip() for x in rows]
+expected=['"'"'命令执行、进程交互'"'"','"'"'文件补丁'"'"','"'"'任务计划'"'"','"'"'用户问询'"'"','"'"'执行中发消息'"'"','"'"'查看图片'"'"','"'"'MCP 外部工具'"'"','"'"'MCP 资源'"'"','"'"'工具搜索与按需加载'"'"','"'"'权限申请'"'"','"'"'上下文管理'"'"','"'"'JavaScript 工具编排'"'"','"'"'多 Agent'"'"']
+assert names==expected,names
+jsrow=next(x for x in rows if x.split('"'"'|'"'"')[1].strip()=='"'"'JavaScript 工具编排'"'"')
+assert '"'"'[034 规格与实施计划](../specs/034-javascript-tool-orchestration.md)'"'"' in jsrow
+nextrow=next(x for x in rows if x.split('"'"'|'"'"')[1].strip()=='"'"'多 Agent'"'"')
+assert nextrow=='"'"'| 多 Agent | `spawn_agent`、`send_message`、`followup_task`、`wait_agent`、`interrupt_agent`、`list_agents` | 缺少。涉及独立会话、调度、取消和资源管理，适合后续阶段 |'"'"'
+assert list((root/'"'"'docs/specs'"'"').glob('"'"'034-*.md'"'"'))==[paths[0]]
+lesson=(root/'"'"'rules/project-lessons.md'"'"').read_text()
+entry=next(x for x in lesson.splitlines() if x.startswith('"'"'- 034 JavaScript 工具编排规划'"'"'))
+assert '"'"'../docs/specs/034-javascript-tool-orchestration.md'"'"' in entry and '"'"'待实现'"'"' in entry
+for target in re.findall(r'"'"'\]\(([^)]+)\)'"'"',entry): assert (root/'"'"'rules'"'"'/target).resolve().is_file()
+print(f'"'"'OK {links}条本地链接；034编号唯一、五节、M0–M7实施计划、C01–C18全部待测'"'"')
+print('"'"'OK 两个JSON示例；双opt-in、032前置、QuickJS/原接口适配、额度与V3证据边界均已说明'"'"')
+print('"'"'OK 原表13项名称与顺序；多Agent行保持原缺口，未推进下一项'"'"')
+print('"'"'OK 本次仅验证文档，没有运行Cargo/JS/模型/MCP，没有把性能、费用或功能标成已实测'"'"')
+'
+工作目录：/workspace
+Traceback (most recent call last):
+  File "<string>", line 21, in <module>
+AssertionError: (PosixPath('/workspace/docs/specs/034-javascript-tool-orchestration.md'), 'args')
+退出码：1
+
+$ git diff --check -- docs/specs/034-javascript-tool-orchestration.md docs/logs/034-javascript-tool-orchestration/2026-10-26-spec-research.md docs/records/2026-10-21-codex-tools-comparison.md rules/project-lessons.md
+工作目录：/workspace
+（标准输出和标准错误均为空）
+退出码：0
+
+$ git status --short
+工作目录：/workspace
+ M AGENTS.md
+ D docs/index.md
+ M docs/logs/024-native-model-apis/2026-10-24-spec-research.md
+ M docs/records/2026-10-21-backend-risk-test-priorities.md
+ M docs/records/2026-10-21-codex-tools-comparison.md
+ D "docs/\350\247\204\346\240\274\346\226\207\346\241\243\345\256\236\346\210\230\346\263\225.md"
+ D project-lessons.md
+?? docs/logs/029-file-patch/
+?? docs/logs/030-tool-search/
+?? docs/logs/031-request-permissions/
+?? docs/logs/032-context-management/
+?? docs/logs/033-tool-sandbox/
+?? docs/logs/034-javascript-tool-orchestration/
+?? docs/specs/029-file-patch.md
+?? docs/specs/030-tool-search.md
+?? docs/specs/031-request-permissions.md
+?? docs/specs/032-context-management.md
+?? docs/specs/033-tool-sandbox.md
+?? docs/specs/034-javascript-tool-orchestration.md
+?? "docs/\351\241\271\347\233\256\350\247\204\345\210\231.md"
+?? rules/
+?? src/app/config/
+退出码：0
+

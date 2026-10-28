@@ -1,0 +1,18 @@
+== 0. .env 元数据（验证前）: size mtime = 64 1792585545
+== 1. gitleaks 恢复（/home/dev/.local 不在卷内，重建后需重装） ==
+PASS: gitleaks 已存在: 8.30.1
+== 2. bubblewrap 与开关注入 ==
+PASS: bwrap: bubblewrap 0.9.0
+PASS: TCHAT_SANDBOX=1 来自 compose environment（无手工 export）
+== 3. 产品干跑（REPL 启动横幅应报告 bwrap 可用；EOF 即退出） ==
+PASS: 启动横幅提及 bubblewrap: 工具沙箱模式：exec/MCP/apply_patch 经 bubblewrap 隔离（/usr/bin/bwrap）
+== 4. 三型沙箱集成（真实分支；默认注入态运行，用例内部自控开关；exec 含管道 failIfUnavailable 与 PTY 超时组杀） ==
+PASS: exec_sandbox + mcp_stdio_sandbox + apply_patch_sandbox 全绿（3 个目标）
+== 5. 假凭据遮蔽（独立 tmp 夹具；产品同参 bwrap 子集；遮蔽证据=正文不可得——open EACCES〔userns 内非特权 bind 被内核强制 nodev，2026-10-27 容器实测〕或读到 0 字节，与产品 A2 stat 级口径一致） ==
+PASS: 沙箱内 .env 正文不可得（open 被拒/零字节）且 cat 被拒（外部仍含标记）、pid1=载荷进程、普通文件读写正常
+== 6. 普通模式回归 E2E（本地 mock；单独清除开关 env -u TCHAT_SANDBOX；主流程与端点冒烟，无真实外部调用） ==
+PASS: e2e_acceptance 通过（本地 mock）
+== 7. .env 元数据（验证后，须与验证前一致） ==
+PASS: .env 元数据未变: 64 1792585545
+
+==== 验证汇总: PASS=8 FAIL=0 ====

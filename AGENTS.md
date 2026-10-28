@@ -7,13 +7,15 @@
 
 ## 2. 项目文档规范
 
-@`docs\规格文档实战法.md`，详细内容查看文档。
+@`rules/规格文档实战法.md`，详细内容查看文档。`@` 引用只带入引用行本身，不会自动展开被引用文件的正文（2026-10-26 实测）；执行涉及该文件的任务前须主动读取。
+
+规则中的仓库路径以项目根目录为准；Markdown 链接按所在文件的位置解析。
 
 功能规格和验证日志与代码同仓库，统一放在 `docs/`：
 
 - `docs/specs/`：功能规格。一个功能一份，不合并不同功能。文件名采用 `编号-功能英文名.md`，如 `001-daily-checkin.md`。
-- `docs/logs/`：证据记录。Agent 按需自主收集并记录证据，只保留关键设计依据、测试要点、失败原因和验证结果。最终报告引用同一份证据，不重复抄写。
-- 可提炼复用到其他项目的经验和决策（含关键判断、坑记录）按第 8 节统一记录到 `project-lessons.md`；规格和日志按需引用，不重复抄写。
+- `docs/logs/`：证据记录。Agent 按需自主收集并记录证据，只保留关键设计依据、测试要点、失败原因和验证结果。运行验证须保留真实终端日志，含实际命令、工作目录、退出码和脱敏后的关键原始输出。最终报告引用同一份证据，不重复抄写。
+- 可提炼复用到其他项目的经验和决策（含关键判断、坑记录）按第 8 节统一记录到 `rules/project-lessons.md`；规格和日志按需引用，不重复抄写。
 - 局部实现原因写在对应代码附近的注释中。
 - 代码变更影响文档或注释时，同步更新对应内容。
 - 临时草稿中的有效结论应按上述分工提炼进正式文档。
@@ -25,9 +27,11 @@
 以下流程和出错处理要求只适用于代码或程序行为变更；仅修改文档且不影响程序行为时，只检查内容、命名和链接，不执行代码检查和全量测试。
 
 按以下顺序执行：
-TDD → comprehensive-testing → Security Testing → code-review → 全量验证和修复。
+TDD → `comprehensive-testing` → `Security Testing` → `ce-code-review` → 全量验证和修复 → `ce-compound`。
 
 任一阶段发现错误时，使用 `diagnosing-bugs` 技能定位根因并修复。修复后复验受影响的检查，最终完成第 7 节规定的全量验证。
+
+提交 PR 或交付前，Agent 须自行完成第 7 节适用的构建和检查，已配置且适用的 CI 也须通过，再交人工审阅。
 
 **验证真实行为，不绑定内部写法。**
 
@@ -38,6 +42,12 @@ TDD → comprehensive-testing → Security Testing → code-review → 全量验
 - 不为覆盖率或形式完整增加低价值测试。
 - 先确认相关测试的原有状态，再验证本次改动；涉及公共逻辑时扩大范围。
 - 完成规定检查后，不重复运行没有新增信息的检查。
+
+### 代码审查
+
+@`rules/REVIEW.md`：审查规则，按需加载；开始审查前须主动读取。
+
+主 Agent 负责实现、修复和汇总；独立审查子代理负责找问题；复杂或有争议时，按需增加验证子代理核对疑点。审查和验证子代理只读，优先复用已有角色；临时分工不自动写入长期配置。
 
 ### 单元与集成测试
 
@@ -59,6 +69,8 @@ TDD → comprehensive-testing → Security Testing → code-review → 全量验
 ### 端到端测试（E2E）
 
 E2E 覆盖关键用户流程，不替代低层测试。主要检查用户最终看到的结果，日志仅辅助定位和交叉验证。
+
+涉及视觉效果的改动，保留截图或渲染结果，对照设计稿检查；没有设计稿时按规格核对。
 
 | 场景 | 验证方式 |
 |---|---|
@@ -105,21 +117,22 @@ API、网络服务按需使用 VCR（录制并回放响应）或等价方案。
 在实际项目中核实后填写，不猜测命令；不适用的项目注明原因。
 
 - 技术栈、运行时、包管理器：Rust CLI `terminal-chat`（edition 2021，rustup stable rustc/cargo 1.99.0，Cargo，Cargo.lock 锁版本）；纯 Rust 项目。
-- 核心入口与模块边界：根 Cargo.toml 为 workspace 入口、默认成员 `src/app`（主程序 crate）；TUI 渲染层在 `src/tui/`＋`src/shims/`＋`src/vendor/`；`src/app/src/lib.rs` 导出十二个模块（catalog、api、prompt、turn、exec、proc_session、apply_patch、plan、session、memory、display、tui_host），`src/app/src/main.rs` 是终端循环与命令入口；模块职责与目录迁移背景见 `project-lessons.md`。
-- 必须保持的行为，如接口、配置和已有数据兼容性：已验收契约覆盖 REPL 回显与退出语义（001）、`config/` 配置与 `/refresh`（002）、exec_command/apply_patch 执行契约（003/004，016 修订：可续接进程会话）、tool_calls `id`/`name` 原样保留（006，017 起用户轮四工具＋update_plan）、进程会话生命周期与取消/时限/容量边界（016，已交付）、会话格式与锁语义（007）、TUI 按键单一职责（010/012）、凭证与输入安全边界、记忆存储位置与 V1 范围（013/014）；契约明细与来源见 `project-lessons.md` §4，行为变更须先核对对应规格。
+- 核心入口与模块边界：根 Cargo.toml 为 workspace 入口、默认成员 `src/app`（主程序 crate）；TUI 渲染层在 `src/tui/`＋`src/shims/`＋`src/vendor/`；`src/app/src/lib.rs` 导出十二个模块（catalog、api、prompt、turn、exec、proc_session、apply_patch、plan、session、memory、display、tui_host），`src/app/src/main.rs` 是终端循环与命令入口；模块职责与目录迁移背景见 `rules/project-lessons.md`。
+- 必须保持的行为，如接口、配置和已有数据兼容性：已验收契约覆盖 REPL 回显与退出语义（001）、`config/` 配置与 `/refresh`（002）、exec_command/apply_patch 执行契约（003/004，016 修订：可续接进程会话）、tool_calls `id`/`name` 原样保留（006，017 起用户轮四工具＋update_plan）、进程会话生命周期与取消/时限/容量边界（016，已交付）、会话格式与锁语义（007）、TUI 按键单一职责（010/012）、凭证与输入安全边界、记忆存储位置与 V1 范围（013/014）；契约明细与来源见 `rules/project-lessons.md` §4，行为变更须先核对对应规格。
 
 | 用途 | 命令与工作目录 |
 |---|---|
-| 启动 / 构建 | 宿主机起容器：`docker compose -f .devcontainer/compose.yaml up -d --build`；容器内 `/workspace`：构建 `cargo build --locked`，交互运行 `cargo run`，管道运行 `echo hello \| cargo run --quiet` |
+| 启动 / 构建 | 宿主机起容器：`docker compose -f .devcontainer/compose.yaml up -d --build`；容器内 `/workspace`：构建 `cargo build --locked`，交互运行 `cargo run`，管道运行 `echo hello \| cargo run --quiet` ；进入容器：`docker exec -it agentlab-demo-dev bash` |
 | 单元 / 集成测试 | 容器内 `/workspace`：`cargo test`（单元＋集成，mock HTTP） |
 | 回归测试（一条命令全量运行） | 容器内 `/workspace`：`cargo check && cargo test --workspace --no-fail-fast`（与「全量验证」同一条命令，覆盖单元＋集成＋回归全集）；支持按名称过滤单个用例排查，过滤结果不能作为交付验证依据 |
 | E2E | 容器内 `/workspace`：`cargo test --test e2e_acceptance`（真实 CLI＋PTY＋本地 mock；覆盖范围与记录见 `docs/records/2026-10-09-e2e-acceptance.md`） |
 | typecheck / lint | 容器内 `/workspace`：typecheck 用 `cargo check`（实测通过）；`cargo clippy`/`cargo fmt` 当前工具链未安装，用前需 `rustup component add clippy rustfmt` |
+| 审查 / 安全检查 / CI | 审查用 `code-review` 技能并读取 `rules/REVIEW.md`；安全检查按 `.agents/agents/Security-Testing-Gate.md`；仓库内未发现 CI 配置 |
 | 全量验证 | 容器内 `/workspace`：`cargo check && cargo test --workspace --no-fail-fast`，并报告通过、失败、跳过与未运行数量（定向测试不能代替最终全量回归）；REPL 交互行为改动另按 001 规格补伪终端验收。注意本环境全局 `CARGO_TARGET_DIR=/workspace/target`——在工作区副本/隔离目录里跑 Cargo 时必须显式 `--target-dir` 指向副本专用目录，否则污染共享构建产物 |
 
 ## 8. 参考资料
 
 - Obsidian 仓库：宿主机 `D:\AgentLab\shared\Obsidian`，Docker 容器 `/vault`。记忆文档和可沉淀的知识通过 wiki MCP 保存到此处。
 - Obsidian GitHub 仓库：[MrSong9957/Obsidian](https://github.com/MrSong9957/Obsidian)，保存个人知识、常用技能和 Agent 代理。若缺失 SKILL 技能和 Agent 代理时，按需下载到 Agent 工具全局目录使用。
-- @`project-lessons.md`：项目经验/决策沉淀，按需加载；Agent 执行时，将与本项目直接相关、对后续执行或决策有复用价值的信息（如已确认决策、问题根因与解决方法）统一记录于此，**不得与「7. 项目信息」重复，禁止直接写入 AGENTS.md**，以避免重复踩坑、减少决策偏差。
+- @`rules/project-lessons.md`：项目经验/决策沉淀，按需加载；Agent 执行时，将与本项目直接相关、对后续执行或决策有复用价值的信息（如已确认决策、问题根因与解决方法）统一记录于此，**不得与「7. 项目信息」重复，禁止直接写入 AGENTS.md**，以避免重复踩坑、减少决策偏差。
 ---

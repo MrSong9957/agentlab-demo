@@ -1,0 +1,8 @@
+cwd: /workspace
+command: python3 -
+final report local links: PASS
+isolated research config/cache/output removed: /tmp/agent-init-last30days-8cgpg9vq
+temporary protocol schema directory removed: /tmp/agent-init-protocol
+temporary scripts and state removed; evidence snapshots retained in docs/logs/agent-init
+exit_code: 0
+

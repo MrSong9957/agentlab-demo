@@ -1,0 +1,40 @@
+cwd: /workspace
+command: python3 - (heredoc: document content, local-link and change-scope checks)
+PASS: historical sections, six specification/plan links and original validation text preserved
+PASS: local link targets exist; checked 17
+PASS: no trailing whitespace
+Content review: sequence 029 -> 032 -> 030 -> 031 -> 034 -> 035; 031 M0 early; 032 prerequisite and 034/035 independence retained
+Change scope:
+--- docs/records/2026-10-27-sandbox-spec-sync.md (before)
++++ docs/records/2026-10-27-sandbox-spec-sync.md (after)
+@@ -33,8 +33,26 @@
+ | JavaScript 工具编排 | [034 §3.2](../specs/034-javascript-tool-orchestration.md#32-根据规格制定的实施计划) | 032 先交付；QuickJS worker、受限桥接、exec/wait 生命周期与 V3 证据 |
+ | 多 Agent | [035 §3.2](../specs/035-multi-agent.md#32-根据规格制定的实施计划) | 032 先交付；六接口、子轮/消息、可信 owner、预算、收尾与 V3 来源记录 |
+ 
+-六项均待实现。030、032 本轮无需修改；034 与 035 互不作为前置。下一项工作仍由用户决定，本轮同步不视为开始实施或批准验收。
++六项均待实现。030、032 在 2026-10-27 同步轮无需修改；034 与 035 互不作为前置。执行顺序见下节；记录计划不视为开始实施或批准验收。
++
++### 3.1 精简执行计划（2026-10-28）
++
++采用**分阶段推进、独立模块并行开发、公共接入串行合并**。功能优先级相同时，主线合并顺序为 **029 → 032 → 030 → 031 → 034 → 035**；**031 的 M0 从第一阶段并行验证**。各项内部仍按上表所链接规格的 §3.2 实施，不改阶段和验收要求。
++
++| 阶段 | 主线执行 | 可并行工作 | 阶段关口 |
++|---|---|---|---|
++| 准备 | 固定包含最新规格和已交付 033 的共同基线，保护现有未提交改动 | 核对公共接口、测试基线与文件分工 | 各实施分支使用同一基线 |
++| 一 | 029 文件补丁完整实施与验证 | 031 M0 后端证明；032 基线与独立准备 | 029 完成规定验证；031 给出可行结论或明确缺口 |
++| 二 | 先交付 032，再接入 030 | 032 上下文模块与 030 搜索索引分别开发 | 032 的 V3、活动视图和提交回执实际交付；030 的请求级声明与执行校验完整接通 |
++| 三 | M0 通过后，完成 031 权限确认、强制执行、授权到期与收尾 | 032 已交付后，开展 034/035 的 M0 隔离原型与独立模块 | 031 安全边界与生命周期验证完成；M0 未通过则暂缓 031，其他项基于 033 继续 |
++| 四 | 034、035 的公共接入默认先 034、后 035 | QuickJS worker 与 Agent 注册表、邮箱、预算模块分别开发 | 每项分别完成验证与验收材料，并检查组合行为 |
++
++- **硬前置**：032 先交付，才能接入 034/035 的持久化与生产开关；仅完成类型定义不算交付。031 不是其余任务的共同前置，034 与 035 互不依赖，035 的独立开发不必等待整个 034 验收结束。
++- **串行接入**：`turn.rs`、`session.rs`、`prompt.rs`、`main.rs/tui_host.rs` 及进程收尾接口由一名集成人按顺序接入，避免并行修改同一状态与行为契约；先合 034 的共用叶子分派，再接 035 子轮与 owner。
++- **验证与隔离**：各项先满足自身 M0 退出条件，再按 TDD → comprehensive-testing → Security Testing → 独立 code-review → 全量验证闭环推进，随后交人工验收。使用独立工作区和专用 Cargo target，避免并发压测；普通回归清除继承的 `TCHAT_SANDBOX`，真实 bwrap 分支另行验证。
+ 
+ ## 4. 本轮验证与证据
+ 
+ 仅检查文档内容、命名、链接、计划/验收编号、示例与容量保留情况，以及修改范围；不运行 Cargo、性能、安全攻防或功能验收。实际命令、工作目录、退出码与关键原始输出见[文档同步检查日志](../logs/033-tool-sandbox/2026-10-27-spec-sync.log)。
++
++2026-10-28 仅补充 §3.1 执行计划及对应说明，检查顺序、前置、并行边界与本地链接，不运行程序验证；实际检查输出见[执行计划文档检查日志](../logs/033-tool-sandbox/2026-10-28-execution-plan-doc-check.log)。
+
+Program checks: not run; documentation-only change
+exit_code: 0

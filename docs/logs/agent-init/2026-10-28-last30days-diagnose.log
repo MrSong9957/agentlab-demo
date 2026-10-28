@@ -1,0 +1,164 @@
+cwd: /workspace
+command: python3 /tmp/agent-init-last30days.py --diagnose
+LAST30DAYS_PYTHON=/usr/bin/python3.12
+SKILL_DIR=/home/dev/.codex/skills/last30days
+isolated config/cache/output root: /tmp/agent-init-last30days-8cgpg9vq
+engine command: /usr/bin/python3.12 /home/dev/.codex/skills/last30days/scripts/last30days.py --diagnose
+{
+  "available_sources": [
+    "reddit",
+    "youtube",
+    "hackernews",
+    "polymarket",
+    "github"
+  ],
+  "bird_authenticated": false,
+  "bird_installed": false,
+  "bird_username": null,
+  "brightdata_authenticated": false,
+  "brightdata_installed": false,
+  "browser_cookies": {
+    "browsers": [],
+    "mode": "plan_only",
+    "reads_values": false
+  },
+  "config_source": "global:/tmp/agent-init-last30days-8cgpg9vq/config/.env",
+  "credential_destinations": {
+    "global_env": "/tmp/agent-init-last30days-8cgpg9vq/config/.env"
+  },
+  "external_commands": {
+    "arxiv-pp-cli": false,
+    "brightdata": false,
+    "digg-pp-cli": false,
+    "gh": true,
+    "techmeme-pp-cli": false,
+    "trustpilot-pp-cli": false,
+    "yt-dlp": true
+  },
+  "has_github": true,
+  "has_scrapecreators": false,
+  "ignored_endpoint_overrides": [],
+  "ignored_project_config": null,
+  "ignored_project_config_keys": [],
+  "local_mode": true,
+  "local_writes": [
+    {
+      "kind": "report",
+      "path": "/tmp/agent-init-last30days-8cgpg9vq/research"
+    }
+  ],
+  "native_search": true,
+  "native_web_backend": null,
+  "permission_preflight": {
+    "action_items": [],
+    "conditional_writes": [],
+    "credentials": {
+      "github": {
+        "label": "GitHub token or gh auth",
+        "present": true
+      },
+      "google": {
+        "label": "Google/Gemini API key",
+        "present": false
+      },
+      "openai": {
+        "label": "OpenAI API key",
+        "present": false
+      },
+      "openrouter": {
+        "label": "OpenRouter API key",
+        "present": false
+      },
+      "perplexity": {
+        "label": "Perplexity API key",
+        "present": false
+      },
+      "scrapecreators": {
+        "label": "ScrapeCreators API key",
+        "present": false
+      },
+      "x_bearer": {
+        "label": "X API bearer [REDACTED]",
+        "present": false
+      },
+      "xai": {
+        "label": "xAI API key",
+        "present": false
+      }
+    },
+    "external_commands": {
+      "arxiv-pp-cli": {
+        "status": "unavailable"
+      },
+      "brightdata": {
+        "status": "unavailable"
+      },
+      "digg-pp-cli": {
+        "status": "unavailable"
+      },
+      "gh": {
+        "status": "available"
+      },
+      "techmeme-pp-cli": {
+        "status": "unavailable"
+      },
+      "trustpilot-pp-cli": {
+        "status": "unavailable"
+      },
+      "yt-dlp": {
+        "status": "available"
+      }
+    },
+    "local_reads": {
+      "browser_cookies": {
+        "browsers": [],
+        "mode": "plan_only",
+        "reads_values": false,
+        "status": "off"
+      },
+      "config_source": "global:/tmp/agent-init-last30days-8cgpg9vq/config/.env",
+      "project_config": {
+        "ignored_keys": [],
+        "ignored_path": null,
+        "status": "not_active",
+        "trusted": false
+      }
+    },
+    "local_writes": [
+      {
+        "kind": "report",
+        "path": "/tmp/agent-init-last30days-8cgpg9vq/research"
+      }
+    ],
+    "network": {
+      "available_sources": [
+        "reddit",
+        "youtube",
+        "hackernews",
+        "polymarket",
+        "github"
+      ],
+      "endpoint_overrides": [],
+      "ignored_endpoint_overrides": [],
+      "native_search": true
+    },
+    "safe": true,
+    "status": "ready"
+  },
+  "providers": {
+    "google": false,
+    "openai": false,
+    "openrouter": false,
+    "perplexity": false,
+    "xai": false
+  },
+  "reasoning_provider": "auto",
+  "safe": true,
+  "x_backend": null,
+  "x_pending_browser_auth": false,
+  "xquik_available": false,
+  "xquik_status": "",
+  "xquik_working": null
+}
+exit_code: 0
+

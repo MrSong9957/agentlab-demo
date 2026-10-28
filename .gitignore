@@ -12,3 +12,9 @@ db
 
 # Python 验收脚本缓存
 __pycache__/
+
+# 033 部署回滚材料：deploy-033-host.sh 从 git 重新生成，含手工备份的大型二进制
+.devcontainer/033-rollback/
+
+# 运行时生成的本地模型选择配置（cargo run 于 src/app 目录时产生）
+/src/app/config/

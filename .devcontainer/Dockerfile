@@ -18,6 +18,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc libc6-dev \
     && curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable --no-modify-path \
     && rm -rf /var/lib/apt/lists/*
+
+# 033 工具沙箱：bubblewrap 持久安装（工具执行面隔离；TCHAT_SANDBOX=1 时按需调用）。
+# 同 033 验收镜像（033-accept-bwrap.Dockerfile）的安装方式。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends bubblewrap \
+    && rm -rf /var/lib/apt/lists/*
 USER dev
 
 # 其他语言/工具需要时在此追加（Node.js、build-essential 等）。

@@ -1,0 +1,37 @@
+cwd: /workspace
+command: bash /home/dev/.codex/plugins/cache/compound-engineering-plugin/compound-engineering/3.33.1/skills/ce-setup/scripts/check-health --version 3.33.1
+
+  🟢  Plugin version v3.33.1
+
+ Optional capabilities  2/6
+  🟡  agent-browser -- unavailable: browser testing and dogfood QA
+       CI=true npm install -g agent-browser --no-audit --no-fund --loglevel=error && agent-browser install
+       https://github.com/vercel-labs/agent-browser
+  🟢  gh -- GitHub PR, issue, and review workflows
+  🟢  jq -- JSON inspection in shell-based workflows
+  🟡  ast-grep -- unavailable: syntax-aware structural code search
+       https://ast-grep.github.io
+  🟡  ffmpeg -- unavailable: media chunking and screenshot extraction for Riffrec analysis
+       https://ffmpeg.org/download.html
+  🟡  node -- unavailable: cross-model peers
+       node not found; cross-model peers need Node 22.13 or newer
+       https://nodejs.org/en/download
+
+ Project config
+  🟢  No obsolete compound-engineering.local.md
+  ➖  No repo config yet (.compound-engineering/config.yaml)
+  ➖  No local override yet (.compound-engineering/config.local.yaml)
+  ➖  CE scratch space is not gitignored
+       Skills that keep local scratch write it under .context/compound-engineering/
+  🟢  Artifact root: docs/ (default — docs_root not set)
+  🟢  CE Work implementation engine: native (setting is commented or missing)
+  🟡  Example config missing (.compound-engineering/config.example.yaml)
+
+ Compound Packs
+  ➖  No packs configured
+
+ ⚠️   1 project issue(s) found. Optional capabilities available: 2/6
+     Missing optional tools do not block setup; install them only for the workflows you use.
+
+exit_code: 0
+

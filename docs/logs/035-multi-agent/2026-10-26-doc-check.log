@@ -1,0 +1,158 @@
+035 多 Agent：源码文本核对与文档检查（2026-10-26）
+仅文档；不启动Agent/模型/MCP，不构建或运行功能测试。
+
+$ git rev-parse --short HEAD
+工作目录：/workspace
+a14a57c
+退出码：0
+
+$ python3 -c 'from pathlib import Path
+import hashlib
+root=Path('"'"'/workspace'"'"')
+files=['"'"'src/app/src/turn.rs'"'"','"'"'src/app/src/prompt.rs'"'"','"'"'src/app/src/session.rs'"'"','"'"'src/app/src/proc_session.rs'"'"','"'"'src/app/src/mcp/manager.rs'"'"','"'"'src/app/src/tui_host.rs'"'"']
+for name in files:
+    data=(root/name).read_bytes()
+    print(f'"'"'{name}: sha256={hashlib.sha256(data).hexdigest()[:16]}, bytes={len(data)}'"'"')
+turn=(root/files[0]).read_text()
+prompt=(root/files[1]).read_text()
+session=(root/files[2]).read_text()
+assert '"'"'MAX_MODEL_REQUESTS_PER_TURN: usize = 8'"'"' in turn
+assert '"'"'AgentEvent'"'"' not in prompt
+assert '"'"'Some(1 | 2)'"'"' in session
+for name in ['"'"'spawn_agent'"'"','"'"'followup_task'"'"','"'"'wait_agent'"'"','"'"'interrupt_agent'"'"','"'"'list_agents'"'"']:
+    assert '"'"'"'"'"'+name+'"'"'"'"'"' not in turn and '"'"'"'"'"'+name+'"'"'"'"'"' not in prompt,name
+assert '"'"'fn call('"'"' in (root/'"'"'src/app/src/mcp/manager.rs'"'"').read_text()
+assert '"'"'pub fn close(&self)'"'"' in (root/'"'"'src/app/src/proc_session.rs'"'"').read_text()
+assert '"'"'failed_spawn_agent'"'"' in (root/'"'"'src/app/src/memory/phase2.rs'"'"').read_text()
+print('"'"'OK 当前8请求/V1V2/无AgentEvent或多Agent控制分派；failed_spawn_agent仅有记忆注释'"'"')
+print('"'"'OK 核对共享MCP调用与全局ProcessManager关闭入口；未执行模型、工具或子Agent'"'"')
+'
+工作目录：/workspace
+src/app/src/turn.rs: sha256=d445aa2238ccf50c, bytes=105038
+src/app/src/prompt.rs: sha256=6019e16185caf948, bytes=33263
+src/app/src/session.rs: sha256=da25a7e1c9a8cf7e, bytes=48151
+src/app/src/proc_session.rs: sha256=65395183bdfdf851, bytes=78354
+src/app/src/mcp/manager.rs: sha256=ca6fbce418f38b6f, bytes=43096
+src/app/src/tui_host.rs: sha256=ceca990eeaefb022, bytes=106227
+OK 当前8请求/V1V2/无AgentEvent或多Agent控制分派；failed_spawn_agent仅有记忆注释
+OK 核对共享MCP调用与全局ProcessManager关闭入口；未执行模型、工具或子Agent
+退出码：0
+
+$ python3 -c 'from pathlib import Path
+from urllib.parse import unquote
+import re,json,hashlib,subprocess
+root=Path('"'"'/workspace'"'"')
+paths=[root/'"'"'docs/specs/035-multi-agent.md'"'"',root/'"'"'docs/logs/035-multi-agent/2026-10-26-spec-research.md'"'"',root/'"'"'docs/records/2026-10-21-codex-tools-comparison.md'"'"']
+def slug(h):
+    return re.sub(r'"'"'\s'"'"','"'"'-'"'"',re.sub(r'"'"'[^\w\s-]'"'"','"'"''"'"',h.lower()))
+def mask_row(s):
+    return '"'"'\n'"'"'.join('"'"'__CURRENT_MULTI_AGENT_ROW__'"'"' if x.startswith('"'"'| 多 Agent |'"'"') else x for x in s.splitlines())+'"'"'\n'"'"'
+links=0
+for p in paths:
+    data=p.read_bytes();s=data.decode('"'"'utf-8'"'"')
+    assert data.endswith(b'"'"'\n'"'"') and b'"'"'\r'"'"' not in data,p
+    assert all(x.rstrip()==x for x in s.splitlines()),p
+    assert not re.search(r'"'"'^(<<<<<<<|=======|>>>>>>>)'"'"',s,re.M),p
+    assert sum(x.startswith('"'"'```'"'"') for x in s.splitlines())%2==0,p
+    link_text=re.sub(r'"'"'^```.*?^```[^\n]*\n?'"'"','"'"''"'"',s,flags=re.M|re.S)
+    link_text=re.sub(r'"'"'`[^`\n]*`'"'"','"'"''"'"',link_text)
+    for target in re.findall(r'"'"'\]\(([^)]+)\)'"'"',link_text):
+        if re.match(r'"'"'[a-zA-Z]+:'"'"',target):continue
+        path,sep,anchor=unquote(target).partition('"'"'#'"'"')
+        dest=(p.parent/path).resolve() if path else p
+        assert dest.is_file(),(p,target)
+        if sep:
+            heads=re.findall(r'"'"'^#{1,6}\s+(.+)$'"'"',dest.read_text(),re.M)
+            assert anchor in [slug(h) for h in heads],(p,target)
+        links+=1
+    print(f'"'"'OK UTF-8/LF/空白/围栏/本地链接：{p.relative_to(root)}（{len(s.splitlines())}行）'"'"')
+spec=paths[0].read_text()
+assert re.findall(r'"'"'^## (\d)\.'"'"',spec,re.M)==list('"'"'12345'"'"')
+assert '"'"'- 状态：待实现'"'"' in spec and '"'"'- 更新时间：2026-10-26'"'"' in spec
+tools=['"'"'spawn_agent'"'"','"'"'send_message'"'"','"'"'followup_task'"'"','"'"'wait_agent'"'"','"'"'interrupt_agent'"'"','"'"'list_agents'"'"']
+for name in tools:assert '"'"'| '"'"'+name+'"'"' |'"'"' in spec,name
+for n in range(8):assert re.search(r'"'"'^\| M'"'"'+str(n)+r'"'"' '"'"',spec,re.M),n
+cases=re.findall(r'"'"'^\| (C\d\d) \|.*?\| (.*?) \|$'"'"',spec,re.M)
+assert [x[0] for x in cases]==[f'"'"'C{n:02}'"'"' for n in range(1,19)] and all(x[1]=='"'"'待测'"'"' for x in cases)
+examples=re.findall(r'"'"'```json\n(.*?)\n```'"'"',spec,re.S)
+assert len(examples)==3
+config,spawn,reply=map(json.loads,examples)
+assert config=={'"'"'experimental_supported_tools'"'"':tools}
+assert set(spawn)=={'"'"'task_name'"'"','"'"'message'"'"','"'"'fork_turns'"'"'} and spawn['"'"'fork_turns'"'"']=='"'"'none'"'"'
+assert re.fullmatch('"'"'[a-z][a-z0-9_]{0,31}'"'"',spawn['"'"'task_name'"'"'])
+assert reply=={'"'"'ok'"'"':True,'"'"'data'"'"':{'"'"'agent_name'"'"':'"'"'/root/'"'"'+spawn['"'"'task_name'"'"'],'"'"'assignment_id'"'"':1},'"'"'error'"'"':None}
+assert 8+24==32 and 8*65536<=8*256*1024
+for term in ['"'"'当前032仍待实现'"'"','"'"'最多3个子执行槽'"'"','"'"'不启动空闲Agent'"'"','"'"'request_seq'"'"','"'"'同一外层批末'"'"','"'"'3个子槽'"'"','"'"'64 MiB'"'"','"'"'context_continuable=false'"'"','"'"'费用均未测'"'"','"'"'原表最后一行'"'"']:
+    assert term in spec,term
+for protocol in ['"'"'openai-chat'"'"','"'"'openai-responses'"'"','"'"'anthropic-messages'"'"','"'"'google-generate-content'"'"','"'"'google-interactions'"'"']:assert protocol in spec
+comparison=paths[2].read_text()
+table=comparison.split('"'"'| 能力 | Codex 工具 | 本项目与建议 |'"'"',1)[1].split('"'"'\n\n'"'"',1)[0]
+rows=[x for x in table.splitlines() if x.startswith('"'"'| '"'"') and not x.startswith('"'"'|---'"'"')]
+expected=['"'"'命令执行、进程交互'"'"','"'"'文件补丁'"'"','"'"'任务计划'"'"','"'"'用户问询'"'"','"'"'执行中发消息'"'"','"'"'查看图片'"'"','"'"'MCP 外部工具'"'"','"'"'MCP 资源'"'"','"'"'工具搜索与按需加载'"'"','"'"'权限申请'"'"','"'"'上下文管理'"'"','"'"'JavaScript 工具编排'"'"','"'"'多 Agent'"'"']
+assert [x.split('"'"'|'"'"')[1].strip() for x in rows]==expected
+assert '"'"'../specs/035-multi-agent.md'"'"' in rows[-1] and '"'"'待实现'"'"' in rows[-1]
+assert hashlib.sha256(mask_row(comparison).encode()).hexdigest()=='"'"'f3f026a0ee2d7df36c7a817338ae19a3393a5cc5599683ec8802dbdc4a69dc9d'"'"','"'"'原表本轮修改超出多Agent行'"'"'
+for n in ['"'"'029'"'"','"'"'030'"'"','"'"'031'"'"','"'"'032'"'"','"'"'034'"'"','"'"'035'"'"']:
+    assert any('"'"'../specs/'"'"'+n+'"'"'-'"'"' in x and '"'"'待实现'"'"' in x for x in rows),n
+assert list((root/'"'"'docs/specs'"'"').glob('"'"'035-*.md'"'"'))==[paths[0]]
+lesson=(root/'"'"'rules/project-lessons.md'"'"').read_text()
+entry=next(x for x in lesson.splitlines() if x.startswith('"'"'- 035 多 Agent 规划'"'"'))
+assert '"'"'../docs/specs/035-multi-agent.md'"'"' in entry and '"'"'待实现'"'"' in entry
+assert (root/'"'"'docs/specs/035-multi-agent.md'"'"').is_file()
+bash=re.findall(r'"'"'```bash\n(.*?)\n```'"'"',spec,re.S)
+for name in re.findall(r'"'"'--test ([a-zA-Z0-9_]+)'"'"', '"'"'\n'"'"'.join(bash)):assert (root/'"'"'src/app/tests'"'"'/f'"'"'{name}.rs'"'"').is_file(),name
+proc=subprocess.run(['"'"'git'"'"','"'"'status'"'"','"'"'--short'"'"'],cwd=root,capture_output=True,text=True)
+print('"'"'$ git status --short\n工作目录：/workspace\n'"'"'+proc.stdout+'"'"'退出码：'"'"'+str(proc.returncode))
+assert proc.returncode==0
+current=set(proc.stdout.splitlines())-{'"'"'?? docs/specs/035-multi-agent.md'"'"','"'"'?? docs/logs/035-multi-agent/'"'"'}
+before=set(json.loads('"'"'" M AGENTS.md\\n D docs/index.md\\n M docs/logs/024-native-model-apis/2026-10-24-spec-research.md\\n M docs/records/2026-10-21-backend-risk-test-priorities.md\\n M docs/records/2026-10-21-codex-tools-comparison.md\\n D \\"docs/\\\\350\\\\247\\\\204\\\\346\\\\240\\\\274\\\\346\\\\226\\\\207\\\\346\\\\241\\\\243\\\\345\\\\256\\\\236\\\\346\\\\210\\\\230\\\\346\\\\263\\\\225.md\\"\\n D project-lessons.md\\n?? docs/logs/029-file-patch/\\n?? docs/logs/030-tool-search/\\n?? docs/logs/031-request-permissions/\\n?? docs/logs/032-context-management/\\n?? docs/logs/033-tool-sandbox/\\n?? docs/logs/034-javascript-tool-orchestration/\\n?? docs/specs/029-file-patch.md\\n?? docs/specs/030-tool-search.md\\n?? docs/specs/031-request-permissions.md\\n?? docs/specs/032-context-management.md\\n?? docs/specs/033-tool-sandbox.md\\n?? docs/specs/034-javascript-tool-orchestration.md\\n?? \\"docs/\\\\351\\\\241\\\\271\\\\347\\\\233\\\\256\\\\350\\\\247\\\\204\\\\345\\\\210\\\\231.md\\"\\n?? rules/\\n?? src/app/config/\\n"'"'"').splitlines())
+assert current==before,(current-before,before-current)
+print(f'"'"'OK {links}条本地链接；编号唯一、五节、六工具、M0–M7计划、C01–C18全部待测'"'"')
+print('"'"'OK 三个JSON示例、五协议、预算边界/032前置/来源与取消排空已说明；基线测试目标存在'"'"')
+print('"'"'OK 原表13项名称顺序；本轮仅多Agent行改变，其余内容与起始快照一致'"'"')
+print('"'"'OK 原表六个剩余缺口均已有待实现规格；未开始代码实施或扩展其他能力'"'"')
+print('"'"'OK 工作区状态与起始快照相符，仅新增035规格/日志；没有新增程序文件改动'"'"')
+'
+工作目录：/workspace
+OK UTF-8/LF/空白/围栏/本地链接：docs/specs/035-multi-agent.md（217行）
+OK UTF-8/LF/空白/围栏/本地链接：docs/logs/035-multi-agent/2026-10-26-spec-research.md（39行）
+OK UTF-8/LF/空白/围栏/本地链接：docs/records/2026-10-21-codex-tools-comparison.md（79行）
+$ git status --short
+工作目录：/workspace
+ M AGENTS.md
+ D docs/index.md
+ M docs/logs/024-native-model-apis/2026-10-24-spec-research.md
+ M docs/records/2026-10-21-backend-risk-test-priorities.md
+ M docs/records/2026-10-21-codex-tools-comparison.md
+ D "docs/\350\247\204\346\240\274\346\226\207\346\241\243\345\256\236\346\210\230\346\263\225.md"
+ D project-lessons.md
+?? docs/logs/029-file-patch/
+?? docs/logs/030-tool-search/
+?? docs/logs/031-request-permissions/
+?? docs/logs/032-context-management/
+?? docs/logs/033-tool-sandbox/
+?? docs/logs/034-javascript-tool-orchestration/
+?? docs/logs/035-multi-agent/
+?? docs/specs/029-file-patch.md
+?? docs/specs/030-tool-search.md
+?? docs/specs/031-request-permissions.md
+?? docs/specs/032-context-management.md
+?? docs/specs/033-tool-sandbox.md
+?? docs/specs/034-javascript-tool-orchestration.md
+?? docs/specs/035-multi-agent.md
+?? "docs/\351\241\271\347\233\256\350\247\204\345\210\231.md"
+?? rules/
+?? src/app/config/
+退出码：0
+OK 54条本地链接；编号唯一、五节、六工具、M0–M7计划、C01–C18全部待测
+OK 三个JSON示例、五协议、预算边界/032前置/来源与取消排空已说明；基线测试目标存在
+OK 原表13项名称顺序；本轮仅多Agent行改变，其余内容与起始快照一致
+OK 原表六个剩余缺口均已有待实现规格；未开始代码实施或扩展其他能力
+OK 工作区状态与起始快照相符，仅新增035规格/日志；没有新增程序文件改动
+退出码：0
+
+$ git diff --check -- docs/specs/035-multi-agent.md docs/logs/035-multi-agent/2026-10-26-spec-research.md docs/records/2026-10-21-codex-tools-comparison.md rules/project-lessons.md
+工作目录：/workspace
+（标准输出和标准错误均为空）
+退出码：0
+

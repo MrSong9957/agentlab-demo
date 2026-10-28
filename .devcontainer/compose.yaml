@@ -11,6 +11,15 @@ services:
     container_name: agentlab-demo-dev
     user: dev
     working_dir: /workspace
+    # 033：seccomp 放宽 profile——由执行 docker 的 CLI（compose）在宿主侧读取
+    # 该路径的文件内容、经 API 下发给引擎；引擎不读宿主文件系统（放行 bwrap
+    # 所需的 userns/mount syscall 集合；基线按引擎 docker-v29.8.2 →
+    # moby/profiles/seccomp 锁定生成，见 docs/logs/033-tool-sandbox/2026-10-27-dev-deploy.md）。
+    # 路径为宿主（CLI）视角绝对路径、D:/ 盘符正斜杠（docker.exe 接受且不被
+    # MSYS 转换，2026-10-27 实测）；引擎版本变化时须重新生成基线，不得沿用
+    # （deploy-033-host.sh 有版本守卫）。
+    security_opt:
+      - seccomp=D:/AgentLab/projects/demo/.devcontainer/033-seccomp.json
     command: sleep infinity
     # 交互式会话分配 TTY；TERM 给缺省值（exec 会话自动继承），
     # 需要与本机终端严格一致时可在 exec 加 -e TERM="$TERM" 覆盖
@@ -39,6 +48,10 @@ services:
       # Cargo（持久卷，不能整卷删除）
       CARGO_HOME: /home/dev/.cargo
       CARGO_TARGET_DIR: /workspace/target
+      # 033 工具沙箱：非空即启用（置空回普通模式）。会被 cargo test 继承；
+      # 三型沙箱测试用例内部自控开关、不受外部值影响，普通模式回归/全量
+      # 测试（3506/0/3 基线）须单独 env -u TCHAT_SANDBOX 清除后运行。
+      TCHAT_SANDBOX: "1"
     volumes:
       # 项目源码
       - type: bind

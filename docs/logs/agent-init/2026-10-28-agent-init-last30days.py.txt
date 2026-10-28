@@ -1,0 +1,50 @@
+import json
+import os
+import pathlib
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+
+registry = pathlib.Path('/tmp/agent-init-last30days-state.json')
+if registry.exists():
+    root = pathlib.Path(json.loads(registry.read_text())['root'])
+else:
+    root = pathlib.Path(tempfile.mkdtemp(prefix='agent-init-last30days-'))
+    registry.write_text(json.dumps({'root': str(root)}))
+    (root / 'config').mkdir()
+    (root / 'gh').mkdir()
+    (root / 'config' / '.env').write_text('SETUP_COMPLETE=true\nBROWSER_CONSENT=false\n')
+    (root / 'config' / '.env').chmod(0o600)
+
+skill_dir = pathlib.Path('/home/dev/.codex/skills/last30days')
+python_path = '/usr/bin/python3.12'
+subprocess.run([python_path, '-c', 'import sys; raise SystemExit(0 if sys.version_info >= (3,12) else 1)'], check=True)
+print('LAST30DAYS_PYTHON=' + shlex.quote(python_path), flush=True)
+print('SKILL_DIR=' + str(skill_dir), flush=True)
+print('isolated config/cache/output root:', root, flush=True)
+environment = dict(os.environ)
+for key in list(environment):
+    if key.startswith('LAST30DAYS_') or re.search(r'(API_KEY|TOKEN|PASSWORD|SECRET|AUTH|COOKIE|^CT0$)', key) or key in ['INCLUDE_SOURCES', 'EXCLUDE_SOURCES', 'FROM_BROWSER']:
+        environment.pop(key, None)
+environment.update({
+    'LAST30DAYS_CONFIG_DIR': str(root / 'config'),
+    'LAST30DAYS_MEMORY_DIR': str(root / 'research'),
+    'LAST30DAYS_NATIVE_SEARCH': '1',
+    'LAST30DAYS_SKIP_KEYCHAIN': '1',
+    'LAST30DAYS_TRUST_PROJECT_CONFIG': '0',
+    'FROM_BROWSER': 'off',
+    'BROWSER_CONSENT': 'false',
+    'AGENTCOOKIE': 'off',
+    'GH_CONFIG_DIR': str(root / 'gh'),
+    'XDG_CACHE_HOME': str(root / 'cache'),
+    'PYTHONDONTWRITEBYTECODE': '1',
+    'TZ': 'UTC',
+    'LC_ALL': 'C.UTF-8',
+})
+arguments = sys.argv[1:]
+command = [python_path, str(skill_dir / 'scripts' / 'last30days.py'), *arguments]
+print('engine command:', shlex.join(command), flush=True)
+result = subprocess.run(command, env=environment)
+sys.exit(result.returncode)

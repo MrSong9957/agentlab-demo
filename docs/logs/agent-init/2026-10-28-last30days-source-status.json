@@ -1,0 +1,35 @@
+{
+  "topic": "Compound Engineering plugin Codex",
+  "range_from": "2026-09-28",
+  "range_to": "2026-10-28",
+  "generated_at": "2026-10-28T07:42:13.381811+00:00",
+  "source_status": {
+    "github": {
+      "source": "github",
+      "state": "no-results",
+      "items_returned": 0,
+      "attempted": true,
+      "at": "2026-10-28T07:41:35.645529Z"
+    },
+    "youtube": {
+      "source": "youtube",
+      "state": "ok",
+      "items_returned": 1,
+      "attempted": true,
+      "at": "2026-10-28T07:42:13.342411Z"
+    },
+    "reddit": {
+      "source": "reddit",
+      "state": "ok",
+      "items_returned": 1,
+      "attempted": true,
+      "detail": "7 sub-requests blocked (HTTP 403)",
+      "at": "2026-10-28T07:42:13.341993Z",
+      "lane_failure_state": "auth-failed"
+    }
+  },
+  "warnings": [
+    "Evidence is thin for this topic."
+  ],
+  "errors_by_source": {}
+}

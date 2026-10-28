@@ -1,0 +1,30 @@
+import pathlib
+import re
+import shlex
+import subprocess
+import sys
+
+log_path = pathlib.Path(sys.argv[1])
+command = sys.argv[2:]
+log_path.parent.mkdir(parents=True, exist_ok=True)
+
+def redact(value):
+    value = re.sub(r'(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]+', r'\1_[REDACTED]', value)
+    value = re.sub(r'(https?://)[^/@\s]+@', r'\1[REDACTED]@', value)
+    value = re.sub(r'(?i)(Bearer\s+)[A-Za-z0-9_.~-]+', r'\1[REDACTED]', value)
+    value = re.sub(r'(?i)(["\x27]?(?:access_token|refresh_token|api_key|password|client_secret)["\x27]?\s*[:=]\s*)(["\x27])[^"\x27]*\2', r'\1"[REDACTED]"', value)
+    return value
+
+with log_path.open('a', encoding='utf-8') as log:
+    def emit(value):
+        value = redact(value)
+        print(value, end='', flush=True)
+        log.write(value)
+        log.flush()
+    emit(f'cwd: {pathlib.Path.cwd()}\ncommand: {shlex.join(command)}\n')
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    for line in process.stdout:
+        emit(line)
+    code = process.wait()
+    emit(f'exit_code: {code}\n\n')
+sys.exit(code)

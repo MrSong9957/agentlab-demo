@@ -1,0 +1,68 @@
+import hashlib
+import json
+import pathlib
+import re
+import subprocess
+import tomllib
+
+passed = 0
+
+def check(label, condition):
+    global passed
+    assert condition, label
+    passed += 1
+    print('PASS:', label)
+
+before = json.loads(pathlib.Path('/tmp/agent-init-before.json').read_text())
+for name, digest in before.items():
+    if name.endswith('/project-lessons.md'):
+        text = pathlib.Path(name).read_text()
+        text = ''.join(line for line in text.splitlines(keepends=True) if not line.startswith('- Codex 原生插件验收补充（2026-10-28）：'))
+        actual = hashlib.sha256(text.encode()).hexdigest()
+        check('project-lessons.md 仅新增本次验收经验', actual == digest)
+    else:
+        check('保留原文件 ' + name, hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest() == digest)
+
+template = pathlib.Path('/vault/wiki/AGENTS-md-base.md').read_text().split('### 全局规则正文', 1)[1].split('````markdown\n', 1)[1].split('\n````', 1)[0]
+check('全局规则与模板正文一致', template.strip() == pathlib.Path('/home/dev/.codex/AGENTS.md').read_text().strip())
+check('无全局或项目规则覆盖文件', all(not pathlib.Path(p).exists() for p in ['/home/dev/.codex/AGENTS.override.md', '/workspace/AGENTS.override.md', '/AGENTS.md']))
+project = pathlib.Path('/workspace/AGENTS.md').read_text()
+check('项目引用的两份 rules 存在', all((pathlib.Path('/workspace') / path).is_file() and path in project for path in ['rules/REVIEW.md', 'rules/规格文档实战法.md']))
+agent = tomllib.loads(pathlib.Path('/home/dev/.codex/agents/Security-Testing-Gate.toml').read_text())
+source_agent = pathlib.Path('/vault/agents/security-testing-gate.md').read_text().split('---', 2)[2].strip()
+check('代理字段、名称与正文对应原始定义', set(agent) == {'name','description','developer_instructions'} and agent['name'] == 'Security-Testing-Gate' and agent['developer_instructions'].strip() == source_agent)
+
+ce_root = pathlib.Path('/home/dev/.codex/plugins/cache/compound-engineering-plugin/compound-engineering/3.33.1')
+manifest = json.loads((ce_root / '.codex-plugin/plugin.json').read_text())
+check('CE 原生清单版本 3.33.1', manifest['name'] == 'compound-engineering' and manifest['version'] == '3.33.1')
+stage = pathlib.Path('/home/dev/.codex/.tmp/marketplaces/compound-engineering-plugin')
+revision = subprocess.run(['git','-C',str(stage),'rev-parse','HEAD'], check=True, capture_output=True, text=True).stdout.strip()
+check('CE 来源固定于已核实提交', revision == '00d0a5bbf1300b2138b65ce724b325dd4dff77ba')
+skills = list((ce_root / 'skills').glob('*/SKILL.md'))
+check('36 个 CE 技能与实际加载来源逐字一致', len(skills) == 36 and all(p.read_bytes() == (stage / 'skills' / p.parent.name / 'SKILL.md').read_bytes() for p in skills))
+config = tomllib.loads(pathlib.Path('/home/dev/.codex/config.toml').read_text())
+check('用户配置启用 CE 且保留固定来源', config['plugins']['compound-engineering@compound-engineering-plugin']['enabled'] is True and config['marketplaces']['compound-engineering-plugin']['ref'] == revision)
+ce_template = (ce_root / 'skills/ce-setup/references/config-template.yaml').read_bytes()
+for name in ['config.example.yaml','config.yaml']:
+    path = pathlib.Path('/workspace/.compound-engineering') / name
+    check(name + ' 等于官方模板且选项全部保持注释', path.read_bytes() == ce_template and all(not line.strip() or line.lstrip().startswith('#') for line in path.read_text().splitlines()))
+last_root = pathlib.Path('/home/dev/.codex/skills/last30days')
+check('last30days 3.31.0 与引擎入口齐全', 'version: "3.31.0"' in (last_root/'SKILL.md').read_text() and (last_root/'scripts/last30days.py').is_file())
+
+logs = pathlib.Path('/workspace/docs/logs/agent-init')
+runtime = (logs/'2026-10-28-runtime-discovery.log').read_text()
+check('新会话实际加载双层规则且最终退出 0', 'fresh ephemeral session instructionSources: ["/home/dev/.codex/AGENTS.md", "/workspace/AGENTS.md"]' in runtime and runtime.rstrip().endswith('exit_code: 0'))
+check('CE 项目健康检查最终通过', 'Project config healthy' in (logs/'2026-10-28-ce-health-after.log').read_text())
+research = (logs/'2026-10-28-last30days-research.log').read_text()
+check('真实调研取得两个来源结果且退出 0', 'Reddit: 1 thread, YouTube: 1 video' in research and research.rstrip().endswith('exit_code: 0'))
+status = json.loads((logs/'2026-10-28-last30days-source-status.json').read_text())
+check('固定日期窗与来源限制被留存', status['range_from'] == '2026-09-28' and status['range_to'] == '2026-10-28' and status['source_status']['reddit']['lane_failure_state'] == 'auth-failed' and status['source_status']['youtube']['items_returned'] == 1)
+raw = (logs/'2026-10-28-last30days-raw.md').read_text()
+check('调研报告含实际引用和补充来源', 'https://www.youtube.com/watch?v=-LODwSuymII' in raw and '## WebSearch Supplemental Results' in raw)
+report = logs/'2026-10-28-initialize.md'
+links = re.findall(r'\[[^\]\n]+\]\(([^)\n]+)\)', report.read_text())
+local_links = [link for link in links if not re.match(r'[a-z]+://', link)]
+missing = [link for link in local_links if not (report.parent / link.partition('#')[0]).exists()]
+check('执行记录的本地证据链接均有效', not missing)
+print(f'检查数量: passed={passed}, failed=0, skipped=0, not_run=0')
+print('适用范围: 配置、文件保留、加载记录和调研结果；Rust 构建/回归未运行，可选研究来源未全部验证。')

@@ -1,0 +1,7 @@
+# 构建上下文裁剪（033 部署轮）：Dockerfile 仅含 apt/rustup/bubblewrap 安装层，
+# 不 COPY 任何项目文件；本文件只裁剪上下文传输——排除凭据与超大目录
+# （凭据不得进入构建上下文；target/.worktrees/.git 经 9p 传输代价过高）。
+**/.env
+.git
+target
+.worktrees

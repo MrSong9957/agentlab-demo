@@ -1,0 +1,26 @@
+cwd: /workspace
+command: timeout 120 codex plugin marketplace add EveryInc/compound-engineering-plugin --ref 00d0a5bbf1300b2138b65ce724b325dd4dff77ba --json
+{
+  "marketplaceName": "compound-engineering-plugin",
+  "installedRoot": "/home/dev/.codex/.tmp/marketplaces/compound-engineering-plugin",
+  "alreadyAdded": false
+}
+exit_code: 0
+
+cwd: /workspace
+command: timeout 120 python3 /home/dev/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py --repo mvanhorn/last30days-skill --ref e06af25a9a78487b75e8509e0e1687fec137176e --path skills/last30days --dest /home/dev/.codex/skills
+Installed last30days to /home/dev/.codex/skills/last30days
+exit_code: 0
+
+cwd: /workspace
+command: timeout 120 codex plugin add compound-engineering@compound-engineering-plugin --json
+{
+  "pluginId": "compound-engineering@compound-engineering-plugin",
+  "name": "compound-engineering",
+  "marketplaceName": "compound-engineering-plugin",
+  "version": "3.33.1",
+  "installedPath": "/home/dev/.codex/plugins/cache/compound-engineering-plugin/compound-engineering/3.33.1",
+  "authPolicy": "ON_INSTALL"
+}
+exit_code: 0
+
