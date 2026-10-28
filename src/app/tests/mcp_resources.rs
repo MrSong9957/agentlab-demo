@@ -67,7 +67,7 @@ fn run_resource_turn(
         TurnExtras {
             mcp: Some(&snapshot),
             send_message: false,
-            steer: None,
+            steer: None, context: None
         },
     );
     (reply, history, bodies)
@@ -469,7 +469,7 @@ fn m2_memory_merge_turn_never_executes_resource_tools() {
         TurnExtras {
             mcp: Some(&snapshot),
             send_message: false,
-            steer: None,
+            steer: None, context: None
         },
     );
     assert!(reply.is_ok(), "{reply:?}");
@@ -893,7 +893,7 @@ fn m4_cancel_before_dispatch_skips_request() {
         TurnExtras {
             mcp: Some(&snapshot),
             send_message: false,
-            steer: None,
+            steer: None, context: None
         },
     );
     // 006 取消语义：本轮以取消 Err 结束（已执行结果保留、剩余调用未执行）。
@@ -975,7 +975,7 @@ fn m4_cancel_during_aggregate_fails_wholesale_and_keeps_batch_pairing() {
         TurnExtras {
             mcp: Some(&snapshot),
             send_message: false,
-            steer: None,
+            steer: None, context: None
         },
     );
     assert!(reply.is_ok(), "{reply:?}");
@@ -1328,7 +1328,7 @@ fn m6_cancel_outranks_partial_failure_with_collected_data() {
         TurnExtras {
             mcp: Some(&snapshot),
             send_message: false,
-            steer: None,
+            steer: None, context: None
         },
     );
     assert!(reply.is_ok(), "{reply:?}");

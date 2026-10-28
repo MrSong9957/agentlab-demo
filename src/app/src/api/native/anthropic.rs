@@ -12,12 +12,11 @@ fn push_message(messages: &mut Vec<Value>, role: &str, blocks: Vec<Value>) {
     }
 }
 
-pub(super) fn request(
+/// 032 M1：Messages 纯 body 组装（零 HTTP；发送与只读计量共用）。
+pub(super) fn build_body(
     conn: &EffectiveConnection,
-    key: &str,
     model: &ModelInfo,
     request: &Value,
-    agent: &ureq::Agent,
     conversation: &Conversation,
 ) -> Result<Value, String> {
     let mut messages = Vec::new();
@@ -37,6 +36,8 @@ pub(super) fn request(
             HistoryItem::NativeAssistant { .. } => {
                 return Err("原生状态缺失或来源已改变，不能续接此调用链".into())
             }
+            // 032：检查点标记不进入原生内容块（防御性跳过，同 project_history）。
+            HistoryItem::ContextCheckpoint { .. } => {}
             HistoryItem::Text(m) => push_message(
                 &mut messages,
                 m.role.as_str(),
@@ -101,8 +102,7 @@ pub(super) fn request(
     if !body.get("max_tokens").is_some_and(Value::is_u64) {
         return Err("Messages 必须配置 max_tokens 或已知的模型 max_output".into());
     }
-    let (response, context) = post_chat_json(conn, key, body, agent)?;
-    decode(conversation.owner.clone(), response).map_err(|e| format!("{e}{context}"))
+    Ok(body)
 }
 
 pub(super) fn decode(current: NativeOwner, response: Value) -> Result<Value, String> {

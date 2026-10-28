@@ -376,6 +376,9 @@ fn response_input(items: &[HistoryItem], current: &NativeOwner) -> Result<Vec<Va
             HistoryItem::NativeAssistant { .. } => {
                 return Err("原生状态缺失或来源已改变，不能续接此调用链".into());
             }
+            // 032：检查点标记不进入原生输入——活动视图由调用方展开为 seed＋尾部；
+            // 直达此处（误传完整历史）时防御性跳过，不把 seed 伪装成原生块。
+            HistoryItem::ContextCheckpoint { .. } => {}
             HistoryItem::Text(m) => {
                 let images = user_images(m);
                 input.push(if images.is_empty() {text_message(m.role.as_str(),&m.content)} else {
@@ -418,26 +421,16 @@ fn response_input(items: &[HistoryItem], current: &NativeOwner) -> Result<Vec<Va
     Ok(input)
 }
 
-pub(super) fn request(
+/// 032 M1：原生会话纯准备（零 HTTP）——来源过滤（for_owner）、不可表达参数
+/// 文本化与 system 指令提取；不做图片能力门（计量对图片内容返回未知，见 032 §1.3）。
+pub(super) fn conversation_for(
     conn: &EffectiveConnection,
     key: &str,
     model: &ModelInfo,
     request: &Value,
-    agent: &ureq::Agent,
-) -> Result<Value, String> {
+) -> Result<Conversation, String> {
     let current = owner(conn, key, model, request);
     let items = textualize_unexpressible(for_owner(history(request)?, &current)?, &conn.protocol);
-    if items.iter().any(|item| match item.portable() {
-        HistoryItem::Text(m) => !user_images(m).is_empty(),
-        HistoryItem::ToolResult { image, .. } => image.is_some(),
-        _ => false,
-    }) && !crate::catalog::supports_image_input(model)
-    {
-        return Err(format!(
-            "当前模型 {} 未确认支持图片输入（input_modalities 缺少 image），已拒绝发送",
-            model.id
-        ));
-    }
     let instructions = request
         .get("messages")
         .and_then(Value::as_array)
@@ -446,34 +439,47 @@ pub(super) fn request(
         .filter(|m| m["role"] == "system")
         .map(|m| m["content"].as_str().ok_or("系统指令必须是字符串"))
         .collect::<Result<Vec<_>, _>>()?;
-    if conn.protocol == "anthropic-messages" {
-        let conversation = Conversation {
-            owner: current,
-            history: items,
-            system: instructions.join("\n\n"),
-        };
-        return anthropic::request(conn, key, model, request, agent, &conversation);
+    Ok(Conversation {
+        owner: current,
+        history: items,
+        system: instructions.join("\n\n"),
+    })
+}
+
+fn history_has_images(items: &[HistoryItem]) -> bool {
+    items.iter().any(|item| match item.portable() {
+        HistoryItem::Text(m) => !user_images(m).is_empty(),
+        HistoryItem::ToolResult { image, .. } => image.is_some(),
+        _ => false,
+    })
+}
+
+/// 032 M1：按协议的纯 body 组装（零 HTTP；发送与只读计量共用）。
+fn native_body(
+    conn: &EffectiveConnection,
+    model: &ModelInfo,
+    request: &Value,
+    conversation: &Conversation,
+) -> Result<Value, String> {
+    match conn.protocol.as_str() {
+        "anthropic-messages" => anthropic::build_body(conn, model, request, conversation),
+        "google-interactions" => gemini::build_interactions_body(conn, model, request, conversation),
+        "google-generate-content" => gemini::build_generate_body(conn, model, request, conversation),
+        _ => build_responses_body(conn, model, request, conversation),
     }
-    if conn.protocol == "google-interactions" {
-        let conversation = Conversation {
-            owner: current,
-            history: items,
-            system: instructions.join("\n\n"),
-        };
-        return gemini::interactions(conn, key, model, request, agent, &conversation);
-    }
-    if conn.protocol == "google-generate-content" {
-        let conversation = Conversation {
-            owner: current,
-            history: items,
-            system: instructions.join("\n\n"),
-        };
-        return gemini::generate_content(conn, key, model, request, agent, &conversation);
-    }
-    let input = response_input(&items, &current)?;
+}
+
+/// 032 M1：Responses 纯 body 组装。
+fn build_responses_body(
+    conn: &EffectiveConnection,
+    model: &ModelInfo,
+    request: &Value,
+    conversation: &Conversation,
+) -> Result<Value, String> {
+    let input = response_input(&conversation.history, &conversation.owner)?;
     let mut body = json!({"model":model.id,"input":input,"store":false});
-    if !instructions.is_empty() {
-        body["instructions"] = json!(instructions.join("\n\n"));
+    if !conversation.system.is_empty() {
+        body["instructions"] = json!(conversation.system.clone());
     }
     if let Some(tools) = request.get("tools") {
         body["tools"] = Value::Array(
@@ -493,8 +499,66 @@ pub(super) fn request(
         );
     }
     apply_params(conn, model, &mut body)?;
+    Ok(body)
+}
+
+pub(super) fn request(
+    conn: &EffectiveConnection,
+    key: &str,
+    model: &ModelInfo,
+    request: &Value,
+    agent: &ureq::Agent,
+) -> Result<Value, String> {
+    let conversation = conversation_for(conn, key, model, request)?;
+    if history_has_images(&conversation.history) && !crate::catalog::supports_image_input(model) {
+        return Err(format!(
+            "当前模型 {} 未确认支持图片输入（input_modalities 缺少 image），已拒绝发送",
+            model.id
+        ));
+    }
+    let body = native_body(conn, model, request, &conversation)?;
     let (response, context) = post_chat_json(conn, key, body, agent)?;
-    decode_response(current, response).map_err(|e| format!("{e}{context}"))
+    let owner = conversation.owner.clone();
+    match conn.protocol.as_str() {
+        "anthropic-messages" => anthropic::decode(owner, response).map_err(|e| format!("{e}{context}")),
+        "google-interactions" => {
+            gemini::decode_interactions(owner, response).map_err(|e| format!("{e}{context}"))
+        }
+        "google-generate-content" => gemini::decode_generate(
+            owner,
+            response,
+            &conversation.history,
+            None,
+        )
+        .map_err(|e| format!("{e}{context}")),
+        _ => decode_response(owner, response).map_err(|e| format!("{e}{context}")),
+    }
+}
+
+/// 032 M1：原生协议只读计量（零 HTTP）：与真实发送共用会话准备、纯 body 组装
+/// 与 [`super::finalize_outbound`] 定型；计数终点＝最终发送 body。
+pub(super) fn measure_outbound(
+    conn: &EffectiveConnection,
+    key: &str,
+    model: &ModelInfo,
+    request: &Value,
+) -> Result<u64, String> {
+    let conversation = conversation_for(conn, key, model, request)?;
+    let body = native_body(conn, model, request, &conversation)?;
+    let outbound = super::finalize_outbound(conn, body)?;
+    super::count_body_bytes(&outbound.body)
+}
+
+/// 032 审查修复 #9：原生协议的纯 body 组装出口（有界计量用——与发送共用
+/// 会话准备与定型，计数由调用方的限计量写入器承担）。
+pub(super) fn build_body_for_measure(
+    conn: &EffectiveConnection,
+    key: &str,
+    model: &ModelInfo,
+    request: &Value,
+) -> Result<Value, String> {
+    let conversation = conversation_for(conn, key, model, request)?;
+    native_body(conn, model, request, &conversation)
 }
 
 pub(super) fn decode_response(current: NativeOwner, response: Value) -> Result<Value, String> {

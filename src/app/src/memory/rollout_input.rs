@@ -100,7 +100,7 @@ fn read_range(file: &mut std::fs::File, start: usize, end: usize) -> Result<Vec<
     Ok(buf)
 }
 
-/// 头部校验：007 的 V1 与 024 的 V2；原生状态在提炼投影时剥离。
+/// 头部校验：007 的 V1、024 的 V2 与 032 的 V3；原生状态在提炼投影时剥离。
 fn validate_session_header(file: &mut std::fs::File) -> Result<(), String> {
     let mut buf = Vec::new();
     file.seek(SeekFrom::Start(0))
@@ -118,7 +118,7 @@ fn validate_session_header(file: &mut std::fs::File) -> Result<(), String> {
     let meta: serde_json::Value = serde_json::from_str(line)
         .map_err(|_| "提炼要求会话元数据在单条上限内有效".to_string())?;
     match meta.get("v").and_then(|v| v.as_i64()) {
-        Some(1 | 2) => Ok(()),
+        Some(1 | 2 | 3) => Ok(()),
         _ => Err("提炼要求会话元数据在单条上限内有效".to_string()),
     }
 }
@@ -150,10 +150,62 @@ fn process_line(line: &[u8], items: &mut Vec<HistoryItem>, remaining: &mut usize
 /// 过滤时机与上游差异：上游在读取侧剔除注入消息（不占 8 MiB 预算），本地
 /// 在序列化侧过滤（已计入预算）——本地会话结构性不含注入块（§2.2-7），该
 /// 差异当前影响为零，登记备查。
+/// 032：上下文管理控制工具名（其调用/结果不作为用户/工具经历）。
+fn is_context_control_tool(name: &str) -> bool {
+    matches!(
+        name,
+        crate::context_window::QUERY_TOOL_NAME | crate::context_window::SWITCH_TOOL_NAME
+    )
+}
+
 pub fn serialize_filtered_history_items(items: &[HistoryItem]) -> Result<String, String> {
+    // 032 §1.6（审查修复 #3：按调用粒度过滤）：ContextCheckpoint（连同 seed
+    //——seed 只存在于检查点内，不会以顶层记录出现）与上下文管理控制调用及
+    // 其结果不进入提炼输入，摘要不当第二份用户/工具经历——混合批中的控制
+    // 调用（如批末 new_context 及其 64 KiB summary）同样剔除，仅剔除后为空的
+    // 批丢弃整条记录；真实工作调用的配对完整性不受影响。计费仍沿 013 原口径
+    //（读取预算不因过滤放宽）。
+    let control_ids: std::collections::HashSet<String> = items
+        .iter()
+        .filter_map(|item| {
+            let HistoryItem::AssistantToolCalls { tool_calls, .. } = item.portable() else {
+                return None;
+            };
+            Some(
+                tool_calls
+                    .iter()
+                    .filter(|c| is_context_control_tool(&c.name))
+                    .map(|c| c.id.clone())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .flatten()
+        .collect();
     let filtered: Vec<HistoryItem> = items
         .iter()
-        .filter_map(sanitize_history_item_for_memories)
+        .filter_map(|item| match item.portable() {
+            HistoryItem::ContextCheckpoint { .. } => None,
+            HistoryItem::AssistantToolCalls { tool_calls, .. } => {
+                let kept: Vec<_> = tool_calls
+                    .iter()
+                    .filter(|c| !is_context_control_tool(&c.name))
+                    .cloned()
+                    .collect();
+                (!kept.is_empty()).then(|| {
+                    HistoryItem::AssistantToolCalls {
+                        tool_calls: kept,
+                        content: match item.portable() {
+                            HistoryItem::AssistantToolCalls { content, .. } => content.clone(),
+                            _ => unreachable!(),
+                        },
+                    }
+                })
+            }
+            HistoryItem::ToolResult { tool_call_id, .. } if control_ids.contains(tool_call_id) => {
+                None
+            }
+            _ => sanitize_history_item_for_memories(item),
+        })
         .collect();
     let projected = crate::prompt::project_history(&filtered);
     let serialized = serde_json::to_string(&projected)
@@ -262,8 +314,11 @@ mod tests {
         let p = t.0.join("a.jsonl");
         std::fs::write(&p, serde_json::to_string(&user("x")).unwrap()).unwrap();
         assert!(read_recent_rollout_items(&p).is_err());
-        std::fs::write(&p, "{\"v\":3}\n").unwrap();
+        // 032 前 v=3 为未知；现合法（V3），未知上移到 v=4
+        std::fs::write(&p, "{\"v\":4}\n").unwrap();
         assert!(read_recent_rollout_items(&p).is_err(), "未知版本整拒");
+        std::fs::write(&p, "{\"v\":3}\n").unwrap();
+        assert!(read_recent_rollout_items(&p).is_ok(), "V3 经版本门");
     }
 
     /// 015（c9）：用户轮上下文消息（AGENTS＋环境合并块）自提炼输入剔除——

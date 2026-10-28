@@ -146,6 +146,8 @@ pub trait SteerChannel {
 /// 021：用户轮附加能力与接续通道（宿主按每轮快照传入；既有入口默认全关）。
 /// 022：`mcp`＝本轮冻结的 MCP 工具快照（声明与分派共用；None＝无 MCP；
 /// MemoryMerge 强制忽略）。
+/// 032：`context`＝上下文管理工具宿主（查询计量＋检查点提交；None＝不声明
+/// 不执行；MemoryMerge 强制忽略——内部记忆轮不开放上下文工具）。
 pub struct TurnExtras<'a> {
     /// 模型目录显式声明 send_message_to_user_async（声明与执行共用快照）。
     pub send_message: bool,
@@ -153,12 +155,14 @@ pub struct TurnExtras<'a> {
     pub mcp: Option<&'a crate::mcp::manager::McpSnapshot>,
     /// 运行中普通输入接续通道（None＝无运行中接续能力；MemoryMerge 强制忽略）。
     pub steer: Option<&'a mut dyn SteerChannel>,
+    /// 032：上下文管理工具宿主（None＝两工具均不声明不执行）。
+    pub context: Option<crate::context_window::ContextHost<'a>>,
 }
 
 impl TurnExtras<'_> {
-    /// 既有入口的兼容取值：无消息能力、无 MCP、无接续通道。
+    /// 既有入口的兼容取值：无消息能力、无 MCP、无接续通道、无上下文工具。
     pub fn none() -> Self {
-        Self { send_message: false, mcp: None, steer: None }
+        Self { send_message: false, mcp: None, steer: None, context: None }
     }
 }
 
@@ -535,6 +539,12 @@ pub fn run_user_turn_with_context_and_caps(
         for notice in &built.notices {
             notify(TurnNotify::Info(notice.clone()));
         }
+        // 032：视图损坏时明确失败（不忽略标记回退全历史）；去重基线直接扫完整
+        // 历史——seed 中的上下文消息是最后一条顶层上下文消息的原样副本
+        //（build_seed 复制 last_context_body(history)），两处扫描结果恒等
+        //（等价性由 m5_context_dedup… 回归锁定），免去每用户轮的整视图深克隆
+        //（审查修复 #16）。
+        crate::context_window::active_view(history).map_err(|reason| reason)?;
         let inject_text = match crate::context::last_context_body(history) {
             Some(previous) if previous == built.message => None,
             Some(_) => Some(format!(
@@ -915,10 +925,15 @@ pub fn run_tool_turn_with_hosts_extras(
     } else {
         extras.steer
     };
+    // 032：上下文工具宿主——合并轮双层隔离（误传也不声明、不执行）。
+    let mut context_host = if merge_mode { None } else { extras.context };
     // 取消状态不跨用户轮（006：每轮开始复位）
     if let Some(c) = cancel {
         c.store(false, std::sync::atomic::Ordering::SeqCst);
     }
+    // 032：本用户轮起点（seed 第 4 项的扫描基线——当前轮用户输入/接续输入/
+    // 问询回答都在其后；此前的记录属归档前缀或上一轮）。
+    let turn_user_start = history.len();
     history.push(HistoryItem::Text(HistoryMessage {
         // 020：准备后的用户附件随同一用户消息入史（纯图消息 content 可为标记/空）
         images: has_user_images.then(|| user_images.expect("已确认存在").data_urls.clone()),
@@ -943,45 +958,71 @@ pub fn run_tool_turn_with_hosts_extras(
     // 同轮已入史答案的 request_id（§8.4）：后续批次再等待这些 ID 只确认
     // 就绪，不重问、不重复记录；未在此列的 ID 仍按无未决/不匹配拒绝。
     let mut recorded_answer_ids: Vec<String> = Vec::new();
+    // 032 §1.5：切换候选与已提交标记。候选隔离于普通待写段（不在历史——
+    // 失败不被自动补写/退出 flush/手动保存复活）；每用户轮最多一次成功提交。
+    let mut pending_switch: Option<PendingSwitch> = None;
+    let mut switch_committed = false;
     loop {
         if requests >= MAX_MODEL_REQUESTS_PER_TURN {
             close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_REQUEST_LIMIT);
             close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_REQUEST_LIMIT);
             return Err(cap_error());
         }
-        // 续请求使用完整历史（含本轮 user 与已有结果），不再次追加当前输入
+        // 续请求使用完整历史（含本轮 user 与已有结果），不再次追加当前输入。
+        // 032：活动视图（最近检查点 seed＋其后真实历史）统一进入 messages 投影
+        // 与 _history；检查点语义损坏时明确失败，不静默回退全历史（§1.6/§2）。
+        let active_items = match crate::context_window::active_view(&*history) {
+            Ok(view) => view.items(),
+            Err(reason) => {
+                close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
+                close_pending_on_model_error(history, on_record, notify, &mut pending_async);
+                return Err(reason);
+            }
+        };
         let empty_tools: Vec<Value> = Vec::new();
         let mcp_definitions: &[Value] = mcp_snapshot
             .map(|s| s.definitions())
             .unwrap_or(&empty_tools);
+        // 032：声明快照——查询按目录开关；切换还要求真实检查点提交宿主（§1.2）。
+        let context_query = context_host
+            .as_ref()
+            .is_some_and(|h| h.query_declared);
+        let context_switch = context_host
+            .as_ref()
+            .is_some_and(|h| h.switch_declared && h.checkpoints.is_some());
         let mut body = match &mode {
             ToolMode::User => crate::prompt::build_turn_request_with_mcp(
-                history,
+                &active_items,
                 None,
                 input_host.is_some(),
                 async_host.is_some(),
                 image_input,
                 send_message,
+                context_query,
+                context_switch,
                 mcp_definitions,
             ),
             ToolMode::UserWithMemory { .. } => crate::prompt::build_turn_request_with_mcp(
-                history,
+                &active_items,
                 memory_context.as_deref(),
                 input_host.is_some(),
                 async_host.is_some(),
                 image_input,
                 send_message,
+                context_query,
+                context_switch,
                 mcp_definitions,
             ),
             ToolMode::MemoryMerge { system, .. } => build_turn_request_with(
-                history,
+                &active_items,
                 &crate::memory::mem_tools::tool_definitions(),
                 system,
             ),
         };
         // 024：共同历史作为宿主数据交给适配器；兼容的 messages 投影仍供旧发送者
-        // 使用。此字段和原生状态绝不直接出现在厂商请求中。
-        body["_history"] = serde_json::to_value(&*history).expect("共同历史可序列化");
+        // 使用。此字段和原生状态绝不直接出现在厂商请求中。032：与 messages 同用
+        // 活动视图（不能只在 Chat messages 隐藏旧内容而由原生适配器重发）。
+        body["_history"] = serde_json::to_value(&active_items).expect("活动视图可序列化");
         // 022：工具总数上限（含本轮条件原生工具）在模型请求发送前按组装结果
         // 检查，超限明确报错、不静默截断。
         let declared_tools = body["tools"].as_array().map(|t| t.len()).unwrap_or(0);
@@ -1086,6 +1127,28 @@ pub fn run_tool_turn_with_hosts_extras(
             return Err(
                 "协议错误：wait_for_user_input 必须是批内最后一条调用，整批拒绝".to_string(),
             );
+        }
+        // 032 §1.5：new_context 每批至多一次且必须是最后一条调用——违反时在
+        // 入史/执行前整批拒绝（零副作用，同 wait_for_user_input 顺序限制）。
+        if let Some(last) = calls.last() {
+            let switch_count = calls
+                .iter()
+                .filter(|c| c.name == crate::context_window::SWITCH_TOOL_NAME)
+                .count();
+            if switch_count > 1
+                || (switch_count == 1 && last.name != crate::context_window::SWITCH_TOOL_NAME)
+            {
+                close_steer_restore(
+                    &mut steer,
+                    notify,
+                    crate::user_input_async::CLOSE_MODEL_ERROR,
+                );
+                close_pending_on_model_error(history, on_record, notify, &mut pending_async);
+                return Err(
+                    "协议错误：new_context 必须是批内最后一条调用且每批至多一次，整批拒绝"
+                        .to_string(),
+                );
+            }
         }
         if calls.is_empty() {
             let reply = content.unwrap_or_default();
@@ -1377,6 +1440,88 @@ pub fn run_tool_turn_with_hosts_extras(
                     None,
                     None,
                 )
+            } else if call.name == crate::context_window::QUERY_TOOL_NAME && !merge_mode {
+                // 032：只读计量查询——零 HTTP/零工具/零文件加载；结果按固定字段
+                // 结构回传（未知≠失败，error=null）。声明与执行共用宿主快照；
+                // 未声明或无宿主的伪造调用返回不可用错误，计量含当前批声明与
+                // 此前已保存结果的快照（§1.3），查询本身照常入史。
+                let outcome = match context_host.as_mut() {
+                    Some(host) if host.query_declared => {
+                        let invalid = crate::context_window::parse_query_arguments(&call.arguments)
+                            .err()
+                            .map(|error| json!({ "error": error }));
+                        invalid.unwrap_or_else(|| {
+                            crate::context_window::execute_query(
+                                &crate::context_window::QueryInput {
+                                    conn: host.conn,
+                                    key: host.key,
+                                    model: host.model,
+                                    in_flight_request: &body,
+                                    history,
+                                },
+                            )
+                        })
+                    }
+                    _ => json!({
+                        "error": format!(
+                            "{} 不可用：当前模型未声明支持（experimental_supported_tools）或当前轮没有模型连接快照",
+                            crate::context_window::QUERY_TOOL_NAME
+                        )
+                    }),
+                };
+                (outcome.to_string(), None, None)
+            } else if call.name == crate::context_window::SWITCH_TOOL_NAME && !merge_mode {
+                // 032 §1.5：new_context——先校验摘要、状态、候选视图和预算；
+                // 通过即排定候选（scheduled＝等待批末提交，绝不提前 applied）。
+                // 失败为 rejected＋原因；无宿主/未声明/重复/未决问询逐项失败。
+                let outcome: Result<Value, String> = (|| {
+                    let host = context_host.as_mut().ok_or_else(|| {
+                        format!(
+                            "{} 不可用：当前轮没有上下文管理宿主",
+                            crate::context_window::SWITCH_TOOL_NAME
+                        )
+                    })?;
+                    if !(host.switch_declared && host.checkpoints.is_some()) {
+                        return Err(format!(
+                            "{} 不可用：当前模型未声明支持（experimental_supported_tools）或没有检查点提交宿主",
+                            crate::context_window::SWITCH_TOOL_NAME
+                        ));
+                    }
+                    if switch_committed {
+                        return Err("本用户轮已成功切换过一次上下文，再次请求拒绝".into());
+                    }
+                    if pending_switch.is_some() {
+                        return Err("本批已排定一个上下文切换候选".into());
+                    }
+                    // 未答异步问询阻止切换（已答未入史的会在批末入史并进入候选）
+                    if pending_async.as_ref().is_some_and(|p| p.answer.is_none()) {
+                        return Err("存在未答异步问询：先等待或完成其回答后再切换上下文".into());
+                    }
+                    let summary =
+                        crate::context_window::parse_switch_arguments(&call.arguments)?;
+                    // 候选视图初步校验（编码/限额/严格缩小/预算；seed 按调用
+                    // 时点构造——批末提交时重建并复验）。单一入口与批末复验
+                    // 共用同一序列（审查修复 #15）。
+                    crate::context_window::evaluate_candidate(
+                        host.conn,
+                        host.key,
+                        host.model,
+                        &body,
+                        history,
+                        turn_user_start,
+                        &call.id,
+                        &summary,
+                        procs,
+                    )?;
+                    pending_switch = Some(PendingSwitch {
+                        request_call_id: call.id.clone(),
+                        summary,
+                    });
+                    Ok(json!({"ok":true,"status":"scheduled","error":null}))
+                })();
+                let result =
+                    outcome.unwrap_or_else(|error| json!({"ok":false,"status":"rejected","error":error}));
+                (result.to_string(), None, None)
             } else if mcp_snapshot.is_some_and(|s| s.has_resources())
                 && crate::mcp::resources::is_resource_tool(&call.name)
             {
@@ -1461,6 +1606,7 @@ pub fn run_tool_turn_with_hosts_extras(
         }
         if cancelled_batch {
             // 取消：结束本轮，保留已发生结果与历史，不自动请求模型、不重复已执行工具
+            // 032：取消已赢——排定的切换候选随轮丢弃（未提交不生效）
             close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_CANCELLED);
             close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_CANCELLED);
             return Err("用户已取消本轮工具执行：已执行结果保留，剩余调用未执行".into());
@@ -1472,27 +1618,128 @@ pub fn run_tool_turn_with_hosts_extras(
             close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_CANCELLED);
             return Err("用户已取消本轮：已保存问询结果，不再请求模型".into());
         }
-        if requests == MAX_MODEL_REQUESTS_PER_TURN {
+        // 021 §2.3-4（既有语义；032 屏障前移判定）：完整工具批及结果配对（含
+        // 异步答案）之后、下一请求组装之前接入已受理普通输入。第 8 次请求的
+        // 额度终止出口不接入新输入（保持既有行为：交还宿主恢复）。
+        let quota_hit = requests == MAX_MODEL_REQUESTS_PER_TURN;
+        if !quota_hit {
+            let pending_inputs = match steer.as_mut() {
+                Some(channel) => channel.drain(),
+                None => Vec::new(),
+            };
+            for input in pending_inputs {
+                ingest_steer_input(history, on_record, input, image_input, cancel, notify);
+            }
+        }
+        // 032 §1.5 批末屏障（提交与取消按先后裁决）：回执前取消→候选不提交；
+        // 已入史输入（含上方批末接入的接续输入与已答问询）进入候选。
+        if pending_switch.is_some()
+            && cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            pending_switch = None;
+            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_CANCELLED);
+            close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_CANCELLED);
+            return Err("用户已取消本轮：已排定的上下文切换未提交，不生效".into());
+        }
+        if let Some(candidate) = pending_switch.take() {
+            // 提交时点重建 seed（纳入批末新入史输入）并复验；仅当检查点保存
+            // 成功并收到宿主回执后才切换活动视图。第 8 次响应的合法切换也在
+            // 批末保存，随后因额度终止（不发第 9 次请求，§1.5）。
+            let applied = context_host.as_mut().map(|host| {
+                commit_context_switch(history, on_record, procs, &body, turn_user_start, &candidate, host)
+            });
+            match applied {
+                Some(Ok(())) => {
+                    switch_committed = true;
+                    notify(TurnNotify::Info(format!(
+                        "上下文检查点已提交（代数 {}）：旧前缀已归档，活动上下文自交接摘要继续",
+                        crate::context_window::current_context_id(history)
+                    )));
+                }
+                Some(Err(reason)) => {
+                    // 032 审查修复 #5：失败对模型可见——scheduled 之后模型须能
+                    // 区分已应用与未应用；带固定宿主标识的记录入史（下一请求
+                    // 可见），提示可用 get_context_remaining 核对 context_id。
+                    history.push(HistoryItem::Text(HistoryMessage {
+                        images: None,
+                        text_elements: Vec::new(),
+                        role: HistoryRole::User,
+                        content: format!(
+                            "[宿主通知，非用户输入] 上下文切换未应用（保留原窗口）：{reason}。可用 get_context_remaining 核对 context_id 是否递增。"
+                        ),
+                        user_input_event: None,
+                    }));
+                    on_record(history);
+                    notify(TurnNotify::Info(format!(
+                        "上下文切换未应用（保留原窗口）：{reason}"
+                    )));
+                }
+                None => {
+                    notify(TurnNotify::Info(
+                        "上下文切换未应用（保留原窗口）：没有可用的上下文管理宿主".into(),
+                    ));
+                }
+            }
+        }
+        if quota_hit {
             // 第 8 批：保存全部结果后报上限，不发第 9 次请求，不生成假回复
             close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_REQUEST_LIMIT);
             close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_REQUEST_LIMIT);
             return Err(cap_error());
-        }
-        // 021 §2.3-4：完整工具批及结果配对（含异步答案）之后、下一请求组装
-        // 之前——按受理顺序接入已受理普通输入（受理保持开放，后续批次可继续
-        // 受理）；入史即确认提交（SteerIngested），准备失败经 SteerRestored 交还。
-        let pending_inputs = match steer.as_mut() {
-            Some(channel) => channel.drain(),
-            None => Vec::new(),
-        };
-        for input in pending_inputs {
-            ingest_steer_input(history, on_record, input, image_input, cancel, notify);
         }
     }
 }
 
 fn cap_error() -> String {
     format!("已达本轮模型请求上限（{MAX_MODEL_REQUESTS_PER_TURN}）")
+}
+
+/// 032 §1.5：已排定的上下文切换候选（调用时点校验通过＝scheduled）。候选只
+/// 存于轮内局部状态、隔离于普通待写段（不进历史——失败不被自动补写/退出
+/// flush/手动保存复活，调研 M3 裁决）；批末屏障重建 seed 并复验后提交。
+struct PendingSwitch {
+    request_call_id: String,
+    summary: String,
+}
+
+/// 032 §1.5 批末屏障提交：提交时点重建 seed（批末入史输入——异步回答/接续
+/// 输入——纳入候选）并复验候选（晚到输入可能使候选超限/不再缩小）；仅当
+/// 检查点保存成功并收到宿主回执后才把检查点推入内存历史（此后活动视图＝
+/// seed＋其后真实历史；会话已在提交内落盘，on_record 无新增可写）。
+/// Err＝未应用原因（旧视图保留，候选不复活）。
+#[allow(clippy::too_many_arguments)]
+fn commit_context_switch(
+    history: &mut Vec<HistoryItem>,
+    on_record: &mut dyn FnMut(&[HistoryItem]),
+    procs: &ProcessManager,
+    in_flight_request: &Value,
+    turn_user_start: usize,
+    candidate: &PendingSwitch,
+    host: &mut crate::context_window::ContextHost<'_>,
+) -> Result<(), String> {
+    // 提交时点重建 seed（批末入史输入——异步回答/接续输入——纳入候选）并
+    // 复验候选；与排定点共用 evaluate_candidate 单一入口（审查修复 #15）。
+    let checkpoint = crate::context_window::evaluate_candidate(
+        host.conn,
+        host.key,
+        host.model,
+        in_flight_request,
+        history,
+        turn_user_start,
+        &candidate.request_call_id,
+        &candidate.summary,
+        procs,
+    )?;
+    let sink = host
+        .checkpoints
+        .as_mut()
+        .ok_or("没有可用的检查点提交宿主")?;
+    sink.commit_checkpoint(history, &checkpoint)?;
+    // 回执成功：切换活动视图（§1.5——scheduled/applied 由是否存在已提交
+    // 检查点区分；此处为唯一 applied 路径）
+    history.push(checkpoint);
+    on_record(history);
+    Ok(())
 }
 
 #[cfg(test)]

@@ -858,6 +858,28 @@ pub fn supports_send_message_to_user(model: &ModelInfo) -> bool {
         .is_some_and(|list| list.iter().any(|t| t == crate::message_to_user::TOOL_NAME))
 }
 
+/// 032：experimental_supported_tools 精确匹配声明 get_context_remaining
+/// （声明与执行共用同一快照；缺省/空数组/只含其他名＝不声明）。
+pub fn supports_get_context_remaining(model: &ModelInfo) -> bool {
+    model
+        .experimental_supported_tools
+        .as_ref()
+        .is_some_and(|list| {
+            list.iter()
+                .any(|t| t == crate::context_window::QUERY_TOOL_NAME)
+        })
+}
+
+/// 032：experimental_supported_tools 精确匹配声明 new_context。
+pub fn supports_new_context(model: &ModelInfo) -> bool {
+    model
+        .experimental_supported_tools
+        .as_ref()
+        .is_some_and(|list| {
+            list.iter().any(|t| t == crate::context_window::SWITCH_TOOL_NAME)
+        })
+}
+
 /// 参数能力检查：能力未知不算不支持（不带可选参数的基础对话照常发送）；
 /// 显式使用的参数必须先确认能力；已确认不支持的发送前报错。
 pub fn check_request_param(model: &ModelInfo, param: &str) -> Result<(), String> {

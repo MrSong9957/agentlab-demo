@@ -117,3 +117,7 @@
 **允许修改**：`src/app/src/context.rs`（新建：来源加载＋消息构造＋去重识别）；`src/app/src/lib.rs`（注册 `context` 模块，最小改动）；`src/app/src/prompt.rs`（适配 3 反转＋替换声明常量）；`src/app/src/turn.rs`（新入口 `run_user_turn_with_context`：空白预检＋User/UserWithMemory 注入、MemoryMerge 不注入；来源参数化，时钟/目录可注入）；`src/app/src/main.rs`、`src/app/src/tui_host.rs`（改调新入口传入来源；TUI `/resume` 投影跳过 ctx 项）；`src/app/src/memory/rollout_input.rs`（过滤识别复用 015 识别器的最小适配＋用例扩展 c9）；`src/app/tests/context_injection.rs`（新建）；`src/app/tests/prompt_assembly.rs`（c8 断言更新）；`src/app/tests/e2e_acceptance.rs`（消息位置断言更新＋受影响用例 cwd 落临时目录）；`docs/specs/005-minimal-prompt-assembly.md`（适配 3 加一行指向本规格的修订注记，已完成）。
 
 **禁止修改**：003/004 工具契约与两工具白名单；007 存储格式与恢复语义（ctx＝普通 Text 历史项，零 schema 变更）；013/014 的 D2/D3/D4 及全部已验收行为（c9 适配不得改变既有两类过滤的已验收行为）；`assets/codex/prompt.md` 嵌入母本字节；生产代码之外的任何用户文件；不新增配置项/依赖；不实现压缩、WS 增量、世界状态差量、Skills/MCP/插件发现。
+
+## 032 关联（2026-10-28）
+
+032 检查点后：去重基线取完整历史最后一条上下文消息（与活动视图中的最近消息恒等），同内容不重复注入、规则变化仍按本规格注入带替换声明的新消息；每用户轮读取一次的语义不变。见 [032 规格](032-context-management.md) §1.4/§1.7。
