@@ -244,12 +244,50 @@ pub const MAX_PATCH_BYTES: usize = 1024 * 1024;
 pub const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_FILE_LINES: usize = 100_000;
 
-/// 逻辑行计数：与 [`SourceFile::parse`] 的行切分**同一实现**（\r、\r\n、\n 均为
-/// 行尾；非空尾段计一行；空串 0 行）。安全修复 F-1（2026-10-28 攻防报告）：
-/// 此前用 `str::lines()`（仅按 \n 切分），lone-CR 文件被漏计成「1 行」通过
-/// 读入门、实际展开百万级行——行数门与解析行定义必须统一，不得再分叉。
+/// 行切分原语（零分配）：逐段产出 `(行文本, 行尾)`——\r、\r\n、\n 均为行尾，
+/// 非空尾段计一行，空串不产出。[`SourceFile::parse`] 与 [`logical_lines`] 共用
+/// 本原语：行数门与解析的行定义由**构造**保证同源（安全修复 F-1；审查 #10
+/// 进一步消除计数路径的全量物化分配）。
+fn line_ranges(s: &str) -> impl Iterator<Item = (&str, Option<LineEnding>)> {
+    let bytes = s.as_bytes();
+    let mut pos = 0usize;
+    std::iter::from_fn(move || {
+        if pos >= s.len() {
+            return None;
+        }
+        let start = pos;
+        let mut i = pos;
+        let split = loop {
+            if i >= s.len() {
+                break None;
+            }
+            match bytes[i] {
+                b'\r' if bytes.get(i + 1) == Some(&b'\n') => {
+                    break Some((LineEnding::CrLf, 2));
+                }
+                b'\r' => break Some((LineEnding::Cr, 1)),
+                b'\n' => break Some((LineEnding::Lf, 1)),
+                _ => i += 1,
+            }
+        };
+        match split {
+            Some((ending, len)) => {
+                pos = i + len;
+                Some((&s[start..i], Some(ending)))
+            }
+            None => {
+                pos = s.len();
+                Some((&s[start..], None))
+            }
+        }
+    })
+}
+
+/// 逻辑行计数：零分配（仅迭代 [`line_ranges`]）。安全修复 F-1（2026-10-28 攻防
+/// 报告）：此前用 `str::lines()`（仅按 \n 切分），lone-CR 文件被漏计成「1 行」
+/// 通过读入门、实际展开百万级行——行数门与解析行定义必须统一，不得再分叉。
 fn logical_lines(s: &str) -> usize {
-    SourceFile::parse(s).lines.len()
+    line_ranges(s).count()
 }
 
 fn run(patch_text: &str) -> (ApplyPatchResult, Vec<crate::prompt::PatchChange>) {
@@ -805,36 +843,16 @@ struct SourceFile {
 }
 
 impl SourceFile {
-    /// 按换行拆分为逻辑行并保留各自行尾。
+    /// 按换行拆分为逻辑行并保留各自行尾（经 [`line_ranges`] 原语——与行数门
+    /// 同一实现）。
     fn parse(contents: &str) -> Self {
         let mut lines = Vec::new();
-        let mut preferred = None;
-        let mut line_start = 0;
-        let mut cursor = 0;
-        let bytes = contents.as_bytes();
-        while cursor < contents.len() {
-            let (ending, ending_len) = match bytes[cursor] {
-                b'\r' if bytes.get(cursor + 1) == Some(&b'\n') => (LineEnding::CrLf, 2),
-                b'\r' => (LineEnding::Cr, 1),
-                b'\n' => (LineEnding::Lf, 1),
-                _ => {
-                    cursor += 1;
-                    continue;
-                }
-            };
-            preferred.get_or_insert(ending);
-            lines.push(SourceLine {
-                text: contents[line_start..cursor].to_string(),
-                ending: Some(ending),
-            });
-            cursor += ending_len;
-            line_start = cursor;
-        }
-        if line_start < contents.len() {
-            lines.push(SourceLine {
-                text: contents[line_start..].to_string(),
-                ending: None,
-            });
+        let mut preferred: Option<LineEnding> = None;
+        for (text, ending) in line_ranges(contents) {
+            if let Some(e) = ending {
+                preferred.get_or_insert(e);
+            }
+            lines.push(SourceLine { text: text.to_string(), ending });
         }
         Self { lines, preferred_ending: preferred.unwrap_or(LineEnding::Lf) }
     }
@@ -921,20 +939,97 @@ fn resolve_target(base: &Path, p: &Path) -> PathBuf {
     }
 }
 
-/// Update 读入：以 `O_RDONLY|O_NONBLOCK|O_CLOEXEC` 打开——FIFO/设备打开本身不阻塞；
-/// 打开成功即持有实际读写的 inode，随后对该 fd fstat 判型，类型验证与 I/O 绑定
-/// 同一对象，关闭"判型后路径被换成 FIFO"的替换窗口（安全报告 F2 收口）。
-fn open_validated_regular(target: &Path) -> std::io::Result<std::fs::File> {
+/// 统一打开样板（审查 #3 收敛）：`O_RDONLY|O_NONBLOCK|O_CLOEXEC|extra_flags`。
+/// FIFO/设备打开本身不阻塞；打开成功即持有实际读写的 inode，随后对该 fd
+/// fstat 判型，类型验证与 I/O 绑定同一对象（安全报告 F2 收口）。
+fn open_path(target: &Path, extra_flags: libc::c_int) -> std::io::Result<std::fs::File> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(target.as_os_str().as_bytes())?;
     let fd = unsafe {
-        libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        libc::open(
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC | extra_flags,
+        )
     };
     if fd < 0 {
         Err(std::io::Error::last_os_error())
     } else {
         Ok(unsafe { std::fs::File::from_raw_fd(fd) })
     }
+}
+
+/// Update 读入（跟随符号链接的既有语义）。
+fn open_validated_regular(target: &Path) -> std::io::Result<std::fs::File> {
+    open_path(target, 0)
+}
+
+/// 有界源读入核心（Update/Move 共用，审查 #7 收敛）：fd 级 fstat 预检＋take
+/// 有限读取＋字节门（N5）；并核对**读取字节数与 fstat 尺寸一致**——常规文件
+/// 的读取结果不可能偏离其元数据尺寸：超出＝procfs/sysfs 类伪文件（S_IFREG、
+/// st_size=0 而读取有内容，安全修复 F-2），不足＝fstat 与读取之间被并发截断
+/// （审查 #8，data-loss：短读残片曾被当完整内容移动并删源）。两向都保守拒绝。
+
+enum BoundedReadError {
+    /// fstat 尺寸超过上限
+    OversizeSize(u64),
+    /// 读取字节数超过上限
+    TooManyBytes,
+    /// 读取字节数与 fstat 尺寸不符（伪文件或读入窗口内被并发截断/追加）
+    Inconsistent { got: usize, want: u64 },
+    Io(std::io::Error),
+}
+
+fn read_bounded(file: &std::fs::File) -> Result<(Vec<u8>, u64), BoundedReadError> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    unsafe { libc::fstat(file.as_raw_fd(), &mut st) };
+    if st.st_size as u64 > MAX_FILE_BYTES as u64 {
+        return Err(BoundedReadError::OversizeSize(st.st_size as u64));
+    }
+    // 审查 #8 截断回归的确定性屏障位：fstat 之后、读取之前（未启用时零开销）
+    #[cfg(test)]
+    move_seam::barrier("before_read");
+    let mut bytes = Vec::new();
+    let mut limited = (file).take(MAX_FILE_BYTES as u64 + 1);
+    std::io::Read::read_to_end(&mut limited, &mut bytes).map_err(BoundedReadError::Io)?;
+    if bytes.len() > MAX_FILE_BYTES {
+        return Err(BoundedReadError::TooManyBytes);
+    }
+    if bytes.len() as u64 != st.st_size as u64 {
+        return Err(BoundedReadError::Inconsistent {
+            got: bytes.len(),
+            want: st.st_size as u64,
+        });
+    }
+    Ok((bytes, st.st_size as u64))
+}
+
+/// UTF-8 解码＋行数门（Update/Move 共用）。`label` 已含完整对象描述与路径。
+fn decode_bounded(bytes: Vec<u8>, label: &str) -> Result<String, String> {
+    let s = match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => return Err(format!("{label}不是有效的 UTF-8 文本（不支持二进制）")),
+    };
+    let n = logical_lines(&s);
+    if n > MAX_FILE_LINES {
+        return Err(format!("{label} 为 {n} 行，超过 {MAX_FILE_LINES} 行读入上限"));
+    }
+    Ok(s)
+}
+
+/// 生成内容写前上限（Update/Move 共用，N5）：字节数＋行数门；超限不得写入
+/// 或删除源。`label` 为对象描述（如「目标 X（源 Y）」）。
+fn check_generated_limits(new_content: &str, label: &str) -> Result<(), String> {
+    if new_content.len() > MAX_FILE_BYTES {
+        return Err(format!(
+            "生成内容 {} 字节超过 {MAX_FILE_BYTES} 字节（4 MiB）上限（{label}）",
+            new_content.len()
+        ));
+    }
+    let n = logical_lines(new_content);
+    if n > MAX_FILE_LINES {
+        return Err(format!("生成内容 {n} 行超过 {MAX_FILE_LINES} 行上限（{label}）"));
+    }
+    Ok(())
 }
 
 /// fd 指向的对象是否常规文件（fstat 绑定打开的 inode，不受路径替换影响）。
@@ -1166,67 +1261,49 @@ fn apply_hunk(
                     target.display()
                 )));
             }
-            // N5：fd 级大小预检＋有限读取（不得 metadata 检查后继续无上限 read_to_end）
-            let mut st: libc::stat = unsafe { std::mem::zeroed() };
-            unsafe { libc::fstat(file.as_raw_fd(), &mut st) };
-            if st.st_size as usize > MAX_FILE_BYTES {
-                return Err(Failure::validation(format!(
-                    "修改目标 {} 为 {size} 字节，超过 {MAX_FILE_BYTES} 字节（4 MiB）读入上限",
-                    target.display(),
-                    size = st.st_size
-                )));
-            }
-            let mut bytes = Vec::new();
-            let mut limited = (&file).take(MAX_FILE_BYTES as u64 + 1);
-            if let Err(e) = std::io::Read::read_to_end(&mut limited, &mut bytes) {
-                return Err(Failure::validation(format!(
-                    "读取修改目标失败 {}：{e}",
-                    target.display()
-                )));
-            }
-            if bytes.len() > MAX_FILE_BYTES {
-                return Err(Failure::validation(format!(
-                    "修改目标 {} 超过 {MAX_FILE_BYTES} 字节（4 MiB）读入上限",
-                    target.display()
-                )));
-            }
-            let original = match String::from_utf8(bytes) {
-                Ok(s) => s,
-                Err(_) => {
+            // N5：fd 级大小预检＋有限读取＋读入一致性（审查 #7/#8：与 Move 共用
+            // read_bounded——伪文件/读入窗口内并发截断两向都保守拒绝）
+            let bytes = match read_bounded(&file) {
+                Ok((bytes, _)) => bytes,
+                Err(BoundedReadError::OversizeSize(size)) => {
                     return Err(Failure::validation(format!(
-                        "修改目标不是有效的 UTF-8 文本（不支持二进制）：{}",
+                        "修改目标 {} 为 {size} 字节，超过 {MAX_FILE_BYTES} 字节（4 MiB）读入上限",
+                        target.display()
+                    )));
+                }
+                Err(BoundedReadError::TooManyBytes) => {
+                    return Err(Failure::validation(format!(
+                        "修改目标 {} 超过 {MAX_FILE_BYTES} 字节（4 MiB）读入上限",
+                        target.display()
+                    )));
+                }
+                Err(BoundedReadError::Inconsistent { got, want }) => {
+                    return Err(Failure::validation(format!(
+                        "修改目标 {} 读入不一致（读取 {got} 字节与元数据尺寸 {want} 不符，\
+                         可能在读入窗口内被并发修改或为伪文件）：拒绝处理",
+                        target.display()
+                    )));
+                }
+                Err(BoundedReadError::Io(e)) => {
+                    return Err(Failure::validation(format!(
+                        "读取修改目标失败 {}：{e}",
                         target.display()
                     )));
                 }
             };
-            // N5：行数在读入后、逐行展开前检查
-            if logical_lines(&original) > MAX_FILE_LINES {
-                return Err(Failure::validation(format!(
-                    "修改目标 {} 为 {n} 行，超过 {MAX_FILE_LINES} 行读入上限",
-                    target.display(),
-                    n = logical_lines(&original)
-                )));
-            }
+            let label = format!("修改目标 {}", target.display());
+            let original = match decode_bounded(bytes, &label) {
+                Ok(s) => s,
+                Err(msg) => return Err(Failure::validation(msg)),
+            };
             let new_content = match compute_new_content(&original, &target.display().to_string(), chunks)
             {
                 Ok(c) => c,
                 Err(msg) => return Err(Failure::validation(msg)),
             };
             // N5：生成内容在写入/截断目标之前检查字节数与行数（超限不改变目标字节）
-            if new_content.len() > MAX_FILE_BYTES {
-                return Err(Failure::validation(format!(
-                    "生成内容 {} 字节超过 {MAX_FILE_BYTES} 字节（4 MiB）上限（目标 {}）",
-                    new_content.len(),
-                    target.display()
-                )));
-            }
-            if logical_lines(&new_content) > MAX_FILE_LINES {
-                return Err(Failure::validation(format!(
-                    "生成内容 {} 行超过 {MAX_FILE_LINES} 行上限（目标 {}）",
-                    logical_lines(&new_content),
-                    target.display()
-                )));
-            }
+            check_generated_limits(&new_content, &format!("目标 {}", target.display()))
+                .map_err(Failure::validation)?;
             #[cfg(test)]
             f2_seam::before_write();
             match write_via_validated_fd(&file, new_content.as_bytes()) {
@@ -1271,26 +1348,22 @@ fn apply_move(
 ) -> Result<(), Failure> {
     let src = resolve_target(base, src_path);
     let dst = resolve_target(base, dest_path);
-    // 阶段化错误：含源、目标两个可确定绝对路径（规格 §1.4.5）
+    // 阶段化错误（规格 §1.4.5）：单一实现点，全部出错点经 ctx/both 构造，
+    // 均含源、目标两个可确定绝对路径（审查 #12 收敛）
+    let ctx = |stage: &str| {
+        format!("{stage}（源 {}，目标 {}）", src.display(), dst.display())
+    };
     let both = |stage: &str, detail: &dyn std::fmt::Display| {
-        format!("{stage}（源 {}，目标 {}）：{detail}", src.display(), dst.display())
+        format!("{}：{detail}", ctx(stage))
     };
 
     // 1. 同路径拒绝：词法归一后比较（`./`、`..`）；其余别名等价由排他创建兜底
     if lexical_normalize(&src) == lexical_normalize(&dst) {
-        return Err(Failure::validation(format!(
-            "移动源与目标为同一路径，按目标冲突拒绝（源 {}，目标 {}）",
-            src.display(),
-            dst.display()
-        )));
+        return Err(Failure::validation(ctx("移动源与目标为同一路径，按目标冲突拒绝")));
     }
     // 目标存在预检：任何目录项（常规/目录/符号链接/悬空/硬链接）均拒绝
     if std::fs::symlink_metadata(&dst).is_ok() {
-        return Err(Failure::validation(format!(
-            "移动目标已存在，禁止覆盖（源 {}，目标 {}）",
-            src.display(),
-            dst.display()
-        )));
+        return Err(Failure::validation(ctx("移动目标已存在，禁止覆盖")));
     }
 
     // 2. 源打开＋判型：O_NOFOLLOW——末端符号链接（含悬空，ELOOP）不跟随，
@@ -1305,83 +1378,46 @@ fn apply_move(
             )));
         }
         Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
-            return Err(Failure::validation(format!(
-                "移动源是符号链接（含悬空），拒绝移动（源 {}，目标 {}）",
-                src.display(),
-                dst.display()
-            )));
+            return Err(Failure::validation(ctx("移动源是符号链接（含悬空），拒绝移动")));
         }
-        Err(e) => {
-            return Err(Failure::validation(format!(
-                "打开移动源失败（源 {}，目标 {}）：{e}",
-                src.display(),
-                dst.display()
-            )));
-        }
+        Err(e) => return Err(Failure::validation(both("打开移动源失败", &e))),
     };
     if !fd_is_regular(&file) {
-        return Err(Failure::validation(format!(
-            "移动源不是常规文件（拒绝 FIFO/设备/目录等，源 {}，目标 {}）",
-            src.display(),
-            dst.display()
-        )));
+        return Err(Failure::validation(ctx("移动源不是常规文件（拒绝 FIFO/设备/目录等）")));
     }
-    // N5：fd 级大小预检＋有限读取＋UTF-8＋行数（与普通 Update 同界；读入失败
-    // 未发生任何写入，validation）
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    unsafe { libc::fstat(file.as_raw_fd(), &mut st) };
-    if st.st_size as usize > MAX_FILE_BYTES {
-        return Err(Failure::validation(format!(
-            "移动源 {} 为 {size} 字节，超过 {MAX_FILE_BYTES} 字节（4 MiB）读入上限",
-            src.display(),
-            size = st.st_size
-        )));
-    }
-    let mut bytes = Vec::new();
-    let mut limited = (&file).take(MAX_FILE_BYTES as u64 + 1);
-    if let Err(e) = std::io::Read::read_to_end(&mut limited, &mut bytes) {
-        return Err(Failure::validation(format!(
-            "读取移动源失败（源 {}，目标 {}）：{e}",
-            src.display(),
-            dst.display()
-        )));
-    }
-    if bytes.len() > MAX_FILE_BYTES {
-        return Err(Failure::validation(format!(
-            "移动源 {} 超过 {MAX_FILE_BYTES} 字节（4 MiB）读入上限",
-            src.display()
-        )));
-    }
-    // 安全修复 F-2（2026-10-28 攻防报告）：常规文件的读取字节数不可能超过其
-    // fstat 尺寸；超出只出现在 procfs/sysfs 类伪文件（S_IFREG、st_size=0 而
-    // 读取返回内容）——拒绝，防止把环境变量等内容物化到普通文件与展示面。
-    // 普通文件并发追加理论上可触发本检查（读到的比先前 fstat 多）＝保守拒绝。
-    if bytes.len() > st.st_size as usize {
-        return Err(Failure::validation(format!(
-            "移动源 {} 是伪文件（读取 {got} 字节超过其元数据尺寸 {want}，\
-             拒绝移动 procfs/sysfs 类对象）",
-            src.display(),
-            got = bytes.len(),
-            want = st.st_size
-        )));
-    }
-    let original = match String::from_utf8(bytes) {
-        Ok(s) => s,
-        Err(_) => {
+    // N5＋F-2＋审查 #8：fd 级大小预检＋有限读取＋读入一致性（与 Update 共用
+    // read_bounded——超出尺寸＝procfs/sysfs 伪文件，不足＝读入窗口内被并发
+    // 截断；两向都保守拒绝，防止把环境变量物化或把截断残片当完整内容移动）
+    let bytes = match read_bounded(&file) {
+        Ok((bytes, _)) => bytes,
+        Err(BoundedReadError::OversizeSize(size)) => {
             return Err(Failure::validation(format!(
-                "移动源不是有效的 UTF-8 文本（不支持二进制；源 {}，目标 {}）",
+                "移动源 {} 为 {size} 字节，超过 {MAX_FILE_BYTES} 字节（4 MiB）读入上限",
+                src.display()
+            )));
+        }
+        Err(BoundedReadError::TooManyBytes) => {
+            return Err(Failure::validation(format!(
+                "移动源 {} 超过 {MAX_FILE_BYTES} 字节（4 MiB）读入上限",
+                src.display()
+            )));
+        }
+        Err(BoundedReadError::Inconsistent { got, want }) => {
+            return Err(Failure::validation(format!(
+                "移动源 {} 是伪文件或读入窗口内被并发截断（读取 {got} 字节与元数据尺寸 \
+                 {want} 不符，拒绝移动 procfs/sysfs 类对象或并发变化的源；目标 {}）",
                 src.display(),
                 dst.display()
             )));
         }
+        Err(BoundedReadError::Io(e)) => {
+            return Err(Failure::validation(both("读取移动源失败", &e)));
+        }
     };
-    if logical_lines(&original) > MAX_FILE_LINES {
-        return Err(Failure::validation(format!(
-            "移动源 {} 为 {n} 行，超过 {MAX_FILE_LINES} 行读入上限",
-            src.display(),
-            n = logical_lines(&original)
-        )));
-    }
+    let original = match decode_bounded(bytes, &format!("移动源 {}（目标 {}）", src.display(), dst.display())) {
+        Ok(s) => s,
+        Err(msg) => return Err(Failure::validation(msg)),
+    };
 
     // 3. 内容计算：纯移动逐字节保留；带修改块按匹配规则生成（失败不触任何文件）
     let new_content = if chunks.is_empty() {
@@ -1392,22 +1428,11 @@ fn apply_move(
             Err(msg) => return Err(Failure::validation(msg)),
         }
     };
-    // 写前上限检查：超限不得创建目标或删除源（N5）
-    if new_content.len() > MAX_FILE_BYTES {
-        return Err(Failure::validation(format!(
-            "生成内容 {} 字节超过 {MAX_FILE_BYTES} 字节（4 MiB）上限（目标 {}，源 {}）",
-            new_content.len(),
-            dst.display(),
-            src.display()
-        )));
-    }
-    if logical_lines(&new_content) > MAX_FILE_LINES {
-        let n = logical_lines(&new_content);
-        return Err(Failure::validation(format!(
-            "生成内容 {n} 行超过 {MAX_FILE_LINES} 行上限（目标 {}，源 {}）",
-            dst.display(),
-            src.display()
-        )));
+    // 写前上限检查：超限不得创建目标或删除源（N5；纯移动内容＝已过读入门的
+    // 原文，跳过重复检查——审查 #10）
+    if !chunks.is_empty() {
+        check_generated_limits(&new_content, &format!("目标 {}（源 {}）", dst.display(), src.display()))
+            .map_err(Failure::validation)?;
     }
 
     // 4. 目标父目录沿用 Add 创建策略（失败＝已尝试变更目录，状态未知）
@@ -1424,11 +1449,7 @@ fn apply_move(
     let mut out = match std::fs::OpenOptions::new().write(true).create_new(true).open(&dst) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(Failure::validation(format!(
-                "移动目标已存在，禁止覆盖（源 {}，目标 {}）",
-                src.display(),
-                dst.display()
-            )));
+            return Err(Failure::validation(ctx("移动目标已存在，禁止覆盖")));
         }
         Err(e) => return Err(Failure::mutating(both("创建移动目标失败", &e))),
     };
@@ -1477,23 +1498,10 @@ fn apply_move(
     }
 }
 
-/// Move 源打开：`O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_NOFOLLOW`——末端符号链接
-///（含悬空）一律 ELOOP 拒绝、不跟随（普通 Update 的 [`open_validated_regular`
-/// 保持跟随语义不变）。
+/// Move 源打开：加 `O_NOFOLLOW`——末端符号链接（含悬空）一律 ELOOP 拒绝、
+/// 不跟随（普通 Update 的 [`open_validated_regular`] 保持跟随语义不变）。
 fn open_source_nofollow(target: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::ffi::OsStrExt;
-    let c = std::ffi::CString::new(target.as_os_str().as_bytes())?;
-    let fd = unsafe {
-        libc::open(
-            c.as_ptr(),
-            libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-        )
-    };
-    if fd < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
-    }
+    open_path(target, libc::O_NOFOLLOW)
 }
 
 /// 词法归一（消 `.`/`..`）比较两路径是否同一目标——用于移动的自路径拒绝；
@@ -2254,6 +2262,70 @@ mod tests {
         .unwrap();
     }
 
+    /// 审查 #8 回归：fstat 与读取之间源被并发截断——短读与元数据尺寸不符，
+    /// 必须保守拒绝（此前只拦「读多」方向，残片曾被当完整内容移动并删源）。
+    /// before_read 屏障给出确定性截断时点。
+    #[test]
+    fn move_concurrent_truncation_short_read_rejected() {
+        if move_seam_child_mode() {
+            unreachable!("子进程已在 move_seam_child_mode 内退出");
+        }
+        let dir = std::env::temp_dir().join(format!("tchat-movetrunc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.txt");
+        let dst = dir.join("dst.txt");
+        std::fs::write(&src, "A\n".repeat(50_000)).unwrap(); // ~100 KiB
+        write_move_patch(&dir, &src, &dst);
+        let mut child = spawn_move_seam_child(
+            "apply_patch::tests::move_concurrent_truncation_short_read_rejected",
+            &dir,
+        );
+        wait_move_barrier(&dir, "before_read", &mut child);
+        // 确定性的读入窗口内截断：只剩 10 行
+        let truncated = "B\n".repeat(10);
+        std::fs::write(&src, &truncated).unwrap();
+        release_move_barrier(&dir, "before_read");
+        let r = collect_move_child(&dir, child);
+        assert_eq!(r["ok"], json!(false), "短读必须拒绝：{r}");
+        assert_eq!(r["state_known"], json!(true), "校验型失败：{r}");
+        assert_eq!(r["changed_files"], json!([]), "不得移动残片：{r}");
+        let err = r["error"].as_str().unwrap();
+        assert!(err.contains("截断") || err.contains("不符"), "错误标明读入不一致：{err}");
+        assert!(!dst.exists(), "不得创建目标");
+        assert_eq!(std::fs::read_to_string(&src).unwrap(), truncated, "截断后的源原样保留");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 审查 #10 奇偶断言：logical_lines（零分配计数）与 SourceFile::parse 的
+    /// 行切分在任何输入上同源——line_ranges 原语由构造保证，此测试钉住不回归。
+    #[test]
+    fn logical_lines_parity_with_source_file_parse() {
+        for s in [
+            "", "a", "a\n", "a\r\nb\r\n", "a\rb\r", "x\ny",
+            "no-newline", "a\r\nb\nc", "\r\n\r\n", "x\r\r\ry",
+            "l\nl\r\nl\nl\r\nl\nl\r\nt",
+        ] {
+            assert_eq!(
+                logical_lines(s),
+                SourceFile::parse(s).lines.len(),
+                "计数与解析必须同源：{s:?}"
+            );
+        }
+    }
+
+    /// correctness 缺口钉扎：eof=true 只锚定末尾、无全范围回退——pattern 仅在
+    /// 早处匹配时应返回 None（自 004 起的既有语义，防未来引入回退扫描）。
+    #[test]
+    fn seek_eof_anchor_has_no_full_range_fallback() {
+        let lines = owned(&["tail", "x"]);
+        assert_eq!(
+            seek_sequence(&lines, &owned(&["tail"]), 0, true),
+            None,
+            "eof 锚定不得回退到早位匹配"
+        );
+    }
+
     /// 029 A5 竞态：预检通过后、排他创建前目标被抢占创建——`create_new` 必须以
     /// EEXIST 拒绝（不覆盖抢占者），抢占者字节与源均不变；未产生本次变更，
     /// 状态已知。
@@ -2273,6 +2345,7 @@ mod tests {
             "apply_patch::tests::move_target_race_rejected_exclusively",
             &dir,
         );
+        release_move_barrier(&dir, "before_read"); // 读入阶段无竞态需求，直接放行
         wait_move_barrier(&dir, "before_create", &mut child);
         // 确定性的创建前时点：抢占创建目标
         std::fs::write(&dst, "RACER\n").unwrap();
@@ -2311,7 +2384,8 @@ mod tests {
             "apply_patch::tests::move_source_swap_detected_before_unlink",
             &dir,
         );
-        // 创建前屏障无需竞态：直接放行（子进程随后写入目标并记录 add）
+        // 读入与创建前屏障均无需竞态：直接放行（子进程随后写入目标并记录 add）
+        release_move_barrier(&dir, "before_read");
         release_move_barrier(&dir, "before_create");
         wait_move_barrier(&dir, "before_unlink", &mut child);
         // 确定性的删源前时点：挪走原文件，原路径放入替换对象
