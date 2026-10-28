@@ -316,21 +316,72 @@ fn run(patch_text: &str) -> (ApplyPatchResult, Vec<crate::prompt::PatchChange>) 
             );
         }
     };
-    let mut changed: Vec<ChangedFile> = Vec::new();
-    let mut display: Vec<crate::prompt::PatchChange> = Vec::new();
+    let mut log = ChangeLog::default();
     for hunk in &hunks {
         // 029：执行器按实际完成的文件操作即时累积清单与展示（Move 一块可产出
         // 多条，部分成功也保留已完成部分）。
-        if let Err(Failure { msg, state_known }) =
-            apply_hunk(hunk, &base, &mut changed, &mut display)
-        {
-            return (ApplyPatchResult::error(msg, changed, state_known), display);
+        if let Err(Failure { msg, state_known }) = apply_hunk(hunk, &base, &mut log) {
+            return (ApplyPatchResult::error(msg, log.changed, state_known), log.display);
         }
     }
     (
-        ApplyPatchResult { ok: true, changed_files: changed, state_known: true, error: None },
-        display,
+        ApplyPatchResult {
+            ok: true,
+            changed_files: log.changed,
+            state_known: true,
+            error: None,
+        },
+        log.display,
     )
+}
+
+/// 展示内容累计预算（审查 #9，CWE-770）：每个 Move 块向展示流嵌入目标全文
+/// （Add）＋源全文（Delete），跨块累积若不设总量上限，~4 KiB 补丁×若干既有
+/// 大文件可把展示/会话载荷放大至数百 MiB。超预算后后续卡片按 012 既有降级
+/// 语义处理（Delete→content=None；Add/Update 卡片不入列，不伪造内容）；
+/// 模型面结果 changed_files 不受影响。
+pub const MAX_DISPLAY_BYTES: usize = 16 * 1024 * 1024;
+
+/// 变更累积器（审查 #6）：changed（结果清单）与 display（展示卡片）必须同序
+/// 同长——该配对不变量由本类型唯一 [`ChangeLog::record`] 入口保证，替代此前
+/// 5 处手写双 push；同时承载展示字节预算（审查 #9）。
+#[derive(Default)]
+struct ChangeLog {
+    changed: Vec<ChangedFile>,
+    display: Vec<crate::prompt::PatchChange>,
+    /// 已入列展示卡片的累计内容字节数（Add 全文/Delete 全文/Update diff）。
+    display_bytes: usize,
+}
+
+fn display_kind_bytes(kind: &crate::prompt::PatchChangeKind) -> usize {
+    use crate::prompt::PatchChangeKind;
+    match kind {
+        PatchChangeKind::Add { content } | PatchChangeKind::Update { diff: content } => {
+            content.len()
+        }
+        PatchChangeKind::Delete { content } => content.as_deref().map_or(0, str::len),
+    }
+}
+
+impl ChangeLog {
+    /// 记录一个**已完成**的文件操作：结果清单始终入列；展示卡片受预算约束。
+    fn record(&mut self, target: &Path, action: Action, kind: crate::prompt::PatchChangeKind) {
+        self.changed.push(ChangedFile { path: path_label(target), action });
+        if self.display_bytes + display_kind_bytes(&kind) > MAX_DISPLAY_BYTES {
+            // 预算耗尽：Delete 降级为 content=None（012 既有语义，展示层明确
+            // 降级）；Add/Update 卡片不入列——不伪造内容。结果清单不受影响。
+            if let crate::prompt::PatchChangeKind::Delete { .. } = kind {
+                self.display.push(crate::prompt::PatchChange {
+                    path: path_label(target),
+                    kind: crate::prompt::PatchChangeKind::Delete { content: None },
+                });
+            }
+            return;
+        }
+        self.display_bytes += display_kind_bytes(&kind);
+        self.display
+            .push(crate::prompt::PatchChange { path: path_label(target), kind });
+    }
 }
 
 // ---- 补丁解析（Codex streaming parser 的整段移植）----
@@ -1125,12 +1176,7 @@ fn read_display_content(target: &Path) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-fn apply_hunk(
-    hunk: &Hunk,
-    base: &Path,
-    changed: &mut Vec<ChangedFile>,
-    display: &mut Vec<crate::prompt::PatchChange>,
-) -> Result<(), Failure> {
+fn apply_hunk(hunk: &Hunk, base: &Path, log: &mut ChangeLog) -> Result<(), Failure> {
     match hunk {
         Hunk::Add { path, content } => {
             let target = resolve_target(base, path);
@@ -1184,12 +1230,11 @@ fn apply_hunk(
                     target.display()
                 )));
             }
-            let label = path_label(&target);
-            changed.push(ChangedFile { path: label.clone(), action: Action::Add });
-            display.push(crate::prompt::PatchChange {
-                path: label,
-                kind: crate::prompt::PatchChangeKind::Add { content: content.clone() },
-            });
+            log.record(
+                &target,
+                Action::Add,
+                crate::prompt::PatchChangeKind::Add { content: content.clone() },
+            );
             Ok(())
         }
         Hunk::Delete { path } => {
@@ -1213,12 +1258,11 @@ fn apply_hunk(
             let old_content = read_display_content(&target);
             match std::fs::remove_file(&target) {
                 Ok(()) => {
-                    let label = path_label(&target);
-                    changed.push(ChangedFile { path: label.clone(), action: Action::Delete });
-                    display.push(crate::prompt::PatchChange {
-                        path: label,
-                        kind: crate::prompt::PatchChangeKind::Delete { content: old_content },
-                    });
+                    log.record(
+                        &target,
+                        Action::Delete,
+                        crate::prompt::PatchChangeKind::Delete { content: old_content },
+                    );
                     Ok(())
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1234,7 +1278,7 @@ fn apply_hunk(
             // 029：带 Move to 的块走移动执行（源读取、目标创建/写入、源删除）；
             // 无 Move 的普通 Update 保持既有语义。
             if let Some(dest) = move_to {
-                return apply_move(path, dest, chunks, base, changed, display);
+                return apply_move(path, dest, chunks, base, log);
             }
             let target = resolve_target(base, path);
             // F2：Update 只读写常规文件。先以非阻塞方式打开（FIFO/设备打开不阻塞），
@@ -1310,12 +1354,11 @@ fn apply_hunk(
                 Ok(()) => {
                     // 012：展示差异＝对真实前后缓冲生成的统一 diff（不从补丁文本反推）
                     let diff = diffy::create_patch(&original, &new_content).to_string();
-                    let label = path_label(&target);
-                    changed.push(ChangedFile { path: label.clone(), action: Action::Update });
-                    display.push(crate::prompt::PatchChange {
-                        path: label,
-                        kind: crate::prompt::PatchChangeKind::Update { diff },
-                    });
+                    log.record(
+                        &target,
+                        Action::Update,
+                        crate::prompt::PatchChangeKind::Update { diff },
+                    );
                     Ok(())
                 }
                 Err(e) => Err(Failure::mutating(format!(
@@ -1343,8 +1386,7 @@ fn apply_move(
     dest_path: &Path,
     chunks: &[UpdateChunk],
     base: &Path,
-    changed: &mut Vec<ChangedFile>,
-    display: &mut Vec<crate::prompt::PatchChange>,
+    log: &mut ChangeLog,
 ) -> Result<(), Failure> {
     let src = resolve_target(base, src_path);
     let dst = resolve_target(base, dest_path);
@@ -1459,12 +1501,11 @@ fn apply_move(
     }
     drop(out);
     // 完整写入成功：立即记目标 add；展示＝目标真实新内容
-    let dst_label = path_label(&dst);
-    changed.push(ChangedFile { path: dst_label.clone(), action: Action::Add });
-    display.push(crate::prompt::PatchChange {
-        path: dst_label,
-        kind: crate::prompt::PatchChangeKind::Add { content: new_content.clone() },
-    });
+    log.record(
+        &dst,
+        Action::Add,
+        crate::prompt::PatchChangeKind::Add { content: new_content.clone() },
+    );
 
     // 5. 删源前复核：源路径仍对应读入时的对象（替换窗口测试经 move_seam 屏障）
     #[cfg(test)]
@@ -1486,12 +1527,11 @@ fn apply_move(
     // 6. 删除源：成功记 delete（展示＝源真实旧内容）；失败保留目标 add、不清理
     match std::fs::remove_file(&src) {
         Ok(()) => {
-            let src_label = path_label(&src);
-            changed.push(ChangedFile { path: src_label.clone(), action: Action::Delete });
-            display.push(crate::prompt::PatchChange {
-                path: src_label,
-                kind: crate::prompt::PatchChangeKind::Delete { content: Some(original) },
-            });
+            log.record(
+                &src,
+                Action::Delete,
+                crate::prompt::PatchChangeKind::Delete { content: Some(original) },
+            );
             Ok(())
         }
         Err(e) => Err(Failure::mutating(both("删除移动源失败", &e))),

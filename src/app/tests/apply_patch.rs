@@ -2022,3 +2022,56 @@ fn move_with_multiple_change_blocks_applies_all() {
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// 审查 #9（CWE-770）：Move 展示内容跨块累计预算——6 块 × ~4 MiB 源若无上限
+/// 将产出 ~48 MiB 展示载荷；预算（16 MiB）耗尽后：Delete 卡降级为 content=None
+/// （012 既有语义），Add 卡不入列不伪造；结果清单 12 条完整、ok=true 不受影响。
+#[test]
+fn move_display_accumulation_budget_bounds_amplification() {
+    let dir = temp_dir("disp-budget");
+    let body = format!("{}\n", "x".repeat(4 * 1024 * 1024 - 8)); // 恰 <4 MiB/文件
+    let mut patch_body = String::new();
+    let mut dsts = Vec::new();
+    for i in 0..6 {
+        let src = dir.join(format!("b{i}-src.txt"));
+        let dst = dir.join(format!("b{i}-dst.txt"));
+        fs::write(&src, &body).unwrap();
+        dsts.push(dst.clone());
+        patch_body.push_str(&format!(
+            "*** Update File: {s}\n*** Move to: {d}\n",
+            s = src.display(),
+            d = dst.display()
+        ));
+    }
+    let (r, changes) =
+        terminal_chat::apply_patch::apply_patch_with_display(&json!({ "patch":
+            patch(&patch_body.trim_end())
+        }));
+    let r = serde_json::to_value(&r).unwrap();
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["changed_files"].as_array().unwrap().len(), 12, "结果清单完整：{r}");
+    // 预算内（前两块）4 张全内容卡片；耗尽后 4 张 Delete 降级 None、Add 不入列
+    assert_eq!(changes.len(), 8, "展示卡片数受预算约束：{changes:?}");
+    for c in &changes[..4] {
+        let bytes = match &c.kind {
+            terminal_chat::prompt::PatchChangeKind::Add { content }
+            | terminal_chat::prompt::PatchChangeKind::Update { diff: content } => content.len(),
+            terminal_chat::prompt::PatchChangeKind::Delete { content } => {
+                content.as_deref().map_or(0, str::len)
+            }
+        };
+        assert!(bytes > 1024 * 1024, "预算内卡片为真实全内容：{c:?}");
+    }
+    for c in &changes[4..] {
+        assert!(
+            matches!(&c.kind, terminal_chat::prompt::PatchChangeKind::Delete { content }
+                if content.is_none()),
+            "预算耗尽后仅保留降级 Delete 卡：{c:?}"
+        );
+    }
+    // 磁盘事实不受展示预算影响：6 个目标全部落盘
+    for dst in &dsts {
+        assert!(dst.exists(), "目标 {dst:?} 已创建");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
