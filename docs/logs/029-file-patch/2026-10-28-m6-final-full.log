@@ -1,0 +1,22 @@
+# 029 M6 最终全量验证（审查修复轮 A/B/C 之后）
+# date: 2026-10-28T16:47:39+00:00
+# cwd: /workspace
+# commit: 093b6e2
+# cmd: env -u TCHAT_SANDBOX cargo check && env -u TCHAT_SANDBOX cargo test --workspace --no-fail-fast
+warning: `terminal-chat` (lib) generated 2 warnings (run `cargo fix --lib -p terminal-chat` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 12.16s
+cargo_check_exit=0
+3548
+---
+TOTAL passed=3569 failed=1 ignored=3
+test turn::tests::cancelled_batch_skips_per_tool_shapes_and_unknown_generic_error ... FAILED
+test result: FAILED. 238 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 42.76s
+cargo_test_exit=1
+isolated_exit=0
+
+## 结论
+- cargo check 通过（exit 0）。
+- cargo test --workspace --no-fail-fast：3569 通过 / 1 失败 / 3 忽略 / 0 未运行。
+- 唯一失败 turn::tests::cancelled_batch_skips_per_tool_shapes_and_unknown_generic_error
+  为基线（2026-10-28-phase0-baseline.log）已记录的并行负载偶发——本次隔离复跑通过
+  （exit 0），与 029 改动无关（该轮基线同样现象同判定）。非本轮新增失败。
