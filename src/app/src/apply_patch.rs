@@ -244,9 +244,12 @@ pub const MAX_PATCH_BYTES: usize = 1024 * 1024;
 pub const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_FILE_LINES: usize = 100_000;
 
-/// 逻辑行计数：str::lines 语义与本边界定义一致（\r\n 一行；非空尾段计一行；空串 0 行）。
+/// 逻辑行计数：与 [`SourceFile::parse`] 的行切分**同一实现**（\r、\r\n、\n 均为
+/// 行尾；非空尾段计一行；空串 0 行）。安全修复 F-1（2026-10-28 攻防报告）：
+/// 此前用 `str::lines()`（仅按 \n 切分），lone-CR 文件被漏计成「1 行」通过
+/// 读入门、实际展开百万级行——行数门与解析行定义必须统一，不得再分叉。
 fn logical_lines(s: &str) -> usize {
-    s.lines().count()
+    SourceFile::parse(s).lines.len()
 }
 
 fn run(patch_text: &str) -> (ApplyPatchResult, Vec<crate::prompt::PatchChange>) {
@@ -1347,6 +1350,19 @@ fn apply_move(
         return Err(Failure::validation(format!(
             "移动源 {} 超过 {MAX_FILE_BYTES} 字节（4 MiB）读入上限",
             src.display()
+        )));
+    }
+    // 安全修复 F-2（2026-10-28 攻防报告）：常规文件的读取字节数不可能超过其
+    // fstat 尺寸；超出只出现在 procfs/sysfs 类伪文件（S_IFREG、st_size=0 而
+    // 读取返回内容）——拒绝，防止把环境变量等内容物化到普通文件与展示面。
+    // 普通文件并发追加理论上可触发本检查（读到的比先前 fstat 多）＝保守拒绝。
+    if bytes.len() > st.st_size as usize {
+        return Err(Failure::validation(format!(
+            "移动源 {} 是伪文件（读取 {got} 字节超过其元数据尺寸 {want}，\
+             拒绝移动 procfs/sysfs 类对象）",
+            src.display(),
+            got = bytes.len(),
+            want = st.st_size
         )));
     }
     let original = match String::from_utf8(bytes) {

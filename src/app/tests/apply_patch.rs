@@ -1931,3 +1931,69 @@ fn move_partial_success_display_shows_only_completed_add() {
     ));
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// 安全修复 F-1 回归（2026-10-28 攻防报告【中】）：lone-CR 文件的行数必须与
+/// SourceFile::parse 的行切分一致——否则「x\r」×N 以「1 行」通过读入门，
+/// 实际展开 N 行（有界 DoS，违背 A9 行数上限）。
+#[test]
+fn move_and_update_reject_lone_cr_line_limit_bypass() {
+    let dir = temp_dir("sec-f1");
+    // 100001 个 lone-CR 分隔的段（字节数与 LF 版超限对照相同）
+    let body = "x\r".repeat(100_001);
+    let f = dir.join("cr.txt");
+    fs::write(&f, &body).unwrap();
+    // Move 面：读入行数门必须拒绝
+    let r = call(&format!(
+        "*** Update File: {s}\n*** Move to: {d}",
+        s = f.display(),
+        d = dir.join("cr-dst.txt").display()
+    ));
+    assert!(!r.ok, "lone-CR 行数不得漏计：{r:?}");
+    assert!(r.error.clone().unwrap().contains("100000"), "{r:?}");
+    assert!(!dir.join("cr-dst.txt").exists(), "拒绝不得创建目标");
+    // 普通 Update 面：同一行数门
+    let r = call(&format!(
+        "*** Update File: {p}\n@@\n-x\n+y",
+        p = f.display()
+    ));
+    assert!(!r.ok, "Update 读入门同源：{r:?}");
+    assert!(r.error.clone().unwrap().contains("100000"), "{r:?}");
+    // 恰 100000 行（lone-CR）仍可用：与 LF 语义对齐
+    let f2 = dir.join("cr-ok.txt");
+    fs::write(&f2, "x\r".repeat(99_999) + "x").unwrap();
+    let r = call(&format!(
+        "*** Update File: {s}\n*** Move to: {d}\n@@\n-x\n+y",
+        s = f2.display(),
+        d = dir.join("cr-ok-dst.txt").display()
+    ));
+    assert!(r.ok, "恰 100000 lone-CR 行应可用：{r:?}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// 安全修复 F-2 回归（2026-10-28 攻防报告【低】）：procfs 伪文件（S_IFREG 但
+/// st_size=0 而读取有内容）作为 Move 源——把读取字节数与 fstat 尺寸比对，
+/// 超出即伪文件拒绝；不得把环境变量等内容物化到普通文件与展示面。
+#[test]
+fn move_rejects_procfs_pseudo_file_source() {
+    let dir = temp_dir("sec-f2");
+    // /proc/self/environ：常规文件类型、st_size=0、读取返回真实环境内容
+    let src = std::path::Path::new("/proc/self/environ");
+    if !src.exists() {
+        eprintln!("环境无 /proc/self/environ（非 Linux），跳过");
+        return;
+    }
+    let dst = dir.join("materialized.txt");
+    let r = call(&format!(
+        "*** Update File: {s}\n*** Move to: {d}",
+        s = src.display(),
+        d = dst.display()
+    ));
+    assert!(!r.ok, "伪文件源必须拒绝：{r:?}");
+    assert!(r.state_known, "校验型失败：{r:?}");
+    assert!(r.changed_files.is_empty(), "{r:?}");
+    let err = r.error.clone().unwrap_or_default();
+    assert!(err.contains("伪文件") || err.contains("proc"), "错误应指明伪文件：{err}");
+    assert!(!dst.exists(), "不得物化伪文件内容");
+    assert!(src.exists(), "procfs 对象本就不应被删");
+    let _ = fs::remove_dir_all(&dir);
+}
