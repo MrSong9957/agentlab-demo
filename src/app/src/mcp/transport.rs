@@ -211,6 +211,12 @@ impl StdioProcess {
             Some((program, sandbox_args, child_env)) => {
                 cmd = tokio::process::Command::new(program);
                 cmd.args(sandbox_args);
+                // 033-B2：同 exec 面——继承 fd ≥3 标记 CLOEXEC（execve 时关闭）；
+                // tokio Command 自带 pre_exec（委托 std）。仅沙箱分支、unix。
+                #[cfg(unix)]
+                unsafe {
+                    cmd.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
+                }
                 // 白名单环境在下方 env_clear **之后**注入（env_clear 是清除不是
                 // 覆盖——先注会被清掉，033 审查轮修正）。
                 Some(child_env)

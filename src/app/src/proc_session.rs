@@ -520,6 +520,71 @@ static TEST_CLOCK_SHIFT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 #[cfg(test)]
 static SEAM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// 收口缝类型（仅 cfg(test)）：监控门控状态——Paused＝测试已布防、监控未达；
+/// Parked＝监控已停靠（不持会话锁）；Released＝放行。
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TestGateState {
+    Paused,
+    Parked,
+    Released,
+}
+
+/// 收口缝类型（仅 cfg(test)）：门控共享句柄（状态＋通知）。
+#[cfg(test)]
+type TestGate = Arc<(Mutex<TestGateState>, Condvar)>;
+
+/// 收口缝守卫（仅 cfg(test)）：Drop 自动放行——panic 展开亦经过，监控不会
+/// 因测试失败而悬挂（另有 10s 有界兜底）。
+#[cfg(test)]
+struct TestGateGuard(TestGate);
+
+#[cfg(test)]
+impl Drop for TestGateGuard {
+    fn drop(&mut self) {
+        let (lock, cv) = &*self.0;
+        let mut g = lock.lock().unwrap_or_else(|p| p.into_inner());
+        *g = TestGateState::Released;
+        cv.notify_all();
+    }
+}
+
+/// 收口缝（仅 cfg(test)）：监控循环顶部停靠点。**不持会话锁**等待——测试在
+/// 停靠后提交显式 terminate（request_kill 的覆盖规则把挂起的 Deadline 请求
+/// 替换为 Terminate），提交可见即自动放行：把「terminate 提交」确定性编排到
+/// 「Deadline 轮询重试消费」之前，消除 10ms tick 的调度竞态（2026-10-27
+/// 全量 flake 根因；被验证的语义本身不变）。放行条件：测试释放（守卫 Drop）／
+/// kill 请求已被替换为 Terminate／10s 有界兜底——异常路径监控仍可推进、
+/// 进程仍可回收。未布防（None／非 Paused）即时返回，并行用例零影响。
+#[cfg(test)]
+fn test_gate_wait(session: &Session) {
+    let Some(gate) = session.lock().test_gate.clone() else {
+        return;
+    };
+    let (lock, cv) = &*gate;
+    let mut g = lock.lock().unwrap_or_else(|p| p.into_inner());
+    if *g != TestGateState::Paused {
+        return;
+    }
+    *g = TestGateState::Parked;
+    cv.notify_all();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if *g == TestGateState::Released
+            || session.kill_snapshot() == Some(KillReq::Terminate)
+        {
+            return;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let slice = Duration::from_millis(5).min(deadline.saturating_duration_since(now));
+        let (ng, _) = cv.wait_timeout(g, slice).unwrap_or_else(|e| e.into_inner());
+        g = ng;
+    }
+}
+
 /// 终止进程组的受检入口：返回 Ok（已发信号）／Gone（组已不存在）／Failed
 ///（失败，含 errno）。测试注入仅对 [`TEST_KILLPG_FAIL_PGD`] 匹配的组生效。
 fn kill_group_checked(pgid: libc::pid_t) -> KillOutcome {
@@ -599,6 +664,9 @@ struct SessionState {
     reader_eof: usize,
     /// 读取线程总数（管道 2：stdout/stderr；PTY 1：master）。
     readers: usize,
+    /// 收口缝（仅 cfg(test)）：监控循环门控——见 [`test_gate_wait`]。
+    #[cfg(test)]
+    test_gate: Option<TestGate>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -640,6 +708,8 @@ impl Session {
                 master,
                 reader_eof: 0,
                 readers,
+                #[cfg(test)]
+                test_gate: None,
             }),
             cv: Condvar::new(),
         }
@@ -676,6 +746,30 @@ impl Session {
     /// 不让陈旧失败阻塞后续重试。
     fn clear_kill_failed(&self) {
         self.lock().kill_failed = None;
+    }
+
+    /// 收口缝（仅 cfg(test)）：布防监控门控，返回守卫（Drop 自动放行）。
+    /// 会话级定位，无全局覆盖污染；仅在 SEAM_LOCK 串行的接缝测试内使用。
+    #[cfg(test)]
+    fn arm_monitor_gate(&self) -> TestGateGuard {
+        let gate: TestGate = Arc::new((Mutex::new(TestGateState::Paused), Condvar::new()));
+        self.lock().test_gate = Some(gate.clone());
+        TestGateGuard(gate)
+    }
+
+    /// 收口缝（仅 cfg(test)）：读门控状态（测试侧等停靠用）。
+    #[cfg(test)]
+    fn monitor_gate_state(&self) -> Option<TestGateState> {
+        let gate = self.lock().test_gate.clone()?;
+        let (lock, _) = &*gate;
+        let state = *lock.lock().unwrap_or_else(|p| p.into_inner());
+        Some(state)
+    }
+
+    /// 收口缝（仅 cfg(test)）：终止请求快照（门控自动放行条件）。
+    #[cfg(test)]
+    fn kill_snapshot(&self) -> Option<KillReq> {
+        self.lock().kill
     }
 
     /// 请求终止进程组并唤醒监控线程（轮询兜底）；只对运行中会话生效。
@@ -1060,6 +1154,12 @@ fn build_tool_command(cmd: &str) -> std::io::Result<Command> {
         Some((program, args, child_env)) => {
             let mut c = Command::new(program);
             c.args(args);
+            // 033-B2：继承 fd ≥3 标记 CLOEXEC（execve 时关闭）——launcher 遗留的
+            // 非 CLOEXEC fd 不再进入沙箱载荷；仅沙箱分支（普通模式零变化）。
+            // 闭包为无捕获 fn 项，pre_exec 异步信号安全（单个 syscall）。
+            unsafe {
+                c.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
+            }
             c.env_clear();
             c.envs(child_env);
             Ok(c)
@@ -1169,6 +1269,9 @@ fn open_pty() -> std::io::Result<(File, File)> {
 fn monitor_thread(session: Arc<Session>, mut child: Child, deadline: Option<Instant>) {
     let pgid = child.id() as libc::pid_t;
     let terminal = loop {
+        // 收口缝（仅 cfg(test)）：门控停靠点——见 test_gate_wait（不持锁）。
+        #[cfg(test)]
+        test_gate_wait(&session);
         let mut st = session.lock();
         // 终止请求（terminate=true／管理器关闭），或总运行时限到期：
         // 到期独立生效，不依赖查询在场。
@@ -1585,6 +1688,21 @@ fn seam_killpg_injection_deadline_not_fake_timeout() {
     let before = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
     std::thread::sleep(Duration::from_millis(300));
     assert!(std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0) > before);
+    // 收口缝：布防门控并等监控停靠（会话级同步点；停靠处**不持会话锁**，
+    // 不阻塞下方 request_kill）。停靠后挂起的 Deadline 请求不可能被 10ms
+    // 轮询重试消费——显式 terminate 的提交被确定性编排到消费之前（提交可见
+    // 即自动放行），下方断言验证的覆盖语义不变，不再依赖抢在 tick 前执行
+    //（2026-10-27 负载竞态 flake 的确定性修复；RED 证据见收口记录）。
+    let sess = {
+        let st = mgr.lock_mgr();
+        st.sessions.get("s1").expect("会话应在册").clone()
+    };
+    let _gate = sess.arm_monitor_gate();
+    let parked_deadline = Instant::now() + Duration::from_secs(5);
+    while sess.monitor_gate_state() != Some(TestGateState::Parked) {
+        assert!(Instant::now() < parked_deadline, "监控未停靠收口门控");
+        std::thread::sleep(Duration::from_millis(2));
+    }
     // 解除注入后显式 terminate：用户显式终止覆盖仍挂起的时限请求，
     // 终止成功后事由归 terminate（请求共存不被静默丢弃）
     drop(_kill_fail);

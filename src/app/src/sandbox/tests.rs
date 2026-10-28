@@ -290,6 +290,151 @@ fn missing_deny_path_is_noop() {
     fs::remove_dir_all(&ws).ok();
 }
 
+/// B1（2026-10-27 加固）：deny 目标为常规文件且存在多个硬链接（nlink>1）＝
+/// 拒绝组装——路径级遮蔽（挂载在路径上）不覆盖同 inode 的其他路径，别名不可
+/// 枚举，只能拒绝该次启动（fail closed，不回退普通模式）。只处理「检查时已
+/// 存在」的硬链接：检查到挂载之间及运行期的并发变化仍是边界（不构成完整
+/// 竞态防护），见 docs/logs/033-tool-sandbox/2026-10-27-b1-b2-risk-verification.md。
+#[test]
+fn deny_target_with_hardlinks_fails_closed() {
+    let ws = tmp_ws("deny-hardlink");
+    // 夹具预清理（幂等）：上次失败运行的残留会让 hard_link EEXIST 掩盖真实信号。
+    let _ = fs::remove_dir_all(&ws);
+    fs::create_dir_all(&ws).unwrap();
+    let env = ws.join(".env");
+    fs::write(&env, "FAKE-TEST-TOKEN=1\n").unwrap();
+    fs::hard_link(&env, ws.join("env-alias")).unwrap();
+    let policy = policy_for(&ws);
+    let err = create_bwrap_command_args(vec!["sh".into()], &policy, &ws, false).unwrap_err();
+    assert!(
+        err.contains("硬链接") && err.contains(&path_to_string(&env)),
+        "fail-closed 错误应指明受保护文件与硬链接，实际：{err}"
+    );
+    fs::remove_dir_all(&ws).ok();
+}
+
+/// B1 控制组：单链接（nlink=1）deny 目标照常遮蔽（既有 T1 层级语义不变）。
+#[test]
+fn deny_target_single_link_still_masks() {
+    let ws = tmp_ws("deny-single");
+    let env = ws.join(".env");
+    fs::write(&env, "FAKE-TEST-TOKEN=2\n").unwrap();
+    let policy = policy_for(&ws);
+    let args = create_bwrap_command_args(vec!["sh".into()], &policy, &ws, false).unwrap();
+    assert!(
+        args.windows(3)
+            .any(|w| w == ["--ro-bind", "/dev/null", &path_to_string(&env)]),
+        "单链接 deny 照常遮蔽：{args:?}"
+    );
+    fs::remove_dir_all(&ws).ok();
+}
+
+/// B1 边界口径：可写根之外的符号链接 deny（不触发可写符号链接 fail-closed
+/// 分支）＝检查**跟随到的实际文件**的链接数（符号链接自身恒为 1，查链接本身
+/// 会漏判）；实际文件多链接时同样拒绝。
+#[test]
+fn rootless_symlink_deny_follows_to_actual_file_nlink() {
+    let ws = tmp_ws("deny-sl-nlink");
+    let outside = std::env::temp_dir().join(format!("tchat-sb-out-sl-{}", std::process::id()));
+    // 夹具预清理（幂等）：残留的 alias 硬链接/.env 符号链接会让 EEXIST 掩盖真实信号。
+    let _ = fs::remove_dir_all(&outside);
+    fs::create_dir_all(&outside).unwrap();
+    let target = outside.join("real-secret");
+    fs::write(&target, "FAKE-TEST-TOKEN=3\n").unwrap();
+    fs::hard_link(&target, outside.join("alias")).unwrap();
+    symlink_or_skip(&target, &outside.join(".env"));
+    let policy = SandboxPolicy {
+        full_disk_read: true,
+        writable_roots: vec![ws.clone()],
+        unreadable_roots: vec![outside.join(".env")],
+    };
+    let err = create_bwrap_command_args(vec!["sh".into()], &policy, &ws, false).unwrap_err();
+    assert!(
+        err.contains("硬链接"),
+        "应跟随符号链接检查实际文件链接数并拒绝，实际：{err}"
+    );
+    let _ = fs::remove_dir_all(&outside);
+    fs::remove_dir_all(&ws).ok();
+}
+
+/// B1 收口（2026-10-27）：deny 目标 stat 失败且**非** NotFound/NotADirectory＝
+/// 显式拒绝（链接数与目标状态不明，fail closed）。稳定触发：可写根之外的自指
+/// 符号链接（metadata 恒 ELOOP；不触发可写符号链接分支——该分支只拒绝
+/// **可写根内**的符号链接，遍历对根外符号链接放行）。此前 `exists()` 口径对
+/// 任何 stat 错误都返回 false，会把这类错误静默当 missing 跳过检查（不遮蔽、
+/// 不拒绝＝fail-open，本轮 RED 留档）。
+#[test]
+fn deny_target_metadata_error_fails_closed() {
+    let ws = tmp_ws("deny-eloop");
+    let outside = std::env::temp_dir().join(format!("tchat-sb-out-loop-{}", std::process::id()));
+    // 夹具预清理（幂等）：残留的循环符号链接会让 symlink EEXIST 掩盖真实信号。
+    let _ = fs::remove_dir_all(&outside);
+    fs::create_dir_all(&outside).unwrap();
+    let loop_path = outside.join(".env");
+    symlink_or_skip(&loop_path, &loop_path); // 自指循环：metadata() 恒 ELOOP
+    let policy = SandboxPolicy {
+        full_disk_read: true,
+        writable_roots: vec![ws.clone()],
+        unreadable_roots: vec![loop_path.clone()],
+    };
+    let err = create_bwrap_command_args(vec!["sh".into()], &policy, &ws, false).unwrap_err();
+    assert!(
+        err.contains("状态读取失败") && err.contains(&path_to_string(&loop_path)),
+        "非 NotFound stat 错误应显式拒绝，实际：{err}"
+    );
+    let _ = fs::remove_dir_all(&outside);
+    fs::remove_dir_all(&ws).ok();
+}
+
+/// B1 收口：deny 目标父目录不可穿越（权限 000，EACCES）＝同样显式拒绝。
+/// 符号链接遍历遇 lstat 错误按上游语义 break 跳过（不构成拦截），非 NotFound
+/// 分类必须由 metadata 检查兜底。夹具目录在工作区之外，锚定根不受影响；
+/// 断言后先恢复权限再清理（否则自身 remove_dir_all 也失败）。
+#[test]
+fn deny_target_parent_permission_error_fails_closed() {
+    use std::os::unix::fs::PermissionsExt;
+    let ws = tmp_ws("deny-eacces");
+    let box_ = std::env::temp_dir().join(format!("tchat-sb-box-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&box_);
+    fs::create_dir_all(&box_).unwrap();
+    let env = box_.join(".env");
+    fs::write(&env, "FAKE-TEST-TOKEN=4\n").unwrap();
+    fs::set_permissions(&box_, fs::Permissions::from_mode(0o000)).unwrap();
+    let policy = SandboxPolicy {
+        full_disk_read: true,
+        writable_roots: vec![ws.clone()],
+        unreadable_roots: vec![env.clone()],
+    };
+    let err = create_bwrap_command_args(vec!["sh".into()], &policy, &ws, false).unwrap_err();
+    fs::set_permissions(&box_, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        err.contains("状态读取失败") && err.contains(&path_to_string(&env)),
+        "EACCES 应显式拒绝而非静默跳过检查，实际：{err}"
+    );
+    let _ = fs::remove_dir_all(&box_);
+    fs::remove_dir_all(&ws).ok();
+}
+
+/// 控制组：路径组件非目录（ENOTDIR）与 NotFound 同类＝既有 missing no-op
+/// 语义不变（不遮蔽、不拒绝；missing_deny_path_is_noop 覆盖 NotFound 面）。
+#[test]
+fn deny_target_enotdir_is_noop() {
+    let ws = tmp_ws("deny-enotdir");
+    let notdir = ws.join("plain-file");
+    fs::write(&notdir, "x").unwrap();
+    let policy = SandboxPolicy {
+        full_disk_read: true,
+        writable_roots: vec![ws.clone()],
+        unreadable_roots: vec![notdir.join(".env")],
+    };
+    let args = create_bwrap_command_args(vec!["sh".into()], &policy, &ws, false).unwrap();
+    assert!(
+        !args.iter().any(|a| a.contains(".env")),
+        "ENOTDIR 与 NotFound 同类：no-op 不遮蔽：{args:?}"
+    );
+    fs::remove_dir_all(&ws).ok();
+}
+
 /// T5 cwd 符号链接别名：命令 cwd 进入 canonical（上游 --chdir 分支）。
 #[test]
 fn symlinked_command_cwd_gets_chdir() {

@@ -140,8 +140,19 @@ pub fn apply_patch_sandboxed_with_exe(
     };
     use std::io::Write;
     use std::process::Stdio;
-    let child = std::process::Command::new(program)
-        .args(sandbox_args)
+    let mut spawn_cmd = std::process::Command::new(program);
+    spawn_cmd.args(sandbox_args);
+    // 033-B2：同 exec 面——继承 fd ≥3 标记 CLOEXEC（execve 时关闭）；仅沙箱
+    // 分支。pre_exec 为 unix API；非 unix 下 tool_launch_argv 恒 None，不会
+    // 到达此分支（cfg 门控仅为可编译性）。
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            spawn_cmd.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
+        }
+    }
+    let child = spawn_cmd
         .env_clear() // 033：凭据环境不进补丁子进程（027 R1 环境面防线保留）
         .envs(child_env)
         .stdin(Stdio::piped())
