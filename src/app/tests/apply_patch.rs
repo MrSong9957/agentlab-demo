@@ -10,7 +10,7 @@
 mod common;
 
 use std::fs;
-use std::os::unix::fs::{symlink, FileTypeExt, PermissionsExt};
+use std::os::unix::fs::{symlink, FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -138,13 +138,28 @@ fn invalid_patches_error_without_touching_files() {
         (patch(&format!("*** Update File: {pa}\n@@")), "变更行"),
         // 变更行后出现非 +/-/空格 开头的行
         (patch(&format!("*** Update File: {pa}\n@@\n-a\nbad line")), "@@"),
-        // 不支持的操作：Move to
+        // ---- 029：Move 非法语法变体（含合法前序块时也不执行任何文件操作）----
+        // 重复 Move
         (
             patch(&format!(
-                "*** Update File: {pa}\n*** Move to: {}\n@@\n-a\n+b",
+                "*** Update File: {pa}\n*** Move to: {}\n*** Move to: {}\n@@\n-a\n+b",
+                dir.join("b1.txt").display(),
+                dir.join("b2.txt").display()
+            )),
+            "Move",
+        ),
+        // Move 位于修改行之后（错位）
+        (
+            patch(&format!(
+                "*** Update File: {pa}\n@@\n-a\n*** Move to: {}",
                 dir.join("b.txt").display()
             )),
-            "Move to",
+            "@@",
+        ),
+        // 空 Move 目标
+        (
+            patch(&format!("*** Update File: {pa}\n*** Move to: \n@@\n-a\n+b")),
+            "Move",
         ),
         // Add 块缺少 + 内容行（后续 Delete 不应执行）
         (
@@ -1265,5 +1280,798 @@ fn n5_generated_content_limits() {
     assert_eq!(fs::read(&victim).unwrap(), b"v\n".to_vec(), "超限项写入前拒绝、字节不变");
     assert_eq!(r.changed_files.len(), 1, "清单只含已确认前项：{r:?}");
     assert!(r.state_known, "写入前校验失败：{r:?}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------- 029 M2：Move 文件操作与部分成功（验收 A1/A2/A4/A5/A6/A7a/A8/A9＋展示）----------
+
+/// A1 纯移动：常规/空文件/无末尾换行/混合行尾 → 目标逐字节等于原文；源消失；
+/// 清单依次为目标 add、源 delete；中文与含空格路径可用。
+#[test]
+fn move_pure_moves_bytes_verbatim() {
+    let dir = temp_dir("move-a1");
+    for (tag, content) in [
+        ("regular", b"a\nb\nc\n".to_vec()),
+        ("empty", b"".to_vec()),
+        ("no-final-nl", b"x\ny".to_vec()),
+        ("mixed-eol", b"a\r\nb\rc\n".to_vec()),
+    ] {
+        let src = dir.join(format!("旧 文-{tag}.txt"));
+        let dst = dir.join(format!("归 档 子目录/新 名-{tag}.txt")); // 父目录缺失→按 Add 创建
+        fs::write(&src, &content).unwrap();
+        let r = call(&format!(
+            "*** Update File: {s}\n*** Move to: {d}",
+            s = src.display(),
+            d = dst.display()
+        ));
+        assert!(r.ok, "{tag}: {r:?}");
+        assert!(r.state_known, "{tag}: {r:?}");
+        assert_eq!(r.error, None, "{tag}: {r:?}");
+        assert_eq!(
+            r.changed_files,
+            vec![
+                ChangedFile { path: dst.display().to_string(), action: Action::Add },
+                ChangedFile { path: src.display().to_string(), action: Action::Delete },
+            ],
+            "{tag}: 清单依次为目标 add、源 delete"
+        );
+        assert!(!src.exists(), "{tag}: 源应消失");
+        assert_eq!(read(&dst), content, "{tag}: 纯移动逐字节保留（含行尾与缺失的末尾换行）");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A2 移动并修改：中文/空格路径、@@ 定位与替换；未改行行尾逐字节保留，替换行
+/// 沿用源文件首个换行风格，清单两记录有序。
+#[test]
+fn move_with_modification_updates_content() {
+    let dir = temp_dir("move-a2");
+    let src = dir.join("旧 文 件.txt");
+    let dst = dir.join("归档/新 文件.txt");
+    fs::write(&src, "alpha\r\nbeta\r\n中文 行\r\ngamma\r\n").unwrap();
+    let r = call(&format!(
+        "*** Update File: {s}\n*** Move to: {d}\n@@ 中文 行\n-gamma\n+gamma2\n+added",
+        s = src.display(),
+        d = dst.display()
+    ));
+    assert!(r.ok, "{r:?}");
+    assert_eq!(
+        r.changed_files,
+        vec![
+            ChangedFile { path: dst.display().to_string(), action: Action::Add },
+            ChangedFile { path: src.display().to_string(), action: Action::Delete },
+        ],
+        "{r:?}"
+    );
+    assert!(!src.exists());
+    assert_eq!(
+        read(&dst),
+        b"alpha\r\nbeta\r\n\xe4\xb8\xad\xe6\x96\x87 \xe8\xa1\x8c\r\ngamma2\r\nadded\r\n".to_vec(),
+        "未改行保留原行尾（CRLF/中文上下文原样），替换行用源首个换行风格 CRLF"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A4 源问题：缺失/符号链接（含悬空）/FIFO/目录/非 UTF-8 → 不创建目标、不删源、
+/// 清单为空、状态已知、错误含源路径。
+#[test]
+fn move_rejects_bad_sources_without_side_effects() {
+    let dir = temp_dir("move-a4");
+    let real = dir.join("real.txt");
+    fs::write(&real, b"real\n").unwrap();
+    let fifo = dir.join("fifo");
+    let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes().to_vec()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+
+    struct Case {
+        tag: &'static str,
+        setup: Box<dyn Fn(&Path) -> PathBuf>,
+        expect_err: &'static str,
+    }
+    let cases = vec![
+        Case {
+            tag: "missing",
+            setup: Box::new(|dir: &Path| dir.join("no-such.txt")),
+            expect_err: "不存在",
+        },
+        Case {
+            tag: "symlink",
+            setup: Box::new(|dir: &Path| {
+                let target = dir.join("real.txt");
+                let link = dir.join("link.txt");
+                symlink(&target, &link).unwrap();
+                link
+            }),
+            expect_err: "符号链接",
+        },
+        Case {
+            tag: "dangling",
+            setup: Box::new(|dir: &Path| {
+                let link = dir.join("dangling.txt");
+                symlink(dir.join("nowhere.txt"), &link).unwrap();
+                link
+            }),
+            expect_err: "符号链接",
+        },
+        Case {
+            tag: "fifo",
+            // 顶部已创建 dir/fifo（供收尾复查），此处只复用同一对象
+            setup: Box::new(|dir: &Path| dir.join("fifo")),
+            expect_err: "常规文件",
+        },
+        Case {
+            tag: "directory",
+            setup: Box::new(|dir: &Path| {
+                let d = dir.join("sub-dir");
+                fs::create_dir_all(&d).unwrap();
+                d
+            }),
+            expect_err: "常规文件",
+        },
+        Case {
+            tag: "non-utf8",
+            setup: Box::new(|dir: &Path| {
+                let f = dir.join("bin.txt");
+                fs::write(&f, [0xFF, 0xFE, 0x00]).unwrap();
+                f
+            }),
+            expect_err: "UTF-8",
+        },
+    ];
+    for (i, case) in cases.iter().enumerate() {
+        let src = (case.setup)(&dir);
+        let dst = dir.join(format!("dst-{i}.txt"));
+        let r = call(&format!(
+            "*** Update File: {s}\n*** Move to: {d}",
+            s = src.display(),
+            d = dst.display()
+        ));
+        assert!(!r.ok, "{}: {r:?}", case.tag);
+        assert!(r.changed_files.is_empty(), "{}: 清单为空：{r:?}", case.tag);
+        assert!(r.state_known, "{}: 未发生写入：{r:?}", case.tag);
+        let err = r.error.clone().unwrap_or_default();
+        assert!(err.contains(case.expect_err), "{}: 错误应含「{}」：{err}", case.tag, case.expect_err);
+        assert!(err.contains(&src.display().to_string()), "{}: 错误含源路径：{err}", case.tag);
+        assert!(!dst.exists(), "{}: 不得创建目标", case.tag);
+        // 源对象原样保留
+        match case.tag {
+            "missing" => {
+                assert!(!src.exists(), "缺失源不得被创建");
+            }
+            "dangling" => {
+                assert!(
+                    fs::symlink_metadata(&src).unwrap().file_type().is_symlink(),
+                    "dangling: 源符号链接本体不动"
+                );
+            }
+            "non-utf8" => assert_eq!(read(&src), [0xFF, 0xFE, 0x00].to_vec(), "{}: 源字节不变", case.tag),
+            "directory" => assert!(src.is_dir(), "{}: 目录不动", case.tag),
+            _ => {}
+        }
+    }
+    assert!(real.exists(), "real 不受影响");
+    assert!(fs::symlink_metadata(&fifo).unwrap().file_type().is_fifo(), "FIFO 不动");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A5 目标冲突：已存在的各类对象（常规/目录/符号链接/悬空/指向源的硬链接）、
+/// 源=目标同串、`.`/`..` 等价路径 → 按目标冲突拒绝；既有对象与源均不变。
+#[test]
+fn move_rejects_existing_targets() {
+    let dir = temp_dir("move-a5");
+    // 指向源的硬链接：链接数 2，双方内容与存在状态不变
+    {
+        let src = dir.join("hl-src.txt");
+        let dst = dir.join("hl-dst.txt");
+        fs::write(&src, b"hard\n").unwrap();
+        fs::hard_link(&src, &dst).unwrap();
+        let r = call(&format!(
+            "*** Update File: {s}\n*** Move to: {d}",
+            s = src.display(),
+            d = dst.display()
+        ));
+        assert!(!r.ok && r.state_known && r.changed_files.is_empty(), "{r:?}");
+        assert!(r.error.clone().unwrap().contains("已存在"), "{r:?}");
+        assert_eq!(read(&src), b"hard\n".to_vec(), "源不变");
+        assert_eq!(read(&dst), b"hard\n".to_vec(), "硬链接目标不变");
+        assert_eq!(
+            fs::symlink_metadata(&dst).unwrap().nlink(),
+            2,
+            "链接数不变（未删任何一方）"
+        );
+    }
+    // 常规文件 / 目录 / 符号链接 / 悬空链接
+    for (tag, mk) in [
+        ("file", Box::new(|p: &Path| fs::write(p, b"x\n").unwrap()) as Box<dyn Fn(&Path)>),
+        ("dir", Box::new(|p: &Path| fs::create_dir_all(p).unwrap())),
+        (
+            "symlink",
+            Box::new(|p: &Path| symlink("/etc/hostname", p).unwrap()),
+        ),
+        ("dangling", Box::new(|p: &Path| symlink("/no/such/target", p).unwrap())),
+    ] {
+        let src = dir.join(format!("src-{tag}.txt"));
+        let dst = dir.join(format!("dst-{tag}"));
+        fs::write(&src, b"src\n").unwrap();
+        mk(&dst);
+        let dst_before = fs::symlink_metadata(&dst).unwrap();
+        let r = call(&format!(
+            "*** Update File: {s}\n*** Move to: {d}",
+            s = src.display(),
+            d = dst.display()
+        ));
+        assert!(!r.ok && r.state_known && r.changed_files.is_empty(), "{tag}: {r:?}");
+        let err = r.error.clone().unwrap_or_default();
+        assert!(err.contains("已存在"), "{tag}: {err}");
+        assert_eq!(read(&src), b"src\n".to_vec(), "{tag}: 源不变");
+        let dst_after = fs::symlink_metadata(&dst).unwrap();
+        assert_eq!(
+            (dst_after.file_type(), dst_after.len()),
+            (dst_before.file_type(), dst_before.len()),
+            "{tag}: 目标原有对象不变"
+        );
+    }
+    // 源=目标同串；`./`、`..` 等价路径
+    {
+        let src = dir.join("same.txt");
+        fs::write(&src, b"same\n").unwrap();
+        for dst_expr in [
+            src.display().to_string(),
+            format!("{}/./same.txt", dir.display()),
+            format!("{}/sub/../same.txt", dir.display()),
+        ] {
+            let r = call(&format!(
+                "*** Update File: {s}\n*** Move to: {d}",
+                s = src.display(),
+                d = dst_expr
+            ));
+            assert!(!r.ok && r.changed_files.is_empty(), "{dst_expr}: {r:?}");
+            let err = r.error.clone().unwrap_or_default();
+            assert!(
+                err.contains("同一") || err.contains("已存在"),
+                "{dst_expr}: 按目标冲突拒绝：{err}"
+            );
+            assert_eq!(read(&src), b"same\n".to_vec(), "{dst_expr}: 源不变");
+        }
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A6 半写：RLIMIT_FSIZE 子进程内移动 → 目标残片可观察、源完整、不虚报 add、
+/// 状态未知；目标写入路径确实执行。
+#[test]
+fn move_half_write_preserves_source() {
+    efbig_child_mode(); // 子进程模式：限额内执行注入场景后已在子进程内退出
+    let dir = temp_dir("move-a6");
+    let src = dir.join("src.txt");
+    let dst = dir.join("dst.txt");
+    let body = "line-0000\n".repeat(1024); // 10 KiB
+    fs::write(&src, &body).unwrap();
+    let patch_text = patch(&format!(
+        "*** Update File: {s}\n*** Move to: {d}",
+        s = src.display(),
+        d = dst.display()
+    ));
+    let r = apply_patch_under_fsize_limit("move_half_write_preserves_source", &patch_text, 4096);
+    assert_eq!(r["ok"], json!(false), "{r}");
+    assert_eq!(r["state_known"], json!(false), "目标可能半写：{r}");
+    assert_eq!(r["changed_files"], json!([]), "未完整写入不得记 add：{r}");
+    let err = r["error"].as_str().unwrap();
+    assert!(err.contains(&dst.display().to_string()), "错误含目标路径：{err}");
+    assert_eq!(read(&src), body.as_bytes().to_vec(), "源内容完整保留");
+    let partial = read(&dst);
+    assert_eq!(partial.len(), 4096, "写入开始后失败，落盘软限制内前 4096 字节");
+    assert_eq!(partial.as_slice(), &body.as_bytes()[..4096], "残片为确定性的内容前缀");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A7a 删源失败：目标可创建但源父目录不可写（非 root 身份下 unlink EACCES）→
+/// 清单保留目标 add、不记源 delete、状态未知、错误含两路径与失败阶段；
+/// 已写好的目标保留，不自动清理。
+#[test]
+fn move_delete_failure_keeps_target_add() {
+    if unsafe { libc::getuid() } == 0 {
+        // root 无视目录权限位，EACCES 不可触发；换用只读 bind mount 之外的
+        // 确定性替代：跳过并在报告中注明（本容器执行身份非 root，通常可达）。
+        eprintln!("以 root 运行：权限位不构成删除失败，跳过 A7a 权限变体");
+        return;
+    }
+    let dir = temp_dir("move-a7a");
+    let srcdir = dir.join("srcdir");
+    let dstdir = dir.join("dstdir");
+    fs::create_dir_all(&srcdir).unwrap();
+    fs::create_dir_all(&dstdir).unwrap();
+    let src = srcdir.join("f.txt");
+    let dst = dstdir.join("g.txt");
+    fs::write(&src, b"content\n").unwrap();
+    set_mode(&srcdir, 0o555);
+    let r = call(&format!(
+        "*** Update File: {s}\n*** Move to: {d}",
+        s = src.display(),
+        d = dst.display()
+    ));
+    set_mode(&srcdir, 0o755); // 先恢复再断言/清理
+    assert!(!r.ok, "{r:?}");
+    assert!(!r.state_known, "删除失败：{r:?}");
+    assert_eq!(
+        r.changed_files,
+        vec![ChangedFile { path: dst.display().to_string(), action: Action::Add }],
+        "清单保留已完整写入的目标 add：{r:?}"
+    );
+    let err = r.error.clone().unwrap_or_default();
+    assert!(err.contains("删除"), "错误标明失败阶段：{err}");
+    assert!(err.contains(&src.display().to_string()), "错误含源路径：{err}");
+    assert!(err.contains(&dst.display().to_string()), "错误含目标路径：{err}");
+    assert_eq!(read(&dst), b"content\n".to_vec(), "目标保留（不自动清理）");
+    assert_eq!(read(&src), b"content\n".to_vec(), "源仍在");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A8 有序块链 A→B、B→C（并修改），随后失败块 → 每次真实操作入清单且不去重、
+/// 失败停止不回滚；重复同一补丁：源已缺失 → 失败且不改已成功目标。
+#[test]
+fn move_chain_and_repeat_patch() {
+    let dir = temp_dir("move-a8");
+    let a = dir.join("A.txt");
+    let b = dir.join("B.txt");
+    let c = dir.join("C.txt");
+    let d = dir.join("D.txt");
+    let missing = dir.join("missing.txt");
+    fs::write(&a, b"A-content\n").unwrap();
+    let patch_text = patch(&format!(
+        "*** Update File: {a}\n*** Move to: {b}\n\
+         *** Update File: {b}\n*** Move to: {c}\n@@\n-A-content\n+C-content\n\
+         *** Update File: {m}\n*** Move to: {d}",
+        a = a.display(),
+        b = b.display(),
+        c = c.display(),
+        d = d.display(),
+        m = missing.display()
+    ));
+    let r = apply_patch(&json!({ "patch": patch_text }));
+    assert!(!r.ok, "第三块失败：{r:?}");
+    assert!(r.state_known, "失败为校验型（源不存在）：{r:?}");
+    assert_eq!(
+        r.changed_files,
+        vec![
+            ChangedFile { path: b.display().to_string(), action: Action::Add },
+            ChangedFile { path: a.display().to_string(), action: Action::Delete },
+            ChangedFile { path: c.display().to_string(), action: Action::Add },
+            ChangedFile { path: b.display().to_string(), action: Action::Delete },
+        ],
+        "清单按实际完成顺序追加（B 的 add 与 delete 均记录，不去重）：{r:?}"
+    );
+    assert!(!a.exists() && !b.exists(), "A、B 均已消失");
+    assert_eq!(read(&c), b"C-content\n".to_vec(), "移动并修改的目标内容");
+    assert!(!d.exists(), "失败块不创建目标");
+
+    // 重复同一补丁：首块 A→B 因 A 缺失失败；C 不被改动
+    let r2 = apply_patch(&json!({ "patch": patch_text }));
+    assert!(!r2.ok && r2.changed_files.is_empty() && r2.state_known, "{r2:?}");
+    assert_eq!(read(&c), b"C-content\n".to_vec(), "已成功目标内容不变");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A9 资源边界：源超读入上限（字节/行数）→ 不创建目标；生成内容超限 →
+/// 创建目标前拒绝，源与目标均不变。
+#[test]
+fn move_respects_size_limits() {
+    let dir = temp_dir("move-a9");
+    // 源 > 4 MiB：读入上限拒绝
+    let big = dir.join("big-src.txt");
+    fs::write(&big, vec![b'x'; 4 * 1024 * 1024 + 1]).unwrap();
+    let dst = dir.join("big-dst.txt");
+    let r = call(&format!(
+        "*** Update File: {s}\n*** Move to: {d}",
+        s = big.display(),
+        d = dst.display()
+    ));
+    assert!(!r.ok && r.state_known && r.changed_files.is_empty(), "{r:?}");
+    assert!(r.error.clone().unwrap().contains("4 MiB"), "{r:?}");
+    assert!(!dst.exists(), "读入拒绝不创建目标");
+    assert_eq!(fs::metadata(&big).unwrap().len(), 4 * 1024 * 1024 + 1, "源不变");
+
+    // 源行数 > 100000：读入上限拒绝（字节远小于 4 MiB）
+    let many = dir.join("many-lines.txt");
+    fs::write(&many, format!("{}z", "z\n".repeat(100_000))).unwrap(); // 100001 逻辑行
+    let dst2 = dir.join("many-dst.txt");
+    let r = call(&format!(
+        "*** Update File: {s}\n*** Move to: {d}",
+        s = many.display(),
+        d = dst2.display()
+    ));
+    assert!(!r.ok && r.state_known && r.changed_files.is_empty(), "{r:?}");
+    assert!(r.error.clone().unwrap().contains("100000"), "{r:?}");
+    assert!(!dst2.exists());
+
+    // 移动并修改：生成内容 > 4 MiB（源 4 MiB-2＋替换更长行 → 4 MiB+1）→ 创建目标前拒绝
+    let grown = dir.join("grown.txt");
+    fs::write(&grown, format!("{}\nold\n", "x".repeat(4 * 1024 * 1024 - 7))).unwrap();
+    let dst3 = dir.join("grown-dst.txt");
+    let r = call(&format!(
+        "*** Update File: {s}\n*** Move to: {d}\n@@\n-old\n+NEWOLD",
+        s = grown.display(),
+        d = dst3.display()
+    ));
+    assert!(!r.ok && r.state_known && r.changed_files.is_empty(), "{r:?}");
+    assert!(r.error.clone().unwrap().contains("4 MiB"), "生成内容写前检查：{r:?}");
+    assert!(!dst3.exists(), "超限不创建目标");
+    assert_eq!(read(&grown)[..16], b"xxxxxxxxxxxxxxxx"[..], "源不变");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// 012/029 展示：Move 产出两条卡片——目标 Add（真实新内容）＋源 Delete（真实旧
+/// 内容）；结果 JSON 与清单并行且不含展示字段；部分成功只展示已确认操作。
+#[test]
+fn move_display_shows_two_cards() {
+    let dir = temp_dir("move-disp");
+    let src = dir.join("s.txt");
+    let dst = dir.join("d.txt");
+    fs::write(&src, "one\ntwo\n").unwrap();
+    let patch_text = patch(&format!(
+        "*** Update File: {s}\n*** Move to: {d}\n@@\n-two\n+TWO",
+        s = src.display(),
+        d = dst.display()
+    ));
+    let (r, changes) =
+        terminal_chat::apply_patch::apply_patch_with_display(&json!({ "patch": patch_text }));
+    assert!(r.ok, "{r:?}");
+    assert_eq!(changes.len(), 2, "两条展示卡片：{changes:?}");
+    assert_eq!(changes[0].path, dst.display().to_string());
+    match &changes[0].kind {
+        terminal_chat::prompt::PatchChangeKind::Add { content } => {
+            assert_eq!(content, "one\nTWO\n", "目标卡片＝真实新内容");
+        }
+        other => panic!("卡片 0 应为 Add：{other:?}"),
+    }
+    assert_eq!(changes[1].path, src.display().to_string());
+    match &changes[1].kind {
+        terminal_chat::prompt::PatchChangeKind::Delete { content } => {
+            assert_eq!(content.as_deref(), Some("one\ntwo\n"), "源卡片＝真实旧内容");
+        }
+        other => panic!("卡片 1 应为 Delete：{other:?}"),
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ---------- 029 M3：第四级 Unicode 匹配容差（验收 B1/B3/B4/C1 的文件级行为）----------
+
+/// B1 集成层：源文行内含全部四组 Unicode 字符，补丁上下文/旧行全用 ASCII 对应物
+/// → @@ 定位与旧行匹配均成功；只按指定映射替换，未涉及行逐字节保留。
+#[test]
+fn update_level4_matches_all_groups_inline() {
+    let dir = temp_dir("m3-b1");
+    let f = dir.join("b1.txt");
+    // 行内位置（非行首尾），保证不被 trim 先行消除
+    let src_lines = [
+        format!("前{}后", '\u{2014}'),          // em dash → '-'
+        format!("{}quoted{}", '\u{201C}', '\u{201D}'), // 弯双引号 → '"'
+        format!("it{}s", '\u{2019}'),           // 弯单引号 → '\''
+        format!("keep{}mid", '\u{00A0}'),       // NBSP → ' '
+        format!("w{}ide", '\u{2003}'),          // em space → ' '
+        "plain".to_string(),
+    ];
+    let src_text = src_lines.join("\n") + "\n";
+    fs::write(&f, &src_text).unwrap();
+    // 补丁：旧行全部用 ASCII 对应物匹配（第一~三级必失败，走第四级）
+    let r = call(&format!(
+        "*** Update File: {f}\n@@\n\
+         -前-后\n\
+         -\"quoted\"\n\
+         -it's\n\
+         -keep mid\n\
+         -w ide\n\
+         +REPLACED\n+plain2",
+        f = f.display()
+    ));
+    assert!(r.ok, "{r:?}");
+    assert_eq!(r.changed_files.len(), 1);
+    // 未涉及行逐字节保留（plain 原样）；替换与新增按补丁文本写入
+    let after = fs::read_to_string(&f).unwrap();
+    assert_eq!(after, "REPLACED\nplain2\nplain\n", "目标字节与预期一致：{after:?}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// B3：Unicode 上下文＋ASCII 补丁匹配；新增文本含另一组 Unicode；混合行尾——
+/// 未修改上下文逐字节保留（含弯引号与 CRLF），新增行按补丁文字＋004 行尾规则。
+#[test]
+fn update_level4_preserves_unmodified_unicode_bytes() {
+    let dir = temp_dir("m3-b3");
+    let f = dir.join("b3.txt");
+    // 首个换行 CRLF ⇒ preferred ending CRLF；未改行保留各自原行尾
+    let src = "\u{201C}头部\u{201D}\r\nkeep\u{00A0}me\r\nold\u{2013}line\r\n";
+    fs::write(&f, src).unwrap();
+    let (r, changes) = terminal_chat::apply_patch::apply_patch_with_display(&json!({ "patch":
+        patch(&format!(
+            "*** Update File: {f}\n@@ \"头部\"\n-keep me\n+新‘增’行",
+            f = f.display()
+        ))
+    }));
+    assert!(r.ok, "{r:?}");
+    // 头部上下文逐字节保留（弯引号＋CRLF）；旧行按第四级匹配删除；
+    // 新增行文字按补丁写入、行尾用 preferred CRLF
+    assert_eq!(
+        read(&f),
+        "\u{201C}头部\u{201D}\r\n新‘增’行\r\nold\u{2013}line\r\n".as_bytes().to_vec(),
+        "未修改行逐字节保留，新增行用补丁文字＋CRLF"
+    );
+    // 展示 diff 来自真实前后内容：含原始弯引号（未被归一化）
+    match &changes[0].kind {
+        terminal_chat::prompt::PatchChangeKind::Update { diff } => {
+            let d = diff.clone();
+            assert!(d.contains("\u{201C}头部\u{201D}"), "diff 含原始弯引号上下文：{d}");
+        }
+        other => panic!("Update 形状：{other:?}"),
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// B4 集成层：未映射标点/全角/大小写/组合字符/连续空格差异 → 匹配失败、字节不变。
+#[test]
+fn update_level4_unmapped_differences_fail() {
+    let dir = temp_dir("m3-b4");
+    let f = dir.join("b4.txt");
+    let before = "a〜b\nａｂ\nAb\ná b\nx  y\n";
+    fs::write(&f, before).unwrap();
+    for old_line in ["a~b", "ab", "ab", "a b", "x y"] {
+        let r = call(&format!(
+            "*** Update File: {f}\n@@\n-{old}\n+NEVER",
+            f = f.display(),
+            old = old_line
+        ));
+        assert!(!r.ok, "未映射差异不应匹配：{old_line} → {r:?}");
+        assert!(r.state_known && r.changed_files.is_empty(), "{r:?}");
+    }
+    assert_eq!(fs::read_to_string(&f).unwrap(), before, "失败后字节不变");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// C1：源文含弯引号/特殊空格，Move 块用 ASCII 上下文并修改 → 移动＋第四级匹配
+/// 共同生效；不匹配对照不创建目标、不删源。
+#[test]
+fn move_with_level4_matching_moves_and_modifies() {
+    let dir = temp_dir("m3-c1");
+    let src = dir.join("c1-src.txt");
+    let dst = dir.join("c1-dst.txt");
+    let bad_dst = dir.join("c1-bad-dst.txt");
+    fs::write(&src, "\u{201C}标题\u{201D}\nmode=dev\nkeep\u{00A0}this\n").unwrap();
+
+    // 正例：@@ 定位用 ASCII 引号，旧行 ASCII 空格
+    let r = call(&format!(
+        "*** Update File: {s}\n*** Move to: {d}\n@@ \"标题\"\n-mode=dev\n+mode=test",
+        s = src.display(),
+        d = dst.display()
+    ));
+    assert!(r.ok, "{r:?}");
+    assert_eq!(
+        r.changed_files,
+        vec![
+            ChangedFile { path: dst.display().to_string(), action: Action::Add },
+            ChangedFile { path: src.display().to_string(), action: Action::Delete },
+        ],
+        "{r:?}"
+    );
+    assert!(!src.exists());
+    // 未修改上下文保留原始 Unicode 字节；替换行按补丁写入
+    assert_eq!(
+        read(&dst),
+        "\u{201C}标题\u{201D}\nmode=test\nkeep\u{00A0}this\n".as_bytes().to_vec(),
+        "目标保留未归一化上下文"
+    );
+
+    // 对照：未映射差异（波浪线）匹配失败 → 不创建目标、不删源
+    fs::write(&src, "a〜b\n").unwrap();
+    let r = call(&format!(
+        "*** Update File: {s}\n*** Move to: {d}\n@@\n-a~b\n+z",
+        s = src.display(),
+        d = bad_dst.display()
+    ));
+    assert!(!r.ok && r.state_known && r.changed_files.is_empty(), "{r:?}");
+    assert!(!bad_dst.exists(), "不匹配不得创建目标");
+    assert_eq!(fs::read_to_string(&src).unwrap(), "a〜b\n", "源不删");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// 029 补强（comprehensive-testing）：合法前序块＋后续非法 Move 语法 → 完整解析
+/// 阶段失败，前序块也不执行（空清单、已知状态、目录无新文件）。
+#[test]
+fn invalid_move_syntax_after_legal_block_executes_nothing() {
+    let dir = temp_dir("move-syn2");
+    let never = dir.join("never.txt");
+    let a = dir.join("a.txt");
+    fs::write(&a, b"keep\n").unwrap();
+    // 前序合法 Add＋后续重复 Move：整体解析失败
+    let r = apply_patch(&json!({ "patch": patch(&format!(
+        "*** Add File: {n}\n+content\n*** Update File: {a}\n*** Move to: {b}\n*** Move to: {c}\n@@\n-keep\n+K",
+        n = never.display(), a = a.display(), b = dir.join("b.txt").display(), c = dir.join("c.txt").display()
+    )) }));
+    assert!(!r.ok, "{r:?}");
+    assert!(r.changed_files.is_empty(), "前序合法块也不得执行：{r:?}");
+    assert!(r.state_known, "{r:?}");
+    let err = r.error.clone().unwrap_or_default();
+    assert!(err.contains("Move"), "{err}");
+    assert!(!never.exists(), "不创建前序目标");
+    assert_eq!(read(&a), b"keep\n".to_vec(), "后续块目标不动");
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "目录内无新文件");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// 029 补强（comprehensive-testing）：部分成功（目标写好、删源失败）时，展示
+/// 卡片只含已确认完成的目标 Add——不能把计划中的源删除画成成功。
+#[test]
+fn move_partial_success_display_shows_only_completed_add() {
+    if unsafe { libc::getuid() } == 0 {
+        eprintln!("以 root 运行：权限位不构成删除失败，跳过");
+        return;
+    }
+    let dir = temp_dir("move-pdisp");
+    let srcdir = dir.join("srcdir");
+    let dstdir = dir.join("dstdir");
+    fs::create_dir_all(&srcdir).unwrap();
+    fs::create_dir_all(&dstdir).unwrap();
+    let src = srcdir.join("f.txt");
+    let dst = dstdir.join("g.txt");
+    fs::write(&src, "PARTIAL\n").unwrap();
+    set_mode(&srcdir, 0o555);
+    let patch_text = patch(&format!(
+        "*** Update File: {s}\n*** Move to: {d}",
+        s = src.display(),
+        d = dst.display()
+    ));
+    let (r, changes) =
+        terminal_chat::apply_patch::apply_patch_with_display(&json!({ "patch": patch_text }));
+    set_mode(&srcdir, 0o755);
+    assert!(!r.ok && !r.state_known, "{r:?}");
+    assert_eq!(r.changed_files.len(), 1, "结果只保留目标 add：{r:?}");
+    assert_eq!(changes.len(), 1, "展示只含已确认完成的目标卡片：{changes:?}");
+    assert_eq!(changes[0].path, dst.display().to_string());
+    assert!(matches!(
+        &changes[0].kind,
+        terminal_chat::prompt::PatchChangeKind::Add { content } if content == "PARTIAL\n"
+    ));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// 安全修复 F-1 回归（2026-10-28 攻防报告【中】）：lone-CR 文件的行数必须与
+/// SourceFile::parse 的行切分一致——否则「x\r」×N 以「1 行」通过读入门，
+/// 实际展开 N 行（有界 DoS，违背 A9 行数上限）。
+#[test]
+fn move_and_update_reject_lone_cr_line_limit_bypass() {
+    let dir = temp_dir("sec-f1");
+    // 100001 个 lone-CR 分隔的段（字节数与 LF 版超限对照相同）
+    let body = "x\r".repeat(100_001);
+    let f = dir.join("cr.txt");
+    fs::write(&f, &body).unwrap();
+    // Move 面：读入行数门必须拒绝
+    let r = call(&format!(
+        "*** Update File: {s}\n*** Move to: {d}",
+        s = f.display(),
+        d = dir.join("cr-dst.txt").display()
+    ));
+    assert!(!r.ok, "lone-CR 行数不得漏计：{r:?}");
+    assert!(r.error.clone().unwrap().contains("100000"), "{r:?}");
+    assert!(!dir.join("cr-dst.txt").exists(), "拒绝不得创建目标");
+    // 普通 Update 面：同一行数门
+    let r = call(&format!(
+        "*** Update File: {p}\n@@\n-x\n+y",
+        p = f.display()
+    ));
+    assert!(!r.ok, "Update 读入门同源：{r:?}");
+    assert!(r.error.clone().unwrap().contains("100000"), "{r:?}");
+    // 恰 100000 行（lone-CR）仍可用：与 LF 语义对齐
+    let f2 = dir.join("cr-ok.txt");
+    fs::write(&f2, "x\r".repeat(99_999) + "x").unwrap();
+    let r = call(&format!(
+        "*** Update File: {s}\n*** Move to: {d}\n@@\n-x\n+y",
+        s = f2.display(),
+        d = dir.join("cr-ok-dst.txt").display()
+    ));
+    assert!(r.ok, "恰 100000 lone-CR 行应可用：{r:?}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// 安全修复 F-2 回归（2026-10-28 攻防报告【低】）：procfs 伪文件（S_IFREG 但
+/// st_size=0 而读取有内容）作为 Move 源——把读取字节数与 fstat 尺寸比对，
+/// 超出即伪文件拒绝；不得把环境变量等内容物化到普通文件与展示面。
+#[test]
+fn move_rejects_procfs_pseudo_file_source() {
+    let dir = temp_dir("sec-f2");
+    // /proc/self/environ：常规文件类型、st_size=0、读取返回真实环境内容
+    let src = std::path::Path::new("/proc/self/environ");
+    if !src.exists() {
+        eprintln!("环境无 /proc/self/environ（非 Linux），跳过");
+        return;
+    }
+    let dst = dir.join("materialized.txt");
+    let r = call(&format!(
+        "*** Update File: {s}\n*** Move to: {d}",
+        s = src.display(),
+        d = dst.display()
+    ));
+    assert!(!r.ok, "伪文件源必须拒绝：{r:?}");
+    assert!(r.state_known, "校验型失败：{r:?}");
+    assert!(r.changed_files.is_empty(), "{r:?}");
+    let err = r.error.clone().unwrap_or_default();
+    assert!(err.contains("伪文件") || err.contains("proc"), "错误应指明伪文件：{err}");
+    assert!(!dst.exists(), "不得物化伪文件内容");
+    assert!(src.exists(), "procfs 对象本就不应被删");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// 审查发现 #5 补强：A2 输入列「多个修改块」——Move＋**两个** @@ 修改块的组合
+/// （此前所有 Move 用例只有单块；若实现只应用首个块，目标会静默缺改且套件全绿）。
+#[test]
+fn move_with_multiple_change_blocks_applies_all() {
+    let dir = temp_dir("move-multi-block");
+    let src = dir.join("多块-旧 名.txt");
+    let dst = dir.join("多块-新 名.txt");
+    fs::write(&src, "head\none\ntwo\nthree\ntail\n").unwrap();
+    // 两个带定位上下文的 @@ 块：定位行与被替换行相邻不重合
+    let r = call(&format!(
+        "*** Update File: {s}\n*** Move to: {d}\n@@ head\n-one\n+ONE\n@@ two\n-three\n+THREE",
+        s = src.display(),
+        d = dst.display()
+    ));
+    assert!(r.ok, "{r:?}");
+    assert!(!src.exists());
+    // 两个块都生效：one→ONE 与 three→THREE，未涉及行原样
+    assert_eq!(
+        fs::read_to_string(&dst).unwrap(),
+        "head\nONE\ntwo\nTHREE\ntail\n",
+        "两个 @@ 块均应用到移动目标"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// 审查 #9（CWE-770）：Move 展示内容跨块累计预算——6 块 × ~4 MiB 源若无上限
+/// 将产出 ~48 MiB 展示载荷；预算（16 MiB）耗尽后：Delete 卡降级为 content=None
+/// （012 既有语义），Add 卡不入列不伪造；结果清单 12 条完整、ok=true 不受影响。
+#[test]
+fn move_display_accumulation_budget_bounds_amplification() {
+    let dir = temp_dir("disp-budget");
+    let body = format!("{}\n", "x".repeat(4 * 1024 * 1024 - 8)); // 恰 <4 MiB/文件
+    let mut patch_body = String::new();
+    let mut dsts = Vec::new();
+    for i in 0..6 {
+        let src = dir.join(format!("b{i}-src.txt"));
+        let dst = dir.join(format!("b{i}-dst.txt"));
+        fs::write(&src, &body).unwrap();
+        dsts.push(dst.clone());
+        patch_body.push_str(&format!(
+            "*** Update File: {s}\n*** Move to: {d}\n",
+            s = src.display(),
+            d = dst.display()
+        ));
+    }
+    let (r, changes) =
+        terminal_chat::apply_patch::apply_patch_with_display(&json!({ "patch":
+            patch(&patch_body.trim_end())
+        }));
+    let r = serde_json::to_value(&r).unwrap();
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["changed_files"].as_array().unwrap().len(), 12, "结果清单完整：{r}");
+    // 预算内（前两块）4 张全内容卡片；耗尽后 4 张 Delete 降级 None、Add 不入列
+    assert_eq!(changes.len(), 8, "展示卡片数受预算约束：{changes:?}");
+    for c in &changes[..4] {
+        let bytes = match &c.kind {
+            terminal_chat::prompt::PatchChangeKind::Add { content }
+            | terminal_chat::prompt::PatchChangeKind::Update { diff: content } => content.len(),
+            terminal_chat::prompt::PatchChangeKind::Delete { content } => {
+                content.as_deref().map_or(0, str::len)
+            }
+        };
+        assert!(bytes > 1024 * 1024, "预算内卡片为真实全内容：{c:?}");
+    }
+    for c in &changes[4..] {
+        assert!(
+            matches!(&c.kind, terminal_chat::prompt::PatchChangeKind::Delete { content }
+                if content.is_none()),
+            "预算耗尽后仅保留降级 Delete 卡：{c:?}"
+        );
+    }
+    // 磁盘事实不受展示预算影响：6 个目标全部落盘
+    for dst in &dsts {
+        assert!(dst.exists(), "目标 {dst:?} 已创建");
+    }
     let _ = fs::remove_dir_all(&dir);
 }

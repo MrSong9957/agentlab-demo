@@ -10142,3 +10142,166 @@ fn s105_mcp_resources_resume_replays_nothing() {
         "新进程首轮启动一次（恢复本身零启动）"
     );
 }
+
+// ---------- S29：029 Move＋Unicode 数据闭环（最薄 JSON 宿主）与 PTY 展示/恢复 ----------
+
+/// S29a：JSON 宿主数据闭环——纯移动（含无末尾换行）、Move＋Unicode 上下文、普通
+/// Unicode 更新、重复补丁失败不改已成功目标；全部核对真实文件字节与有序清单。
+#[test]
+fn s29a_json_host_move_and_unicode_data_loop() {
+    tool_child_mode();
+    let dir = TempDir::new("s29a");
+    let patch_of = |body: String| json!({ "patch": format!("*** Begin Patch\n{body}\n*** End Patch") });
+
+    // A：纯移动（无末尾换行逐字节保留）
+    let a_src = dir.path().join("A-旧.txt");
+    let a_dst = dir.path().join("A-新.txt");
+    fs::write(&a_src, "alpha\nbeta").unwrap();
+    let r = call_tool("s29a_json_host_move_and_unicode_data_loop", "apply_patch", patch_of(format!(
+        "*** Update File: {s}\n*** Move to: {d}", s = a_src.display(), d = a_dst.display()
+    )));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(r["changed_files"], json!([
+        { "path": a_dst.display().to_string(), "action": "add" },
+        { "path": a_src.display().to_string(), "action": "delete" },
+    ]), "{r}");
+    assert!(!a_src.exists());
+    assert_eq!(fs::read(&a_dst).unwrap(), b"alpha\nbeta".to_vec(), "无末尾换行逐字节保留");
+
+    // B：Move＋Unicode 上下文（第四级匹配）＋修改
+    let b_src = dir.path().join("B-旧 名.txt");
+    let b_dst = dir.path().join("B-新 名.txt");
+    fs::write(&b_src, "\u{201C}S29-标题\u{201D}\nmode=dev\n").unwrap();
+    let r = call_tool("s29a_json_host_move_and_unicode_data_loop", "apply_patch", patch_of(format!(
+        "*** Update File: {s}\n*** Move to: {d}\n@@ \"S29-标题\"\n-mode=dev\n+mode=e2e",
+        s = b_src.display(), d = b_dst.display()
+    )));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert!(!b_src.exists(), "源已删");
+    assert_eq!(
+        fs::read_to_string(&b_dst).unwrap(),
+        "\u{201C}S29-标题\u{201D}\nmode=e2e\n",
+        "未归一化上下文保留"
+    );
+
+    // C：普通 Unicode 更新（em dash 旧行，ASCII 补丁匹配）
+    let c = dir.path().join("C.txt");
+    fs::write(&c, "keep\n前\u{2014}后\n").unwrap();
+    let r = call_tool("s29a_json_host_move_and_unicode_data_loop", "apply_patch", patch_of(format!(
+        "*** Update File: {p}\n@@\n-前-后\n+REPLACED", p = c.display()
+    )));
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert_eq!(fs::read_to_string(&c).unwrap(), "keep\nREPLACED\n", "未改行保留");
+
+    // D：重复同一移动补丁——目标已存在 → 失败且不改已成功目标
+    let r = call_tool("s29a_json_host_move_and_unicode_data_loop", "apply_patch", patch_of(format!(
+        "*** Update File: {s}\n*** Move to: {d}", s = a_src.display(), d = a_dst.display()
+    )));
+    assert_eq!(r["ok"], json!(false), "{r}");
+    assert_eq!(r["changed_files"], json!([]), "{r}");
+    assert_eq!(fs::read(&a_dst).unwrap(), b"alpha\nbeta".to_vec(), "已成功目标不变");
+    let _ = fs::remove_dir_all(dir.path());
+}
+
+/// S29b：真实 TUI（PTY）——mock 返回 Move＋Unicode 更新两调用；屏幕显示两个
+/// 路径（目标/源）与未归一化内容；下一次请求回传有序结果；/save→/resume 只
+/// 展示历史、不重放移动（文件不再变化、不新增模型请求）。
+#[test]
+fn s29b_tui_move_unicode_display_and_resume() {
+    let cfg = TempDir::new("s29b-cfg");
+    let user = TempDir::new("s29b-user");
+    let work = TempDir::new("s29b-work");
+    let mv_src = work.path().join("S29-旧名.txt");
+    let mv_dst = work.path().join("S29-新名.txt");
+    let upd = work.path().join("S29-更新.txt");
+    fs::write(&mv_src, "\u{201C}S29-标题\u{201D}\nmode=dev\n").unwrap();
+    fs::write(&upd, "keep\n前\u{2014}后\n").unwrap();
+    let tc = json!({"choices":[{"message":{"tool_calls":[
+        {"id":"s29-mv","type":"function","function":{"name":"apply_patch","arguments":json!({
+            "patch": format!("*** Begin Patch\n*** Update File: {s}\n*** Move to: {d}\n@@ \"S29-标题\"\n-mode=dev\n+mode=tui\n*** End Patch",
+                s = mv_src.display(), d = mv_dst.display())
+        }).to_string()}},
+        {"id":"s29-upd","type":"function","function":{"name":"apply_patch","arguments":json!({
+            "patch": format!("*** Begin Patch\n*** Update File: {p}\n@@\n-前-后\n+S29-REPLACED\n*** End Patch", p = upd.display())
+        }).to_string()}}
+    ]}}]}).to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc),
+        MockResp::json(200, chat_body("S29-全部完成")),
+    ]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_S29B_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s29b"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S29B_KEY",
+        "fake-s29b",
+        true,
+    ));
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.send_line("执行 S29 移动与更新");
+    pty.wait_screen("S29-全部完成").unwrap();
+    // 移动显示两路径（目标卡片＋源卡片，摘要视图按 012 卡片投影）；「真实未归
+    // 一化内容」在 PatchChange 数据层断言（update_level4_preserves…/move_display
+    // 用例），PTY 摘要视图不内联全文
+    pty.wait_screen("S29-新名.txt").unwrap();
+    pty.wait_screen("S29-旧名.txt").unwrap();
+    assert_eq!(mock.count(), 2, "工具轮后恰一次续请求");
+    // 文件事实
+    assert!(!mv_src.exists() && mv_dst.exists(), "真实移动发生");
+    assert_eq!(
+        fs::read_to_string(&mv_dst).unwrap(),
+        "\u{201C}S29-标题\u{201D}\nmode=tui\n",
+        "移动并修改内容"
+    );
+    assert_eq!(fs::read_to_string(&upd).unwrap(), "keep\nS29-REPLACED\n");
+    // 第 2 请求回传有序两条结果（Move＝add 后 delete）
+    let body: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
+    let mv_result: Value = serde_json::from_str(
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["tool_call_id"] == "s29-mv")
+            .unwrap()["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(mv_result["changed_files"], json!([
+        { "path": mv_dst.display().to_string(), "action": "add" },
+        { "path": mv_src.display().to_string(), "action": "delete" },
+    ]), "有序两条记录：{mv_result}");
+    // 保存并退出
+    pty.send_line("/save s29mv");
+    pty.wait_screen("已保存").unwrap();
+    pty.send_raw(b"\x03");
+    assert!(pty.finish().1.success());
+
+    // /resume：展示与执行时一致；不重放（无新请求、文件不再变化）
+    let mut resumed = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S29B_KEY",
+        "fake-s29b",
+        true,
+    ));
+    resumed.wait_screen("? for shortcuts").unwrap();
+    resumed.send_line("/resume s29mv");
+    resumed.wait_screen("S29-新名.txt").unwrap();
+    resumed.wait_screen("S29-旧名.txt").unwrap();
+    resumed.wait_screen("S29-全部完成").unwrap();
+    assert!(!mv_src.exists(), "恢复不重放移动（源不复现）");
+    assert_eq!(
+        fs::read_to_string(&mv_dst).unwrap(),
+        "\u{201C}S29-标题\u{201D}\nmode=tui\n",
+        "恢复不改目标内容"
+    );
+    resumed.send_raw(b"\x03");
+    assert!(resumed.finish().1.success());
+    assert_eq!(mock.count(), 2, "恢复只展示、不新增模型请求");
+}

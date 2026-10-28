@@ -1,0 +1,7 @@
+# 029 M4 绿测（声明与调用链）
+# date: 2026-10-28T14:11:03+00:00
+# cwd: /workspace
+# cmd: env -u TCHAT_SANDBOX cargo test --locked --test prompt_assembly --test tool_loop
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.80s
+exit=0

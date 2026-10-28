@@ -1,0 +1,22 @@
+# 029 M3 绿测（实现后）
+# date: 2026-10-28T14:02:34+00:00
+# cwd: /workspace
+# cmd1: env -u TCHAT_SANDBOX cargo test --locked --lib apply_patch::tests::seek_level4
+test apply_patch::tests::seek_level4_priority_start_and_eof ... ok
+test apply_patch::tests::seek_level4_maps_all_unicode_punct_to_ascii ... ok
+test apply_patch::tests::seek_level4_keeps_unmapped_differences ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 233 filtered out; finished in 0.02s
+lib_exit=0
+# cmd2: env -u TCHAT_SANDBOX cargo test --locked --test apply_patch level4
+test update_level4_unmapped_differences_fail ... ok
+test update_level4_preserves_unmodified_unicode_bytes ... FAILED
+test move_with_level4_matching_moves_and_modifies ... FAILED
+test update_level4_matches_all_groups_inline ... FAILED
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.01s
+integ_exit=101
+# cmd3: 全量 apply_patch 回归
+test result: FAILED. 46 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+full_exit=101
+# cmd4: lib apply_patch 全部
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 202 filtered out; finished in 0.19s
+libfull_exit=0

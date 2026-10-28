@@ -1,0 +1,17 @@
+# 029 M5 绿测（session/sandbox/e2e 最终）
+# date: 2026-10-28T14:25:41+00:00
+# cwd: /workspace
+# 注：PTY 摘要视图按 012 卡片投影显示路径；未归一化内容真实性的断言位于
+#   PatchChange 数据层（update_level4_preserves_unmodified_unicode_bytes / move_display_shows_two_cards）
+# cmd1: env -u TCHAT_SANDBOX cargo test --locked --test session move_tool_result --test apply_patch_sandbox
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.01s
+part1_exit=0
+# cmd2: env -u TCHAT_SANDBOX cargo test --locked --test e2e_acceptance s29
+e2e_exit=1
+# cmd2: env -u TCHAT_SANDBOX cargo test --locked --test e2e_acceptance s29
+test s29a_json_host_move_and_unicode_data_loop ... ok
+test s29_tui_cancel_renders_explicit_cancelled_and_recovers ... ok
+test s29b_tui_move_unicode_display_and_resume ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 142 filtered out; finished in 1.30s
+e2e_exit=0

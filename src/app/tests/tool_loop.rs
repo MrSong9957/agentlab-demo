@@ -215,6 +215,52 @@ fn t2_apply_patch_creates_file_and_echoes_result() {
     assert!(out.contains("Agent：文件已创建"), "{out}");
 }
 
+/// T2b（029 M4）：Move 补丁经真实分派——真实移动落盘；第 2 请求回传**有序两条
+/// 记录**（目标 add、源 delete）的四字段结果；工具名/请求次数/id 契约不变。
+#[test]
+fn t2b_apply_patch_move_returns_ordered_two_records() {
+    let dir = TempDir::new("tl-t2b");
+    let src = dir.path().join("old-t2b.txt");
+    let dst = dir.path().join("new-t2b.txt");
+    std::fs::write(&src, "A\nB\n").unwrap();
+    let patch = format!(
+        "*** Begin Patch\n*** Update File: {s}\n*** Move to: {d}\n@@\n-B\n+B2\n*** End Patch",
+        s = src.display(),
+        d = dst.display()
+    );
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc_response(
+            &[call("call-move01", "apply_patch", json!({ "patch": patch }).to_string())],
+            None,
+        )),
+        MockResp::json(200, ok_response("已移动")),
+    ]);
+    let (out, code) = run_cli(dir.path(), &mock.url, "tl-key", "移动文件\nexit\n");
+    assert_eq!(code, Some(0), "{out}");
+    assert!(!src.exists(), "源已删除：{out}");
+    assert_eq!(std::fs::read_to_string(&dst).unwrap(), "A\nB2\n", "目标含修改后内容");
+    assert_eq!(mock.count(), 2, "工具轮后必须再请求一次");
+    let body = req_body(&mock, 1);
+    assert_eq!(body["messages"][3]["tool_calls"][0]["id"], json!("call-move01"));
+    assert_eq!(body["messages"][3]["tool_calls"][0]["function"]["name"], json!("apply_patch"));
+    let tool = &body["messages"][4];
+    assert_eq!(tool["tool_call_id"], json!("call-move01"), "id 必须匹配");
+    let result: Value = serde_json::from_str(tool["content"].as_str().unwrap()).unwrap();
+    assert_eq!(result["ok"], json!(true), "ApplyPatchResult JSON：{result}");
+    assert_eq!(result["state_known"], json!(true), "{result}");
+    assert_eq!(result["error"], json!(null), "{result}");
+    let changed = result["changed_files"].as_array().unwrap();
+    assert_eq!(changed.len(), 2, "一个成功 Move 恰两条记录：{result}");
+    assert_eq!(changed[0]["path"], json!(dst.display().to_string()), "先目标 add：{result}");
+    assert_eq!(changed[0]["action"], json!("add"));
+    assert_eq!(changed[1]["path"], json!(src.display().to_string()), "后源 delete：{result}");
+    assert_eq!(changed[1]["action"], json!("delete"));
+    let keys: Vec<&str> = result.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(keys, vec!["ok", "changed_files", "state_known", "error"], "四字段且有序");
+    assert!(out.contains("[工具] apply_patch（call-mov"), "{out}");
+    assert!(out.contains("Agent：已移动"), "{out}");
+}
+
 /// T3：执行命令——真实输出与非零退出码出现在回传 ExecResult JSON。
 #[test]
 fn t3_exec_command_returns_real_output_and_exit_code() {

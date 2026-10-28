@@ -1,13 +1,13 @@
 # 规格：文本补丁修改（apply_patch）
 
-> 状态：已实现（2026-10-08）　更新：2026-10-08
+> 状态：已实现（2026-10-08）　更新：2026-10-28（[029](029-file-patch.md) 交付 `Move to` 与第四级 Unicode 匹配容差，修订本页相应限制；其余契约不变）
 > 定位：参考 Codex 编写的 MVP 规格；接口取舍见第 3 节。
 > 来源：[openai/codex](https://github.com/openai/codex) · [初始工具定义](https://github.com/openai/codex/blob/2fdf047c9631c9ed01a31b62efb7891718a931a8/codex-rs/core/src/tools/handlers/apply_patch_spec.rs) · [补丁语法](https://github.com/openai/codex/blob/2fdf047c9631c9ed01a31b62efb7891718a931a8/codex-rs/core/assets/tools/apply_patch.lark) · [应用实现](https://github.com/openai/codex/blob/2fdf047c9631c9ed01a31b62efb7891718a931a8/codex-rs/apply-patch/src/lib.rs#L280-L590) · [行尾处理](https://github.com/openai/codex/blob/2fdf047c9631c9ed01a31b62efb7891718a931a8/codex-rs/apply-patch/src/text_file.rs)。源码固定在提交 `2fdf047c9631`。
 
 ## 1. 目标 & I/O
 
 - 目标：根据补丁新增、局部修改或删除 UTF-8 文本文件，返回实际变更清单。
-- 工具描述：接收 Codex 补丁格式，支持 `Add File / Update File / Delete File`；可涉及多个文件；MVP 不支持 `Move to`、二进制文件。
+- 工具描述：接收 Codex 补丁格式，支持 `Add File / Update File / Delete File`；可涉及多个文件；`Update File` 块可带一行 `*** Move to:`（移动/重命名，029：结果记目标 `add`＋源 `delete` 两条）；仍不支持二进制文件。上下文匹配为四级容差（精确 → 忽略行尾空白 → 忽略两端空白 → 忽略两端空白＋Unicode 标点/空格映射，映射仅用于定位不改写文件；029 起）。
 - 输入：补丁文本。Codex 原版直接接收自由文本；仅支持 JSON 函数工具的接口采用 `{"patch": "补丁文本"}`。路径基于会话当前目录解析，可使用相对或绝对路径；读写权限由执行环境控制。
 
 示例：文件原来含有 `mode=dev`，调用后改成 `mode=test`。
@@ -49,7 +49,7 @@
 
 | 场景 | 预测 / 验收 | 实测 |
 |---|---|---|
-| 格式错误、空补丁、不支持的操作 | `ok=false`；清单为空；文件字节不变 | ✅ `invalid_patches_error_without_touching_files`：10 组非法补丁（空补丁、Move to、块头/块体错误、End Patch 后多余内容等）均 `ok=false`、清单空、`state_known=true`，探针文件字节不变、目录无新文件；JSON 参数非法 6 组另见 `invalid_json_args_error_without_side_effects` |
+| 格式错误、空补丁、不支持的操作 | `ok=false`；清单为空；文件字节不变 | ✅ `invalid_patches_error_without_touching_files`：非法补丁组（空补丁、块头/块体错误、End Patch 后多余内容等）均 `ok=false`、清单空、`state_known=true`，探针文件字节不变、目录无新文件；JSON 参数非法 6 组另见 `invalid_json_args_error_without_side_effects`。029 起 `Move to` 为合法语法，该组改为覆盖其**非法变体**（重复/错位/空目标/位于 Add/Delete 块），含合法前序块整体不执行另见 `invalid_move_syntax_after_legal_block_executes_nothing` |
 | 新增 → 修改 → 删除 | 内容和存在状态正确；清单动作准确 | ✅ `add_update_delete_full_cycle`：三文件字节与存在状态正确；清单按执行顺序给出绝对路径与 `update/add/delete` 动作 |
 | 新增目标已存在 / 修改或删除目标不存在 / 更新上下文不存在 | 不改变当前目标；返回具体错误 | ✅ `conflicting_targets_rejected_without_changes`：五类冲突（含 `@@` 定位行不存在）均拒绝；错误含目标路径与不匹配内容；目标字节/存在状态不变；`state_known=true` |
 | 两文件：第一项成功，第二项写入时故障 | `ok=false`；清单含第一项；`state_known=false`；重读第二项核对状态 | ✅ `second_file_write_failure_reports_partial_state` 两阶段确定性注入：0444 只读文件在 open 阶段被拒（目标字节不变）；RLIMIT_FSIZE=4096＋忽略 SIGXFSZ 使第二项**写入开始后** EFBIG 半写截断（实测目标恰为新内容前 4096 字节前缀，原内容已被 O_TRUNC 清除）。清单仅含已生效第一项；`state_known=false`；错误含路径与原因；重读两文件核对。定向变异 M-A（状态标记改坏）/ M-B（失败目标混入清单）均被该测试捕获 |
@@ -62,6 +62,6 @@
 ## 固定边界（2026-10-10 安全修复 N5）
 
 - 补丁文本：≤1 MiB（UTF-8 字节），在解析前检查，超限直接拒绝。
-- 单文件读入与生成内容：均 ≤4 MiB（UTF-8 字节）且 ≤100000 逻辑行。逻辑行定义：CRLF 算一行；非空且无末尾换行的尾段算一行。
+- 单文件读入与生成内容：均 ≤4 MiB（UTF-8 字节）且 ≤100000 逻辑行。逻辑行定义（2026-10-28 F-1 修订，与实现 `logical_lines`/`SourceFile::parse` 同源）：`\r`、`\r\n`、`\n` 均为行尾（CRLF 算一行；孤立 `\r` 也计一行——此前仅按 `\n` 切分致 lone-CR 文件漏计、绕过行数上限）；非空且无末尾换行的尾段算一行；空串 0 行。
 - 读入按已打开 fd 的 fstat 预检＋有限读取（不得 metadata 检查后继续无上限 read_to_end）；行数在读入后、逐行展开前检查；生成内容在写入或截断目标前检查字节数与行数。超限操作不改变目标字节（校验型失败）；前序已成功操作仍遵守无回滚语义，changed_files/state_known 如实报告。
 - O_NONBLOCK 打开、fd 判型、inode 绑定与写入复核（F2 收口）不变。

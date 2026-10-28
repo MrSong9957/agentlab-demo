@@ -1,0 +1,11 @@
+# 029 M3 变异验证补正（审查发现 #11：原日志变异 2 缺失败测试名与命令头）
+# date: 2026-10-28T16:14:05+00:00
+# cwd: /workspace
+# 变异内容：seek_sequence 逐位置提前使用第四级（破坏按级全范围优先）
+# cmd: env -u TCHAT_SANDBOX cargo test --locked --lib apply_patch::tests::seek_level4_priority_start_and_eof
+test apply_patch::tests::seek_level4_priority_start_and_eof ... FAILED
+thread 'apply_patch::tests::seek_level4_priority_start_and_eof' (454590) panicked at src/app/src/apply_patch.rs:1940:9:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 235 filtered out; finished in 0.02s
+
+# 恢复后复验
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 233 filtered out; finished in 0.02s

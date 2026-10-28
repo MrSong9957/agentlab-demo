@@ -1,0 +1,17 @@
+# 029 M3 变异验证（B5）
+# date: 2026-10-28T14:05:56+00:00
+
+## 变异1：移除第四级（删除最后一个循环）
+test update_level4_matches_all_groups_inline ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.01s
+
+## 变异2：逐位置提前使用第四级（破坏按级全范围优先）
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 235 filtered out; finished in 0.01s
+
+## 变异3：把归一化上下文写回文件（into_contents 对每行做映射）
+test update_level4_preserves_unmodified_unicode_bytes ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.01s
+
+## 恢复后复验
+test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 202 filtered out; finished in 0.21s

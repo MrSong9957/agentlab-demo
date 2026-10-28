@@ -243,7 +243,13 @@ fn s6_tool_whitelist_matches_local_contracts() {
     let desc = f["description"].as_str().unwrap();
     assert!(desc.contains("can be used to edit files"), "复用 Codex 首句");
     assert!(!desc.contains("FREEFORM") && !desc.contains("do not wrap"), "不得残留 freeform 措辞");
-    assert!(!desc.contains("Move to"), "不得声明未实现的 Move to");
+    // 029：参数描述声明 Move 位置、纯移动与最后一级匹配容差（与实现同步）
+    let patch_desc = f["parameters"]["properties"]["patch"]["description"].as_str().unwrap();
+    assert!(patch_desc.contains("\"*** Move to: <path>\""), "声明 Move 语法：{patch_desc}");
+    assert!(patch_desc.contains("directly after"), "声明 Move 位置（紧接 Update 头）：{patch_desc}");
+    assert!(patch_desc.contains("pure move"), "声明纯移动：{patch_desc}");
+    assert!(patch_desc.contains("target add + source delete"), "声明结果为两条记录：{patch_desc}");
+    assert!(patch_desc.contains("mapping Unicode"), "声明第四级匹配容差：{patch_desc}");
     let params = &f["parameters"];
     assert_eq!(params["required"], json!(["patch"]));
     assert_eq!(params["additionalProperties"], json!(false));
