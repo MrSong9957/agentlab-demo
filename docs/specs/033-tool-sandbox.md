@@ -218,3 +218,27 @@ CLOEXEC fd 经 `/proc/self/fd` 读出）为与冻结上游 d8acdf1 共有的路�
   （exit=0，2026-10-28）——待交付候选验证通过**；仍未提交/合并/推送，部署版本
   未替换。证据：`docs/logs/033-tool-sandbox/2026-10-27-b1b2-closeout.md`、
   `2026-10-28-seam-gate-fix.md`。
+
+### 沙箱进程生命周期修复（2026-10-28，候选待验收——分支 fix/033-proc-lifecycle，未合并）
+
+- **缺陷**：`--die-with-parent` 的 PDEATHSIG 锚定「创建者内核线程」——工具 spawn
+  此前在随轮退出的 turn 线程内执行，轮结束即整树 SIGKILL：016 的跨调用/跨轮保留、
+  取消不终止在沙箱模式全部失效（n2b/n2b2 部署态失败根因；MCP stdio 服务器同病）。
+  归因与四变体对照（新旧二进制×沙箱/普通）见
+  `docs/logs/033-tool-sandbox/2026-10-28-e2e-failure-attribution.md`。
+- **修复**：①exec 面——ProcessManager 专属长寿创建线程执行 fork/exec（PDEATHSIG
+  锚点＝管理器生命周期；仅串行化创建，执行/监控照旧并发；创建线程失败＝显式报错
+  fail closed；close() 先回收、线程随通道关闭后结束）；②MCP stdio 面——spawn 经
+  manager runtime 的 `tokio::spawn` 移交核心 worker（常驻线程，非会退休的
+  blocking 池）；③apply_patch 面——子进程同步完成于调用内，无需接入；④s103 测试
+  沙箱分支改外层 argv 扫描判定回收（ns 内 pid 不可跨边界使用，僵尸天然排除）。
+  `--die-with-parent` 与全部隔离/安全配置保留（宿主异常退出仍保证载荷停止执行）。
+- **上游参考**：openai/codex issue #46702（同机制：PDEATHSIG 锚定创建线程、Tokio
+  blocking 线程退休触发；**未合入上游**，0.155–0.162 均核查存在；issue 内候选方案
+  为持久 spawn 线程——与本地同向；未复用上游代码）。
+- **验证**：新增回归 `sandbox_lifecycle.rs` 四用例（管道/PTY 跨轮保留＋write_stdin
+  管理/输入、MCP 跨轮存活＋reload 外层回收、宿主 SIGKILL 后载荷停止——活进程与
+  僵尸区分）；RED（修复前沙箱注入态 3 FAILED）→GREEN（4/4）→env -u 对照 4/4；
+  n2b/n2b2 沙箱注入态通过（修复前 FAILED）；完整 e2e_acceptance 双口径 143/143
+  （修复前沙箱态 140/3）；标准验收口径最终全量 **71 目标 3533/0/3（exit 0）**。
+  记录：`docs/logs/033-tool-sandbox/2026-10-28-lifecycle-fix.md`。

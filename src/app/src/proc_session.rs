@@ -78,6 +78,19 @@ pub struct ProcessManager {
 
 struct MgrInner {
     state: Mutex<MgrState>,
+    /// 工具进程创建线程的请求通道（033 生命周期修复，见 [`ProcessManager::new`]
+    /// 内线程注释）。Mutex 仅弥补 std mpsc Sender 非 Sync（发送为 O(1) 入队）；
+    /// 接收端为专属长寿线程，退出条件＝全部管理器克隆 Drop（通道关闭）。
+    spawner_tx: Mutex<std::sync::mpsc::Sender<SpawnJob>>,
+}
+
+/// 创建线程的请求（033 生命周期修复）：仅串行化 fork/exec 本身；工具执行、
+/// 监控与读取仍按会话并发，创建线程不取任何管理器锁。
+struct SpawnJob {
+    cmd: String,
+    workdir: std::path::PathBuf,
+    tty: bool,
+    reply: std::sync::mpsc::Sender<std::io::Result<Spawned>>,
 }
 
 struct MgrState {
@@ -94,6 +107,29 @@ impl Default for ProcessManager {
 
 impl ProcessManager {
     pub fn new() -> Self {
+        let (spawner_tx, spawner_rx) = std::sync::mpsc::channel::<SpawnJob>();
+        // 033 生命周期修复（归因：docs/logs/033-tool-sandbox/
+        // 2026-10-28-e2e-failure-attribution.md）：bwrap `--die-with-parent` 的
+        // PDEATHSIG 锚定「创建者内核线程」——此前 spawn 在随轮退出的 turn 线程内
+        // 执行，轮结束即整树 SIGKILL（016 跨轮保留/取消契约失效，n2b/n2b2 部署态
+        // 失败根因）。工具进程的 fork/exec 改由管理器**专属长寿线程**执行：
+        // PDEATHSIG 锚点＝管理器生命周期（全部克隆 Drop／进程退出才触发——宿主
+        // 异常退出仍保证载荷停止执行）；仅串行化创建本身，工具执行与监控照旧
+        // 并发。关闭顺序：close() 先组杀回收，本线程随通道关闭（克隆全部 Drop）
+        // 自然结束——先回收、后结束。线程创建失败＝通道无接收端，start() 的
+        // send/recv 显式报错（fail closed，不静默回退调用线程）。
+        let _ = std::thread::Builder::new()
+            .name("tchat-proc-spawner".into())
+            .spawn(move || {
+                while let Ok(job) = spawner_rx.recv() {
+                    let res = if job.tty {
+                        spawn_pty(&job.cmd, &job.workdir)
+                    } else {
+                        spawn_piped(&job.cmd, &job.workdir)
+                    };
+                    let _ = job.reply.send(res);
+                }
+            });
         Self {
             inner: Arc::new(MgrInner {
                 state: Mutex::new(MgrState {
@@ -101,6 +137,7 @@ impl ProcessManager {
                     next_id: 1,
                     sessions: HashMap::new(),
                 }),
+                spawner_tx: Mutex::new(spawner_tx),
             }),
         }
     }
@@ -218,10 +255,34 @@ impl ProcessManager {
             if let Some(r) = cancelled_before_start(cancel) {
                 return r.into();
             }
-            let spawned = if args.tty {
-                spawn_pty(&args.cmd, &workdir)
-            } else {
-                spawn_piped(&args.cmd, &workdir)
+            let spawned = {
+                // 033 生命周期修复：fork/exec 经管理器长寿创建线程执行（PDEATHSIG
+                // 锚点＝管理器生命周期；原先随轮退出的调用线程会连带杀树）。等待
+                // 回复期间持管理器锁是既有顺序（spawn 本就持锁执行）；创建线程
+                // 不取任何锁，无死锁环。
+                let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+                let job = SpawnJob {
+                    cmd: args.cmd.clone(),
+                    workdir: workdir.clone(),
+                    tty: args.tty,
+                    reply: reply_tx,
+                };
+                if let Err(_e) = self
+                    .inner
+                    .spawner_tx
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .send(job)
+                {
+                    return ExecResult::error("进程启动失败：工具创建线程已退出".into()).into();
+                }
+                match reply_rx.recv() {
+                    Ok(res) => res,
+                    Err(_) => {
+                        return ExecResult::error("进程启动失败：工具创建线程已退出".into())
+                            .into()
+                    }
+                }
             };
             match spawned {
                 Ok(sp) => {
