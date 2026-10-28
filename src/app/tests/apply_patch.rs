@@ -138,13 +138,28 @@ fn invalid_patches_error_without_touching_files() {
         (patch(&format!("*** Update File: {pa}\n@@")), "变更行"),
         // 变更行后出现非 +/-/空格 开头的行
         (patch(&format!("*** Update File: {pa}\n@@\n-a\nbad line")), "@@"),
-        // 不支持的操作：Move to
+        // ---- 029：Move 非法语法变体（含合法前序块时也不执行任何文件操作）----
+        // 重复 Move
         (
             patch(&format!(
-                "*** Update File: {pa}\n*** Move to: {}\n@@\n-a\n+b",
+                "*** Update File: {pa}\n*** Move to: {}\n*** Move to: {}\n@@\n-a\n+b",
+                dir.join("b1.txt").display(),
+                dir.join("b2.txt").display()
+            )),
+            "Move",
+        ),
+        // Move 位于修改行之后（错位）
+        (
+            patch(&format!(
+                "*** Update File: {pa}\n@@\n-a\n*** Move to: {}",
                 dir.join("b.txt").display()
             )),
-            "Move to",
+            "@@",
+        ),
+        // 空 Move 目标
+        (
+            patch(&format!("*** Update File: {pa}\n*** Move to: \n@@\n-a\n+b")),
+            "Move",
         ),
         // Add 块缺少 + 内容行（后续 Delete 不应执行）
         (

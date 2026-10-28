@@ -316,6 +316,8 @@ enum Hunk {
     },
     Update {
         path: PathBuf,
+        /// 029：`*** Move to:` 目标路径；仅允许紧接 Update 头，每块最多一次。
+        move_to: Option<PathBuf>,
         chunks: Vec<UpdateChunk>,
     },
 }
@@ -443,8 +445,9 @@ impl Parser {
                 }
             }
             Mode::Update => {
-                if let Some(Hunk::Update { path, chunks, .. }) = self.hunks.last() {
-                    if chunks.is_empty() {
+                if let Some(Hunk::Update { path, move_to, chunks, .. }) = self.hunks.last() {
+                    // 029：带 Move 的空 Update＝纯移动，合法；无 Move 且无修改块仍为空块
+                    if chunks.is_empty() && move_to.is_none() {
                         return Err(format!(
                             "第 {no} 行：Update File 块（路径 {p}）为空",
                             p = path.display()
@@ -477,7 +480,11 @@ impl Parser {
             return Ok(true);
         }
         if let Some(p) = update {
-            self.hunks.push(Hunk::Update { path: check_path(p, no)?, chunks: Vec::new() });
+            self.hunks.push(Hunk::Update {
+                path: check_path(p, no)?,
+                move_to: None,
+                chunks: Vec::new(),
+            });
             self.mode = Mode::Update;
         }
         Ok(true)
@@ -485,7 +492,7 @@ impl Parser {
 
     /// Update 模式下块头之外的行：@@ 定位、End of File、上下文/新增/删除行。
     fn update_lines(&mut self, raw: &str, end_trimmed: &str, no: usize) -> Result<(), String> {
-        let Some(Hunk::Update { chunks, .. }) = self.hunks.last_mut() else {
+        let Some(Hunk::Update { move_to, chunks, .. }) = self.hunks.last_mut() else {
             unreachable!("Update 模式下末尾块必为 Update");
         };
 
@@ -501,9 +508,21 @@ impl Parser {
             }
         }
 
-        // MVP 不支持 Move to（仅在块尚未开始时识别为该操作）
-        if chunks.is_empty() && end_trimmed.starts_with(MOVE_TO_MARKER) {
-            return Err(format!("第 {no} 行：MVP 不支持 *** Move to（移动/重命名）"));
+        // 029：Move to 只允许紧接 Update 头（chunks 为空＝尚未开始任何修改块）；
+        // 重复与空目标在完整解析阶段拒绝。修改行之后出现时落入下方意外行错误。
+        if chunks.is_empty() {
+            if let Some(dest) = end_trimmed.strip_prefix(MOVE_TO_MARKER) {
+                if move_to.is_some() {
+                    return Err(format!(
+                        "第 {no} 行：*** Move to 在同一 Update 块中只能出现一次"
+                    ));
+                }
+                *move_to = Some(check_path(dest, no)?);
+                return Ok(());
+            }
+            if end_trimmed == MOVE_TO_MARKER.trim_end() {
+                return Err(format!("第 {no} 行：*** Move to 缺少目标路径"));
+            }
         }
 
         // 连续 @@：上一个 @@ 块仍为空
@@ -1082,7 +1101,15 @@ fn apply_hunk(
                 ))),
             }
         }
-        Hunk::Update { path, chunks } => {
+        Hunk::Update { path, move_to, chunks } => {
+            // M1 临时 fail-closed：Move 语义（M2）落地前，解析出的移动块不得
+            // 静默按普通 Update 执行（纯移动会把源原地重写）。
+            if let Some(dest) = move_to {
+                return Err(Failure::validation(format!(
+                    "移动到 {d} 尚未实现（029 M2 接入文件操作）",
+                    d = dest.display()
+                )));
+            }
             let target = resolve_target(base, path);
             // F2：Update 只读写常规文件。先以非阻塞方式打开（FIFO/设备打开不阻塞），
             // 再对打开的 fd fstat 判型——判型绑定实际读写的 inode；悬空链接仍报
@@ -1283,7 +1310,7 @@ mod tests {
         );
         assert_eq!(hunks[1], Hunk::Delete { path: PathBuf::from("path/delete.py") });
         match &hunks[2] {
-            Hunk::Update { path, chunks } => {
+            Hunk::Update { path, chunks, .. } => {
                 assert_eq!(path, &PathBuf::from("path/update.py"));
                 assert_eq!(chunks.len(), 1);
                 let c = &chunks[0];
@@ -1387,10 +1414,6 @@ mod tests {
             ("*** Begin Patch\n*** Update File: f\n@@\n*** End Patch", "变更行"),
             ("*** Begin Patch\n*** Update File: f\n@@\n@@\n-x\n*** End Patch", "意外行"),
             ("*** Begin Patch\n*** Update File: f\n@@\n-old\nbad\n*** End Patch", "@@"),
-            (
-                "*** Begin Patch\n*** Update File: f\n*** Move to: g\n@@\n-a\n+b\n*** End Patch",
-                "Move to",
-            ),
             ("*** Begin Patch\n*** Add File: f\n*** End Patch", "+"),
             (
                 "*** Begin Patch\n*** Add File: f\nnot-plus\n*** End Patch",
@@ -1398,10 +1421,97 @@ mod tests {
             ),
             ("*** Begin Patch\n*** Add File: \n+x\n*** End Patch", "块头"),
             ("*** Begin Patch\n*** Add File: f\n+hi\n*** End Patch\nextra", "多余内容"),
+            // ---- 029 Move 语法：非法变体（重复/错位/空目标/不属于 Update 块）----
+            (
+                "*** Begin Patch\n*** Update File: f\n*** Move to: g\n*** Move to: h\n@@\n-a\n+b\n*** End Patch",
+                "Move",
+            ),
+            (
+                "*** Begin Patch\n*** Update File: f\n@@\n-a\n*** Move to: g\n*** End Patch",
+                "@@",
+            ),
+            (
+                "*** Begin Patch\n*** Update File: f\n*** Move to:\n@@\n-a\n+b\n*** End Patch",
+                "Move",
+            ),
+            (
+                "*** Begin Patch\n*** Update File: f\n*** Move to:  \n*** End Patch",
+                "Move",
+            ),
+            (
+                "*** Begin Patch\n*** Add File: f\n*** Move to: g\n+x\n*** End Patch",
+                "+",
+            ),
+            (
+                "*** Begin Patch\n*** Delete File: f\n*** Move to: g\n*** End Patch",
+                "块头",
+            ),
         ];
         for (text, hint) in cases {
             let err = parse_patch(text).unwrap_err();
             assert!(err.contains(hint), "补丁 {text:?} 的错误应包含「{hint}」，实际：{err}");
+        }
+    }
+
+    // ---- 029 M1：Move 语法正例（纯移动 / 移动并修改 / CRLF / 上下文前缀）----
+
+    #[test]
+    fn parse_move_to_accepted() {
+        // 纯移动：Update＋Move to，无任何修改块
+        let hunks = parse_ok(
+            "*** Begin Patch\n*** Update File: notes/旧名.txt\n*** Move to: archive/新名.txt\n*** End Patch",
+        );
+        match &hunks[0] {
+            Hunk::Update { path, move_to, chunks } => {
+                assert_eq!(path, &PathBuf::from("notes/旧名.txt"));
+                assert_eq!(move_to.as_deref(), Some(Path::new("archive/新名.txt")));
+                assert!(chunks.is_empty(), "纯移动不带修改块");
+            }
+            other => panic!("应为 Update 块：{other:?}"),
+        }
+
+        // 移动并修改：Move to 后接 @@ 修改块
+        let hunks = parse_ok(
+            "*** Begin Patch\n*** Update File: src/old.txt\n*** Move to: src/new.txt\n@@\n-mode=dev\n+mode=test\n*** End Patch",
+        );
+        match &hunks[0] {
+            Hunk::Update { path, move_to, chunks } => {
+                assert_eq!(path, &PathBuf::from("src/old.txt"));
+                assert_eq!(move_to.as_deref(), Some(Path::new("src/new.txt")));
+                assert_eq!(chunks.len(), 1);
+                assert_eq!(chunks[0].old_lines, vec!["mode=dev".to_string()]);
+                assert_eq!(chunks[0].new_lines, vec!["mode=test".to_string()]);
+            }
+            other => panic!("应为 Update 块：{other:?}"),
+        }
+
+        // CRLF 补丁文本中的 Move 标记
+        let hunks = parse_ok(
+            "*** Begin Patch\r\n*** Update File: f\r\n*** Move to: g\r\n*** End Patch\r\n",
+        );
+        match &hunks[0] {
+            Hunk::Update { move_to, chunks, .. } => {
+                assert_eq!(move_to.as_deref(), Some(Path::new("g")));
+                assert!(chunks.is_empty());
+            }
+            other => panic!("应为 Update 块：{other:?}"),
+        }
+    }
+
+    /// 带上下文前缀的 ` *** Move to: ...` 是文件内容（上下文行），不当成指令。
+    #[test]
+    fn parse_context_prefixed_move_marker_is_content() {
+        let hunks = parse_ok(
+            "*** Begin Patch\n*** Update File: f\n@@\n keep\n  *** Move to: not-a-command\n*** End Patch",
+        );
+        match &hunks[0] {
+            Hunk::Update { chunks, .. } => {
+                assert!(
+                    chunks[0].old_lines.iter().any(|l| l.contains("*** Move to: not-a-command")),
+                    "前缀空格的 Move 标记应作为上下文内容：{chunks:?}"
+                );
+            }
+            other => panic!("应为 Update 块：{other:?}"),
         }
     }
 
