@@ -1871,3 +1871,63 @@ fn move_with_level4_matching_moves_and_modifies() {
     assert_eq!(fs::read_to_string(&src).unwrap(), "a〜b\n", "源不删");
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// 029 补强（comprehensive-testing）：合法前序块＋后续非法 Move 语法 → 完整解析
+/// 阶段失败，前序块也不执行（空清单、已知状态、目录无新文件）。
+#[test]
+fn invalid_move_syntax_after_legal_block_executes_nothing() {
+    let dir = temp_dir("move-syn2");
+    let never = dir.join("never.txt");
+    let a = dir.join("a.txt");
+    fs::write(&a, b"keep\n").unwrap();
+    // 前序合法 Add＋后续重复 Move：整体解析失败
+    let r = apply_patch(&json!({ "patch": patch(&format!(
+        "*** Add File: {n}\n+content\n*** Update File: {a}\n*** Move to: {b}\n*** Move to: {c}\n@@\n-keep\n+K",
+        n = never.display(), a = a.display(), b = dir.join("b.txt").display(), c = dir.join("c.txt").display()
+    )) }));
+    assert!(!r.ok, "{r:?}");
+    assert!(r.changed_files.is_empty(), "前序合法块也不得执行：{r:?}");
+    assert!(r.state_known, "{r:?}");
+    let err = r.error.clone().unwrap_or_default();
+    assert!(err.contains("Move"), "{err}");
+    assert!(!never.exists(), "不创建前序目标");
+    assert_eq!(read(&a), b"keep\n".to_vec(), "后续块目标不动");
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "目录内无新文件");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// 029 补强（comprehensive-testing）：部分成功（目标写好、删源失败）时，展示
+/// 卡片只含已确认完成的目标 Add——不能把计划中的源删除画成成功。
+#[test]
+fn move_partial_success_display_shows_only_completed_add() {
+    if unsafe { libc::getuid() } == 0 {
+        eprintln!("以 root 运行：权限位不构成删除失败，跳过");
+        return;
+    }
+    let dir = temp_dir("move-pdisp");
+    let srcdir = dir.join("srcdir");
+    let dstdir = dir.join("dstdir");
+    fs::create_dir_all(&srcdir).unwrap();
+    fs::create_dir_all(&dstdir).unwrap();
+    let src = srcdir.join("f.txt");
+    let dst = dstdir.join("g.txt");
+    fs::write(&src, "PARTIAL\n").unwrap();
+    set_mode(&srcdir, 0o555);
+    let patch_text = patch(&format!(
+        "*** Update File: {s}\n*** Move to: {d}",
+        s = src.display(),
+        d = dst.display()
+    ));
+    let (r, changes) =
+        terminal_chat::apply_patch::apply_patch_with_display(&json!({ "patch": patch_text }));
+    set_mode(&srcdir, 0o755);
+    assert!(!r.ok && !r.state_known, "{r:?}");
+    assert_eq!(r.changed_files.len(), 1, "结果只保留目标 add：{r:?}");
+    assert_eq!(changes.len(), 1, "展示只含已确认完成的目标卡片：{changes:?}");
+    assert_eq!(changes[0].path, dst.display().to_string());
+    assert!(matches!(
+        &changes[0].kind,
+        terminal_chat::prompt::PatchChangeKind::Add { content } if content == "PARTIAL\n"
+    ));
+    let _ = fs::remove_dir_all(&dir);
+}

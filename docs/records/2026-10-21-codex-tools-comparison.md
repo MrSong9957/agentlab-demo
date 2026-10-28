@@ -20,7 +20,7 @@
 | 能力 | Codex 工具 | 本项目与建议 |
 |---|---|---|
 | 命令执行、进程交互 | `exec_command`、`write_stdin` | [016](../specs/016-process-sessions-plan.md) 已实施并批准交付（2026-10-22）：可续接进程会话、后续输出与输入、PTY、取消及回收；2026-10-26 复核代码入口仍存在 |
-| 文件补丁 | `apply_patch` | 基础功能已有；JSON 参数为主动适配。按本行作为一项任务，[029 规格与实施计划](../specs/029-file-patch.md)统一覆盖剩余 `Move to` 与 Unicode 匹配容差（待实现，待用户审阅）；两者不另拆任务（[差异依据](2026-10-22-codex-apply-patch-comparison.md)） |
+| 文件补丁 | `apply_patch` | 基础功能已有；JSON 参数为主动适配。按本行作为一项任务，[029 规格与实施计划](../specs/029-file-patch.md)统一覆盖剩余 `Move to` 与 Unicode 匹配容差；两者不另拆任务（[差异依据](2026-10-22-codex-apply-patch-comparison.md)）。2026-10-28 已按 029 M1–M6 实现完毕（Move 语法/文件操作与部分成功/第四级匹配/声明/保存展示与沙箱隔离；红绿＋变异＋攻防证据见 [docs/logs/029-file-patch/](../logs/029-file-patch/)），**待验收**；004 契约相应条款已同步修订 |
 | 任务计划 | `update_plan` | [017](../specs/017-update-plan.md) 已实施并批准交付（2026-10-22），保留 8 次请求额度；2026-10-26 复核工具定义、执行与计划状态模块均已存在（[实施证据](2026-10-22-017-implementation.md)） |
 | 用户问询 | `request_user_input`、`request_user_input_async` | [018](../specs/018-user-input.md) 阶段 A 同步问答已本地交付（2026-10-23），任务分支已清理；独立回答通道、关闭自动空答。阶段 B 异步问询已实施并获批准本地交付（2026-10-23）：TUI 七工具（异步发布＋本地等待）、单项未决、F6 回答窗口（[证据](2026-10-23-018b-implementation.md)） |
 | 执行中发消息 | `send_message_to_user_async` | [021](../specs/021-send-message-to-user-async.md) 已实施（2026-10-23）：模型目录 opt-in、accepted 即时确认、消息不结束轮、无额外注入、/resume 只展示不重发；运行中 Enter 接续当前轮＋显式排队保留（[证据](2026-10-23-021-implementation.md)）。任务完成后的响铃、桌面提醒由应用另行实现 |
