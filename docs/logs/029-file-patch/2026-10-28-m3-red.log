@@ -1,0 +1,17 @@
+# 029 M3 红测（第四级未实现）
+# date: 2026-10-28T13:58:15+00:00
+# cwd: /workspace
+# cmd1: env -u TCHAT_SANDBOX cargo test --locked --lib apply_patch::tests::seek_level4
+lib_exit=101
+# cmd2: env -u TCHAT_SANDBOX cargo test --locked --test apply_patch level4 m3_ move_with_level4
+test update_level4_unmapped_differences_fail ... ok
+test update_level4_preserves_unmodified_unicode_bytes ... FAILED
+test move_with_level4_matching_moves_and_modifies ... FAILED
+test update_level4_matches_all_groups_inline ... FAILED
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.01s
+integ_exit=101
+test apply_patch::tests::seek_level4_keeps_unmapped_differences ... ok
+test apply_patch::tests::seek_level4_priority_start_and_eof ... FAILED
+test apply_patch::tests::seek_level4_maps_all_unicode_punct_to_ascii ... FAILED
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 233 filtered out; finished in 0.01s
+exit=101

@@ -1733,3 +1733,141 @@ fn move_display_shows_two_cards() {
     }
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ---------- 029 M3：第四级 Unicode 匹配容差（验收 B1/B3/B4/C1 的文件级行为）----------
+
+/// B1 集成层：源文行内含全部四组 Unicode 字符，补丁上下文/旧行全用 ASCII 对应物
+/// → @@ 定位与旧行匹配均成功；只按指定映射替换，未涉及行逐字节保留。
+#[test]
+fn update_level4_matches_all_groups_inline() {
+    let dir = temp_dir("m3-b1");
+    let f = dir.join("b1.txt");
+    // 行内位置（非行首尾），保证不被 trim 先行消除
+    let src_lines = [
+        format!("前{}后", '\u{2014}'),          // em dash → '-'
+        format!("{}quoted{}", '\u{201C}', '\u{201D}'), // 弯双引号 → '"'
+        format!("it{}s", '\u{2019}'),           // 弯单引号 → '\''
+        format!("keep{}mid", '\u{00A0}'),       // NBSP → ' '
+        format!("w{}ide", '\u{2003}'),          // em space → ' '
+        "plain".to_string(),
+    ];
+    let src_text = src_lines.join("\n") + "\n";
+    fs::write(&f, &src_text).unwrap();
+    // 补丁：旧行全部用 ASCII 对应物匹配（第一~三级必失败，走第四级）
+    let r = call(&format!(
+        "*** Update File: {f}\n@@\n\
+         -前-后\n\
+         -\"quoted\"\n\
+         -it's\n\
+         -keep mid\n\
+         -w ide\n\
+         +REPLACED\n+plain2",
+        f = f.display()
+    ));
+    assert!(r.ok, "{r:?}");
+    assert_eq!(r.changed_files.len(), 1);
+    // 未涉及行逐字节保留（plain 原样）；替换与新增按补丁文本写入
+    let after = fs::read_to_string(&f).unwrap();
+    assert_eq!(after, "REPLACED\nplain2\nplain\n", "目标字节与预期一致：{after:?}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// B3：Unicode 上下文＋ASCII 补丁匹配；新增文本含另一组 Unicode；混合行尾——
+/// 未修改上下文逐字节保留（含弯引号与 CRLF），新增行按补丁文字＋004 行尾规则。
+#[test]
+fn update_level4_preserves_unmodified_unicode_bytes() {
+    let dir = temp_dir("m3-b3");
+    let f = dir.join("b3.txt");
+    // 首个换行 CRLF ⇒ preferred ending CRLF；未改行保留各自原行尾
+    let src = "\u{201C}头部\u{201D}\r\nkeep\u{00A0}me\r\nold\u{2013}line\r\n";
+    fs::write(&f, src).unwrap();
+    let (r, changes) = terminal_chat::apply_patch::apply_patch_with_display(&json!({ "patch":
+        patch(&format!(
+            "*** Update File: {f}\n@@ \"头部\"\n-keep me\n+新‘增’行",
+            f = f.display()
+        ))
+    }));
+    assert!(r.ok, "{r:?}");
+    // 头部上下文逐字节保留（弯引号＋CRLF）；旧行按第四级匹配删除；
+    // 新增行文字按补丁写入、行尾用 preferred CRLF
+    assert_eq!(
+        read(&f),
+        "\u{201C}头部\u{201D}\r\n新‘增’行\r\nold\u{2013}line\r\n".as_bytes().to_vec(),
+        "未修改行逐字节保留，新增行用补丁文字＋CRLF"
+    );
+    // 展示 diff 来自真实前后内容：含原始弯引号（未被归一化）
+    match &changes[0].kind {
+        terminal_chat::prompt::PatchChangeKind::Update { diff } => {
+            let d = diff.clone();
+            assert!(d.contains("\u{201C}头部\u{201D}"), "diff 含原始弯引号上下文：{d}");
+        }
+        other => panic!("Update 形状：{other:?}"),
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// B4 集成层：未映射标点/全角/大小写/组合字符/连续空格差异 → 匹配失败、字节不变。
+#[test]
+fn update_level4_unmapped_differences_fail() {
+    let dir = temp_dir("m3-b4");
+    let f = dir.join("b4.txt");
+    let before = "a〜b\nａｂ\nAb\ná b\nx  y\n";
+    fs::write(&f, before).unwrap();
+    for old_line in ["a~b", "ab", "ab", "a b", "x y"] {
+        let r = call(&format!(
+            "*** Update File: {f}\n@@\n-{old}\n+NEVER",
+            f = f.display(),
+            old = old_line
+        ));
+        assert!(!r.ok, "未映射差异不应匹配：{old_line} → {r:?}");
+        assert!(r.state_known && r.changed_files.is_empty(), "{r:?}");
+    }
+    assert_eq!(fs::read_to_string(&f).unwrap(), before, "失败后字节不变");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// C1：源文含弯引号/特殊空格，Move 块用 ASCII 上下文并修改 → 移动＋第四级匹配
+/// 共同生效；不匹配对照不创建目标、不删源。
+#[test]
+fn move_with_level4_matching_moves_and_modifies() {
+    let dir = temp_dir("m3-c1");
+    let src = dir.join("c1-src.txt");
+    let dst = dir.join("c1-dst.txt");
+    let bad_dst = dir.join("c1-bad-dst.txt");
+    fs::write(&src, "\u{201C}标题\u{201D}\nmode=dev\nkeep\u{00A0}this\n").unwrap();
+
+    // 正例：@@ 定位用 ASCII 引号，旧行 ASCII 空格
+    let r = call(&format!(
+        "*** Update File: {s}\n*** Move to: {d}\n@@ \"标题\"\n-mode=dev\n+mode=test",
+        s = src.display(),
+        d = dst.display()
+    ));
+    assert!(r.ok, "{r:?}");
+    assert_eq!(
+        r.changed_files,
+        vec![
+            ChangedFile { path: dst.display().to_string(), action: Action::Add },
+            ChangedFile { path: src.display().to_string(), action: Action::Delete },
+        ],
+        "{r:?}"
+    );
+    assert!(!src.exists());
+    // 未修改上下文保留原始 Unicode 字节；替换行按补丁写入
+    assert_eq!(
+        read(&dst),
+        "\u{201C}标题\u{201D}\nmode=test\nkeep\u{00A0}this\n".as_bytes().to_vec(),
+        "目标保留未归一化上下文"
+    );
+
+    // 对照：未映射差异（波浪线）匹配失败 → 不创建目标、不删源
+    fs::write(&src, "a〜b\n").unwrap();
+    let r = call(&format!(
+        "*** Update File: {s}\n*** Move to: {d}\n@@\n-a~b\n+z",
+        s = src.display(),
+        d = bad_dst.display()
+    ));
+    assert!(!r.ok && r.state_known && r.changed_files.is_empty(), "{r:?}");
+    assert!(!bad_dst.exists(), "不匹配不得创建目标");
+    assert_eq!(fs::read_to_string(&src).unwrap(), "a〜b\n", "源不删");
+    let _ = fs::remove_dir_all(&dir);
+}

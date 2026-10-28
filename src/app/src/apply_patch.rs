@@ -14,8 +14,9 @@
 //!   新增文件用 LF；更新后补齐末尾换行。
 //!
 //! 与 Codex 参考实现的取舍：
-//! - 行匹配保留三级容差（精确 → 忽略行尾空白 → 忽略两端空白），
-//!   未移植第四级 Unicode 标点归一化。
+//! - 行匹配保留四级容差（精确 → 忽略行尾空白 → 忽略两端空白 → 忽略两端空白
+//!   ＋Unicode 标点/空格映射，029 移植上游 seek_sequence 最后一轮；映射仅用于
+//!   定位比较，不改写源文件缓冲）。
 //! - 解析错误与校验失败（未发生写入）`state_known=true`；写入/删除失败的
 //!   变更操作可能已部分修改目标（坑003），`state_known=false` 须重读。
 //! - 按引用语法 `add_line+` 要求 Add 块至少一行 `+` 内容（Codex 解析器未强制）。
@@ -624,9 +625,12 @@ fn parse_patch(text: &str) -> Result<Vec<Hunk>, String> {
 /// 一次替换：(起始行下标, 被替换行数, 新行)。
 type Replacement = (usize, usize, Vec<String>);
 
-/// 在 lines 中自 start 起查找 pattern 的首个匹配下标；
-/// 依次尝试精确、忽略行尾空白、忽略两端空白三级容差（坑002：上下文应足够定位）。
-/// eof 为真时先尝试把 pattern 锚定在文件末尾。
+/// 在 lines 中自 start 起查找 pattern 的首个匹配下标；按完整搜索范围依次尝试
+/// 四级容差（坑002：上下文应足够定位；029：追加第四级）：
+/// 1. 精确 → 2. 忽略行尾空白 → 3. 忽略两端空白 → 4. 忽略两端空白＋Unicode
+/// 标点/空格映射（[`map_unicode_punct`]，仅比较用，不改写任何缓冲）。
+/// 每级先扫描完整允许范围再进入下一级——前面的宽松匹配不得抢走后面的较严格
+/// 匹配。eof 为真时先尝试把 pattern 锚定在文件末尾。
 fn seek_sequence(lines: &[String], pattern: &[String], start: usize, eof: bool) -> Option<usize> {
     if pattern.is_empty() {
         return Some(start);
@@ -658,7 +662,36 @@ fn seek_sequence(lines: &[String], pattern: &[String], start: usize, eof: bool) 
             return Some(i);
         }
     }
+    for i in search_start..=last_start {
+        if pattern
+            .iter()
+            .enumerate()
+            .all(|(k, p)| level4_line_eq(&lines[i + k], p))
+        {
+            return Some(i);
+        }
+    }
     None
+}
+
+/// 第四级行比较：两侧先按既有 `trim` 规则、再把 28 个 Unicode 标点/空格码点
+/// 映射为 ASCII 对应物后逐字符比较（两侧都映射——Unicode↔ASCII 及同组内部
+/// 均可匹配；中文、大小写与未列出的行内字符保持区分，029 规格 §1.3）。
+fn level4_line_eq(a: &str, b: &str) -> bool {
+    a.trim().chars().map(map_unicode_punct).eq(b.trim().chars().map(map_unicode_punct))
+}
+
+/// 029 固定映射表（上游 seek_sequence 的 Unicode 归一化，28 个码点）：
+/// 各组 Unicode 破折号→`-`、弯单引号→`'`、弯双引号→`"`、特殊空格→` `。
+/// 仅用于第四级**定位比较**，不改写源文件缓冲、路径或补丁新增文本。
+fn map_unicode_punct(c: char) -> char {
+    match c {
+        '\u{2010}'..='\u{2015}' | '\u{2212}' => '-',
+        '\u{2018}'..='\u{201B}' => '\'',
+        '\u{201C}'..='\u{201F}' => '"',
+        '\u{00A0}' | '\u{2002}'..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}' => ' ',
+        other => other,
+    }
 }
 
 /// 计算把 original_lines 变换为新内容所需的替换序列（按下标升序、互不重叠）。
@@ -1831,6 +1864,91 @@ mod tests {
         let lines = owned(&["a"]);
         assert_eq!(seek_sequence(&lines, &owned(&["a", "b"]), 0, false), None);
         assert_eq!(seek_sequence(&lines, &[], 5, false), Some(5), "空模式为无操作匹配");
+    }
+
+    // ---- 029 M3：第四级 Unicode 标点/空格匹配容差 ----
+
+    /// B1 单元层：28 个码点（行内位置，防被 trim 先行消除）与对应 ASCII 双向可
+    /// 匹配；同组内部也可匹配。
+    #[test]
+    fn seek_level4_maps_all_unicode_punct_to_ascii() {
+        let dashes = ['\u{2010}', '\u{2011}', '\u{2012}', '\u{2013}', '\u{2014}', '\u{2015}', '\u{2212}'];
+        let singles = ['\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'];
+        let doubles = ['\u{201C}', '\u{201D}', '\u{201E}', '\u{201F}'];
+        let spaces = [
+            '\u{00A0}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}',
+            '\u{2008}', '\u{2009}', '\u{200A}', '\u{202F}', '\u{205F}', '\u{3000}',
+        ];
+        let groups: [&[char]; 4] = [&dashes, &singles, &doubles, &spaces];
+        let ascii_for = ['-', '\'', '"', ' '];
+        for (gi, chars) in groups.iter().enumerate() {
+            let expect = ascii_for[gi];
+            for ch in *chars {
+                // Unicode 源 ↔ ASCII 补丁；ASCII 源 ↔ Unicode 补丁（两侧都映射）
+                let uni = format!("a{ch}b");
+                let asc = format!("a{expect}b");
+                assert_eq!(
+                    seek_sequence(&owned(&[uni.as_str()]), &owned(&[asc.as_str()]), 0, false),
+                    Some(0),
+                    "源含 {ch:?} 应与补丁 {expect:?} 匹配"
+                );
+                assert_eq!(
+                    seek_sequence(&owned(&[asc.as_str()]), &owned(&[uni.as_str()]), 0, false),
+                    Some(0),
+                    "补丁含 {ch:?} 应与源 ASCII {expect:?} 匹配"
+                );
+            }
+        }
+        // 同组内部：两种不同 Unicode 破折号都映射到 '-'
+        assert_eq!(
+            seek_sequence(&owned(&["a\u{2013}b"]), &owned(&["a\u{2012}b"]), 0, false),
+            Some(0),
+            "同映射组内部可匹配"
+        );
+    }
+
+    /// B2 单元层：四级按完整搜索范围依次尝试——前面的宽松候选不得抢走后面的
+    /// 精确/较严格匹配；第四级不越过 start、EOF 锚定仍生效。
+    #[test]
+    fn seek_level4_priority_start_and_eof() {
+        // 行 0 仅第四级可匹配（em dash ↔ ASCII），行 1 精确匹配——精确优先
+        let lines = owned(&["a-b", "a\u{2014}b"]);
+        assert_eq!(
+            seek_sequence(&lines, &owned(&["a\u{2014}b"]), 0, false),
+            Some(1),
+            "后面的精确匹配优先于前面的第四级宽松匹配"
+        );
+        // 无精确候选时第四级取最早候选
+        let lines = owned(&["a-b", "c-d"]);
+        assert_eq!(seek_sequence(&lines, &owned(&["a\u{2014}b"]), 0, false), Some(0));
+        // start 起点不因第四级越过
+        assert_eq!(seek_sequence(&lines, &owned(&["a\u{2014}b"]), 1, false), None);
+        // EOF 锚定：末行第四级匹配
+        let lines = owned(&["x", "tail", "a-b"]);
+        assert_eq!(seek_sequence(&lines, &owned(&["a\u{2014}b"]), 0, true), Some(2));
+        // 行尾空白容差（二级）先于第四级整行归一：两侧等价场景回归
+        let lines = owned(&["a\u{00A0}"]);
+        assert_eq!(seek_sequence(&lines, &owned(&["a "]), 0, false), Some(0));
+    }
+
+    /// B4 单元层：未映射标点、全角字母、大小写、组合字符、多个连续空格不匹配。
+    #[test]
+    fn seek_level4_keeps_unmapped_differences() {
+        let cases: Vec<(&str, &str)> = vec![
+            ("a〜b", "a~b"),            // U+301C 波浪线未映射
+            ("ａｂ", "ab"),             // 全角字母不折叠
+            ("Ab", "ab"),               // 大小写区分
+            ("áb", "ab"),               // 组合字符不剥离
+            ("a  b", "a b"),            // 连续空格不合并
+            ("a\u{2026}b", "a.b"),      // 省略号未映射
+        ];
+        for (line, pat) in cases {
+            assert_eq!(
+                seek_sequence(&owned(&[line]), &owned(&[pat]), 0, false),
+                None,
+                "{line:?} 与 {pat:?} 不应匹配"
+            );
+        }
     }
 
     // ---- compute_replacements：哨兵重试与上下文切分 ----
