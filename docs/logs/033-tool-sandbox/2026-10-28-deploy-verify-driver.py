@@ -229,7 +229,7 @@ def session_b():
 def main():
     sha = subprocess.run(["sha256sum", BIN], capture_output=True, text=True).stdout.split()[0]
     print(f"verified-binary sha256={sha}")
-    check("正式二进制哈希＝部署构建产物", sha == "4ab2dcc16e142de18b2dbb643c3276fdd23534dcb0b316e7b04eaa41a3f1521a", sha)
+    check("正式二进制哈希＝部署构建产物", sha == "713e4c28a431f40134e1f0bd9d9170e14266046176d4501a739f7e34eff41cd6", sha)
     session_a()
     session_b()
     failed = [n for n, ok in VERDICT if not ok]

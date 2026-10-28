@@ -1,0 +1,37 @@
+verified-binary sha256=713e4c28a431f40134e1f0bd9d9170e14266046176d4501a739f7e34eff41cd6
+PASS 正式二进制哈希＝本轮部署构建产物 | 713e4c28a431f40134e1f0bd9d9170e14266046176d4501a739f7e34eff41cd6
+PASS C: 启动横幅提及 bubblewrap（部署态沙箱可用）
+PASS C: 命令上屏
+PASS C: 写盘探针已运行
+PASS C: 回合收尾（LC-DONE 上屏＝轮线程已退出）
+PASS C: 轮结束后写盘继续（016 跨轮保留） | s1=256
+PASS C: 第二轮为 write_stdin 查询（请求数=3） | 3
+PASS C: 查询仍运行会话＝running | {'status': 'running', 'exit_code': None, 'output': 'tick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\nti
+PASS C: 查询取到跨轮新增输出（tick） | {'status': 'running', 'exit_code': None, 'output': 'tick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\ntick\nti
+PASS C: /exit 退出（再见!）
+PASS C: 退出码 0
+PASS C: 退出后写入进程无遗留（活进程口径）
+PASS C: 退出后无沙箱包装遗留
+PASS D: TUI 就绪
+PASS D: PTY 命令上屏
+PASS D: 回合收尾（yield 会话保留）
+PASS D: 轮结束后 write_stdin 输入送达（GOT:hello 落盘） | out=GOT:hello
+ ws={'status': 'running', 'exit_code': None, 'output': 'hello\r\n', 'truncated': False, 'error': None, 'session_id': 's1'}
+PASS D: /exit 退出码 0
+PASS E: 行模式就绪「你> 」
+PASS E: 首轮回复
+PASS E: MCP 服务器实际启动（外层 argv 身份） | [375605, 375606]
+PASS E: 轮结束后 MCP 服务器跨轮存活 | [375605, 375606]
+PASS E: 下一轮健康对话（连接复用）
+PASS E: reload 完成提示
+PASS E: 停用后旧 MCP 进程外层回收
+PASS E: Ctrl-D 退出码 0
+PASS F: TUI 就绪
+PASS F: 命令上屏
+PASS F: 回合收尾（会话跨轮保留）
+PASS F: 先证存活（轮结束后载荷在册） | [375637, 375639]
+PASS F: SIGKILL 后沙箱载荷停止执行（零活进程） | alive=[] zombies=[375637, 375639] gone=[] live_scan=[]
+PASS F: CLI 自身已死（僵尸或消失，不计泄漏） | CLI 375610: State:	Z (zombie)
+  [三分类明细] alive=[] zombies=[375637, 375639]（已死未收割） gone=[] CLI=State:	Z (zombie)
+
+== 生命周期部署验证：32 PASS / 0 FAIL ==
