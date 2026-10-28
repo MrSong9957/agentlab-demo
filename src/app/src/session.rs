@@ -28,8 +28,21 @@ fn needs_v2(history: &[HistoryItem]) -> bool {
     history.iter().any(|item| matches!(item, HistoryItem::NativeAssistant { .. }))
 }
 
+/// 032：含上下文检查点的快照必须写 V3（§1.6——旧程序对 V3 明确拒绝，
+/// 不能把检查点塞进会被忽略的旧格式后声称恢复等价）。
+fn needs_v3(history: &[HistoryItem]) -> bool {
+    needs_v2(history)
+        || history
+            .iter()
+            .any(|item| matches!(item, HistoryItem::ContextCheckpoint { .. }))
+}
+
 fn meta_line(version: u64) -> &'static str {
-    if version == 2 { "{\"v\":2}" } else { META_LINE }
+    match version {
+        2 => "{\"v\":2}",
+        3 => "{\"v\":3}",
+        _ => META_LINE,
+    }
 }
 
 /// 悬空调用合成结果的固定文案（§6-A：只表达结果未知，禁言未执行/取消/失败）。
@@ -143,6 +156,13 @@ enum Entry {
 /// detail 恰为 `high`、解码字节不超过准备后图片上限的本地图片 data URL。
 fn image_payload_ok(item: &HistoryItem) -> bool {
     let item = item.portable();
+    // 032 审查修复 #4：检查点 seed 逐条按同一 Text 图片规则校验——外部/
+    // 损坏 V3 不能借检查点把远程 URL 或超限载荷带过 019 §5.1 装载防线。
+    if let HistoryItem::ContextCheckpoint { seed, .. } = item {
+        return seed
+            .iter()
+            .all(|m| user_images_payload_ok(&HistoryItem::Text(m.clone())));
+    }
     let HistoryItem::ToolResult { image: Some(img), .. } = item else {
         return user_images_payload_ok(item);
     };
@@ -270,11 +290,12 @@ pub fn load_from_reader<R: Read>(reader: R) -> Result<Loaded, String> {
         }
         line_no += 1;
         if meta_pending {
-            // meta 门：v==1/2 通过（多余字段忽略）；坏 meta/未知 v 整文件拒绝
+            // meta 门：v==1/2/3 通过（多余字段忽略）；坏 meta/未知 v 整文件拒绝
+            //（旧程序只认 1/2——V3 对其即未知版本，满足"旧程序明确拒绝"）
             let parsed_version = serde_json::from_slice::<serde_json::Value>(&line_buf)
                     .ok()
                     .and_then(|v| v.get("v").and_then(|v| v.as_u64()));
-            let meta_ok = !over_limit && matches!(parsed_version, Some(1 | 2));
+            let meta_ok = !over_limit && matches!(parsed_version, Some(1 | 2 | 3));
             if !meta_ok {
                 return Err(format!("会话首行 meta 无效（期望 {META_LINE}）：整文件拒绝"));
             }
@@ -292,18 +313,42 @@ pub fn load_from_reader<R: Read>(reader: R) -> Result<Loaded, String> {
         } else {
             serde_json::from_slice::<HistoryItem>(&line_buf).ok()
         };
+        // 032：检查点只可能出现在 V3——V1/V2 携带检查点＝外来自称事件，拒绝
+        // 整文件装载（外部数据不能靠自称检查点成为宿主事件，§1.6）。
+        if version != 3
+            && parsed
+                .as_ref()
+                .is_some_and(|item| matches!(item, HistoryItem::ContextCheckpoint { .. }))
+        {
+            return Err(format!(
+                "V{version} 会话含上下文检查点，拒绝按旧格式装载（检查点仅存在于 V3）"
+            ));
+        }
         if version == 1 && parsed.as_ref().is_some_and(|item| matches!(item, HistoryItem::NativeAssistant { .. })) {
             return Err("V1 会话含原生状态，拒绝按旧格式装载".into());
         }
         // 019 §5.1：图片载荷校验——只接受有界且有效的本地图片 data URL；
         // 远程 URL、非法 base64、错误 MIME、错误 detail 或超限额按坏行处理
         //（配对修复补未知结果；不为校验加载原路径或访问网络）。
+        let unparseable = parsed.is_none();
         match parsed.filter(|item| batch_line_ok(item, &mut seen) && image_payload_ok(item)) {
             Some(item) => {
                 entries.push(Entry::Item(item));
                 last_accepted = true;
             }
             None => {
+                // 032 审查修复：V3 中不可解析的检查点行整文件拒绝——按坏行跳过
+                // 会让活动视图静默回退全历史/上一检查点（错误视图续接，§1.6/C12）。
+                // 可解析但载荷非法（如 seed 图片越界）的检查点仍按 007 坏行跳过
+                //＋计数（与普通 Text 行同规则）。
+                if version == 3
+                    && unparseable
+                    && line_buf.windows(b"context_check".len()).any(|w| w == b"context_check")
+                {
+                    return Err(format!(
+                        "V3 会话第 {line_no} 行为损坏的上下文检查点，整文件拒绝（防止用错误视图续接）"
+                    ));
+                }
                 entries.push(Entry::Bad);
                 skipped += 1;
                 skipped_line_numbers.push(line_no);
@@ -320,6 +365,14 @@ pub fn load_from_reader<R: Read>(reader: R) -> Result<Loaded, String> {
     }
 
     let (repairs, mut history) = repair_pairs(entries);
+    // 032 审查修复 #12：V3 装载时执行检查点链全量语义校验（代数连续/批位
+    // 闭合/成功排定关联/seed 形状）——请求与查询路径只做轻量本地校验，
+    // 链级保证收敛到本状态变化点（O(n) 一次，不随请求次数放大）。
+    if version == 3 {
+        crate::context_window::validate_checkpoint_chain(&history).map_err(|e| {
+            format!("V3 会话检查点语义校验失败，整文件拒绝（{e}）")
+        })?;
+    }
     if version == 2 && skipped > 0 {
         // 损坏行可能就是必要签名，不能像普通文本一样丢掉后继续请求。
         // 保留可显示历史，并把不可续接事实持久保存，禁止恢复时补执行工具。
@@ -373,6 +426,13 @@ fn repair_pairs(entries: Vec<Entry>) -> (usize, Vec<HistoryItem>) {
     for entry in entries {
         match entry {
             Entry::Bad => finalize_open_batch(&mut out, &mut open, &mut repairs),
+            // 032：检查点只在批次闭合后追加——作为边界处理（先闭合开放批再入列）。
+            // 语义校验（代数/关联/seed 形状）由活动视图读取时裁决（§1.6/§2：
+            // 可展示恢复事实，但不得悄悄丢标记并用错误视图续接）。
+            Entry::Item(item @ HistoryItem::ContextCheckpoint { .. }) => {
+                finalize_open_batch(&mut out, &mut open, &mut repairs);
+                out.push(item);
+            }
             Entry::Item(item @ HistoryItem::NativeAssistant { .. }) => {
                 finalize_open_batch(&mut out, &mut open, &mut repairs);
                 if let HistoryItem::AssistantToolCalls { tool_calls, .. } = item.portable() {
@@ -591,7 +651,7 @@ pub fn save_snapshot(dir: &Path, name: &str, history: &[HistoryItem]) -> Result<
         #[cfg(not(unix))]
         let mut f =
             std::fs::File::create(&tmp).map_err(|e| format!("写 {} 失败：{e}", tmp.display()))?;
-        f.write_all(format!("{}\n", meta_line(if needs_v2(history) { 2 } else { 1 })).as_bytes())
+        f.write_all(format!("{}\n", meta_line(if needs_v3(history) { 3 } else if needs_v2(history) { 2 } else { 1 })).as_bytes())
             .map_err(|e| format!("写 {} 失败：{e}", tmp.display()))?;
         for item in history {
             let line = record_line(item);
@@ -705,6 +765,92 @@ impl Session {
             self.persisted_upto = 0;
             self.durable_len = 0;
             self.error_reported = false;
+        }
+    }
+
+    /// 032 M3：提交检查点——专用可失败回执路径（与普通 on_history 的"失败只
+    /// 提示一次"分离，§1.5：没有回执不得切换活动视图）。语义：
+    /// - 首次提交先迁移 V3 目标（V1/V2 旧文件保持原样，新 auto 文件以完整
+    ///   transcript 开篇）；
+    /// - 滞留待写段＋检查点行按序写入，每行一次 `write_all` 成功即提交；
+    /// - 全部成功→返回已提交条数，游标越过检查点（调用方随后把同一记录推入
+    ///   内存历史并 on_record——届时无新增待写，不会二次落盘）；
+    /// - 任一失败→截回 durable_len 并返回原因；检查点未进入内存历史（调用方
+    ///   败时不推入），此后普通补写/退出 flush/手动保存均无该记录可写——
+    ///   失败候选不复活（调研 M3 裁决）。
+    /// 行超限：提交前拒绝，不动追加状态（普通自动保存不受影响）。
+    pub fn commit_checkpoint(
+        &mut self,
+        history: &[HistoryItem],
+        checkpoint: &HistoryItem,
+    ) -> Result<usize, String> {
+        let cp_line = record_line(checkpoint);
+        if line_over_limit(&cp_line) {
+            return Err(format!(
+                "{}，已拒绝提交检查点",
+                line_limit_error("检查点序列化后")
+            ));
+        }
+        if matches!(self.state, State::Disabled) {
+            return Err("自动保存已停用，无法提交检查点".into());
+        }
+        // 待写段行限预检（纯检查，不写不改状态）
+        for item in &history[self.persisted_upto..] {
+            if line_over_limit(&record_line(item)) {
+                return Err(format!(
+                    "{}，滞留记录无法随检查点提交",
+                    line_limit_error("待写段记录")
+                ));
+            }
+        }
+        // 032 审查修复 #13：迁移原子化——version<3 时先在局部完成「建 V3 目标
+        // ＋完整 transcript 开篇＋检查点行」，全部成功后才一次性替换状态；
+        // 任一失败只清理临时文件，self 不动（旧目标与普通自动保存保持原样，
+        // 不再出现「无检查点的 V3 残档」或迁移失败即停用）。
+        if self.version != 3 {
+            let (path, file, bytes) =
+                self.create_v3_target_with_checkpoint(history, cp_line.as_str())?;
+            self.version = 3;
+            self.state = State::Writing { _path: path, file };
+            self.durable_len = bytes;
+            // 游标越过检查点：调用方回执成功后恰推入一条同名记录
+            self.persisted_upto = history.len() + 1;
+            self.error_reported = false;
+            return Ok(self.persisted_upto);
+        }
+        let State::Writing { file, .. } = &mut self.state else {
+            return Err("自动保存目标不可用，无法提交检查点".into());
+        };
+        let outcome = (|| -> Result<(), std::io::Error> {
+            for item in &history[self.persisted_upto..] {
+                let line = record_line(item);
+                file.write_all(line.as_bytes())?;
+                self.durable_len += line.len() as u64;
+                self.persisted_upto += 1;
+            }
+            file.write_all(cp_line.as_bytes())?;
+            self.durable_len += cp_line.len() as u64;
+            // 游标越过检查点：调用方恰推入一条同名记录（on_record 无新增可写）
+            self.persisted_upto += 1;
+            Ok(())
+        })();
+        match outcome {
+            Ok(()) => {
+                self.error_reported = false;
+                Ok(self.persisted_upto)
+            }
+            Err(e) => {
+                let msg = format!("检查点提交写入失败（{e}）：未提交，活动视图不变");
+                match file.set_len(self.durable_len) {
+                    Ok(()) => Err(msg),
+                    Err(te) => {
+                        self.state = State::Disabled;
+                        Err(format!(
+                            "{msg}；截回失败（{te}），自动保存已停用，文件尾部半行将由下次装载按坏行跳过"
+                        ))
+                    }
+                }
+            }
         }
     }
 
@@ -950,6 +1096,92 @@ impl Session {
         Err("自动会话文件名持续冲突，自动保存已停用".into())
     }
 
+    /// 032 审查修复 #13：迁移原子化的局部演练——创建新 V3 auto 目标（meta
+    /// v3＋完整 transcript 开篇＋检查点行），成功返回 (path, file, bytes)，
+    /// 失败清理临时文件且不触碰 self。撞名候选循环与锁语义复用
+    /// create_auto_file 的既有约定。
+    fn create_v3_target_with_checkpoint(
+        &self,
+        history: &[HistoryItem],
+        cp_line: &str,
+    ) -> Result<(PathBuf, File, u64), String> {
+        catalog::ensure_private_dir(&self.dir)
+            .map_err(|e| format!("自动会话目录初始化失败：{e}"))?;
+        let base = auto_file_name();
+        for attempt in 0..50u32 {
+            let name = if attempt == 0 {
+                base.clone()
+            } else {
+                format!("{}-{attempt}.jsonl", base.strip_suffix(".jsonl").unwrap_or(&base))
+            };
+            let path = self.dir.join(&name);
+            let opened = {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(&path)
+                }
+                #[cfg(not(unix))]
+                {
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .create_new(true)
+                        .open(&path)
+                }
+            };
+            let mut file = match opened {
+                Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("创建自动会话文件失败：{e}")),
+            };
+            match try_flock(&file) {
+                LockOutcome::Acquired => {}
+                LockOutcome::Busy => continue,
+                LockOutcome::Failed(e) => return Err(format!("自动会话文件加锁失败：{e}")),
+            }
+            if ensure_within_dir(&self.dir, &path).is_err() {
+                let _ = std::fs::remove_file(&path);
+                return Err("自动会话路径逃出 sessions 目录，已停用自动保存".into());
+            }
+            let mut bytes = 0u64;
+            let outcome = (|| -> Result<(), String> {
+                let meta = format!("{}\n", meta_line(3));
+                file.write_all(meta.as_bytes())
+                    .map_err(|e| format!("自动会话写入失败：{e}"))?;
+                bytes += meta.len() as u64;
+                for item in history {
+                    let line = record_line(item);
+                    if line_over_limit(&line) {
+                        return Err(format!(
+                            "{}，自动保存已停用",
+                            line_limit_error("记录序列化后")
+                        ));
+                    }
+                    file.write_all(line.as_bytes())
+                        .map_err(|e| format!("自动会话写入失败：{e}"))?;
+                    bytes += line.len() as u64;
+                }
+                file.write_all(cp_line.as_bytes())
+                    .map_err(|e| format!("自动会话写入失败：{e}"))?;
+                bytes += cp_line.len() as u64;
+                Ok(())
+            })();
+            match outcome {
+                Ok(()) => return Ok((path, file, bytes)),
+                Err(msg) => {
+                    // 局部演练失败：清掉残档，self 未被触碰（旧目标原样）
+                    let _ = std::fs::remove_file(&path);
+                    return Err(format!("提交检查点失败：{msg}"));
+                }
+            }
+        }
+        Err("自动会话文件名持续冲突，检查点未提交（自动保存不受影响）".into())
+    }
+
     /// 按序提交待写段 `history[persisted_upto..]`：每行独立 write_all＋独立推进；
     /// 失败→截回 durable_len（截回成功＝游标不动待补写；截回失败＝停用）；
     /// 行超限→停用不截断。返回原始失败消息（打印一次纪律由调用方施加）。
@@ -1028,6 +1260,51 @@ fn truncate_bad_tail(file: &mut File, file_len: u64) -> std::io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 032 M3（C10 写前/半写屏障）：真实设备注入——Writing 态指向 /dev/full
+    /// （write 恒 ENOSPC、ftruncate 恒 EINVAL），经生产 commit_checkpoint 路径
+    /// 触发"检查点写失败→截回失败→停用＋明确报错"。验证：失败回执（不 Ok）、
+    /// 停用后普通追加不再尝试、检查点未提交（游标不越界）。
+    #[test]
+    fn checkpoint_write_failure_reports_and_disables_via_real_device() {
+        let dir = temp_dir("cpdev");
+        let dev = std::fs::OpenOptions::new()
+            .append(true)
+            .read(true)
+            .open("/dev/full")
+            .expect("本测试需要 /dev/full（Linux 标准字符设备）");
+        let mut session = Session {
+            version: 3,
+            native_seen: 0,
+            dir: dir.clone(),
+            state: State::Writing { _path: PathBuf::from("/dev/full"), file: dev },
+            persisted_upto: 1,
+            durable_len: 64,
+            error_reported: false,
+        };
+        let history = vec![
+            text_user("已提交一"),
+            text_user("第二条"),
+        ];
+        let checkpoint = HistoryItem::ContextCheckpoint {
+            context_id: 1,
+            request_call_id: "switch-1".into(),
+            summary: "交接".into(),
+            seed: Vec::new(),
+        };
+        let err = session
+            .commit_checkpoint(&history, &checkpoint)
+            .expect_err("写入 /dev/full 必失败");
+        assert!(
+            err.contains("检查点提交写入失败") && err.contains("截回失败") && err.contains("停用"),
+            "报错须指明写失败＋截回失败＋停用：{err}"
+        );
+        // 游标未越过检查点；停用后普通追加静默（不再尝试写）
+        assert_eq!(session.persisted_upto, 1, "游标不因失败推进");
+        assert_eq!(session.on_history(&history), None, "停用后无追加");
+        assert_eq!(session.flush_final(&history), Ok(()), "停用态排空＝无操作");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn text_user(content: &str) -> HistoryItem {
         HistoryItem::Text(HistoryMessage {
@@ -1114,5 +1391,19 @@ mod tests {
         assert_eq!(loaded.skipped_lines, 1, "半行按坏行跳过");
         assert_eq!(loaded.tail, TailState::Bad);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// 032：CLI 行式的检查点提交宿主——经 RefCell 与 on_record 顺序共享同一会话
+/// 保存器（单线程轮内顺序调用，无运行时借用冲突；提交失败候选不进内存历史）。
+pub struct SessionCellSink<'c, 'a>(pub &'c std::cell::RefCell<&'a mut Session>);
+
+impl crate::context_window::CheckpointHost for SessionCellSink<'_, '_> {
+    fn commit_checkpoint(
+        &mut self,
+        history: &[HistoryItem],
+        checkpoint: &HistoryItem,
+    ) -> Result<usize, String> {
+        self.0.borrow_mut().commit_checkpoint(history, checkpoint)
     }
 }

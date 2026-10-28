@@ -243,6 +243,21 @@ pub enum HistoryItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         image: Option<ToolResultImage>,
     },
+    /// 032：上下文检查点——只在批次闭合后追加的单条记录（§1.6）。标记与 seed
+    /// 不构成新的实际用户/工具行为；活动视图＝最近检查点的 seed＋其后真实历史
+    /// （见 `context_window::active_view`），完整 transcript 留档不删改。
+    #[serde(rename = "context_checkpoint")]
+    ContextCheckpoint {
+        /// 上一有效代数＋1（首个为 1）。
+        context_id: u64,
+        /// 发起切换的 new_context 调用 id（原样保留，装载时校验关联）。
+        request_call_id: String,
+        /// 模型提供的交接摘要（非空，≤64 KiB UTF-8；宿主只验证格式边界）。
+        summary: String,
+        /// 新活动上下文的共同消息（§1.4 2–5：规则/环境、带标识的摘要、本用户轮
+        /// 输入与运行态说明；仅 User/Assistant 文本，用户消息可带已准备图片）。
+        seed: Vec<HistoryMessage>,
+    },
 }
 
 impl HistoryItem {
@@ -327,6 +342,12 @@ pub(crate) fn project_history(history: &[HistoryItem]) -> Vec<Value> {
                     pending_attachments
                         .push(image_attachment_message(tool_call_id, content, image));
                 }
+            }
+            // 032：检查点标记不进入请求投影——活动视图由调用方经
+            // `context_window::active_view` 展开为 seed＋尾部；直接收到完整
+            // 历史时防御性跳过（不把 seed 当第二份对话重复注入）。
+            HistoryItem::ContextCheckpoint { .. } => {
+                flush(&mut out, &mut pending_attachments);
             }
         }
     }
@@ -613,6 +634,8 @@ pub fn build_turn_request_with_async_host(
         has_async_input_host,
         image_input,
         send_message,
+        false,
+        false,
         &[],
     )
 }
@@ -620,6 +643,8 @@ pub fn build_turn_request_with_async_host(
 /// 022：MCP 工具定义追加在现有原生（含条件）工具之后（§2.3：按原始身份
 /// 稳定排序，由快照保证）；空切片时请求与既有入口逐字节一致。
 /// 工具总数上限（128）由 turn 层在组装后、发送前按 tools 数组长度检查。
+/// 032：`context_query`/`context_switch`＝本轮声明快照（experimental_supported_tools
+/// 精确匹配＋宿主可用性；声明与执行共用同一快照）。
 pub fn build_turn_request_with_mcp(
     history: &[HistoryItem],
     memory_context: Option<&str>,
@@ -627,6 +652,8 @@ pub fn build_turn_request_with_mcp(
     has_async_input_host: bool,
     image_input: bool,
     send_message: bool,
+    context_query: bool,
+    context_switch: bool,
     mcp_tools: &[Value],
 ) -> Value {
     let mut system = sent_instructions();
@@ -655,6 +682,13 @@ pub fn build_turn_request_with_mcp(
     // 021：模型目录声明的用户轮加声明即时消息工具（每轮固定快照）
     if send_message {
         tools.push(crate::message_to_user::tool_definition());
+    }
+    // 032：上下文管理工具（每用户轮固定快照；查询与切换分别独立声明）
+    if context_query {
+        tools.push(crate::context_window::query_tool_definition());
+    }
+    if context_switch {
+        tools.push(crate::context_window::switch_tool_definition());
     }
     // 022：本轮 MCP 快照的定义（已排序；声明与执行共用同一快照）
     tools.extend(mcp_tools.iter().cloned());

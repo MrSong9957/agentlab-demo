@@ -437,18 +437,30 @@ impl TuiHost {
                         }
                     }
                     turn::TurnNotify::ToolEnd { id, name, arguments, result, display, cancelled } => {
-                        // 未知工具：无 cell 可替换（Begin 已回退活动行），不发送
-                        let item = tool_end_item(&name, &id, &arguments, &result, display.as_ref(), cancelled);
-                        match item {
-                            Some(item) => Some(DriverEvent::ToolEnd { id, item }),
-                            // 021：消息工具失败/取消/结果未知——活动行已被抑制，
-                            // 这里显式呈现原因，不静默（展示副本过终端过滤）
-                            None if name == "send_message_to_user_async" => Some(DriverEvent::Info(
-                                crate::display::sanitize_for_terminal(
-                                    &crate::message_to_user::failure_line(&result),
-                                ),
-                            )),
-                            None => None,
+                        // 032：上下文工具结果——估算/未知与排定/拒绝以提示行呈现
+                        //（已应用边界由提交回执的 Info 通知另行呈现）。
+                        if name == crate::context_window::QUERY_TOOL_NAME {
+                            Some(DriverEvent::Info(crate::display::sanitize_for_terminal(
+                                &crate::context_window::query_display_line(&result),
+                            )))
+                        } else if name == crate::context_window::SWITCH_TOOL_NAME {
+                            Some(DriverEvent::Info(crate::display::sanitize_for_terminal(
+                                &crate::context_window::switch_call_display_line(&result),
+                            )))
+                        } else {
+                            // 未知工具：无 cell 可替换（Begin 已回退活动行），不发送
+                            let item = tool_end_item(&name, &id, &arguments, &result, display.as_ref(), cancelled);
+                            match item {
+                                Some(item) => Some(DriverEvent::ToolEnd { id, item }),
+                                // 021：消息工具失败/取消/结果未知——活动行已被抑制，
+                                // 这里显式呈现原因，不静默（展示副本过终端过滤）
+                                None if name == "send_message_to_user_async" => Some(DriverEvent::Info(
+                                    crate::display::sanitize_for_terminal(
+                                        &crate::message_to_user::failure_line(&result),
+                                    ),
+                                )),
+                                None => None,
+                            }
                         }
                     }
                 };
@@ -535,12 +547,23 @@ impl TuiHost {
                     return;
                 }
             };
+            // 032：上下文工具宿主（查询/切换按目录开关；检查点提交经共享保存器
+            // 锁的可失败回执——轮线程内与 on_record 顺序加锁，无竞争）。
+            let mut checkpoint_sink = TuiCheckpointSink(autosave.clone());
             let extras = turn::TurnExtras {
                 // 022：声明与分派共用同一快照（合并轮由 turn 层强制忽略）
                 mcp: mcp_snapshot.as_deref(),
                 // 021：每用户轮固定能力快照（声明与执行共用）
                 send_message: catalog::supports_send_message_to_user(&model),
                 steer: Some(&mut steer_channel),
+                context: Some(crate::context_window::ContextHost {
+                    conn: &conn,
+                    key: &key,
+                    model: &model,
+                    query_declared: catalog::supports_get_context_remaining(&model),
+                    switch_declared: catalog::supports_new_context(&model),
+                    checkpoints: Some(&mut checkpoint_sink),
+                }),
             };
             let result = turn::run_user_turn_with_context_and_caps(
                 &mut history.lock().unwrap(),
@@ -844,6 +867,22 @@ impl TuiHost {
 /// 018-B：带来源标记的回答/关闭文本（正文与标记 request_id 一致）合并进对应
 /// 异步发布调用的同一展示，不作为普通用户文本重复出现；孤儿/重复/矛盾记录
 /// 不伪造已答，按普通文本保留。
+/// 032：TUI 检查点提交宿主——与 on_record 共享同一 `Arc<Mutex<Session>>`
+///（轮线程内顺序加锁，无竞争；提交失败候选不进内存历史）。
+struct TuiCheckpointSink(std::sync::Arc<std::sync::Mutex<session::Session>>);
+impl crate::context_window::CheckpointHost for TuiCheckpointSink {
+    fn commit_checkpoint(
+        &mut self,
+        history: &[HistoryItem],
+        checkpoint: &HistoryItem,
+    ) -> Result<usize, String> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .commit_checkpoint(history, checkpoint)
+    }
+}
+
 fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
     use std::collections::HashMap;
     // 018-B 预扫：request_id → 首条有效 answer/closed 事件
@@ -902,6 +941,18 @@ fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
         let item = item.portable();
         match item {
             HistoryItem::NativeAssistant { .. } => {}, // portable 已解包，不展示原生块
+            // 032：检查点边界——归档前缀与活动视图的分界（完整 transcript 含
+            // 归档内容可回看；seed 的用户输入已作为真实记录在前缀中展示，
+            // 不经 seed 复制重画；摘要随边界呈现，M5 细化展示形态）。
+            HistoryItem::ContextCheckpoint { context_id, summary, .. } => {
+                out.push(HostHistoryItem::Text {
+                    assistant: false,
+                    content: format!(
+                        "—— 上下文检查点（代数 {context_id}）已提交，此前前缀已归档 ——\n交接摘要：{}",
+                        crate::display::truncate_chars(summary, 400)
+                    ),
+                });
+            }
             HistoryItem::Text(m) => {
                 // 015：自动上下文消息不作为真实用户发言展示（仅投影层过滤，
                 // 历史与请求面不变；识别与去重共用同一识别器）
@@ -1578,6 +1629,56 @@ mod tests {
             }
             other => panic!("孤儿结果按文本：{other:?}"),
         }
+    }
+
+    /// 032：恢复历史中的上下文检查点——渲染为已应用边界＋摘要（完整
+    /// transcript 含归档前缀，seed 用户输入已作为真实记录展示，不经 seed 重画）。
+    #[test]
+    fn project_history_items_renders_checkpoint_boundary() {
+        use tchat_tui::chat_driver::HostHistoryItem as H;
+        let history = vec![
+            HistoryItem::Text(crate::prompt::HistoryMessage {
+                images: None,
+                text_elements: Vec::new(),
+                role: crate::prompt::HistoryRole::User,
+                content: "归档输入".into(),
+                user_input_event: None,
+            }),
+            HistoryItem::ContextCheckpoint {
+                context_id: 1,
+                request_call_id: "sw".into(),
+                summary: "交接：旧前缀已归档".into(),
+                seed: vec![crate::prompt::HistoryMessage {
+                    images: None,
+                    text_elements: Vec::new(),
+                    role: crate::prompt::HistoryRole::Assistant,
+                    content: "[交接]".into(),
+                    user_input_event: None,
+                }],
+            },
+            HistoryItem::Text(crate::prompt::HistoryMessage {
+                images: None,
+                text_elements: Vec::new(),
+                role: crate::prompt::HistoryRole::User,
+                content: "检查点后输入".into(),
+                user_input_event: None,
+            }),
+        ];
+        let cells = project_history_items(&history);
+        let texts: Vec<&str> = cells
+            .iter()
+            .filter_map(|c| match c {
+                H::Text { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.contains("上下文检查点（代数 1）已提交") && t.contains("旧前缀已归档")),
+            "边界＋摘要：{texts:?}"
+        );
+        assert!(texts.iter().any(|t| *t == "归档输入"), "归档前缀仍可回看");
+        assert!(texts.iter().any(|t| *t == "检查点后输入"), "尾部展示");
+        assert_eq!(texts.len(), 3, "seed 不重画（恰三条）：{texts:?}");
     }
 
     /// 016：恢复历史中的 running 记录——按“当时状态”文本呈现，不渲染为

@@ -4,6 +4,7 @@ pub mod api;
 pub mod apply_patch;
 pub mod catalog;
 pub mod context;
+pub mod context_window;
 pub mod display;
 pub mod exec;
 pub mod mcp;

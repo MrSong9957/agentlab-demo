@@ -281,44 +281,66 @@ impl std::io::Write for LimitCountingWriter {
     }
 }
 
-/// 发送已构造完成的对话请求，返回解析后的响应 JSON 与 HTTP 上下文：chat 与
-/// chat_with_body 共用的 URL 构造、鉴权头、重定向拒绝、请求体上限与错误映射路径。
-fn post_chat_json(
+/// 032 M1：定型出站请求（纯函数，零 HTTP/零鉴权）——按协议完成 URL 构造与
+/// 最终 body 纯化（Gemini 移除用于 URL 的 model/stream）。真实发送
+/// （[`post_chat_json`]）与只读计量（[`measure_request_body_bytes`]）共用本阶段，
+/// 计量终点＝实际发送字节（不计量移除 model/stream 之前的中间表示）。
+pub(crate) struct Outbound {
+    pub url: String,
+    pub body: Value,
+    pub streaming: bool,
+}
+
+pub(crate) fn finalize_outbound(
     conn: &EffectiveConnection,
-    key: &str,
     mut body: Value,
-    agent: &ureq::Agent,
-) -> Result<(Value,String), String> {
-    let streaming=body.get("stream")==Some(&json!(true));
-    let mut url=Url::parse(&conn.base_url).map_err(|e|format!("基础地址无效：{e}"))?;
+) -> Result<Outbound, String> {
+    let streaming = body.get("stream") == Some(&json!(true));
+    let mut url = Url::parse(&conn.base_url).map_err(|e| format!("基础地址无效：{e}"))?;
     {
-        let mut path=url.path_segments_mut().map_err(|_|"基础地址不能拼接操作路径")?;
+        let mut path = url.path_segments_mut().map_err(|_| "基础地址不能拼接操作路径")?;
         path.pop_if_empty();
         match conn.protocol.as_str() {
             "openai-responses" => { path.push("responses"); }
             "anthropic-messages" => { path.push("messages"); }
             "google-interactions" => { path.push("interactions"); }
             "google-generate-content" => {
-                let model=body.as_object_mut().and_then(|b|b.remove("model"))
-                    .and_then(|v|v.as_str().map(str::to_owned)).ok_or("Gemini 请求缺少模型 ID")?;
+                let model = body.as_object_mut().and_then(|b| b.remove("model"))
+                    .and_then(|v| v.as_str().map(str::to_owned)).ok_or("Gemini 请求缺少模型 ID")?;
                 // 资源名前缀只去一次，其余整体作为一个路径段编码，不解释已有 % 转义。
-                let operation=if streaming {"streamGenerateContent"} else {"generateContent"};
-                path.push("models").push(&format!("{}:{operation}",model.strip_prefix("models/").unwrap_or(&model)));
+                let operation = if streaming { "streamGenerateContent" } else { "generateContent" };
+                path.push("models").push(&format!("{}:{operation}", model.strip_prefix("models/").unwrap_or(&model)));
                 body.as_object_mut().expect("已检查对象").remove("stream");
             }
             _ => { path.push("chat").push("completions"); }
         }
     }
-    if conn.protocol=="google-generate-content" && streaming {url.query_pairs_mut().append_pair("alt","sse");}
+    if conn.protocol == "google-generate-content" && streaming {
+        url.query_pairs_mut().append_pair("alt", "sse");
+    }
+    Ok(Outbound { url: url.into(), body, streaming })
+}
+
+/// 发送已构造完成的对话请求，返回解析后的响应 JSON 与 HTTP 上下文：chat 与
+/// chat_with_body 共用的 URL 构造、鉴权头、重定向拒绝、请求体上限与错误映射路径。
+/// 032 M1 起 URL/body 定型经 [`finalize_outbound`]（与只读计量共用）。
+fn post_chat_json(
+    conn: &EffectiveConnection,
+    key: &str,
+    body: Value,
+    agent: &ureq::Agent,
+) -> Result<(Value,String), String> {
+    let outbound = finalize_outbound(conn, body)?;
+    let streaming = outbound.streaming;
     // N4b：发送前限计量序列化检查（超限零发送，本轮由调用方结束且不重发）
     let mut counter = LimitCountingWriter { written: 0, limit: MAX_REQUEST_BODY_BYTES };
-    if serde_json::to_writer(&mut counter, &body).is_err() {
+    if serde_json::to_writer(&mut counter, &outbound.body).is_err() {
         return Err(format!(
             "模型请求体超过 {} MiB 上限，已拒绝发送（含 model/messages/tools/request_params 序列化后总字节）",
             MAX_REQUEST_BODY_BYTES / 1024 / 1024
         ));
     }
-    let req = agent.post(url.as_str()).set("Content-Type", "application/json")
+    let req = agent.post(outbound.url.as_str()).set("Content-Type", "application/json")
         .set("Accept",if streaming {"text/event-stream"} else {"application/json"});
     let req = if conn.protocol == "anthropic-messages" {
         req.set("x-api-key", key).set("anthropic-version", "2026-10-21")
@@ -327,7 +349,7 @@ fn post_chat_json(
     } else {
         req.set("Authorization", &auth_header(key))
     };
-    match req.send_json(body) {
+    match req.send_json(outbound.body) {
         Ok(r) => {
             let status = r.status();
             let context=http_context(&r,key);
@@ -485,6 +507,27 @@ fn chat_with_body_inner(
             conn.protocol, SUPPORTED_PROTOCOL
         ));
     }
+    // 032 M1：纯组装与只读计量共用；图片能力门与密钥头检查留在发送侧。
+    let body = build_chat_body(conn, key, model, request)?;
+    // 019 §3.2：发送前再次检查图片消息与所选模型能力——恢复图片历史后切到
+    // 文本/能力未知模型时明确本地拒绝（零发送），不静默丢图、不发不支持的请求。
+    if request_has_image_content(&body) && !crate::catalog::supports_image_input(model) {
+        return Err(format!("当前模型 {} 未确认支持图片输入（input_modalities 缺少 image），已拒绝发送",model.id));
+    }
+    check_key_header_safe(key)?;
+    post_chat_json(conn,key,body,agent).map(|(value,_)|value)
+}
+
+/// 032 M1：openai-chat 纯 body 组装（零 HTTP）——保留字段前置拒绝、`_history`
+/// 投影（兼容 messages 与共同历史共用同一活动视图）、`model` 注入与已校验
+/// request_params 并入。真实发送与只读计量共用；图片能力门不在本层（计量对
+/// 图片内容返回未知而非失败，见 032 §1.3）。`key` 仅参与来源身份指纹，不进入 body。
+pub(crate) fn build_chat_body(
+    conn:&EffectiveConnection,
+    key:&str,
+    model:&ModelInfo,
+    request:&Value,
+) -> Result<Value,String> {
     // 006 收尾：核心请求字段（model/messages/tools）由程序组装，request_params
     // 一律不得携带——shared 检查只硬拒 model/messages，此处补 tools 并统一前置拒绝
     if let Some(k) = conn
@@ -494,8 +537,6 @@ fn chat_with_body_inner(
     {
         return Err(format!("request_params 不能包含保留字段 {k}"));
     }
-    // 019 §3.2：发送前再次检查图片消息与所选模型能力——恢复图片历史后切到
-    // 文本/能力未知模型时明确本地拒绝（零发送），不静默丢图、不发不支持的请求。
     let mut body = request.clone();
     if request.get("_history").is_some() {
         let current=native::owner(conn,key,model,request);
@@ -505,15 +546,80 @@ fn chat_with_body_inner(
         messages.extend(crate::prompt::project_history(&items));
         body["messages"]=json!(messages);
     }
-    if request_has_image_content(&body) && !crate::catalog::supports_image_input(model) {
-        return Err(format!("当前模型 {} 未确认支持图片输入（input_modalities 缺少 image），已拒绝发送",model.id));
-    }
     body.as_object_mut().ok_or("模型请求必须是对象")?.remove("_history");
     body.as_object_mut().expect("已确认对象").remove("_provider_id");
     body["model"] = json!(model.id);
     checked_params(conn, model, &mut body)?;
-    check_key_header_safe(key)?;
-    post_chat_json(conn,key,body,agent).map(|(value,_)|value)
+    Ok(body)
+}
+
+/// 032 M1：只读计量出站请求字节数（零 HTTP/零工具/零文件加载）。
+/// `request` 为 turn 组装产物（messages/tools/_history，与真实发送同构）；
+/// 各协议经同一纯组装与 [`finalize_outbound`] 定型后计数——计量终点＝最终
+/// 发送 body（Gemini 已移除 URL 化的 model/stream）。
+pub fn measure_request_body_bytes(
+    conn: &EffectiveConnection,
+    key: &str,
+    model: &ModelInfo,
+    request: &Value,
+) -> Result<u64, String> {
+    if native::is_native(&conn.protocol) {
+        return native::measure_outbound(conn, key, model, request);
+    }
+    if conn.protocol != SUPPORTED_PROTOCOL {
+        return Err(format!(
+            "协议 {} 未支持，当前仅支持 {}",
+            conn.protocol, SUPPORTED_PROTOCOL
+        ));
+    }
+    let body = build_chat_body(conn, key, model, request)?;
+    let outbound = finalize_outbound(conn, body)?;
+    count_body_bytes(&outbound.body)
+}
+
+/// 032 审查修复 #9：有界计量——超过 limit 即停止并返回 Ok(None)，不完成
+/// 全量序列化（切换体积校验对超限旧窗口只需下界结论）。
+pub fn measure_request_body_bytes_bounded(
+    conn: &EffectiveConnection,
+    key: &str,
+    model: &ModelInfo,
+    request: &Value,
+    limit: u64,
+) -> Result<Option<u64>, String> {
+    let body = if native::is_native(&conn.protocol) {
+        native::build_body_for_measure(conn, key, model, request)?
+    } else if conn.protocol == SUPPORTED_PROTOCOL {
+        build_chat_body(conn, key, model, request)?
+    } else {
+        return Err(format!(
+            "协议 {} 未支持，当前仅支持 {}",
+            conn.protocol, SUPPORTED_PROTOCOL
+        ));
+    };
+    let outbound = finalize_outbound(conn, body)?;
+    let mut counter = LimitCountingWriter { written: 0, limit };
+    if serde_json::to_writer(&mut counter, &outbound.body).is_err() {
+        return Ok(None); // 超限即停
+    }
+    Ok(Some(counter.written))
+}
+
+/// 最终 body 的流式字节计数（不物化整串；Value 已在内存，计数无上限——
+/// 10 MiB 发送硬边界由发送侧 N4b 独立把关）。
+fn count_body_bytes(body: &Value) -> Result<u64, String> {
+    struct Counter(u64);
+    impl std::io::Write for Counter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len() as u64;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, body).map_err(|e| format!("计量序列化失败：{e}"))?;
+    Ok(counter.0)
 }
 
 /// 查询厂商模型列表；有分页（has_more/after 游标）就读完整。

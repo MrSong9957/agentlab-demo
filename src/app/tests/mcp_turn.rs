@@ -83,7 +83,7 @@ fn run_turn_with(
         TurnExtras {
             mcp: Some(&snapshot),
             send_message: false,
-            steer: None,
+            steer: None, context: None
         },
     );
     TurnRun {
@@ -250,7 +250,7 @@ fn a07_memory_merge_turn_never_declares_or_executes_mcp() {
         TurnExtras {
             mcp: Some(&snapshot),
             send_message: true,
-            steer: None,
+            steer: None, context: None
         },
     );
     assert!(reply.is_ok());
@@ -596,7 +596,7 @@ fn a17_mcp_call_coexists_with_user_input_in_batch() {
         TurnExtras {
             mcp: Some(&snapshot),
             send_message: false,
-            steer: None,
+            steer: None, context: None
         },
     );
     assert!(reply.is_ok());
@@ -768,7 +768,7 @@ fn a17_mcp_with_view_image_batch_pairs_then_image_projection() {
         TurnExtras {
             mcp: Some(&snapshot),
             send_message: false,
-            steer: Some(&mut channel),
+            steer: Some(&mut channel), context: None
         },
     );
     assert!(reply.is_ok(), "{reply:?}");

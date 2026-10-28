@@ -1,7 +1,7 @@
 # 规格：上下文管理
 
-- 状态：待实现
-- 更新时间：2026-10-26
+- 状态：待验收（实现方标记；最终由验收人判定）
+- 更新时间：2026-10-28（M0–M7 实现完成；独立审查 25 项发现已修复并复验）
 - 对应原表项目：[工具能力对照表](../records/2026-10-21-codex-tools-comparison.md)的「上下文管理」。`get_context_remaining`、`new_context`、预算、压缩策略与历史管理纳入同一项规格及实施计划，不拆成后续项目。
 - 关联契约：[006 工具循环](006-tool-call-loop.md)、[007 会话保存](007-session-persistence.md)、[013 记忆](013-memory-system-v1.md)、[015 规则注入](015-turn-context-injection.md)、[016 进程会话](016-process-sessions-plan.md)、[018 问询](018-user-input.md)、[021 接续输入](021-send-message-to-user-async.md)、[022 MCP](022-mcp-tools.md)、[024 原生模型协议](024-native-model-apis.md)。
 - 本轮只建立规格与实施计划，未改程序行为。下一项为原表「JavaScript 工具编排」，等待用户同意后才处理。
@@ -163,13 +163,13 @@ M0–M7全部属于原表「上下文管理」一项。
 | 步骤 | 修改落点与工作 | 验证与退出条件 |
 |---|---|---|
 | M0 固定现状与基线 | 记录工作区及相关测试原有结果；固定五协议文本/工具/图片/opaque夹具、计量口径与输出上限映射；用小原型测增量追加/活动视图/迁移，冻结性能阈值 | 所有数值和unknown分支可判定；保存/加载/独立记忆读取路径已列全；明确与上游空参数reset差异，不先假设精确token |
-| M1 分离纯请求编码 | 在`api.rs`及`api/native{,/anthropic,/gemini}.rs`抽取已有请求编码供只读计量和真实发送共用；原网络/认证/错误/限额逻辑继续复用 | 五协议原有出站黄金样本不变；计量零HTTP/零工具/零文件加载；不把内部字段/重复表示算两遍；未闭合前缀不发送 |
+| M1 分离纯请求编码 | 在`api.rs`及`api/native{,/anthropic,/gemini}.rs`抽取已有请求编码供只读计量和真实发送共用；计量终点为最终发送body，包括Gemini移除用于URL的model/stream后的定型阶段；原网络/认证/错误/限额逻辑继续复用 | 五协议原有出站黄金样本不变，计量与实际出站字节相符；计量零HTTP/零工具/零文件加载；不把内部字段/重复表示算两遍；未闭合前缀不发送 |
 | M2 预算与查询TDD | 新增`src/app/src/context_window.rs`并从lib导出；复用近似计数，处理C/R/未知/溢出、代数及缓存失效；在catalog/prompt/TurnExtras按模型开关接通查询 | 空参数、估算公式、动态Schema、中文、图片/opaque未知和当前批快照全部红绿；旧入口关闭不改已有请求 |
-| M3 V3检查点与提交回执 | 扩展`prompt::HistoryItem`、`session.rs`和专用checkpoint host；实现V1/V2读兼容、首次V3迁移/锁/单条提交、坏检查点阻断；升级`memory/rollout_input.rs`及自动登记路径 | 保存前后完整事实相等；检查点成功才切换；半写/取消/恢复不误用；旧程序拒绝V3、独立记忆能读V3且不重复提炼seed |
-| M4 new_context与批末屏障 | `turn.rs`增加summary解析、批末位置校验、一次切换/轮、就绪输入处理及checkpoint提交；当前system/记忆/规则/用户输入与运行说明构造seed | 搜索/问询/进程/MCP原有状态不重建；切换保8请求32调用；候选变小且通过限额；失败仍旧视图，scheduled/applied区别可观察 |
+| M3 V3检查点与提交回执 | 扩展`prompt::HistoryItem`、`session.rs`和专用checkpoint host；实现V1/V2读兼容、首次V3迁移/锁/单条提交、坏检查点阻断；候选与普通待写段隔离，明确取消与提交的裁决点；升级`memory/rollout_input.rs`及自动登记路径 | 保存前后完整事实相等；检查点成功才切换；半写/取消/恢复不误用；失败候选不被后续补写、退出flush或手动保存复活；旧程序拒绝V3、独立记忆能读V3且不重复提炼seed，计费仍沿013原口径 |
+| M4 new_context与批末屏障 | `turn.rs`增加summary解析、批末位置校验、一次切换/轮、就绪输入处理及checkpoint提交；当前system/记忆/规则/用户输入与运行说明构造seed；以屏障在写前、半写、回执后插入取消和输入，对齐M3提交裁决 | 搜索/问询/进程/MCP原有状态不重建；切换保8请求32调用；候选变小且通过限额；未提交失败仍旧视图，已提交状态以回执和恢复记录为准；输入恰一次，scheduled/applied区别可观察 |
 | M5 五协议、CLI/TUI与恢复 | 统一活动视图进入messages/_history及原生编码；`main.rs/tui_host.rs`传回执与模型限制；通用工具结果显示估算/未知，检查点显示已应用边界与摘要 | 真实CLI/PTY显示并可滚动看旧历史；五协议下一请求只含合法活动链；恢复零请求/零重放；来源切换与关闭工具开关仍正确 |
-| M6 加固、安全与独立审查 | TDD后按comprehensive-testing→Security Testing→code-review执行，读取rules/REVIEW.md并用未参与实现的只读审查子代理 | 覆盖摘要注入、检查点伪造/破坏、原生状态、输入竞态、内存和权限状态；关键用例反证有效，修复不改冻结阈值或放宽断言 |
-| M7 全量验证与文档收口 | 最终全量及受影响PTY/性能复验；同步006/007/013/015/024及表格，记录新格式和输入差异 | 规定门禁/性能阈值和验收证据齐全；报告通过/失败/忽略/未运行及精确计数/真实服务未测边界；状态最多待验收 |
+| M6 加固、安全与独立审查 | ce-work承接实施并保持TDD，随后按comprehensive-testing→Security Testing→ce-code-review执行，读取rules/REVIEW.md并用未参与实现的只读审查子代理 | 覆盖摘要注入、检查点伪造/破坏、原生状态、输入竞态、内存和权限状态；关键用例反证有效，修复不改冻结阈值或放宽断言 |
+| M7 全量验证与文档收口 | 最终全量及受影响PTY/性能复验后执行ce-compound；同步006/007/013/015/024及表格，记录新格式和输入差异 | 规定门禁/性能阈值和验收证据齐全；报告通过/失败/忽略/未运行及精确计数/真实服务未测边界；状态最多待验收 |
 
 M0定向基线（工作目录`/workspace`，不代替最终回归）：
 
@@ -177,35 +177,42 @@ M0定向基线（工作目录`/workspace`，不代替最终回归）：
 cargo test --locked --test context_injection --test prompt_assembly --test tool_loop --test native_model_apis --test session --test session_cli --test session_perf --test memory_phase1 --test proc_session --test mcp_turn
 ```
 
-新增`context_management`集成测试在创建后纳入根目录回归。M5补`cargo test --locked --test e2e_acceptance`并保存PTY屏幕；M7最终`cargo check && cargo test --workspace --no-fail-fast`，静态检查按工具链实际能力执行。任一阶段错误用diagnosing-bugs定位修复；副本和性能原型指定独立`--target-dir`。
+新增`context_management`集成测试在创建后纳入根目录回归。M5补`cargo test --locked --test e2e_acceptance`并保存PTY屏幕；M7最终`cargo check && cargo test --workspace --no-fail-fast`，静态检查按工具链实际能力执行。任一阶段错误用ce-debug定位修复；副本和性能原型指定独立`--target-dir`。
+
+### 3.3 计划前调研复核（2026-10-28）
+
+倒序第5/6项的[汇总报告](../think-tank/2026-10-28-032-context-management.md)及完整原始输出：[多协议预算专家](../think-tank/raw/2026-10-28-032-context-management-systems.md)、[V3存储与提交回执专家](../think-tank/raw/2026-10-28-032-context-management-storage.md)、[批末竞态专家](../think-tank/raw/2026-10-28-032-context-management-security.md)、[侦察兵](../think-tank/raw/2026-10-28-032-context-management-scout.md)。
+
+M1明确计量最终发送body；M3/M4补充失败候选隔离与取消/提交竞态的裁决和反证，保留013计费后过滤口径。§1、§2、§5不变，仍待实现/待测。门禁对齐现行AGENTS；ce-compound的复用经验统一进入`rules/project-lessons.md`。
 
 ## 4. 踩过的坑，怎样解决
 
-本项未实施，没有运行修复结论。已有[原生接口与独立记忆版本门经验](../../rules/project-lessons.md#原生模型接口路线2026-10-24-决定2026-10-25-实现中)说明仅改主会话读取器会漏掉下游；本项须同时验证V3真实来源。其他依据见[核对记录](../logs/032-context-management/2026-10-26-spec-research.md)，真实问题及可复用结论实施后按项目规范记录。
+实施期真实失败与修复：M0 定位全局 `TCHAT_SANDBOX` 泄漏干扰回归（[基线记录](../logs/032-context-management/2026-10-28-m0-baseline.md)）；安全攻防 8 类矩阵在覆盖范围内核心防线全部有效，仅 2 项低危观察，独立审查另确认混合批提炼泄漏与 V3 seed 内嵌图片两处 P1，均已修复（[安全报告](../security/reports/2026-10-28-032-context-management-security.md)含勘误）；独立代码审查 25 项 actionable 全部修复并附回归（[最终验证记录](../logs/032-context-management/2026-10-28-m7-full-verification.md)）。[原生接口与独立记忆版本门经验](../../rules/project-lessons.md#原生模型接口路线2026-10-24-决定2026-10-25-实现中)（仅改主会话读取器会漏掉下游）在本项以 V3 真实来源用例落实。可复用结论统一记录到[项目经验 032 节](../../rules/project-lessons.md#032-上下文管理2026-10-28-实现待验收)；方案依据见[核对记录](../logs/032-context-management/2026-10-26-spec-research.md)，此处只留引用。
 
 ## 5. 先预测，再实测，最后确认是否合格
 
 | 编号 | 准备输入 → 执行动作 | 预测与验收标准 | 实测 |
 |---|---|---|---|
-| C01 | 无模型开关/无checkpoint宿主/内部记忆轮 → 查询或切换 | 条件声明与执行一致；旧路径不变，不借伪造名读取或切换 | 待测 |
-| C02 | 空/未知/非法查询参数；固定B/C/R及边界/溢出 → 计量 | 输入规则准确，ceil(B/4)与剩余公式一致；未知不填0，参数失败不改状态 | 待测 |
-| C03 | 五协议文本/工具/中文/JSON转义/动态Schema/当前批前缀 → 查询 | 实际共享纯编码口径；只含至当前调用前数据；零HTTP，不发送未配对前缀 | 待测 |
-| C04 | 缺模型容量/预留，图片/签名/opaque、无效限额 → 查询 | 返回明确unknown及null，不把Base64/密文或旧usage当真实token | 待测 |
-| C05 | 固定长历史与准确交接摘要 → 批末切换 → 下一请求 | 当前规则/记忆/用户输入及运行态正确，旧前缀不再发；全transcript仍完整，context_id加1 | 待测 |
-| C06 | summary空/null/过64KiB、arguments过128KiB、未知字段/假路径/权限 → 切换 | 明确拒绝，无新窗口/无新权限；边界值按两种字节口径分别验证 | 待测 |
-| C07 | 非批末/一批多个new_context、>32或断流批；同轮第二次切换 | 非法结构整批零副作用；第二次逐项拒绝；8次请求计数不归零 | 待测 |
-| C08 | 当前输入/图片/规则很大；候选不变小、估算不够或真实请求超10MiB | 拒绝或提交前失败，不截断用户/Schema、不先切再回滚，不自动调用摘要服务 | 待测 |
-| C09 | pending异步问询、已答事件、steer入史/未入史边界及取消屏障 → 切换 | 未答阻止，输入顺序/来源不丢；取消前未提交不应用，旧窗口可辨 | 待测 |
-| C10 | 自动保存关闭/失败、首次迁移锁冲突、检查点半写/中断 → 提交与恢复 | 专用回执失败不切换；原事实字节保留；只有完整checkpoint表示applied，scheduled不冒成功 | 待测 |
-| C11 | V1/V2首次切换、V3后续追加、旧程序、/save与/resume → 读取 | 版本迁移/锁/行限符合契约；旧程序拒绝V3；恢复不联网/不重放，活动视图与保存前一致 | 待测 |
-| C12 | 伪造/嵌套/坏代数/坏关联/截断checkpoint及损坏原生块 → 装载 | 可显示恢复事实但阻止错误续接；不能忽略标记回退全历史或伪造签名 | 待测 |
-| C13 | 五协议含原生块的合法闭合历史 → 切换并同源/换源续接 | 原始opaque留档，活动新链不携伪造旧签名/悬空结果；关闭工具开关也不重发归档前缀 | 待测 |
-| C14 | 进程/MCP/计划活跃，第8次响应切换，后续新用户轮 → 运行 | 不重启进程或MCP、真实句柄能续接，计划保留；不发第9请求，不借reset延长权限 | 待测 |
-| C15 | 真实V3文件进入独立记忆读取/登记/提炼 → 处理 | 能识别V3；读取原事实、过滤检查点/seed复制/控制调用及结果，遵守原预算与来源认领 | 待测 |
-| C16 | 真实CLI/PTY查询/成功/失败/恢复 → 看屏幕和请求记录 | 用户看见估算/未知与已应用边界，原历史可回看；失败不画成功，摘要不变系统指令 | 待测 |
-| C17 | M0冻结的1千/10万条原历史、小活动窗口 → 计量/追加/迁移/恢复 | 达到冻结p95/RSS；普通追加与查询不因全历史反复扫描退化；原样本与字节/落盘证据齐全 | 待测 |
-| C18 | 保持断言 → 旧实现/临时破坏视图选择、提交回执、请求计数或记忆版本门 → 恢复 | C05/C10/C07/C15分别发现旧前缀重发、先切后存、重置额度和遗漏下游；恢复后通过 | 待测 |
+| C01 | 无模型开关/无checkpoint宿主/内部记忆轮 → 查询或切换 | 条件声明与执行一致；旧路径不变，不借伪造名读取或切换 | 通过：m2_unregistered（无开关）、fix_no_checkpoint_host（无宿主腿）、sec_memory_merge（内部轮双层＋执行层断言） |
+| C02 | 空/未知/非法查询参数；固定B/C/R及边界/溢出 → 计量 | 输入规则准确，ceil(B/4)与剩余公式一致；未知不填0，参数失败不改状态 | 通过：query_arguments/spec_arithmetic/reserve_mapping 单测＋m2_turn 固定字段；饱和加法（u64 极大预留）补验 |
+| C03 | 五协议文本/工具/中文/JSON转义/动态Schema/当前批前缀 → 查询 | 实际共享纯编码口径；只含至当前调用前数据；零HTTP，不发送未配对前缀 | 通过：m1 五协议计量＝线上字节（mock 捕获逐字节相等）＋ct_query_snapshot（批中快照含前序结果，独立计量逐字节核对） |
+| C04 | 缺模型容量/预留，图片/签名/opaque、无效限额 → 查询 | 返回明确unknown及null，不把Base64/密文或旧usage当真实token | 通过：m2_query_images_unknown＋fix_native_opaque（NativeAssistant→unknown）＋reserve 单测（互斥/零值/缺省） |
+| C05 | 固定长历史与准确交接摘要 → 批末切换 → 下一请求 | 当前规则/记忆/用户输入及运行态正确，旧前缀不再发；全transcript仍完整，context_id加1 | 通过：m4_switch_happy（seed/归档/代数/声明逐项）＋e2e s32（真实 CLI/PTY 全链） |
+| C06 | summary空/null/过64KiB、arguments过128KiB、未知字段/假路径/权限 → 切换 | 明确拒绝，无新窗口/无新权限；边界值按两种字节口径分别验证 | 通过：switch_arguments_shape_and_limits（64KiB 恰好/超过、128KiB 超限；恰好 128KiB 允许侧补验）＋sec_summary_privilege（权限/路径/身份字段全拒） |
+| C07 | 非批末/一批多个new_context、>32或断流批；同轮第二次切换 | 非法结构整批零副作用；第二次逐项拒绝；8次请求计数不归零 | 通过：m4_batch_shape（整批零副作用）＋m4 第二次逐项拒绝＋m4_eighth（第8批封顶，变异反证3）；断流批沿既有协议失败路径 |
+| C08 | 当前输入/图片/规则很大；候选不变小、估算不够或真实请求超10MiB | 拒绝或提交前失败，不截断用户/Schema、不先切再回滚，不自动调用摘要服务 | 通过：m4_not_smaller＋ct_budget_insufficient＋switch_size_verdict 单测（含旧窗口超限下界分支，#9 修复后有界反证） |
+| C09 | pending异步问询、已答事件、steer入史/未入史边界及取消屏障 → 切换 | 未答阻止，输入顺序/来源不丢；取消前未提交不应用，旧窗口可辨 | 通过：m4_unanswered_async（阻止＋回答入 seed）＋ct_steer（批末入史进 seed、提交后到达按序追加）＋m4_cancel_after_scheduled（回执前取消不生效） |
+| C10 | 自动保存关闭/失败、首次迁移锁冲突、检查点半写/中断 → 提交与恢复 | 专用回执失败不切换；原事实字节保留；只有完整checkpoint表示applied，scheduled不冒成功 | 通过：session 单测（/dev/full 真实设备写失败→截回失败→停用＋明确报错）＋m3_over_limit＋m4_commit_failure（未应用；#13 修复后迁移原子化，失败不动旧目标）＋变异反证2 |
+| C11 | V1/V2首次切换、V3后续追加、旧程序、/save与/resume → 读取 | 版本迁移/锁/行限符合契约；旧程序拒绝V3；恢复不联网/不重放，活动视图与保存前一致 | 通过：m3_first_checkpoint（旧文件字节不变＋V3 开篇＋游标）＋m5_save_resume（视图一致＋关开关不重发）＋e2e s32 恢复段（新进程装载零重放）；旧程序拒绝由 meta 门推断（无旧二进制实测，见残留） |
+| C12 | 伪造/嵌套/坏代数/坏关联/截断checkpoint及损坏原生块 → 装载 | 可显示恢复事实但阻止错误续接；不能忽略标记回退全历史或伪造签名 | 通过：#4/#24 修复后——V1/V2 走私整拒；不可解析检查点行整拒；可解析但语义坏（代数/关联非成功排定/seed 形状/seed 图片非法）分别由装载链校验/坏行/轻量校验拒绝（m3_v1_v2、ct_bad_link、fix_checkpoint_linked_to_rejected、fix_seed_assistant_images、fix_v3_seed_remote_image） |
+| C13 | 五协议含原生块的合法闭合历史 → 切换并同源/换源续接 | 原始opaque留档，活动新链不携伪造旧签名/悬空结果；关闭工具开关也不重发归档前缀 | 通过：m5_native（四原生协议归档不重发）＋m5_save_resume 关开关腿；换源沿 024 for_owner 既有契约 |
+| C14 | 进程/MCP/计划活跃，第8次响应切换，后续新用户轮 → 运行 | 不重启进程或MCP、真实句柄能续接，计划保留；不发第9请求，不借reset延长权限 | 通过：m4_seed_runtime_note（活进程如实列出＋句柄续接＋计划最新快照［#1 修复］）＋m4_eighth；MCP 连接腿沿快照机制（未单列用例，见残留） |
+| C15 | 真实V3文件进入独立记忆读取/登记/提炼 → 处理 | 能识别V3；读取原事实、过滤检查点/seed复制/控制调用及结果，遵守原预算与来源认领 | 通过：m3_rollout（V3 可读＋纯控制批过滤）＋fix_mixed_batch（#3 修复：混合批控制调用/summary 按调用粒度剔除，真实调用配对保留） |
+| C16 | 真实CLI/PTY查询/成功/失败/恢复 → 看屏幕和请求记录 | 用户看见估算/未知与已应用边界，原历史可回看；失败不画成功，摘要不变系统指令 | 通过：e2e s32（PTY 屏幕断言估算/已排定/已提交/恢复代数）＋fix_query_display_unknown（未知分支单测）；失败屏幕由 m4 未应用通知＋#5 模型可见记录覆盖 |
+| C17 | M0冻结的1千/10万条原历史、小活动窗口 → 计量/追加/迁移/恢复 | 达到冻结p95/RSS；普通追加与查询不因全历史反复扫描退化；原样本与字节/落盘证据齐全 | 通过：context_perf 门禁（修复轮后复测 59.5s 绿，含 #12 装载时链校验）；#16 修复免去轮入口整视图克隆；口径边界见冻结日志 |
+| C18 | 保持断言 → 旧实现/临时破坏视图选择、提交回执、请求计数或记忆版本门 → 恢复 | C05/C10/C07/C15分别发现旧前缀重发、先切后存、重置额度和遗漏下游；恢复后通过 | 通过：4/4 变异红→还原绿（docs/logs/…/2026-10-28-mutation-evidence.md） |
 
-- 本轮只检查文档，C01–C18均待测；命令、工作目录、退出码和脱敏原始输出统一放`docs/logs/032-context-management/`，入口为[核对与文档检查记录](../logs/032-context-management/2026-10-26-spec-research.md)。
+- C01–C18 实测结论见上表；复现命令、工作目录、退出码和脱敏原始输出统一放`docs/logs/032-context-management/`，最终验证入口为[最终验证记录](../logs/032-context-management/2026-10-28-m7-full-verification.md)，方案核对入口为[核对与文档检查记录](../logs/032-context-management/2026-10-26-spec-research.md)。
 - 实施证据包括五协议固定样本与实际请求、V1/V2/V3文件/故障前后字节、记忆真实来源、PTY最终屏幕、进程/MCP请求次数、性能原样本。安全报告按安全代理规则保存并从本目录引用。
 - 完成条件：M0口径/性能阈值冻结，C01–C18、规定门禁及最终全量完成，无本项未修复阻塞问题；完整历史和活动视图恢复一致，可运行材料齐全。实现方最多改待验收；精确token、真实服务成本与模型摘要保真不作已测承诺，最终验收由验收人依据规格、证据和产物判定。
+- 实施记录（2026-10-28）：M0–M7 完成；独立审查（10 审查者＋验证批 8/8 confirmed）25 项发现全部修复并复验（修复说明见 `docs/logs/032-context-management/` 与 lessons）；残留未测项：旧二进制实测拒绝 V3（由 meta 门推断）、断流批/MCP 连接腿沿既有路径未单列、真实模型行为（描述契约仅静态对比）。

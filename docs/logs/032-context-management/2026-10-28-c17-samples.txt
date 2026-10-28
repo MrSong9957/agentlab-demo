@@ -1,0 +1,11 @@
+032 C17 性能原样本（p95 中位轮；迁移/恢复每轮 10 次中位）
+
+== 1k（1000 条归档）：全历史 318782 B，活动窗口 3521 B ==
+query_p95_ms=0.842
+append_p95_ms=0.000 migrate_med_ms=6.938 checkpoint_med_ms=0.013 recover_med_ms=3.539
+vm_hwm_kb=7356
+
+== 100k（100000 条归档）：全历史 31503782 B，活动窗口 3521 B ==
+query_p95_ms=2.321
+append_p95_ms=0.000 migrate_med_ms=681.668 checkpoint_med_ms=0.017 recover_med_ms=326.595
+vm_hwm_kb=184224

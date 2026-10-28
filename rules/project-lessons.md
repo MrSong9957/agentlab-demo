@@ -103,6 +103,7 @@
 
 ## 9. 环境注意事项
 
+- last30days 调研覆盖核验（2026-10-28）：本机 3.31.0 的 quick 深度只执行第一个子查询、最多两个来源；参数列出更多来源不代表全部运行。先核实际 query plan/source outcomes，按需显式选源或补轮；403、空结果和无关命中分别记录，不能拼成社区共识。源码摘录、真实运行与日期资格见[倒序调研索引](../docs/think-tank/2026-10-28-plan-preresearch-index.md)及[quick 限制证据](../docs/logs/plan-preresearch/2026-10-28-035/quick-source-limit.txt)。
 - 进入容器：宿主机项目根目录 `docker compose -f .devcontainer/compose.yaml exec -u dev -w /workspace dev bash`（原 AGENTS.md 第 7 节命令表「进入容器」行，精简时移出）。其余环境注意事项（CARGO_TARGET_DIR、clippy/rustfmt 安装）已在 AGENTS.md 第 7 节命令表，不重复。
 - Agent 初始化按实际运行工具确认用户级目录；Codex 可用 `skills/list` 的 `scope=user` 和新会话 `thread/start.instructionSources` 验证技能及双层规则，避免只凭目录示例或模型自述判断。当前容器的 shell 沙箱故障会阻止技能按需读取依赖；通过原生技能输入同时选择依赖可验证显式调用路径，但不能据此宣称单独调用已恢复。具体安装、上游文档差异与验证边界见 [Codex 初始化记录](../docs/records/2026-10-02-install-mattpocock-skills.md#2026-10-20codex-用户级初始化v29-个)。
 - Codex 原生插件验收补充（2026-10-28）：`skills/list` 与 `plugin/read` 分别核验独立技能和插件技能；CE 插件技能的实际名称带 `compound-engineering:` 前缀，不能用未加前缀的名称作断言，也不能仅凭独立技能列表判断插件缺失。本项目的知识沉淀继续遵循既有路径，不另加一套 CE 自动沉淀规则。安装方式、临时新会话的两层规则加载证据及来源限制见 [五步初始化记录](../docs/logs/agent-init/2026-10-28-initialize.md)。
@@ -219,3 +220,12 @@
 - **资源上限检查要对称覆盖双向**：F-2 伪文件检查只拦「读取字节数 > fstat 尺寸」（procfs st_size=0 有内容），漏了「读取 < 尺寸」（fstat 与 read 间被并发截断）——短读残片被当完整内容移动并删源（审查 #8，data-loss 类）。教训：凡「读入窗口内对象可能变化」的校验，加检查时两个方向都要过一遍。
 - **bwrap 遮蔽的真实形态**：033 的 `--ro-bind /dev/null <deny路径>` 在 user namespace 内**打开即 EACCES**（非读到空）——工具侧表现为「打开失败」而非「非常规文件」，测试断言应取并集；遮蔽路径表现为 `/dev/null` 字符设备（crw-rw-rw- nobody nogroup）。
 - **cargo 多 --test 目标共享单一过滤器**：`cargo test --test A filter --test B` 中 filter 同时作用于 A 与 B——B 可能被滤成 0 运行而 exit=0，日志记成绿灯（审查 #1 的证据链缺口即由此产生）。多目标验证须整目标分别运行或各自过滤。
+
+## 032 上下文管理（2026-10-28 实现，待验收）
+
+- **TCHAT_SANDBOX 环境泄漏会整体扭曲测试基线**：交互 shell 遗留的 `TCHAT_SANDBOX=1` 使全部工具命令经 bwrap 包装，`trap '' INT` 等 OS 语义在沙箱内失效，proc_session 计时类用例确定性失败（029 上午基线通过、下午失败，代码未变）。**测试/验证命令一律 `env -u TCHAT_SANDBOX` 前缀**；遇到「基线 inexplicably 失败」先查环境变量再查代码。
+- **检查点/双视图类功能的校验要分层放置**：链级语义校验（代数连续等）放装载与提交两个状态变化点（O(n) 各一次），请求/查询热路径只做轻量本地校验（O(活动尾部)）——首版把全量校验放进了每次请求组装，审查轮 4 位审查者独立标记线性恶化。
+- **「纯函数＋单一入口」是防重复漂移的关键**：候选校验序列曾在 turn 分派臂与批末提交两处逐字重复（相距 220 行），抽成 `evaluate_candidate` 单一入口后消除；工具名/标记文案全部走导出常量，main.rs 曾裸字符串分派（改名即静默漂移）。
+- **死代码零容忍的价值**：审查轮揪出的 `provider_id` 死字段、无人用的 `impl CheckpointHost for Session`、测试里的 `#[allow(dead_code)]` 与恒真断言（`late_delivered` 永不填充）都是「看起来覆盖了、实际空转」的陷阱——测试断言必须验证真实出口，不是摆设。
+- **原子迁移先演练后替换**：会话 V1/V2→V3 迁移首版先切版本再写文件，磁盘满时把健康的自动保存目标永久降级；改为「局部建新文件＋完整开篇＋检查点行全部成功后一次性替换 self」后，失败路径零副作用。
+- **跨模型审查路线依赖 acpx（node/npx）**：本容器有 codex CLI 但无 node，对抗镜头只能进程内承担；需要真跨模型审查时装 node ≥22.13 或预先确认路线。

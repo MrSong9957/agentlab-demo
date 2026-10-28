@@ -766,6 +766,14 @@ fn cmd_chat(
                             }
                             // 017：计划更新成功——输出说明与步骤清单（say 经终端过滤；
                             // 失败/取消输出原因，不把失败调用画成清单；结果未知不打印）
+                            // 032：上下文工具结果——估算/未知与排定/拒绝各一行；
+                            // 已应用边界由提交回执的 Info 通知另行呈现。
+                            if name == terminal_chat::context_window::QUERY_TOOL_NAME {
+                                say(&terminal_chat::context_window::query_display_line(&result));
+                            }
+                            if name == terminal_chat::context_window::SWITCH_TOOL_NAME {
+                                say(&terminal_chat::context_window::switch_call_display_line(&result));
+                            }
                             if name == "update_plan" {
                                 if let Some(snapshot) =
                                     terminal_chat::plan::success_snapshot(&arguments, &result)
@@ -826,6 +834,11 @@ fn cmd_chat(
                             return exit_host;
                         }
                     };
+                    // 032：会话保存器经 RefCell 共享——on_record（普通追加）与
+                    // 检查点提交宿主（可失败回执）顺序借用同一保存器；提交失败
+                    // 候选不进内存历史（不复活）。
+                    let autosave_cell = std::cell::RefCell::new(autosave);
+                    let mut checkpoint_sink = session::SessionCellSink(&autosave_cell);
                     // 015：用户轮上下文来源（每轮解析：全局规则目录、cwd、SHELL、时钟）
                     let context_sources = terminal_chat::context::ContextSources::from_env();
                     let mut input_host = |_: &turn::ParsedToolCall,
@@ -844,12 +857,13 @@ fn cmd_chat(
                         Some(&TOOL_CANCEL),
                         // 007：每个入史点同步进入待写段并立即尝试提交（失败只提示一次）
                         &mut |h: &[HistoryItem]| {
-                            if let Some(msg) = autosave.on_history(h) {
+                            let mut session = autosave_cell.borrow_mut();
+                            if let Some(msg) = session.on_history(h) {
                                 say(&msg);
                             }
                             // 013-M7：threads 登记——仅 (stem, durable_len) 变化时推进
                             //（未成功持久化的数据不登记为已更新版本）。
-                            registrar.note_persisted(&user_dir, &mem_config, autosave);
+                            registrar.note_persisted(&user_dir, &mem_config, &session);
                         },
                         mode,
                         &context_sources,
@@ -872,6 +886,16 @@ fn cmd_chat(
                             // 022：声明与分派共用本轮快照
                             mcp: mcp_snapshot.as_deref(),
                             steer: None,
+                            // 032：上下文工具宿主（查询/切换按目录开关；检查点提交
+                            // 经共享保存器的可失败回执）
+                            context: Some(terminal_chat::context_window::ContextHost {
+                                conn,
+                                key,
+                                model: &model,
+                                query_declared: catalog::supports_get_context_remaining(&model),
+                                switch_declared: catalog::supports_new_context(&model),
+                                checkpoints: Some(&mut checkpoint_sink),
+                            }),
                         },
                     );
                     unsafe {

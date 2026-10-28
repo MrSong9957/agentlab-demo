@@ -2,12 +2,11 @@
 use super::*;
 use std::collections::HashMap;
 
-pub(super) fn generate_content(
+/// 032 M1：generateContent 纯 body 组装（零 HTTP；发送与只读计量共用）。
+pub(super) fn build_generate_body(
     conn: &EffectiveConnection,
-    key: &str,
     model: &ModelInfo,
     request: &Value,
-    agent: &ureq::Agent,
     conversation: &Conversation,
 ) -> Result<Value, String> {
     let mut contents = Vec::new();
@@ -52,6 +51,8 @@ pub(super) fn generate_content(
             HistoryItem::NativeAssistant { .. } => {
                 return Err("原生状态缺失或来源已改变，不能续接此调用链".into())
             }
+            // 032：检查点标记不进入原生内容（防御性跳过，同 project_history）。
+            HistoryItem::ContextCheckpoint { .. } => {}
             HistoryItem::Text(m) => contents.push(json!({
                 "role":if m.role==HistoryRole::User {"user"} else {"model"},
                 "parts":content_parts("google-generate-content",&m.content,&user_images(m))?
@@ -120,8 +121,7 @@ pub(super) fn generate_content(
         body["tools"] = json!([{"functionDeclarations":definitions}]);
     }
     apply_params(conn, model, &mut body)?;
-    let (response, context) = post_chat_json(conn, key, body, agent)?;
-    decode_generate(conversation.owner.clone(), response, &conversation.history, None).map_err(|e| format!("{e}{context}"))
+    Ok(body)
 }
 
 pub(super) fn decode_generate(current: NativeOwner, response: Value, history: &[HistoryItem], saved_calls: Option<&[ToolCallRecord]>) -> Result<Value, String> {
@@ -196,12 +196,11 @@ pub(super) fn decode_generate(current: NativeOwner, response: Value, history: &[
     )
 }
 
-pub(super) fn interactions(
+/// 032 M1：Interactions 纯 body 组装（零 HTTP；发送与只读计量共用）。
+pub(super) fn build_interactions_body(
     conn: &EffectiveConnection,
-    key: &str,
     model: &ModelInfo,
     request: &Value,
-    agent: &ureq::Agent,
     conversation: &Conversation,
 ) -> Result<Value, String> {
     let mut input = Vec::new();
@@ -231,6 +230,8 @@ pub(super) fn interactions(
             HistoryItem::NativeAssistant { .. } => {
                 return Err("原生状态缺失或来源已改变，不能续接此调用链".into())
             }
+            // 032：检查点标记不进入原生步骤（防御性跳过，同 project_history）。
+            HistoryItem::ContextCheckpoint { .. } => {}
             HistoryItem::Text(m) => input.push(json!({
                 "type":if m.role==HistoryRole::User {"user_input"} else {"model_output"},
                 "content":content_parts("google-interactions",&m.content,&user_images(m))?
@@ -287,8 +288,7 @@ pub(super) fn interactions(
         );
     }
     apply_params(conn, model, &mut body)?;
-    let (response, context) = post_chat_json(conn, key, body, agent)?;
-    decode_interactions(conversation.owner.clone(), response).map_err(|e| format!("{e}{context}"))
+    Ok(body)
 }
 
 pub(super) fn decode_interactions(current: NativeOwner, response: Value) -> Result<Value, String> {

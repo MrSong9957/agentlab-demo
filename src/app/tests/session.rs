@@ -74,7 +74,8 @@ fn meta_gate_rejects_bad_meta_and_unknown_version() {
     for (tag, content) in [
         ("空文件", ""),
         ("坏 JSON meta", "{oops\n"),
-        ("v=2", "{\"v\":3}\n" ),
+        // 032 前 v=3 为未知版本；现已是合法版本（上下文检查点），未知上移到 v=4
+        ("v=4", "{\"v\":4}\n"),
         ("缺 v", "{\"x\":1}\n"),
         ("非对象 meta", "[1,2]\n"),
     ] {
@@ -82,6 +83,12 @@ fn meta_gate_rejects_bad_meta_and_unknown_version() {
         seed(&p, content);
         let err = load_session_file(&p).unwrap_err();
         assert!(err.contains("meta") || err.contains("v"), "{tag} 应整文件拒绝：{err}");
+    }
+    // v=1/2/3 均为合法版本门（032 起）
+    for version in ["{\"v\":1}\n", "{\"v\":2}\n", "{\"v\":3}\n"] {
+        let p = session_path(&dir);
+        seed(&p, version);
+        assert!(load_session_file(&p).is_ok(), "{version} 应通过版本门");
     }
 }
 

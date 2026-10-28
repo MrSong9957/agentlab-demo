@@ -160,6 +160,15 @@ impl ProcessManager {
         self.lock_mgr().sessions.get(session_id).map(|s| s.cmd.clone())
     }
 
+    /// 032：句柄对应会话的真实运行状态（None＝未登记；true＝仍在运行，
+    /// false＝已退出但句柄仍登记/输出未取尽——不把后者称作运行中）。
+    pub fn session_running(&self, session_id: &str) -> Option<bool> {
+        self.lock_mgr()
+            .sessions
+            .get(session_id)
+            .map(|s| matches!(s.phase(), Phase::Running { .. }))
+    }
+
     /// 会话输入发送侧进度（字节；真实写线程累计，只读观测）——用于区分
     /// 发送侧提交与接收侧消费（内核缓冲排空不增加本计数）。
     /// `#[doc(hidden)]`：非承诺接口，仅测试/诊断观测用。
@@ -748,6 +757,11 @@ enum KillReq {
 }
 
 impl Session {
+    /// 生命周期快照（032 运行态说明用；克隆轻量）。
+    fn phase(&self) -> Phase {
+        self.st.lock().unwrap_or_else(|e| e.into_inner()).phase.clone()
+    }
+
     fn new(
         id: String,
         cmd: String,

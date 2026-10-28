@@ -10305,3 +10305,158 @@ fn s29b_tui_move_unicode_display_and_resume() {
     assert!(resumed.finish().1.success());
     assert_eq!(mock.count(), 2, "恢复只展示、不新增模型请求");
 }
+
+// ---------- 032 上下文管理（M5/C16） ----------
+
+/// 032：声明 get_context_remaining/new_context 的 manual（含窗口与输出上限）。
+fn write_manual_context_capable(dir: &Path, base_url: &str, key_ref: &str) {
+    let m = catalog::ManualRoot {
+        selected_provider: Some("deepseek".into()),
+        selected_model: Some("deepseek-flash".into()),
+        memories: None,
+        providers: [(
+            "deepseek".into(),
+            catalog::ManualProvider {
+                base_url: Some(base_url.into()),
+                key_ref: Some(key_ref.into()),
+                models: [(
+                    "deepseek-flash".into(),
+                    catalog::ModelInfo {
+                        id: "deepseek-flash".into(),
+                        context_length: Some(32768),
+                        max_output: Some(4096),
+                        experimental_supported_tools: Some(vec![
+                            "get_context_remaining".into(),
+                            "new_context".into(),
+                        ]),
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+    };
+    std::fs::write(dir.join("manual.json"), serde_json::to_string(&m).unwrap()).unwrap();
+}
+
+fn tool_call_json(id: &str, name: &str, arguments: &str) -> Value {
+    json!({"id": id, "type": "function", "function": {"name": name, "arguments": arguments}})
+}
+
+fn tool_batch_json(calls: &[Value]) -> String {
+    json!({"choices":[{"message":{"role":"assistant","content":null,
+        "tool_calls": calls},"finish_reason":"tool_calls"}]}).to_string()
+}
+
+/// S32（032 C16）：行式 PTY——查询显示估算/未知；批末切换提交检查点后显示
+/// 已应用边界与摘要；切换后的请求不再携带归档前缀；会话文件为 V3 且含
+/// 检查点；恢复后仍使用已提交窗口（旧历史可回看＝完整 transcript 留档）。
+#[test]
+fn s32_pty_context_query_switch_and_checkpoint() {
+    let cfg = TempDir::new("s32-cfg");
+    let user = TempDir::new("s32-user");
+    // 预置长历史素材：一次长回复（使候选严格更小）
+    let long_reply = format!("S32-归档前缀素材：{}", "背景与已完成工作。".repeat(1500));
+    let query_call = tool_call_json("s32-q1", "get_context_remaining", "{}");
+    let switch_call = tool_call_json(
+        "s32-sw1",
+        "new_context",
+        &json!({"summary": "S32-交接：长素材已归档，继续收尾"}).to_string(),
+    );
+    let mock = spawn_mock(vec![
+        // 轮 1：制造归档素材
+        MockResp::json(200, chat_body(&long_reply)),
+        // 轮 2：查询（代数 0）＋终文
+        MockResp::json(200, tool_batch_json(&[query_call])),
+        MockResp::json(200, chat_body("S32-查询完成")),
+        // 轮 3：切换（批末提交）＋终文
+        MockResp::json(200, tool_batch_json(&[switch_call])),
+        MockResp::json(200, chat_body("S32-新窗口继续")),
+        // 恢复后的新一轮：查询（代数 1）＋终文
+        MockResp::json(
+            200,
+            tool_batch_json(&[tool_call_json("s32-q2", "get_context_remaining", "{}")]),
+        ),
+        MockResp::json(200, chat_body("S32-恢复完成")),
+    ]);
+    write_manual_context_capable(cfg.path(), &mock.url, "env:TCHAT_S32_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s32"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S32_KEY",
+        "fake-s32",
+        false,
+    ));
+    pty.wait_screen("Terminal Chat!").unwrap();
+    // 轮 1：制造归档素材
+    pty.send_line("开始积累上下文");
+    pty.wait_screen("S32-归档前缀素材").unwrap();
+    // 轮 2：查询——界面显示估算（代数 0）
+    pty.send_line("查一下余量");
+    pty.wait_screen("上下文余量（估算，代数 0）").unwrap();
+    pty.wait_screen("S32-查询完成").unwrap();
+    // 轮 3：切换——排定→批末提交→已应用边界＋摘要
+    pty.send_line("切换上下文并收尾");
+    pty.wait_screen("上下文切换已排定").unwrap();
+    pty.wait_screen("上下文检查点已提交（代数 1）").unwrap();
+    pty.wait_screen("S32-新窗口继续").unwrap();
+    assert_eq!(mock.count(), 5, "查询/切换零额外模型请求（3 轮 5 请求）");
+    // 切换后的最终请求不含归档素材，含交接摘要
+    let last: Value = serde_json::from_str(&mock.requests()[4].body).unwrap();
+    let serialized = last.to_string();
+    assert!(!serialized.contains("S32-归档前缀素材"), "归档前缀不得重发");
+    assert!(
+        serialized.contains("S32-交接"),
+        "交接摘要进入活动请求：{}",
+        &serialized[..serialized.len().min(600)]
+    );
+    // 检查点调用与 scheduled 结果仍在请求历史中（普通工具规则）
+    assert!(serialized.contains("new_context"));
+    // 会话文件：V3＋检查点行；完整 transcript 留档
+    let sessions = std::fs::read_dir(user.path().join("sessions")).unwrap();
+    let v3_file = sessions
+        .into_iter()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            std::fs::read_to_string(p)
+                .map(|t| t.starts_with("{\"v\":3}") && t.contains("context_checkpoint"))
+                .unwrap_or(false)
+        })
+        .expect("存在含检查点的 V3 自动会话");
+    let v3_text = std::fs::read_to_string(&v3_file).unwrap();
+    assert!(v3_text.contains("S32-归档前缀素材"), "完整 transcript 留档（可回看）");
+    // 恢复（新 CLI 进程）：装载摘要后新一轮查询代数 1，请求仍为新窗口视图
+    let mut resumed = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S32_KEY",
+        "fake-s32",
+        false,
+    ));
+    resumed.wait_screen("Terminal Chat!").unwrap();
+    resumed.send_line("/resume");
+    resumed.wait_screen("恢复").unwrap();
+    let before = mock.requests().len();
+    resumed.send_line("恢复后再查");
+    resumed.wait_screen("上下文余量（估算，代数 1）").unwrap();
+    resumed.wait_screen("S32-恢复完成").unwrap();
+    let req = &mock.requests()[before];
+    let body: Value = serde_json::from_str(&req.body).unwrap();
+    assert!(
+        !body.to_string().contains("S32-归档前缀素材"),
+        "恢复零重放：使用已提交窗口"
+    );
+    resumed.send_line("exit");
+    assert_eq!(resumed.finish().1.code(), Some(0));
+    pty.send_line("exit");
+    assert_eq!(pty.finish().1.code(), Some(0));
+}
