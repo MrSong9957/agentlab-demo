@@ -158,3 +158,57 @@ mcp_stdio_sandbox.rs、apply_patch_sandbox.rs）——cargo 各测试文件为�
   超时回收（**跨 PID ns 的 killpg 契约重验**——016 全套隔离变体）、MCP 沙箱
   往返、apply_patch 三型沙箱内落盘（含 Update 恢复验证）、探测 dry-run 成功
   分支。复跑命令与前置条件见第 5 节验收清单。
+
+### B1/B2 加固轮（2026-10-27 实施，2026-10-28 候选验证通过——分支 feat/033-b1-b2-hardening，未合并）
+
+背景与风险核实：`docs/logs/033-tool-sandbox/2026-10-27-b1-b2-risk-verification.md`
+——B1（deny 目标被沙箱外**预建硬链接**别名读出正文）与 B2（launcher 遗留非
+CLOEXEC fd 经 `/proc/self/fd` 读出）为与冻结上游 d8acdf1 共有的路径级遮蔽/fd
+面边界（上游 bwrap.rs/linux_run_main.rs/launcher.rs 均无对应处理）；矩阵实测
+与上游核对后用户批准两项加固。实施记录：
+`docs/logs/033-tool-sandbox/2026-10-27-b1-b2-hardening.md`。
+
+- **B1**：`sandbox.rs::append_unreadable_root_args` 组装时（每次工具启动复查，
+  不缓存安全结论）对 deny 目标 `fs::metadata()`（跟随符号链接取**实际常规
+  文件**，不查链接本身）读 nlink，>1 即 Err（fail closed，三面共用的单一
+  入口，与既有可写符号链接 fail-closed 同构）。目录不适用（nlink＝子目录
+  计数）。**保证范围**：仅阻断「检查时已存在」的硬链接；检查到挂载之间及
+  沙箱运行期的并发变化仍是边界——非完整竞态防护。真实 `.env` 元数据实测
+  nlink=1，当前部署零触发。
+- **B2**：新增 `sandbox::close_inherited_fds_mark_cloexec()`＝
+  `close_range(3, ~0, CLOSE_RANGE_CLOEXEC)`（**标记** CLOEXEC 而非关闭——
+  在 pre_exec 里真 close 会切断 std 的 spawn 失败信道［Linux 为 SOCK_SEQPACKET
+  socketpair］，execve 失败会被误报为 spawn 成功），经 pre_exec 注入三个工具
+  spawn 点的**沙箱分支**（proc_session `build_tool_command`［管道＋PTY 共用］/
+  mcp transport［tokio pre_exec］/ apply_patch internal-apply）。stdio 0/1/2、
+  主进程 fd、载荷运行时自开 fd 均不受影响；普通模式零变化；close_range 失败
+  （旧内核 ENOSYS）＝显式失败不静默放行；部署前提＝内核 ≥5.11（CLOSE_RANGE_
+  CLOEXEC 引入）＋glibc ≥2.34（close_range 封装；libc 0.2.189 为 gnu 目标
+  普通符号绑定，musl 无绑定——旧 glibc 链接期即失败，非静默；审查轮补记）。
+- **修订总评口径**：路径级「指定路径不可读」承诺不变且全部兑现；加固后
+  「检查时已存在的同 inode 别名」与「launcher 遗留非 CLOEXEC fd」两条条件性
+  读取绕过通道关闭；**不承诺**「内容经任何别名/fd 都不可得」——TOCTOU 窗口
+  与运行期新建链接/新开 fd 仍是边界（如实声明）。B3 维持 022 容错契约不动。
+- **测试**：单元 3 例（多链接拒绝／单链接控制／rootless 符号链接跟随实际
+  文件 nlink）＋集成 b1 三面拒绝（无执行副作用）＋b2 三探针（launcher→真实
+  CLI 全链路／库级管道面／MCP 面 fd 扫描）＋spawn 失败信道探针（execve 失败
+  仍返回 Err，防「真 close」型回归）。RED（未修复代码上 5 例真实失败记录在
+  案）→GREEN→变异证明（移除 transport 注入→MCP 面测试失败）。
+- **收口轮（2026-10-27）**：①B1 分类收口——`exists()` 对任何 stat 错误都返回
+  false，会把非 NotFound 错误静默当 missing 跳过检查（fail-open），改为单次
+  `fs::metadata` 三分类：NotFound/NotADirectory → missing no-op（既有差异
+  不变）、其余错误 → 显式拒绝（fail closed，启动前、三面共用入口）；单元 3 例
+  稳定夹具（ELOOP／父目录 EACCES／ENOTDIR 控制组）＋端到端探针证明拒绝先于
+  工具启动。②全量 flake 根因修复——`commit_does_not_execute_planted_hooks`
+  的 300ms 超时＝并发超时测试全局覆盖缝（`GIT_TIMEOUT_MS_OVERRIDE`）泄漏进
+  读者测试，读者持有 `OVERRIDE_GUARD` 串行修复（断言零变化）。③最终全量
+  3528 passed / 1 failed / 3 ignored：唯一失败 `seam_killpg_injection_deadline_
+  not_fake_timeout` 为既有监控轮询竞态测试例外（负载下概率翻转、与候选改动
+  零交集、两种交错均契约内行为），处置建议供用户决定。2026-10-28 按方案 a 完成
+  确定性修复（会话级 `cfg(test)` 监控门控缝：停靠于监控循环顶部、terminate 覆盖
+  提交后自动放行；断言零变化，变异检出力验证；与 B1/B2 产品改动分开记录于
+  `2026-10-28-seam-gate-fix.md`）。**最终验收全量（PTY＋TERM=dumb 验收等价口径，
+  `--locked --offline` 串行）＝70 目标 3529 passed / 0 failed / 3 ignored
+  （exit=0，2026-10-28）——待交付候选验证通过**；仍未提交/合并/推送，部署版本
+  未替换。证据：`docs/logs/033-tool-sandbox/2026-10-27-b1b2-closeout.md`、
+  `2026-10-28-seam-gate-fix.md`。

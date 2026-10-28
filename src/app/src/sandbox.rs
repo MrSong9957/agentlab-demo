@@ -12,6 +12,11 @@
 //! 不搬）：全盘只读 ＋ 工作区＋系统临时目录可写 ＋ `<工作区>/.env` 不可读遮蔽；
 //! 网络默认保留；PID/IPC/用户命名空间隔离＋新 procfs 成对挂载（上游 mount_proc
 //! 语义——`/proc/self/fd` 消费者依赖，见 create_bwrap_flags 注释）。
+//!
+//! 2026-10-27 B1/B2 加固（本轮）：B1＝deny 目标存在预建硬链接（nlink>1）时
+//! 拒绝该次工具启动（路径级遮蔽不覆盖同 inode 别名）；B2＝沙箱工具子进程经
+//! pre_exec `close_range(CLOSE_RANGE_CLOEXEC)` 收口继承 fd ≥3。保证范围与
+//! 剩余边界见 docs/logs/033-tool-sandbox/2026-10-27-b1-b2-risk-verification.md。
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -103,6 +108,46 @@ fn tool_child_env(workspace: &Path) -> Vec<(String, String)> {
         env.push(("TERM".to_string(), term));
     }
     env
+}
+
+/// 033-B2（2026-10-27 加固）：沙箱工具子进程 fd 收口——pre_exec 内以
+/// close_range(2) 的 `CLOSE_RANGE_CLOEXEC` 把继承 fd ≥3 **标记**为 execve 时
+/// 关闭（只标记、不关闭）：
+/// - 仅作用于 fork 出的子进程副本，主进程 fd（PTY master、MCP 管道、错误上
+///   报通道等）不受影响；
+/// - std 的 spawn 失败信道（Linux 为 SOCK_SEQPACKET socketpair，fd≥3、自带
+///   CLOEXEC）不受影响：execve 失败时 errno 仍回传父进程、spawn 返回 Err。
+///   若在 pre_exec 里真 close 掉 fd≥3，失败会被误报为 spawn 成功（子进程
+///   静默 exit 1）——故必须 CLOEXEC 标记而非关闭；
+/// - stdio 0/1/2 不在标记范围；载荷运行时自开的 fd 在 execve 之后，不受影响。
+///
+/// 三处工具 spawn 点（proc_session build_tool_command、mcp transport、
+/// apply_patch internal-apply）仅在**沙箱分支**注入；普通模式行为零变化。
+/// close_range 失败（如旧内核 ENOSYS）＝Err → pre_exec 失败 → std 回传错误、
+/// spawn 返回 Err（沙箱工具显式失败，不静默放行）；部署前提＝内核 ≥5.11
+///（CLOSE_RANGE_CLOEXEC 引入）＋glibc ≥2.34（close_range 封装；libc 0.2.189
+/// 绑定为 gnu 目标普通符号——musl 目标无绑定，链接期即失败，非静默）。
+/// 异步信号安全：单个 syscall，无分配/锁/环境读取（io::Error 为 Os repr，
+/// 不堆分配）。
+#[cfg(target_os = "linux")]
+pub fn close_inherited_fds_mark_cloexec() -> std::io::Result<()> {
+    // SAFETY：close_range(2) 仅操作本进程 fd 表的标志位，无内存安全影响。
+    let ret = unsafe {
+        libc::close_range(3, libc::c_uint::MAX, libc::CLOSE_RANGE_CLOEXEC as libc::c_int)
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// 非 Linux unix：close_range(2) 为 Linux 特有 syscall，此处＝能力不足，按
+/// 既有 fail-closed 语义显式失败（Os repr ENOSYS，不堆分配——pre_exec 内
+/// 合法），沙箱工具不静默放行。非 unix（Windows）下 tool_launch_argv 恒
+/// None，不会调用本函数。
+#[cfg(all(unix, not(target_os = "linux")))]
+pub fn close_inherited_fds_mark_cloexec() -> std::io::Result<()> {
+    Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
 }
 
 // ---------- bwrap 探测（failIfUnavailable） ----------
@@ -438,13 +483,58 @@ fn append_unreadable_root_args(
         ));
     }
 
-    if !unreadable_root.exists() {
-        // 上游：缺失路径用 `--ro-bind-data <fd>` 预创建空文件，阻止沙箱内重建
-        // 层级。本项目适配（无 fd mount，见下）：deny 目标是已存在的凭据文件，
-        // missing＝当前无凭据可保护，no-op；沙箱内若新建 .env 属写入面（027
-        // 语义为读保护，写面与普通模式一致开放）。
-        return Ok(());
+    // B1（2026-10-27 加固；收口轮改单次 stat 三分类）：不能用 `exists()` 判
+    // 「不存在」——它对任何 stat 错误（EACCES/ELOOP/ESTALE…）都返回 false，
+    // 会把非 NotFound 错误静默当 missing 跳过检查（不遮蔽、不拒绝＝fail-open；
+    // 且上方符号链接遍历遇 lstat 错误按上游语义 break 跳过，不构成拦截）。
+    // 改为一次 `fs::metadata`（跟随符号链接）显式三分类：Ok → 硬链接检查＋
+    // 遮蔽；NotFound/NotADirectory → 既有 missing no-op（见下）；其余错误 →
+    // 目标与链接数状态不明＝拒绝该次启动（fail closed，与上方可写符号链接
+    // fail-closed 同构）。
+    let metadata = match std::fs::metadata(unreadable_root) {
+        Ok(md) => Some(md),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            // 上游：缺失路径用 `--ro-bind-data <fd>` 预创建空文件，阻止沙箱内重建
+            // 层级。本项目适配（无 fd mount，见下）：deny 目标是已存在的凭据文件，
+            // missing＝当前无凭据可保护，no-op；沙箱内若新建 .env 属写入面（027
+            // 语义为读保护，写面与普通模式一致开放）。
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(format!(
+                "受保护文件 {} 状态读取失败（{e}）：无法核实遮蔽目标与硬链接，拒绝启动沙箱工具（不回退普通模式）",
+                unreadable_root.display()
+            ));
+        }
+    };
+
+    // B1：deny 目标为常规文件且链接数>1（沙箱外已存在的硬链接别名）＝拒绝
+    // 组装——路径级遮蔽（挂载在路径上）不覆盖同 inode 的其他路径，别名不可
+    // 枚举，只能拒绝该次启动。检查跟随符号链接取**实际受保护文件**的链接数
+    //（rootless deny 自身为符号链接时不经上方分支，查链接本身会漏判）；目录
+    // 不适用（nlink＝子目录计数，非文件硬链接）。每次工具启动组装时复查，
+    // 不缓存安全结论。
+    // 边界如实声明：本检查只阻断「检查时已存在」的硬链接；检查到挂载之间及
+    // 沙箱运行期的并发变化仍是边界，不构成完整竞态防护（见 B1/B2 核实记录）。
+    // nlink 为 unix 语义；非 unix 下 bwrap 路线本就不可用，跳过本检查。
+    #[cfg(unix)]
+    if let Some(md) = metadata {
+        use std::os::unix::fs::MetadataExt;
+        let links = md.nlink();
+        if !md.is_dir() && links > 1 {
+            return Err(format!(
+                "受保护文件 {} 存在 {links} 个硬链接：路径级遮蔽无法覆盖同 inode 别名，拒绝启动沙箱工具（不回退普通模式）",
+                unreadable_root.display()
+            ));
+        }
     }
+    #[cfg(not(unix))]
+    let _ = metadata;
 
     append_existing_unreadable_path_args(args, unreadable_root);
     Ok(())

@@ -951,6 +951,12 @@ mod tests {
     /// 不出现＝hooksPath 覆盖生效，钩子（及其宿主）未被信任。
     #[test]
     fn commit_does_not_execute_planted_hooks() {
+        // 与覆盖缝写者（git_timeout_* 测试）串行：git_ok 经 effective_timeout_ms
+        // 读全局 GIT_TIMEOUT_MS_OVERRIDE，写方窗口内并发执行会把 300ms 测试
+        // 预算泄漏进本测试的真实 git 调用（2026-10-27 全量 flake 根因：run1
+        // init 超时/run2 add 超时，报文含「300ms 上限」＝覆盖值指纹；RED 复现
+        // 留档）。断言不变，仅隔离并发窗口。
+        let _serial = OVERRIDE_GUARD.lock().unwrap_or_else(|p| p.into_inner());
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
