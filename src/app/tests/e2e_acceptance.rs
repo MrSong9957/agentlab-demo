@@ -9722,6 +9722,21 @@ fn write_mcp_config_enabled(
     fs::write(user.join("mcp.json"), json).unwrap();
 }
 
+/// 外层 argv 扫描计数：cmdline 含全部片段的进程数（033 生命周期）。
+/// 僵尸进程 cmdline 为空，天然不计——「活进程」与「已死未收割」在扫描层面区分。
+fn scan_arg_procs(markers: &[&str]) -> usize {
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().parse::<u32>().is_ok())
+        .filter(|e| {
+            fs::read_to_string(e.path().join("cmdline"))
+                .map(|c| !c.is_empty() && markers.iter().all(|m| c.contains(m)))
+                .unwrap_or(false)
+        })
+        .count()
+}
+
 fn mcp_record(path: &Path) -> Vec<Value> {
     let text = fs::read_to_string(path).unwrap_or_default();
     text.lines()
@@ -9852,15 +9867,51 @@ fn s103_mcp_reload_disables_and_exit_reaps_process() {
         .expect("启动记录")["pid"]
         .as_u64()
         .expect("pid");
-    assert!(process_alive(pid), "MCP 子进程存活");
+    // 033 生命周期（2026-10-28）：沙箱注入态下服务器记录的 pid 是**命名空间内**
+    // pid（恒为 1；外层 /proc/1 恒存在，不得作为回收判据）——存活/回收判定切换
+    // 为外层 argv 扫描（bwrap 包装与 python 载荷均含 fixture 路径；僵尸进程
+    // cmdline 为空，天然排除，不把僵尸计为泄漏）。普通模式保留原 pid 断言。
+    let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mcp_stdio_server.py");
+    // 扫描标记＝fixture 路径＋**本测试唯一**的 record 路径（AND）：全局共享的
+    // fixture 路径会被并行 MCP 用例的服务器污染（假失败/假通过），record 路径
+    // 含每测试独立 TempDir 名，精确归属本用例进程（2026-10-28 审查发现）。
+    let record_str = record.display().to_string();
+    let mcp_markers = [fixture, record_str.as_str()];
+    let sandbox = std::env::var("TCHAT_SANDBOX")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    if sandbox {
+        let dl = std::time::Instant::now() + Duration::from_secs(5);
+        while scan_arg_procs(&mcp_markers) == 0 && std::time::Instant::now() < dl {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            scan_arg_procs(&mcp_markers) > 0,
+            "MCP 服务器实际启动（外层 argv 身份）"
+        );
+        let _ = pid;
+    } else {
+        assert!(process_alive(pid), "MCP 子进程存活");
+    }
     // 修改配置停用服务器 → reload → 立即生效且旧进程回收。
     write_mcp_config_enabled(user.path(), "echo", &record, "", false);
     pty.send_line("/mcp reload");
     pty.wait_output("已重新加载配置并重建连接", WATCHDOG).unwrap();
-    assert!(
-        wait_pid_gone(pid, Duration::from_secs(5)),
-        "停用后旧 MCP 进程被回收"
-    );
+    if sandbox {
+        let dl = std::time::Instant::now() + Duration::from_secs(5);
+        while scan_arg_procs(&mcp_markers) > 0 && std::time::Instant::now() < dl {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            scan_arg_procs(&mcp_markers) == 0,
+            "停用后旧 MCP 进程被回收（外层 argv 口径）"
+        );
+    } else {
+        assert!(
+            wait_pid_gone(pid, Duration::from_secs(5)),
+            "停用后旧 MCP 进程被回收"
+        );
+    }
     pty.send_line("/mcp");
     pty.wait_output("fx（stdio）：已停用", WATCHDOG).unwrap();
     // 停用后继续对话照常（原生工具面不受影响）。

@@ -242,6 +242,12 @@ impl StdioProcess {
             .stderr(Stdio::piped());
         #[cfg(unix)]
         cmd.process_group(0);
+        // 033 生命周期：spawn 经 runtime worker 分离任务执行（连接建立取消/超时
+        // 丢弃本 future 时，已启动进程的句柄会随任务结果丢弃）——kill_on_drop 使
+        // 「句柄 drop＝进程组后备回收」的既有注释语义真实成立（tokio 默认
+        // kill_on_drop=false 不回收，孤儿进程泄漏）；正常路径句柄由连接持有，
+        // 显式 close/进程组终止不受影响。
+        cmd.kill_on_drop(true);
         let mut child = cmd.spawn()?;
         let pid = child.id().ok_or_else(|| io::Error::other("MCP 进程已退出"))?;
         let stdin = child

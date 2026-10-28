@@ -260,13 +260,30 @@ impl McpConnection {
                 if !missing.is_empty() {
                     return Err(connect_err(format!("环境变量缺失：{}", missing.join("、"))));
                 }
-                let (process, t) = transport::StdioProcess::spawn(
-                    &stdio.command,
-                    &stdio.args,
-                    &stdio.cwd,
-                    &env,
-                )
-                .map_err(|e| connect_err(format!("启动服务器进程失败：{e}")))?;
+                // 033 生命周期修复（归因：docs/logs/033-tool-sandbox/
+                // 2026-10-28-e2e-failure-attribution.md；同上游 codex issue
+                // #46702 机制）：bwrap `--die-with-parent` 的 PDEATHSIG 锚定
+                // 「创建者线程」——此前 spawn 经 manager runtime 的 block_on
+                // 内联在随轮退出的调用线程执行，MCP 服务器跨轮即被杀。移交
+                // **runtime 核心 worker**（多线程 runtime 的常驻线程，不随任务
+                // 退休；区别于会 ~10s 空闲退休的 blocking 池——那正是上游
+                // issue 的触发机制）执行 fork/exec：PDEATHSIG 锚点＝manager
+                // runtime 生命周期（宿主关闭/异常退出仍保证载荷停止）。
+                let command = stdio.command.clone();
+                let args = stdio.args.clone();
+                let cwd = stdio.cwd.clone();
+                let spawn_task = tokio::spawn(async move {
+                    transport::StdioProcess::spawn(&command, &args, &cwd, &env).map_err(|e| {
+                        connect_err(format!("启动服务器进程失败：{e}"))
+                    })
+                });
+                // spawn 移交为分离任务：若本 future 在 await 期间被取消/超时丢弃，
+                // 任务内已启动的进程不得孤儿化——StdioProcess 携带
+                // kill_on_drop(true)（见 transport::spawn），句柄 drop 即回收，
+                // 「spawn 成功但登记失败」仍有明确所有者并能回收。
+                let (process, t) = spawn_task
+                    .await
+                    .map_err(|e| connect_err(format!("启动服务器任务失败：{e}")))??;
                 let process = Arc::new(process);
                 let state = ConnectionState::new(
                     process.stderr_tail.clone(),
