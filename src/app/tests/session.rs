@@ -1731,3 +1731,89 @@ fn user_image_old_rows_and_multi_image_order() {
     assert_eq!(loaded.skipped_lines, 0);
     assert_eq!(loaded.history.len(), 1);
 }
+
+/// 029：Move 工具结果（有序两条记录）与展示（Add/Delete 两卡片）往返保真；
+/// 装载只读历史，不重放移动——会话外同路径的现有文件不被触碰。
+#[test]
+fn move_tool_result_and_display_roundtrip_without_replay() {
+    use terminal_chat::prompt::{PatchChange, PatchChangeKind, ToolCallRecord, ToolDisplay};
+    let dir = TempDir::new("s029-mv");
+    // 恢复不得触碰的真实文件对（与历史记录中的路径同名的哨兵）
+    let fs_pair = TempDir::new("s029-mv-fs");
+    let src = fs_pair.path().join("旧 名.txt");
+    let dst = fs_pair.path().join("新 名.txt");
+    std::fs::write(&src, "SENTINEL-029\n").unwrap();
+
+    let hist = vec![
+        HistoryItem::Text(HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
+            role: HistoryRole::User,
+            content: "029 移动历史".into(),
+            user_input_event: None,
+        }),
+        HistoryItem::AssistantToolCalls {
+            tool_calls: vec![ToolCallRecord {
+                id: "call-mv029".into(),
+                name: "apply_patch".into(),
+                arguments: "{}".into(),
+            }],
+            content: None,
+        },
+        HistoryItem::ToolResult {
+            image: None,
+            tool_call_id: "call-mv029".into(),
+            content: serde_json::json!({
+                "ok": true,
+                "changed_files": [
+                    { "path": dst.display().to_string(), "action": "add" },
+                    { "path": src.display().to_string(), "action": "delete" }
+                ],
+                "state_known": true,
+                "error": null
+            })
+            .to_string()
+            .into(),
+            display: Some(ToolDisplay::Patch {
+                changes: vec![
+                    PatchChange {
+                        path: dst.display().to_string(),
+                        kind: PatchChangeKind::Add { content: "新内容\n".into() },
+                    },
+                    PatchChange {
+                        path: src.display().to_string(),
+                        kind: PatchChangeKind::Delete { content: Some("旧内容\n".into()) },
+                    },
+                ],
+            }),
+        },
+    ];
+    terminal_chat::session::save_snapshot(&dir.path(), "mv029", &hist).unwrap();
+    let loaded =
+        terminal_chat::session::load_session_file(&dir.path().join("mv029.jsonl")).unwrap();
+    assert_eq!(loaded.history.len(), 3, "零修复装载：{}", loaded.repairs);
+    assert_eq!(loaded.repairs, 0);
+    match &loaded.history[2] {
+        HistoryItem::ToolResult { tool_call_id, content, display, .. } => {
+            assert_eq!(tool_call_id, "call-mv029");
+            let v: serde_json::Value = serde_json::from_str(content).unwrap();
+            assert_eq!(v["changed_files"].as_array().unwrap().len(), 2, "两条记录保真：{v}");
+            assert_eq!(v["changed_files"][0]["action"], serde_json::json!("add"), "顺序保真");
+            assert_eq!(v["changed_files"][1]["action"], serde_json::json!("delete"));
+            let Some(ToolDisplay::Patch { changes }) = display else {
+                panic!("展示字段应保留：{display:?}")
+            };
+            assert_eq!(changes.len(), 2, "两张卡片：{changes:?}");
+            assert!(matches!(&changes[0].kind, PatchChangeKind::Add { content } if content == "新内容\n"));
+            assert!(matches!(&changes[1].kind, PatchChangeKind::Delete { content } if content.as_deref() == Some("旧内容\n")));
+        }
+        other => panic!("形状：{other:?}"),
+    }
+    // 恢复不重放：装载仅读历史，同名路径的现有文件不被移动/删除
+    assert_eq!(
+        std::fs::read_to_string(&src).unwrap(),
+        "SENTINEL-029\n",
+        "历史中的 delete 不得在装载时重放"
+    );
+    assert!(!dst.exists(), "历史中的 add 不得在装载时重放");
+}
