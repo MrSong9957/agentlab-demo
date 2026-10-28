@@ -4,7 +4,9 @@
 //! file_update / text_file / seek_sequence）。
 //!
 //! MVP 约束（规格第 3 节）：
-//! - 仅支持 Add / Update / Delete；不支持 `*** Move to`（移动/重命名）与二进制文件。
+//! - 支持 Add / Update / Delete；`*** Update File` 块可带 `*** Move to: 目标`
+//!   （029：移动/重命名＝先排他创建目标并完整写入、复核源后删除源；一个成功
+//!   Move 记两条＝目标 add＋源 delete）。不支持二进制文件。
 //! - 新增不得覆盖已有文件（`create_new` 原子保证，含悬空符号链接）。
 //! - 先完整解析，再按补丁顺序逐文件校验并执行；失败即停止，不回滚此前修改。
 //! - 更新先算出完整新内容再写；匹配失败不改当前文件。
@@ -275,14 +277,12 @@ fn run(patch_text: &str) -> (ApplyPatchResult, Vec<crate::prompt::PatchChange>) 
     let mut changed: Vec<ChangedFile> = Vec::new();
     let mut display: Vec<crate::prompt::PatchChange> = Vec::new();
     for hunk in &hunks {
-        match apply_hunk(hunk, &base) {
-            Ok((path, action, change)) => {
-                changed.push(ChangedFile { path: path.display().to_string(), action });
-                display.push(change);
-            }
-            Err(Failure { msg, state_known }) => {
-                return (ApplyPatchResult::error(msg, changed, state_known), display)
-            }
+        // 029：执行器按实际完成的文件操作即时累积清单与展示（Move 一块可产出
+        // 多条，部分成功也保留已完成部分）。
+        if let Err(Failure { msg, state_known }) =
+            apply_hunk(hunk, &base, &mut changed, &mut display)
+        {
+            return (ApplyPatchResult::error(msg, changed, state_known), display);
         }
     }
     (
@@ -997,7 +997,9 @@ fn read_display_content(target: &Path) -> Option<String> {
 fn apply_hunk(
     hunk: &Hunk,
     base: &Path,
-) -> Result<(PathBuf, Action, crate::prompt::PatchChange), Failure> {
+    changed: &mut Vec<ChangedFile>,
+    display: &mut Vec<crate::prompt::PatchChange>,
+) -> Result<(), Failure> {
     match hunk {
         Hunk::Add { path, content } => {
             let target = resolve_target(base, path);
@@ -1052,14 +1054,12 @@ fn apply_hunk(
                 )));
             }
             let label = path_label(&target);
-            Ok((
-                target,
-                Action::Add,
-                crate::prompt::PatchChange {
-                    path: label,
-                    kind: crate::prompt::PatchChangeKind::Add { content: content.clone() },
-                },
-            ))
+            changed.push(ChangedFile { path: label.clone(), action: Action::Add });
+            display.push(crate::prompt::PatchChange {
+                path: label,
+                kind: crate::prompt::PatchChangeKind::Add { content: content.clone() },
+            });
+            Ok(())
         }
         Hunk::Delete { path } => {
             let target = resolve_target(base, path);
@@ -1083,14 +1083,12 @@ fn apply_hunk(
             match std::fs::remove_file(&target) {
                 Ok(()) => {
                     let label = path_label(&target);
-                    Ok((
-                        target,
-                        Action::Delete,
-                        crate::prompt::PatchChange {
-                            path: label,
-                            kind: crate::prompt::PatchChangeKind::Delete { content: old_content },
-                        },
-                    ))
+                    changed.push(ChangedFile { path: label.clone(), action: Action::Delete });
+                    display.push(crate::prompt::PatchChange {
+                        path: label,
+                        kind: crate::prompt::PatchChangeKind::Delete { content: old_content },
+                    });
+                    Ok(())
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     Err(Failure::validation(format!("删除目标不存在：{}", target.display())))
@@ -1102,13 +1100,10 @@ fn apply_hunk(
             }
         }
         Hunk::Update { path, move_to, chunks } => {
-            // M1 临时 fail-closed：Move 语义（M2）落地前，解析出的移动块不得
-            // 静默按普通 Update 执行（纯移动会把源原地重写）。
+            // 029：带 Move to 的块走移动执行（源读取、目标创建/写入、源删除）；
+            // 无 Move 的普通 Update 保持既有语义。
             if let Some(dest) = move_to {
-                return Err(Failure::validation(format!(
-                    "移动到 {d} 尚未实现（029 M2 接入文件操作）",
-                    d = dest.display()
-                )));
+                return apply_move(path, dest, chunks, base, changed, display);
             }
             let target = resolve_target(base, path);
             // F2：Update 只读写常规文件。先以非阻塞方式打开（FIFO/设备打开不阻塞），
@@ -1203,20 +1198,307 @@ fn apply_hunk(
                     // 012：展示差异＝对真实前后缓冲生成的统一 diff（不从补丁文本反推）
                     let diff = diffy::create_patch(&original, &new_content).to_string();
                     let label = path_label(&target);
-                    Ok((
-                        target,
-                        Action::Update,
-                        crate::prompt::PatchChange {
-                            path: label,
-                            kind: crate::prompt::PatchChangeKind::Update { diff },
-                        },
-                    ))
+                    changed.push(ChangedFile { path: label.clone(), action: Action::Update });
+                    display.push(crate::prompt::PatchChange {
+                        path: label,
+                        kind: crate::prompt::PatchChangeKind::Update { diff },
+                    });
+                    Ok(())
                 }
                 Err(e) => Err(Failure::mutating(format!(
                     "写入修改目标失败 {}：{e}",
                     target.display()
                 ))),
             }
+        }
+    }
+}
+
+/// 029 Move 执行（规格 §1.4 顺序）：
+/// 1. 同路径与目标存在预检（词法 `.`/`..` 归一；其余别名由排他创建兜底）；
+/// 2. 源经 `O_NOFOLLOW` 打开并 fd 判型（拒绝末端符号链接/非常规文件），
+///    有界读入＋UTF-8＋行数校验（与普通 Update 同界）；
+/// 3. 内容计算：纯移动逐字节保留（含混合行尾与缺失末尾换行）；带修改块时按
+///    匹配规则生成新内容并做写前上限检查；
+/// 4. 目标父目录沿用 Add 创建策略；`create_new` 排他创建＋完整写入——完整写入
+///    成功**立即**记目标 `add`（012 展示＝目标真实新内容）；半写不记 add；
+/// 5. 删除源前复核源路径仍对应读入对象（更换则保留目标 add、不删替换对象）；
+/// 6. 删除源成功记源 `delete`（展示＝源真实旧内容）；失败保留目标 add、不清理。
+/// 不承诺 inode/权限位/时间戳随源保留（文本内容的新建＋删除）。
+fn apply_move(
+    src_path: &Path,
+    dest_path: &Path,
+    chunks: &[UpdateChunk],
+    base: &Path,
+    changed: &mut Vec<ChangedFile>,
+    display: &mut Vec<crate::prompt::PatchChange>,
+) -> Result<(), Failure> {
+    let src = resolve_target(base, src_path);
+    let dst = resolve_target(base, dest_path);
+    // 阶段化错误：含源、目标两个可确定绝对路径（规格 §1.4.5）
+    let both = |stage: &str, detail: &dyn std::fmt::Display| {
+        format!("{stage}（源 {}，目标 {}）：{detail}", src.display(), dst.display())
+    };
+
+    // 1. 同路径拒绝：词法归一后比较（`./`、`..`）；其余别名等价由排他创建兜底
+    if lexical_normalize(&src) == lexical_normalize(&dst) {
+        return Err(Failure::validation(format!(
+            "移动源与目标为同一路径，按目标冲突拒绝（源 {}，目标 {}）",
+            src.display(),
+            dst.display()
+        )));
+    }
+    // 目标存在预检：任何目录项（常规/目录/符号链接/悬空/硬链接）均拒绝
+    if std::fs::symlink_metadata(&dst).is_ok() {
+        return Err(Failure::validation(format!(
+            "移动目标已存在，禁止覆盖（源 {}，目标 {}）",
+            src.display(),
+            dst.display()
+        )));
+    }
+
+    // 2. 源打开＋判型：O_NOFOLLOW——末端符号链接（含悬空，ELOOP）不跟随，
+    //    避免"复制链接所指内容后删除链接本体"（普通 Update 跟随语义不变）
+    let file = match open_source_nofollow(&src) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(Failure::validation(format!(
+                "移动源不存在（目标 {}）：{}",
+                dst.display(),
+                src.display()
+            )));
+        }
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(Failure::validation(format!(
+                "移动源是符号链接（含悬空），拒绝移动（源 {}，目标 {}）",
+                src.display(),
+                dst.display()
+            )));
+        }
+        Err(e) => {
+            return Err(Failure::validation(format!(
+                "打开移动源失败（源 {}，目标 {}）：{e}",
+                src.display(),
+                dst.display()
+            )));
+        }
+    };
+    if !fd_is_regular(&file) {
+        return Err(Failure::validation(format!(
+            "移动源不是常规文件（拒绝 FIFO/设备/目录等，源 {}，目标 {}）",
+            src.display(),
+            dst.display()
+        )));
+    }
+    // N5：fd 级大小预检＋有限读取＋UTF-8＋行数（与普通 Update 同界；读入失败
+    // 未发生任何写入，validation）
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    unsafe { libc::fstat(file.as_raw_fd(), &mut st) };
+    if st.st_size as usize > MAX_FILE_BYTES {
+        return Err(Failure::validation(format!(
+            "移动源 {} 为 {size} 字节，超过 {MAX_FILE_BYTES} 字节（4 MiB）读入上限",
+            src.display(),
+            size = st.st_size
+        )));
+    }
+    let mut bytes = Vec::new();
+    let mut limited = (&file).take(MAX_FILE_BYTES as u64 + 1);
+    if let Err(e) = std::io::Read::read_to_end(&mut limited, &mut bytes) {
+        return Err(Failure::validation(format!(
+            "读取移动源失败（源 {}，目标 {}）：{e}",
+            src.display(),
+            dst.display()
+        )));
+    }
+    if bytes.len() > MAX_FILE_BYTES {
+        return Err(Failure::validation(format!(
+            "移动源 {} 超过 {MAX_FILE_BYTES} 字节（4 MiB）读入上限",
+            src.display()
+        )));
+    }
+    let original = match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return Err(Failure::validation(format!(
+                "移动源不是有效的 UTF-8 文本（不支持二进制；源 {}，目标 {}）",
+                src.display(),
+                dst.display()
+            )));
+        }
+    };
+    if logical_lines(&original) > MAX_FILE_LINES {
+        return Err(Failure::validation(format!(
+            "移动源 {} 为 {n} 行，超过 {MAX_FILE_LINES} 行读入上限",
+            src.display(),
+            n = logical_lines(&original)
+        )));
+    }
+
+    // 3. 内容计算：纯移动逐字节保留；带修改块按匹配规则生成（失败不触任何文件）
+    let new_content = if chunks.is_empty() {
+        original.clone()
+    } else {
+        match compute_new_content(&original, &src.display().to_string(), chunks) {
+            Ok(c) => c,
+            Err(msg) => return Err(Failure::validation(msg)),
+        }
+    };
+    // 写前上限检查：超限不得创建目标或删除源（N5）
+    if new_content.len() > MAX_FILE_BYTES {
+        return Err(Failure::validation(format!(
+            "生成内容 {} 字节超过 {MAX_FILE_BYTES} 字节（4 MiB）上限（目标 {}，源 {}）",
+            new_content.len(),
+            dst.display(),
+            src.display()
+        )));
+    }
+    if logical_lines(&new_content) > MAX_FILE_LINES {
+        let n = logical_lines(&new_content);
+        return Err(Failure::validation(format!(
+            "生成内容 {n} 行超过 {MAX_FILE_LINES} 行上限（目标 {}，源 {}）",
+            dst.display(),
+            src.display()
+        )));
+    }
+
+    // 4. 目标父目录沿用 Add 创建策略（失败＝已尝试变更目录，状态未知）
+    if let Some(parent) = dst.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return Err(Failure::mutating(both("创建移动目标父目录失败", &e)));
+            }
+        }
+    }
+    // 排他创建＋完整写入：create_new 原子拒绝既有目标（含预检后的抢占竞态）
+    #[cfg(test)]
+    move_seam::barrier("before_create");
+    let mut out = match std::fs::OpenOptions::new().write(true).create_new(true).open(&dst) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(Failure::validation(format!(
+                "移动目标已存在，禁止覆盖（源 {}，目标 {}）",
+                src.display(),
+                dst.display()
+            )));
+        }
+        Err(e) => return Err(Failure::mutating(both("创建移动目标失败", &e))),
+    };
+    if let Err(e) = out.write_all(new_content.as_bytes()) {
+        // 半写：目标残片保留供观察，不记 add；源内容完整（尚未动源）
+        return Err(Failure::mutating(both("写入移动目标失败", &e)));
+    }
+    drop(out);
+    // 完整写入成功：立即记目标 add；展示＝目标真实新内容
+    let dst_label = path_label(&dst);
+    changed.push(ChangedFile { path: dst_label.clone(), action: Action::Add });
+    display.push(crate::prompt::PatchChange {
+        path: dst_label,
+        kind: crate::prompt::PatchChangeKind::Add { content: new_content.clone() },
+    });
+
+    // 5. 删源前复核：源路径仍对应读入时的对象（替换窗口测试经 move_seam 屏障）
+    #[cfg(test)]
+    move_seam::barrier("before_unlink");
+    let verify = match open_source_nofollow(&src) {
+        Ok(f) => f,
+        Err(e) => return Err(Failure::mutating(both("删除前复核移动源失败", &e))),
+    };
+    if fd_inode(&verify) != fd_inode(&file) {
+        return Err(Failure::mutating(format!(
+            "移动源对象在删除前被更换，已保留目标 add、不删除替换对象（源 {}，目标 {}）",
+            src.display(),
+            dst.display()
+        )));
+    }
+    drop(verify);
+    drop(file);
+
+    // 6. 删除源：成功记 delete（展示＝源真实旧内容）；失败保留目标 add、不清理
+    match std::fs::remove_file(&src) {
+        Ok(()) => {
+            let src_label = path_label(&src);
+            changed.push(ChangedFile { path: src_label.clone(), action: Action::Delete });
+            display.push(crate::prompt::PatchChange {
+                path: src_label,
+                kind: crate::prompt::PatchChangeKind::Delete { content: Some(original) },
+            });
+            Ok(())
+        }
+        Err(e) => Err(Failure::mutating(both("删除移动源失败", &e))),
+    }
+}
+
+/// Move 源打开：`O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_NOFOLLOW`——末端符号链接
+///（含悬空）一律 ELOOP 拒绝、不跟随（普通 Update 的 [`open_validated_regular`
+/// 保持跟随语义不变）。
+fn open_source_nofollow(target: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(target.as_os_str().as_bytes())?;
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    }
+}
+
+/// 词法归一（消 `.`/`..`）比较两路径是否同一目标——用于移动的自路径拒绝；
+/// 不触文件系统（符号链接别名等价由 `create_new` 排他创建兜底）。
+fn lexical_normalize(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in p.components() {
+        match component {
+            std::path::Component::RootDir => out.push("/"),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::Normal(part) => out.push(part),
+            std::path::Component::Prefix(_) => {}
+        }
+    }
+    out
+}
+
+/// 029 Move 窗口测试同步接缝（**仅测试构建**，与 f2_seam 同构）：具名屏障，
+/// 控制端在确定性的时点完成抢占/替换——
+/// - `before_create`：目标预检后、排他创建前（目标抢占竞态，A5）；
+/// - `before_unlink`：目标完整写入并记录 add 后、删源复核前（源替换，A7b）。
+/// 由 `apply_patch::tests::move_*` 的子进程模式启用。
+#[cfg(test)]
+mod move_seam {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static ARMED: AtomicBool = AtomicBool::new(false);
+
+    /// 启用接缝：仅测试子进程在调用 apply_patch 前设置。
+    pub fn arm() {
+        ARMED.store(true, Ordering::SeqCst);
+    }
+
+    /// 具名屏障：启用时写出 `reached-<name>` 并阻塞等待 `release-<name>`。
+    /// 协调目录经 `TCHAT_MOVE_SEAM_DIR` 传递。
+    pub fn barrier(name: &str) {
+        if !ARMED.load(Ordering::SeqCst) {
+            return;
+        }
+        let dir = std::env::var("TCHAT_MOVE_SEAM_DIR").unwrap_or_default();
+        assert!(!dir.is_empty(), "接缝已启用但缺少协调目录");
+        let d = std::path::PathBuf::from(dir);
+        std::fs::write(d.join(format!("reached-{name}")), b"").expect("写出 reached 标记");
+        let release = d.join(format!("release-{name}"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !release.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "接缝等待 release-{name} 超时（控制端未放行）"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 }
@@ -1759,6 +2041,173 @@ mod tests {
             "重指向后的 FIFO 未被读写（仍为 FIFO）"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- 029：Move 窗口测试（子进程屏障模式，与 f2_swap_barrier 同构）----
+
+    /// 子进程模式共用入口：启用接缝→执行 patch.txt→写 out.json→退出。
+    /// 非子进程返回 false，用例继续走控制端逻辑。
+    fn move_seam_child_mode() -> bool {
+        if std::env::var_os("TCHAT_MOVE_SEAM_CHILD").is_none() {
+            return false;
+        }
+        let dir: std::path::PathBuf = std::env::var("TCHAT_MOVE_SEAM_DIR").unwrap().into();
+        move_seam::arm();
+        let patch_text = std::fs::read_to_string(dir.join("patch.txt")).unwrap();
+        let r = apply_patch(&json!({ "patch": patch_text }));
+        std::fs::write(dir.join("out.json"), serde_json::to_string(&r).unwrap()).unwrap();
+        std::process::exit(0);
+    }
+
+    /// 启动重入本测试二进制的接缝子进程。
+    fn spawn_move_seam_child(test_name: &str, dir: &std::path::Path) -> std::process::Child {
+        use std::process::{Command, Stdio};
+        Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(test_name)
+            .env("TCHAT_MOVE_SEAM_CHILD", "1")
+            .env("TCHAT_MOVE_SEAM_DIR", dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("子进程启动失败")
+    }
+
+    /// 等待具名屏障到达（子进程提前退出即失败）。
+    fn wait_move_barrier(
+        dir: &std::path::Path,
+        name: &str,
+        child: &mut std::process::Child,
+    ) {
+        let reached = dir.join(format!("reached-{name}"));
+        let wait_dl = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !reached.exists() {
+            assert!(
+                std::time::Instant::now() < wait_dl,
+                "屏障 {name} 未到达：实现未到达该时点，或接缝被移除"
+            );
+            if let Ok(Some(st)) = child.try_wait() {
+                panic!("子进程在屏障 {name} 前退出：{st}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn release_move_barrier(dir: &std::path::Path, name: &str) {
+        std::fs::write(dir.join(format!("release-{name}")), b"").unwrap();
+    }
+
+    /// 收集子进程结果 JSON。
+    fn collect_move_child(
+        dir: &std::path::Path,
+        child: std::process::Child,
+    ) -> serde_json::Value {
+        let out = child.wait_with_output().expect("等待子进程失败");
+        assert!(out.status.success(), "子进程异常退出：{out:?}");
+        let text = std::fs::read_to_string(dir.join("out.json")).unwrap();
+        serde_json::from_str(&text).unwrap()
+    }
+
+    fn write_move_patch(dir: &std::path::Path, src: &Path, dst: &Path) {
+        std::fs::write(
+            dir.join("patch.txt"),
+            format!(
+                "*** Begin Patch\n*** Update File: {s}\n*** Move to: {d}\n*** End Patch",
+                s = src.display(),
+                d = dst.display()
+            ),
+        )
+        .unwrap();
+    }
+
+    /// 029 A5 竞态：预检通过后、排他创建前目标被抢占创建——`create_new` 必须以
+    /// EEXIST 拒绝（不覆盖抢占者），抢占者字节与源均不变；未产生本次变更，
+    /// 状态已知。
+    #[test]
+    fn move_target_race_rejected_exclusively() {
+        if move_seam_child_mode() {
+            unreachable!("子进程已在 move_seam_child_mode 内退出");
+        }
+        let dir = std::env::temp_dir().join(format!("tchat-moverace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.txt");
+        let dst = dir.join("dst.txt");
+        std::fs::write(&src, "S\n").unwrap();
+        write_move_patch(&dir, &src, &dst);
+        let mut child = spawn_move_seam_child(
+            "apply_patch::tests::move_target_race_rejected_exclusively",
+            &dir,
+        );
+        wait_move_barrier(&dir, "before_create", &mut child);
+        // 确定性的创建前时点：抢占创建目标
+        std::fs::write(&dst, "RACER\n").unwrap();
+        release_move_barrier(&dir, "before_create");
+        let r = collect_move_child(&dir, child);
+        assert_eq!(r["ok"], json!(false), "目标被抢占必须失败：{r}");
+        assert_eq!(r["state_known"], json!(true), "仅创建竞争且未产生本次变更：{r}");
+        assert_eq!(r["changed_files"], json!([]), "{r}");
+        assert!(r["error"].as_str().unwrap().contains("已存在"), "{r}");
+        assert_eq!(
+            std::fs::read_to_string(&dst).unwrap(),
+            "RACER\n",
+            "抢占者字节不变（未被覆盖）"
+        );
+        assert_eq!(std::fs::read_to_string(&src).unwrap(), "S\n", "源不变");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 029 A7b：删源前源对象更换——真实同步屏障下的确定性替换。子进程在 Move
+    /// 完成目标写入并记录 add 后、删源复核前停在 `before_unlink`；控制端此刻把
+    /// 源改名挪走并在原路径放入替换文件，再放行。期望：ok=false、清单保留目标
+    /// add、不记源 delete、state_known=false；替换对象与被挪走的原文件均不被删。
+    #[test]
+    fn move_source_swap_detected_before_unlink() {
+        if move_seam_child_mode() {
+            unreachable!("子进程已在 move_seam_child_mode 内退出");
+        }
+        let dir = std::env::temp_dir().join(format!("tchat-moveswap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.txt");
+        let dst = dir.join("dst.txt");
+        std::fs::write(&src, "ORIGINAL\n").unwrap();
+        write_move_patch(&dir, &src, &dst);
+        let mut child = spawn_move_seam_child(
+            "apply_patch::tests::move_source_swap_detected_before_unlink",
+            &dir,
+        );
+        // 创建前屏障无需竞态：直接放行（子进程随后写入目标并记录 add）
+        release_move_barrier(&dir, "before_create");
+        wait_move_barrier(&dir, "before_unlink", &mut child);
+        // 确定性的删源前时点：挪走原文件，原路径放入替换对象
+        let moved_away = dir.join("moved-away.txt");
+        std::fs::rename(&src, &moved_away).unwrap();
+        std::fs::write(&src, "IMPOSTOR\n").unwrap();
+        release_move_barrier(&dir, "before_unlink");
+        let r = collect_move_child(&dir, child);
+        assert_eq!(r["ok"], json!(false), "源更换必须失败：{r}");
+        assert_eq!(r["state_known"], json!(false), "{r}");
+        assert_eq!(
+            r["changed_files"],
+            json!([{ "path": dst.display().to_string(), "action": "add" }]),
+            "清单保留已完整写入的目标 add、不记源 delete：{r}"
+        );
+        let err = r["error"].as_str().unwrap();
+        assert!(err.contains("更换"), "错误标明源对象更换：{err}");
+        // 磁盘事实：目标＝移动内容；替换对象与被挪走的原文件都在
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "ORIGINAL\n", "目标含完整移动内容");
+        assert_eq!(
+            std::fs::read_to_string(&src).unwrap(),
+            "IMPOSTOR\n",
+            "可检测的替换对象不得被删"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&moved_away).unwrap(),
+            "ORIGINAL\n",
+            "被挪走的原文件保留（用户重读后决定下一步）"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---- 012：展示差异捕获（apply_patch_with_display——真实前后内容）----
