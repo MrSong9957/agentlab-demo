@@ -30,6 +30,7 @@ http = "1"  # 022：env_http_headers 的 HeaderName/HeaderValue（rmcp 同源）
 bytes = "1"  # 022：SSE 字节流限额器（rmcp 同源）
 sse-stream = "0.2"  # 022：SSE 事件流解析（rmcp 同源）
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }  # 022：有界 HTTP 客户端移植（与 rmcp 的 reqwest 依赖同版本合并）；022 §5.4：官方 rustls 组合（aws-lc-rs＋platform-verifier 系统根）使远程 HTTPS 可用；0.13 已无 webpki-roots 直选 feature，与 ureq（ring/webpki）为两个独立 TLS 栈
+rquickjs = { version = "=0.14.0", default-features = false, features = ["std", "futures"] }  # 034：JS 编排 worker 的嵌入式引擎（MIT；std=分配用 Rust 标准库；futures=AsyncRuntime/AsyncContext；不开 loader/dyn-load/rust-alloc/allocator——内存限制对自定义 allocator 失效，见规格 §3.1）
 
 [dev-dependencies]
 # 022 §5.4：TLS mock 服务器（自签证书）；与 reqwest 传递的 rustls 同版本同 provider，避免双 provider。

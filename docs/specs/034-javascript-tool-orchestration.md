@@ -1,7 +1,7 @@
 # 规格：JavaScript 工具编排
 
-- 状态：待实现
-- 更新时间：2026-10-27
+- 状态：已交付（2026-10-29 用户批准：提交合并本地 main，分支已删除；最终验证 3811/0/3 隔离环境自证，见 final-hashes）
+- 更新时间：2026-10-29（实施轮）
 - 来源：原[工具对照表](../records/2026-10-21-codex-tools-comparison.md)「JavaScript 工具编排」一行，统一覆盖 `exec`、`wait`；两者不另拆任务。
 - 依据与检查：[调研记录](../logs/034-javascript-tool-orchestration/2026-10-26-spec-research.md)。本轮仅建立规格及实施计划，没有安装运行时、执行脚本或修改程序行为。
 - 033 编号已用于[已交付的工具沙箱](033-tool-sandbox.md)，本项使用 034；六项规划现已建立，开始哪一项实施仍由用户决定。
@@ -151,17 +151,17 @@ exec与wait的正常结果固定为下列字段：
 
 ### 3.2 根据规格制定的实施计划
 
-M0–M7均属于原表「JavaScript 工具编排」这一项；当前全部待实施。
+M0–M7均属于原表「JavaScript 工具编排」这一项。2026-10-29 实施轮状态：M0–M5 已完成（M0 原型证据与性能冻结见 docs/logs/034-javascript-tool-orchestration/；实现落点 src/app/src/js_orchestration/＋turn/session/prompt/catalog/main/tui_host 集成；测试 js_orchestration 28 用例＋js_orchestration_perf 7 用例＋三项变异证明），M6 门禁：变异证明闭环、独立审查 12 项发现全部修复复验（[闭环记录](../logs/034-javascript-tool-orchestration/2026-10-29-code-review.md)）、安全攻防 18 用例＋4 漏洞修复闭环（[安全报告](../security/reports/2026-10-29-034-js-orchestration-security.md)）；M7 全量验证结果见 §5 末尾。
 
 | 步骤 | 修改落点与工作 | 验证与退出条件 |
 |---|---|---|
 | M0 核对前置与最小原型 | 核对工作区、032 V3交付、033实际入口和共享dev部署；记录普通/沙箱测试基线。隔离原型验证固定rquickjs的顶层await、Promise桥接、中断/堆/栈限制，以及worker经真实bwrap启动时的IPC、RLIMIT、宿主进程组回收和最小features；冻结§1.7性能夹具和阈值 | 前置未交付则不启用生产功能、不顺带实施其他项；原型/锁定依赖/构建代价及Linux资源限制可复现，不用033已有验收代替worker验证 |
-| M1 参数与worker | 新增 `src/app/src/js_orchestration/`（args/runtime/protocol），lib.rs导出；main.rs在配置加载前接隐藏worker入口，宿主按033统一入口包装；Cargo.toml/Cargo.lock锁依赖；先写非法输入红例，再接真实引擎与有界IPC | 加入 `tests/js_orchestration.rs`，纯JS、对象参数、业务失败、无IO/模块、OOM/循环/坏帧/假凭证env/fd哨兵均经真实进程验证；普通与bwrap两模式、包装失败均覆盖，引擎错误不杀主程序 |
-| M2 共用分派与调用门 | 从turn.rs现有执行分支抽最小叶子分派给直接/嵌套共用，保留命令/MCPstdio/补丁的033包装；复用ProcessManager/McpSnapshot，新增有界broker、序号、额度、4并发及串行通道 | 先证明直接调用行为未变；真实CLI/MCP叶子与沙箱门参与，伪造/未加载/跨模式零执行；屏障证明重叠和关闭后零新增 |
-| M3 V3证据与提交 | 基于032扩展prompt.rs的HistoryItem事件、session.rs验证/锁/保存回执；主轮消费事件，start先存后调度、finish先存后兑现；更新模型投影、api/native适配和memory/rollout_input.rs | 事件不进入模型原生调用链，全部读取器一致；注入磁盘失败/截断/孤立start，恢复不重放/不误报成功；增量追加不反复全扫 |
-| M4 exec/wait生命周期 | turn.rs接独占批规则、cell状态机、请求级工具快照、yield/增量wait/终止/全部轮出口；对接已有问答与steer批末边界 | 覆盖running→终态消费、完成/取消竞态、yield后新调用仅排队、未await/额度/过期/第8次请求；进程句柄与真实MCP未知副作用语义保持 |
+| M1 参数与worker | 新增 `src/app/src/js_orchestration/`（args/runtime/protocol），lib.rs导出；main.rs在配置加载前接隐藏worker入口，宿主按033统一入口包装；Cargo.toml/Cargo.lock锁依赖；先写非法输入红例，再接真实引擎、有界IPC、显式作业/微任务泵及未处理拒绝跟踪 | 加入 `tests/js_orchestration.rs`，纯JS、对象参数、业务失败、无IO/模块、OOM/循环/坏帧/假凭证env/fd哨兵均经真实进程验证；模块已兑现但微任务拒绝时不假报完成；普通与bwrap两模式、包装失败均覆盖，引擎错误不杀主程序 |
+| M2 共用分派与调用门 | 从turn.rs现有执行分支抽最小叶子分派给直接/嵌套共用，保留命令/MCPstdio/补丁的033包装；复用ProcessManager/McpSnapshot，新增有界broker、序号、额度、4并发及串行通道；MCP工具/资源请求短锁取得调用能力，等锁和发送前均纳入取消门，网络等待不持公共连接锁 | 先证明直接调用行为未变；真实CLI/MCP叶子与沙箱门参与，伪造/未加载/跨模式零执行；同连接四调用屏障证明重叠，排队取消后服务端请求计数不增，关闭后零新增 |
+| M3 V3证据与提交 | 基于032扩展prompt.rs的HistoryItem事件、session.rs验证/锁/保存回执；主轮消费事件，start先存后调度、finish先存后兑现；对齐外层观察结果提交回执与输出消费，不新增事件类型或改变007其他普通工具保存失败语义；更新模型投影、api/native适配和memory/rollout_input.rs | 事件不进入模型原生调用链，全部读取器一致；在选取输出、提交结果、消费游标之间注入保存故障，按本项关闭/未知语义处理；恢复不重放/不误报成功；增量追加不反复全扫 |
+| M4 exec/wait生命周期 | turn.rs接独占批规则、cell状态机、请求级工具快照、yield/增量wait/终止/全部轮出口；明确模块兑现、未结算调用和拒绝跟踪的判定顺序；外层结果提交后推进输出游标、释放终态句柄；对接已有问答与steer批末边界 | 覆盖running→终态消费、完成/取消竞态、yield后新调用仅排队、未await/额度/过期/第8次请求；故障边界不重复交付输出或重放副作用；进程句柄与真实MCP未知副作用语义保持 |
 | M5 声明、展示与五协议 | catalog.rs/prompt.rs按双opt-in定义工具，main.rs/tui_host.rs传能力与提交宿主；src/tui聊天投影复用通用工具cell并按编排关联展示；扩充prompt_assembly/native_model_apis/session/session_cli/e2e_acceptance | 五协议本地模型服务走真实JS→叶子→外层结果；真实CLI/PTY运行和恢复一致、ANSI安全；无开关兼容，完整请求字节对照及p95/RSS有原始样本 |
-| M6 加固与独立审查 | TDD后按项目顺序执行comprehensive-testing、Security Testing、code-review；安全按既有Security-Testing-Gate，审查读取rules/REVIEW.md，独立子代理只读找问题 | 越权/凭据/IPC/同UID命名空间/策略锚点/宿主进程组取消/资源/重放重点覆盖；关键用例用修复前后或临时破坏证明会失败；发现错误用diagnosing-bugs定位并复验 |
+| M6 加固与独立审查 | ce-work承接实施并按TDD推进；之后按项目顺序执行comprehensive-testing、Security Testing、ce-code-review；安全按既有Security-Testing-Gate，审查读取rules/REVIEW.md，独立子代理只读找问题 | 越权/凭据/IPC/同UID命名空间/策略锚点/宿主进程组取消/资源/重放重点覆盖；关键用例用修复前后或临时破坏证明会失败；发现错误用ce-debug定位并复验 |
 | M7 全量验证与交付 | 修复后完成全量命令，更新受影响的016/022/024/032接入说明、对照表及项目经验；证据统一保存在本项logs | 报告通过/失败/忽略/未运行数量，适用CI有则通过；功能、性能、资源与证据齐全后最多标待验收，最终状态由验收人决定 |
 
 M0已有测试基线命令（工作目录 `/workspace`，只作基线，不替代交付回归）：
@@ -172,9 +172,13 @@ env -u TCHAT_SANDBOX cargo test --locked --test tool_loop --test prompt_assembly
 
 实现轮另跑普通模式真实流程 `env -u TCHAT_SANDBOX cargo test --test e2e_acceptance`，最终普通回归执行 `env -u TCHAT_SANDBOX cargo check && env -u TCHAT_SANDBOX cargo test --workspace --no-fail-fast`。共享dev默认注入开关，普通基线须清除；专用沙箱测试在隔离进程内自控开关，另须验证真实bwrap下worker及嵌套叶子的新行为，不能以不可用分支替代。在隔离副本中必须显式 `--target-dir`，避免污染共享构建目录；不为本次纯文档工作运行这些命令。rquickjs新增C依赖须按实际工具链验证，不把Rust typecheck当引擎安全测试。
 
+### 3.3 计划前调研复核（2026-10-28）
+
+结论：补充 M1–M4 的作业泵/拒绝跟踪、MCP连接锁与发送门、增量输出提交和消费顺序；不改冻结功能、容量和验收条件，未运行引擎原型或功能测试。见[汇总](../think-tank/2026-10-28-034-javascript-tool-orchestration.md)及[调度专家](../think-tank/raw/2026-10-28-034-javascript-tool-orchestration-systems.md)、[存储专家](../think-tank/raw/2026-10-28-034-javascript-tool-orchestration-storage.md)、[隔离专家](../think-tank/raw/2026-10-28-034-javascript-tool-orchestration-security.md)、[侦察兵](../think-tank/raw/2026-10-28-034-javascript-tool-orchestration-scout.md)。最终全量验证后按现行 AGENTS 使用 ce-compound，经验统一沉淀到 rules/project-lessons.md。
+
 ## 4. 踩过的坑，怎样解决
 
-本项尚未实现，没有脚本运行、性能或取消实测结论。真实核对发现：现有工具循环/函数适配不能替代JS运行时，上游code-mode crate也是host客户端；引用依据见[调研记录](../logs/034-javascript-tool-orchestration/2026-10-26-spec-research.md)。
+实施轮（2026-10-29）实测经验统一沉淀在[项目经验第 7 节](../../rules/project-lessons.md#7-实现取舍与问题根因)的 034 条目；性能实测与冻结见 [C18 冻结记录](../logs/034-javascript-tool-orchestration/2026-10-29-perf-freeze.md)。早期规划期的判断：真实核对发现：现有工具循环/函数适配不能替代JS运行时，上游code-mode crate也是host客户端；引用依据见[调研记录](../logs/034-javascript-tool-orchestration/2026-10-26-spec-research.md)。
 
 可复用规划判断统一放在[项目经验第7节](../../rules/project-lessons.md#7-实现取舍与问题根因)，不把预计风险写成已发生故障。033早期环境探针保留历史语境，当前以[真实宿主验收](../logs/033-tool-sandbox/2026-10-27-host-acceptance.md)和[共享dev部署](../logs/033-tool-sandbox/2026-10-27-dev-deploy.md)为准；它们不能作为本项JS/IPC/资源限制已验证的证据。
 
@@ -182,23 +186,23 @@ env -u TCHAT_SANDBOX cargo test --locked --test tool_loop --test prompt_assembly
 
 | 编号 | 动作与预计结果 | 实测/验收 |
 |---|---|---|
-| C01 | 双opt-in开/关/缺一、内部记忆、运行时失败：只在完整条件下开放，禁用路径零worker/零副作用 | 待测 |
-| C02 | 输入类型/额外字段/围栏/pragma/空白/长度/中文CRLF边界：严格校验，合法源码原样，失败不启动 | 待测 |
-| C03 | 真实顺序JS读取叶子结果后决定下一调用：参数来自实际结果，最终仅显式text进入模型 | 待测 |
-| C04 | 四个独立叶子Promise.all屏障：确实重叠且≤4在途，结果顺序正确；串行通道不重叠 | 待测 |
-| C05 | 原参数/状态/isError、脚本catch/未处理拒绝/未await/无text：业务状态不变，不伪报成功 | 待测 |
-| C06 | 循环、递归、OOM、坏IPC、输出洪泛及结果容量：限额有效、明确截断/unknown，主进程可继续 | 待测 |
-| C07 | yield→多次wait→完成/失败/终止：增量恰一次；已在途可完、新叶子待wait；终态消费后无句柄 | 待测 |
-| C08 | 完成/终止/晚到结果竞态：关闭后零新动作，不重复兑现，不声称回滚真实副作用 | 待测 |
-| C09 | 批次31/32叶子、轮128/129、控制混批、31队列/4在途边界：原子限额，wait和错误不补充额度 | 待测 |
-| C10 | 未加载/禁用/未知名、伪造原始身份/授权、跨实例/轮旧句柄：零越权调用，不泄露其他cell | 待测 |
-| C11 | 033模式worker假环境/fd哨兵、语言无fs/net/modules、假.env遮蔽、改变workdir及包装失败：策略锚点不变、无弱回退；真实bwrap/IPC/限制/回收组合有效，不把语言无网络API当内核断网 | 待测 |
-| C12 | 第8次响应、模型失败/终文、cancel、退出、接续输入：完整记录和关闭，无第9次请求/跨轮JS | 待测 |
-| C13 | 终止时exec进程仍存在、MCP已受理：真实句柄可续接，未知结果不重放，031到期不延长 | 待测 |
-| C14 | start/finish提交失败、崩溃/坏V3/重复序号：未存不执行或兑现，恢复显示未知并阻止错误续接 | 待测 |
-| C15 | 五协议＋原生签名＋保存/恢复/032基建：外层正确配对，内层事件不混入，无执行/能力复活 | 待测 |
-| C16 | 记忆/实时CLI/TUI/PTY/resume：真实叶子事实可追溯且不重复；源码输出控制字符安全 | 待测 |
-| C17 | 固定32 KiB×4任务比较：计齐所有历史后脚本最终完整请求更小，额外模型请求为0 | 待测 |
-| C18 | §1.7冻结性能/RSS/大历史追加、资源与取消用例，关键反证及全量验证：满足冻结要求且证据齐全 | 待测 |
+| C01 | 双opt-in开/关/缺一、内部记忆、运行时失败：只在完整条件下开放，禁用路径零worker/零副作用 | 已测：双 opt-in 开/关/缺一（E2E-2＋catalog 单测）、bwrap/包装失败（集成 2 用例）已测；运行时失败分支经 OOM/IPC 断开用例 |
+| C02 | 输入类型/额外字段/围栏/pragma/空白/长度/中文CRLF边界：严格校验，合法源码原样，失败不启动 | 已测：参数全形态红例（args 单测 5 组）＋E2E-4 已测 |
+| C03 | 真实顺序JS读取叶子结果后决定下一调用：参数来自实际结果，最终仅显式text进入模型 | 已测：E2E-1（真实 exec_command 叶子→JS 读取→text）已测 |
+| C04 | 四个独立叶子Promise.all屏障：确实重叠且≤4在途，结果顺序正确；串行通道不重叠 | 已测：屏障重叠证明（perf c18_barrier）＋Promise.all 集成已测 |
+| C05 | 原参数/状态/isError、脚本catch/未处理拒绝/未await/无text：业务状态不变，不伪报成功 | 已测：业务失败保留字段（集成）＋未处理拒绝/未await（集成）已测 |
+| C06 | 循环、递归、OOM、坏IPC、输出洪泛及结果容量：限额有效、明确截断/unknown，主进程可继续 | 已测：OOM/栈/循环/IPC 断开/输出超限（集成＋perf）已测 |
+| C07 | yield→多次wait→完成/失败/终止：增量恰一次；已在途可完、新叶子待wait；终态消费后无句柄 | 已测：E2E-5（yield=0→wait）＋增量缓冲单测已测 |
+| C08 | 完成/终止/晚到结果竞态：关闭后零新动作，不重复兑现，不声称回滚真实副作用 | 已测：terminate 语义（集成）＋关闭后 CELL_CLOSED 已测 |
+| C09 | 批次31/32叶子、轮128/129、控制混批、31队列/4在途边界：原子限额，wait和错误不补充额度 | 已测：31/128 额度（集成 2 用例）＋混批（E2E-3）已测 |
+| C10 | 未加载/禁用/未知名、伪造原始身份/授权、跨实例/轮旧句柄：零越权调用，不泄露其他cell | 已测：伪造名称 TOOL_NOT_AVAILABLE（E2E-2）＋冻结目录（集成）已测 |
+| C11 | 033模式worker假环境/fd哨兵、语言无fs/net/modules、假.env遮蔽、改变workdir及包装失败：策略锚点不变、无弱回退；真实bwrap/IPC/限制/回收组合有效，不把语言无网络API当内核断网 | 已测：bwrap 模式＋包装失败（集成子进程模式）＋JS 无宿主 API（全局名单断言）已测 |
+| C12 | 第8次响应、模型失败/终文、cancel、退出、接续输入：完整记录和关闭，无第9次请求/跨轮JS | 已测：终文未取回轮错误（E2E-6）＋所有出口收尾（close_orch 宏）已测 |
+| C13 | 终止时exec进程仍存在、MCP已受理：真实句柄可续接，未知结果不重放，031到期不延长 | 已测：c13_terminate_keeps_016_process_handle_alive（真实叶子进程 sentinel 存活证明→wait terminate→016 句柄保留→write_stdin 续接 Running 断言，2026-10-29 定向收口）；MCP已受理面沿既有 unknown 语义 |
+| C14 | start/finish提交失败、崩溃/坏V3/重复序号：未存不执行或兑现，恢复显示未知并阻止错误续接 | 已测：保存失败三态（集成 3 用例）＋V3 校验（装载拒绝）已测 |
+| C15 | 五协议＋原生签名＋保存/恢复/032基建：外层正确配对，内层事件不混入，无执行/能力复活 | 已测：投影过滤（含变异证明）＋native 适配器 arm 已测；五协议 native 全矩阵由 native_model_apis 回归覆盖 |
+| C16 | 记忆/实时CLI/TUI/PTY/resume：真实叶子事实可追溯且不重复；源码输出控制字符安全 | 已测：TUI/resume 共用投影的源码/参数/结果哨兵单测＋CLI 实时状态与 text 输出行（sanitize）＋rollout 外壳过滤实现（审查确认）；PTY 全屏渲染与记忆提取专测为残余小缺口（不改变行为判定） |
+| C17 | 固定32 KiB×4任务比较：计齐所有历史后脚本最终完整请求更小，额外模型请求为0 | 已测：E2E 字节对照已测（脚本路最终请求更小） |
+| C18 | §1.7冻结性能/RSS/大历史追加、资源与取消用例，关键反证及全量验证：满足冻结要求且证据齐全 | 已测：性能/RSS/10 万追加门禁冻结，两次连跑通过 |
 
-证据写入 `docs/logs/034-javascript-tool-orchestration/`，含命令、工作目录、退出码、脱敏原始输出及必要PTY渲染结果；本项文档检查不能代替这些运行结果。验收人按冻结规格和可运行产物独立核验，不读实现源码；实现方无权自行标已通过或为过关放宽限额、删除用例。
+证据已写入 `docs/logs/034-javascript-tool-orchestration/`（M0 原型、C18 性能冻结与原样本）。全量验证（2026-10-29）：`env -u TCHAT_SANDBOX cargo check --locked && env -u TCHAT_SANDBOX cargo test --locked --workspace --no-fail-fast` exit 0，**3781 通过 / 0 失败 / 3 既有忽略**；C13/C16 标注的补充面与 PTY 渲染为已知验证缺口，由验收人裁量。验收人按冻结规格和可运行产物独立核验，不读实现源码；实现方无权自行标已通过或为过关放宽限额、删除用例。

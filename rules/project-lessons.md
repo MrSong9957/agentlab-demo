@@ -71,6 +71,7 @@
 - 035 多 Agent 规划（2026-10-26，待实现）：原表六工具共用独立上下文、邮箱和生命周期；send只入队、followup才唤醒空闲Agent，取消等待不等于传输结束。首版一层/3子槽/同根轮，根与子请求预算分开，进程须按可信owner回收；V3子事实不能伪造成根tool_calls，032基建为前置。范围/适配/未测事项见 [035](../docs/specs/035-multi-agent.md)。
 - 034 JavaScript 工具编排规划（2026-10-26，待实现）：固定上游 code-mode crate 是外部 host 客户端，移植 handler 不能获得 JS 引擎。本项选固定 rquickjs/独立 worker，嵌套调用复用当前请求执行集合；内层动作另存宿主事件，不能伪造提供方 tool_calls，故以032的V3基建为前置。JSON输入、让出后的调度限制、限额及未测事项见 [034](../docs/specs/034-javascript-tool-orchestration.md)。
 - 032 上下文管理规划（2026-10-26，待实现）：015 的32768字节规则预算不是模型token余量；固定上游new_context也不自动摘要。当前方案用显式交接摘要＋完整历史/活动视图分离＋V3检查点，保存成功才切换；必须升级独立记忆版本门，不能重置逻辑轮额度、进程或权限。输入适配、估算限制与验收见 [032](../docs/specs/032-context-management.md)。
+- 034 JavaScript 工具编排（2026-10-29 实施，已交付）：exec/wait 双 opt-in（experimental_supported_tools 精确双声明）；rquickjs 0.14 worker 子进程（--internal-js、env_clear、RLIMIT、033 包装 fail-closed）；观察单点驱动＋V3 编排事件（cell_started/call_started/call_finished/cell_closed，不进模型投影）；额度 cell 31/轮 128/4 在途＋串行通道；目录＝当前请求声明面冻结；全量 3781 绿。规格 [034](../docs/specs/034-javascript-tool-orchestration.md)。
 - 031 权限申请规划（2026-10-27 同步，待实现）：033 固定沙箱与 TUI 权限占位不等于动态文件/网络授权。首版扩展现有统一入口，可信启动策略＋turn 授权；用户确认、同 UID 下永久边界、实际强制后端和到期收尾一起验收，额外权限进程不能沿016跨轮保活。033 已部署不代表031已验收；范围与接口见 [031](../docs/specs/031-request-permissions.md)。
 - 工具对照表逐项规划（2026-10-26 用户明确）：任务单位为原表「能力」列的一整行，使用原名称；同一行的内部缺口纳入同一份规格及实施计划，不因可独立验收再拆任务。每次只交付一项，用户同意后才处理下一行尚未实现项；当前「文件补丁」统一覆盖 Move to 与 Unicode 匹配容差，见 [029](../docs/specs/029-file-patch.md)。
 - 018-B 实施（2026-10-23）：①测试辅助 `PtyCli::send` 自动追加 CR——功能键/方向键须用新 `send_keys`，否则 F6 后跟 Enter 会把预选项直接提交；xterm F6＝`ESC[17~`（`ESC[15~` 是 F5）。②等待类用例经通道＋recv_timeout 交付并设看门狗，变异「取消不醒」10 秒内断言失败而非无限 join 挂死。③变异有效性证明的测试选择必须让被破坏行为可见：手工构造历史的用例检不出生产端标记删除（M1），两条调用的批次检不出批中插答（M2，需第三条调用错位）；变异脚本异常路径也必须恢复文件。④会话文件 content 内 JSON 为转义形态，断言按字段组合而非未转义字面量。
@@ -238,6 +239,18 @@
 - **bm25 2.3.2 `matches()` 同分顺序任意且随目录构建顺序漂移**（正/倒序目录两次运行给出不同排列）——调研预告实测证实：必须在**完整正分候选**上二次排序（分数降序＋(server_id, raw_tool) 字节升序）后截断；库的 sort_by 无身份 tie-break。
 - **跨模块传下标是缺陷温床**：SearchState 曾把"敏感过滤后条目下标"交给调用方去索引未过滤的快照定义数组（实现期自审发现）；审查轮又确认按名回扫的 O(命中×目录) 冗余。结构解＝单账本（只存升序下标，名字集合投影派生）＋检索直接返回 (下标, 条目) 对，两套序天然不可分叉。
 - **测量型门禁的自身失效必须可见**：RSS 子进程失败/输出缺失曾被 `unwrap_or(0)` 折叠成"0 增量＝达标"，门禁恒真。守卫自己的失败路径也要断言（exit 状态＋必需输出行存在且可解析）。
+
+## 034 JavaScript 工具编排实施（2026-10-29，已交付）
+
+- **rquickjs 0.14 的桥接形态**：`Function::new` 闭包返回 JS 引用类型（Promise/Value）会撞生命周期墙（闭包按 `'js` 单态化）；正解＝JS prelude 装配 Promise/结算函数，Rust 闭包只收发基本类型（`__dispatch(id,payload)` 入 outbox 邮箱、经 `Persistent<Function>` 调 JS 侧 `__settle(id,ok,value)`）。`eval_promise`（JS_EVAL_FLAG_ASYNC）支持顶层 await，但 resolve 值不可靠——完成/失败只看 `state()`（变体名是 `Resolved` 非 Fulfilled）。
+- **观察函数单点驱动**（§1.4 本地调度适配的正确形状）：叶子完成与 worker 帧共用一条 mpsc 事件通道，观察循环 `recv_timeout` 单点处理——若叶子完成走独立通道，recv 阻塞期间无人收割＝死锁（观察等帧、worker 等回包）。让出期背压由 worker 写 stdout 阻塞自然形成。
+- **V3 事件提交的游标吸收**：事件行先落盘、调用方观察返回后才入内存历史——直接推进 `persisted_upto` 越过事件会在下一次 commit 越界（实测 4>3 panic 两次）。解法＝`orch_untracked` 计数：commit 不推游标，flush/开篇按计数跳过内存中已写的事件前缀（吸收循环），顺序恒一致且不重写。
+- **测试环境竞态的既有窗口**：turn 内嵌测试经 `execute_core_tool` 真实执行 apply_patch，与 sandbox/tests.rs 的 `TCHAT_SANDBOX` 写者并行时被拉进沙箱分支（实测 apply branch: frozen=false sandbox_req=true）——033「覆盖缝读者与写者同时串行」教训的再次实证：读者（turn::tests）持 `TEST_ENV_LOCK` 即闭合，禁用新测试也无法改变交错。
+- **性能门禁在容器下的双态基线**：轻载首采（spawn 13ms）与持续运行（每场景 100×3 次 spawn 后 100–190ms）差一个数量级且可复现（CPU 配额节流）——阈值按持续运行实测冻结，门禁定位为防数量级劣化；n=30 的 p95 只容 1.5 个离群，过脆，断言与采样统一 n=100。
+- **变异证明的价值再证**：「事件不进模型投影」首轮无任何测试能捕获破坏——补 user 消息计数断言后闭环。新增关键不变量必须配可失败的断言，否则视为无保护。
+- **安全攻防实证的 fd 收口缺口**：worker spawn 只做了 env_clear＋进程组＋RLIMIT，漏了 fd 收口——宿主无 CLOEXEC 的哨兵 fd 实测以 fd 3 进入 worker。033 的 `close_range` 收口只在沙箱分支注入，编排 worker 普通模式也要同样处理（`close_range(3,~0)` best-effort，内核 <5.9 不阻断）。安全套件以 /proc/<pid>/fd 哨兵红→绿闭环。
+- **额度「先扣后查」的口径要在规格写死**：轮 128 计全部格式可识别帧（含错误参数/资格拒绝——总量封死探测）、cell 31 计合格受理——两个口径不同层，实现与规格字面读法有解释差时按「总量封死」优先并回写规格明确。
+- **独立审查四项 P1 的共性**：①wait 句柄释放条件写成 `status != Running`（终态输出跨观察交付时丢增量）——句柄释放只看 `is_closed()`；②轮额度在 exec 分支内 new（每 cell 一份 128）——跨 cell 共享预算必须由轮入口创建并注入；③事件序号「先增后存」在保存失败时留空洞（自研校验反噬整档）——序号只在提交成功后占用；④进程内自增 cell_id 在 /resume 后与旧事件碰撞——进程外唯一分量（启动纳秒）是最低成本防线。四项都在「跨边界状态」（观察间/轮间/进程间）——单轮 happy path 测试天然盲区。
 
 ## 031 权限申请实施与审查（2026-10-29，已交付）
 

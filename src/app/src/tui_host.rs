@@ -659,6 +659,11 @@ impl TuiHost {
             // 032：上下文工具宿主（查询/切换按目录开关；检查点提交经共享保存器
             // 锁的可失败回执——轮线程内与 on_record 顺序加锁，无竞争）。
             let mut checkpoint_sink = TuiCheckpointSink(autosave.clone());
+            let mut orch_sink = TuiOrchestrationSink(autosave.clone());
+            // §1.5：轮 128 叶子额度跨本用户轮全部 cell 共享。
+            let turn_leaf_budget = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(
+                crate::js_orchestration::runtime::TURN_LEAF_QUOTA,
+            ));
             let extras = turn::TurnExtras {
                 // 022：声明与分派共用同一快照（合并轮由 turn 层强制忽略）
                 mcp: mcp_snapshot.as_deref(),
@@ -681,6 +686,17 @@ impl TuiHost {
                     .map(|h| crate::permissions::PermissionExtras {
                         host: h as &mut dyn crate::permissions::PermissionHost,
                     }),
+                // 034：编排宿主（模型目录双 opt-in；V3 事件经共享保存器锁的
+                // 可失败回执——与检查点同锁序，轮线程内顺序访问无竞争）
+                orchestration: if crate::catalog::supports_js_orchestration(&model) {
+                    Some(crate::js_orchestration::runtime::OrchestrationExtras {
+                        sink: &mut orch_sink,
+                        mcp: mcp_snapshot.clone(),
+                        turn_budget: turn_leaf_budget.clone(),
+                    })
+                } else {
+                    None
+                },
             };
             // 审查 #2（§1.7-7）：收尾失败门——拒绝开始新用户轮直到回收成功。
             if let Some(gate) = procs.extra_reap_gate() {
@@ -1009,6 +1025,24 @@ impl crate::context_window::CheckpointHost for TuiCheckpointSink {
     }
 }
 
+/// 034：TUI 编排事件提交宿主（与检查点同锁序的可失败回执）。
+struct TuiOrchestrationSink(std::sync::Arc<std::sync::Mutex<session::Session>>);
+
+impl crate::js_orchestration::runtime::OrchestrationSink for TuiOrchestrationSink {
+    fn commit(
+        &mut self,
+        event: &crate::js_orchestration::runtime::Event<'_>,
+        history: &[HistoryItem],
+    ) -> Result<(), String> {
+        let item = crate::js_orchestration::runtime::event_to_history_item(event);
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .commit_orchestration_event(history, &item)
+            .map(|_| ())
+    }
+}
+
 fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
     use std::collections::HashMap;
     // 018-B 预扫：request_id → 首条有效 answer/closed 事件
@@ -1077,6 +1111,70 @@ fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
                         "—— 上下文检查点（代数 {context_id}）已提交，此前前缀已归档 ——\n交接摘要：{}",
                         crate::display::truncate_chars(summary, 400)
                     ),
+                });
+            }
+            // 034：编排事件按 cell 归组展示——源码、叶子参数与真实结果摘要
+            // （§1.6「按 cell 归组展示源码、叶子参数、真实结果/差异、运行/
+            // 让出/终止/未知状态」）；展示副本经 sanitize（源码/结果不当 ANSI
+            // 执行），长内容截断。
+            HistoryItem::OrchestrationEvent {
+                kind,
+                cell_id,
+                tool_name,
+                arguments,
+                result,
+                close_reason,
+                ..
+            } => {
+                let brief = |text: &str, n: usize| {
+                    crate::display::sanitize_for_terminal(&crate::display::truncate_chars(text, n))
+                };
+                let label = match kind {
+                    crate::prompt::OrchestrationEventKind::CellStarted => {
+                        // exec 实际参数 JSON 内含 code——提取展示（无法解析时整段摘要）。
+                        let code = arguments
+                            .as_deref()
+                            .and_then(|a| serde_json::from_str::<serde_json::Value>(a).ok())
+                            .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string))
+                            .or_else(|| arguments.clone())
+                            .unwrap_or_default();
+                        format!("编排 {cell_id} 开始：{}", brief(&code, 200))
+                    }
+                    crate::prompt::OrchestrationEventKind::CallStarted => {
+                        format!(
+                            "编排 {cell_id} 调用 {}：{}",
+                            tool_name.as_deref().unwrap_or("?"),
+                            brief(arguments.as_deref().unwrap_or(""), 160)
+                        )
+                    }
+                    crate::prompt::OrchestrationEventKind::CallFinished => {
+                        let result_brief = result
+                            .as_ref()
+                            .map(|r| {
+                                let state = r.execution.as_str();
+                                let note = if r.truncated {
+                                    format!("（结果截断，原文 {} 字节，sha256:{}）", r.original_bytes.unwrap_or(0), r.sha256.as_deref().unwrap_or("?"))
+                                } else {
+                                    String::new()
+                                };
+                                format!("{}：{}{note}", state, brief(&r.content, 200))
+                            })
+                            .unwrap_or_else(|| "结果未知（未记录 call_finished）".into());
+                        format!(
+                            "编排 {cell_id} 调用完成 {}：{result_brief}",
+                            tool_name.as_deref().unwrap_or("?")
+                        )
+                    }
+                    crate::prompt::OrchestrationEventKind::CellClosed => {
+                        format!(
+                            "编排 {cell_id} 关闭（{}）",
+                            close_reason.as_deref().unwrap_or("?")
+                        )
+                    }
+                };
+                out.push(HostHistoryItem::Text {
+                    assistant: false,
+                    content: label,
                 });
             }
             HistoryItem::Text(m) => {
@@ -1760,6 +1858,68 @@ mod tests {
     /// 032：恢复历史中的上下文检查点——渲染为已应用边界＋摘要（完整
     /// transcript 含归档前缀，seed 用户输入已作为真实记录展示，不经 seed 重画）。
     #[test]
+    /// 034 C16：编排事件投影行携带源码、叶子参数与真实结果摘要（哨兵区分
+    /// 应显示内容；运行中/关闭状态行如实呈现）。
+    #[test]
+    fn project_history_items_renders_orchestration_group() {
+        use crate::prompt::{OrchestrationEventKind, OrchestrationEventResult};
+        let event = |kind, seq, tool, args, result| HistoryItem::OrchestrationEvent {
+            kind,
+            cell_id: "cell-abc-1".into(),
+            exec_call_id: "c1".into(),
+            seq,
+            leaf_id: Some(seq),
+            tool_name: tool,
+            arguments: args,
+            result,
+            close_reason: None,
+        };
+        let history = vec![
+            event(
+                OrchestrationEventKind::CellStarted,
+                1,
+                None,
+                Some(r#"{"code":"const MARK_SOURCE=1; text(1)"}"#.into()),
+                None,
+            ),
+            event(
+                OrchestrationEventKind::CallStarted,
+                2,
+                Some("exec_command".into()),
+                Some(r#"{"cmd":"echo MARK_ARGS"}"#.into()),
+                None,
+            ),
+            event(
+                OrchestrationEventKind::CallFinished,
+                3,
+                Some("exec_command".into()),
+                None,
+                Some(OrchestrationEventResult {
+                    content: r#"{"output":"MARK_RESULT"}"#.into(),
+                    original_bytes: None,
+                    sha256: None,
+                    truncated: false,
+                    display: None,
+                    execution: "completed".into(),
+                }),
+            ),
+            event(OrchestrationEventKind::CellClosed, 4, None, None, None),
+        ];
+        let items = project_history_items(&history);
+        let text: Vec<String> = items
+            .into_iter()
+            .filter_map(|i| match i {
+                HostHistoryItem::Text { content, .. } => Some(content),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text.len(), 4, "四事件各一行：{text:?}");
+        assert!(text[0].contains("MARK_SOURCE"), "{}", text[0]);
+        assert!(text[1].contains("MARK_ARGS"), "{}", text[1]);
+        assert!(text[2].contains("MARK_RESULT") && text[2].contains("completed"), "{}", text[2]);
+        assert!(text[3].contains("cell-abc-1 关闭"), "{}", text[3]);
+    }
+
     fn project_history_items_renders_checkpoint_boundary() {
         use tchat_tui::chat_driver::HostHistoryItem as H;
         let history = vec![

@@ -30,7 +30,7 @@
 | 工具搜索与按需加载 | `tool_search` | [030 规格](../specs/030-tool-search.md) 已实现（2026-10-29，待验收）：本地 BM25 搜索（bm25 2.3.2，冻结词法/排序夹具）、动态 MCP 工具按需声明＋请求级执行集合门、五协议普通函数适配；容量边界 2048 项/10 MiB/1 MiB/128 声明；关闭模式逐字节兼容。证据见 [030 日志目录](../logs/030-tool-search/)。固定上游机制见本文末尾 |
 | 权限申请 | `request_permissions` | 已建立 [031 规格与实施计划](../specs/031-request-permissions.md)（待实现，待用户审阅）：扩展 033 统一沙箱入口，补齐受限读/网络/系统调用策略、可信基线/上限、专用确认、本轮授权与到期收尾；同 UID 下的永久拒绝及别名边界须先验证，当前尚无实际权限申请入口 |
 | 上下文管理 | `get_context_remaining`、`new_context` | [032 规格](../specs/032-context-management.md) 已实现（2026-10-28，待验收）：离线预算估算/未知、显式交接摘要、批末活动视图切换、V3 完整历史检查点与提交回执；不重置逻辑轮/环境；五协议计量与发送共用纯定型（出站字节不变） |
-| JavaScript 工具编排 | `exec`、`wait` | 已建立 [034 规格与实施计划](../specs/034-javascript-tool-orchestration.md)（待实现，待用户审阅）：本地 QuickJS 子进程、五协议普通函数适配、受限工具代理、增量 wait 与 V3 调用证据；032 会话基建为实施前置，当前尚未实施 |
+| JavaScript 工具编排 | `exec`、`wait` | 已建立 [034 规格与实施计划](../specs/034-javascript-tool-orchestration.md)（待实现，待用户审阅）：本地 QuickJS 子进程、五协议普通函数适配、受限工具代理、增量 wait 与 V3 调用证据；032 会话基建为实施前置，当前尚未实施 | 2026-10-29：已实现（034，待验收）
 | 多 Agent | `spawn_agent`、`send_message`、`followup_task`、`wait_agent`、`interrupt_agent`、`list_agents` | 已建立 [035 规格与实施计划](../specs/035-multi-agent.md)（待实现，待用户审阅）：六工具统一覆盖一层子会话、本地3子并发、消息/续派/等待、中断收尾、额度及 V3 来源记录；032 会话基建为实施前置，当前尚未实施 |
 
 Codex 还包含 `clock.curr_time`、`clock.sleep`、`wait_for_environment`、`list_available_plugins_to_install`、`request_plugin_install` 等条件启用的工具。旧版多 Agent 接口另有 `send_input / resume_agent / close_agent`，属于版本差异，不需要同时照搬。[多 Agent 定义](https://github.com/openai/codex/blob/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4/codex-rs/core/src/tools/handlers/multi_agents_spec.rs)
