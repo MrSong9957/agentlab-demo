@@ -86,6 +86,7 @@ fn run_turn_with(
             send_message: false,
             steer: None, context: None,
             permissions: None,
+            orchestration: None,
         },
     );
     TurnRun {
@@ -255,6 +256,7 @@ fn a07_memory_merge_turn_never_declares_or_executes_mcp() {
             send_message: true,
             steer: None, context: None,
             permissions: None,
+            orchestration: None,
         },
     );
     assert!(reply.is_ok());
@@ -603,6 +605,7 @@ fn a17_mcp_call_coexists_with_user_input_in_batch() {
             send_message: false,
             steer: None, context: None,
             permissions: None,
+            orchestration: None,
         },
     );
     assert!(reply.is_ok());
@@ -777,6 +780,7 @@ fn a17_mcp_with_view_image_batch_pairs_then_image_projection() {
             send_message: false,
             steer: Some(&mut channel), context: None,
             permissions: None,
+            orchestration: None,
         },
     );
     assert!(reply.is_ok(), "{reply:?}");
@@ -881,6 +885,7 @@ fn run_turn_ex(
             steer: None,
             context: None,
             permissions: None,
+            orchestration: None,
         },
     );
     TurnRun { reply, history, bodies, events }

@@ -66,6 +66,11 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("--internal-view-image") {
         std::process::exit(terminal_chat::view_image::run_internal_view_image());
     }
+    // 034：JS 编排 worker 入口（仅经宿主 spawn 的本二进制调用；先于 dotenv/
+    // 模型目录/记忆初始化分流——worker 不读任何环境变量，§1.6）
+    if std::env::args().nth(1).as_deref() == Some("--internal-js") {
+        std::process::exit(terminal_chat::js_orchestration::worker::run_internal_js());
+    }
     // .env 是环境变量的可选来源：启动时载入，已存在的变量不覆盖
     catalog::load_dotenv_from(std::path::Path::new(".env"));
     // 031：可信策略装配（§1.2：CLI/TUI 分流前统一加载并冻结；两宿主取得同
@@ -864,8 +869,51 @@ fn cmd_chat(
                                     say(&terminal_chat::plan::cli_failure_line(&err));
                                 }
                             }
+                            // 034：编排 cell 生命周期状态行（cell 句柄与输出增量
+                            // 数；终态字段由结果 JSON 本身承载）
+                            if name == terminal_chat::js_orchestration::EXEC_TOOL_NAME
+                                || name == terminal_chat::js_orchestration::WAIT_TOOL_NAME
+                            {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&result) {
+                                    let cell = v["cell_id"].as_str().unwrap_or("?");
+                                    let outputs = v["output"].as_array().map(|a| a.len()).unwrap_or(0);
+                                    match v["status"].as_str() {
+                                        Some("running") => say(&format!(
+                                            "[工具] 编排 cell {cell} 仍在运行（本次新增输出 {outputs} 条，用 wait 取回）"
+                                        )),
+                                        Some("completed") => say(&format!(
+                                            "[工具] 编排 cell {cell} 已完成（本次交付输出 {outputs} 条）"
+                                        )),
+                                        Some("terminated") => say(&format!(
+                                            "[工具] 编排 cell {cell} 已终止并回收"
+                                        )),
+                                        Some("failed") => {
+                                            if let Some(err) = v["error"].as_object() {
+                                                say(&format!(
+                                                    "[工具] 编排失败（{}）：{}",
+                                                    err.get("code").and_then(|c| c.as_str()).unwrap_or("?"),
+                                                    err.get("message").and_then(|m| m.as_str()).unwrap_or("?")
+                                                ));
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                    // text() 输出即时呈现（展示副本经 say 终端过滤）
+                                    if let Some(list) = v["output"].as_array() {
+                                        for item in list {
+                                            if let Some(text) = item.as_str() {
+                                                say(&format!("    {text}"));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             // 016：运行中/终止/超时三类宿主侧生命周期状态明确展示
-                            //（自然完成含非零退出仍由模型回复承载——006 行式纪律）
+                            //（自然完成含非零退出仍由模型回复承载——006 行式纪律；
+                            // 034 编排结果无 session_id，不走进程会话展示）
+                            if name != terminal_chat::js_orchestration::EXEC_TOOL_NAME
+                                && name != terminal_chat::js_orchestration::WAIT_TOOL_NAME
+                            {
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&result) {
                                 match v["status"].as_str() {
                                     Some("running") => {
@@ -880,6 +928,7 @@ fn cmd_chat(
                                     }
                                     _ => {}
                                 }
+                            }
                             }
                         }
                     };
@@ -916,6 +965,33 @@ fn cmd_chat(
                     // 候选不进内存历史（不复活）。
                     let autosave_cell = std::cell::RefCell::new(autosave);
                     let mut checkpoint_sink = session::SessionCellSink(&autosave_cell);
+                    // 034：编排宿主（V3 事件经共享保存器的可失败回执；双 opt-in
+                    // 核对在 extras 装配处）。部分配置（只配一个）给一次提示。
+                    let mut orch_sink = session::SessionOrchestrationSink(&autosave_cell);
+                    // §1.5：轮 128 叶子额度跨本用户轮全部 cell 共享。
+                    let turn_leaf_budget = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(
+                        terminal_chat::js_orchestration::runtime::TURN_LEAF_QUOTA,
+                    ));
+                    let orch_ready = terminal_chat::catalog::supports_js_orchestration(&model);
+                    let mut orch_extras: Option<
+                        (
+                            &mut dyn terminal_chat::js_orchestration::runtime::OrchestrationSink,
+                            Option<std::sync::Arc<terminal_chat::mcp::manager::McpSnapshot>>,
+                        ),
+                    > = if orch_ready {
+                        Some((&mut orch_sink, mcp_snapshot.clone()))
+                    } else {
+                        None
+                    };
+                    if let Some(missing) = terminal_chat::catalog::js_orchestration_missing(&model) {
+                        static ORCH_PARTIAL_NOTICED: std::sync::OnceLock<()> =
+                            std::sync::OnceLock::new();
+                        if ORCH_PARTIAL_NOTICED.set(()).is_ok() {
+                            say(&format!(
+                                "提示：experimental_supported_tools 只配置了 exec/wait 之一（缺 {missing}），编排工具对整体关闭；两者都配置后才开放"
+                            ));
+                        }
+                    }
                     // 015：用户轮上下文来源（每轮解析：全局规则目录、cwd、SHELL、时钟）
                     let context_sources = terminal_chat::context::ContextSources::from_env();
                     // 轮内行编辑器共享单元：问询宿主与 031 权限宿主都读终端，
@@ -1005,6 +1081,15 @@ fn cmd_chat(
                                 .as_mut()
                                 .map(|h| terminal_chat::permissions::PermissionExtras {
                                     host: h as &mut dyn terminal_chat::permissions::PermissionHost,
+                                }),
+                            // 034：编排宿主（模型目录双 opt-in＋V3 提交宿主齐备才装配；
+                            // 行式 CLI 与 TUI 共用同一装配面，M5 接入展示）
+                            orchestration: orch_extras
+                                .as_mut()
+                                .map(|(sink, mcp)| terminal_chat::js_orchestration::runtime::OrchestrationExtras {
+                                    sink: *sink,
+                                    mcp: mcp.clone(),
+                                    turn_budget: turn_leaf_budget.clone(),
                                 }),
                         },
                     );

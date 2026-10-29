@@ -895,6 +895,29 @@ pub fn supports_tool_search(model: &ModelInfo) -> bool {
         })
 }
 
+/// 034：exec/wait 双 opt-in——`experimental_supported_tools` 必须同时显式含
+/// 精确名称 `exec` 与 `wait` 才开放这一对工具；缺省、空数组、只含其一或
+/// 只含其他名称均关闭。
+pub fn supports_js_orchestration(model: &ModelInfo) -> bool {
+    let list = model.experimental_supported_tools.as_deref().unwrap_or(&[]);
+    let has_exec = list.iter().any(|t| t == crate::js_orchestration::EXEC_TOOL_NAME);
+    let has_wait = list.iter().any(|t| t == crate::js_orchestration::WAIT_TOOL_NAME);
+    has_exec && has_wait
+}
+
+/// 034：只配了一个时返回缺失的精确名（宿主给一次配置提示用；两者都缺或
+/// 都在时返回 None）。
+pub fn js_orchestration_missing(model: &ModelInfo) -> Option<&'static str> {
+    let list = model.experimental_supported_tools.as_deref().unwrap_or(&[]);
+    let has_exec = list.iter().any(|t| t == crate::js_orchestration::EXEC_TOOL_NAME);
+    let has_wait = list.iter().any(|t| t == crate::js_orchestration::WAIT_TOOL_NAME);
+    match (has_exec, has_wait) {
+        (true, true) | (false, false) => None,
+        (true, false) => Some(crate::js_orchestration::WAIT_TOOL_NAME),
+        (false, true) => Some(crate::js_orchestration::EXEC_TOOL_NAME),
+    }
+}
+
 /// 031：experimental_supported_tools 精确匹配声明 request_permissions（§1.2-4
 /// 的模型能力半边；实际声明还要求 031 冻结策略与专用交互宿主——见 turn 装配）。
 pub fn supports_request_permissions(model: &ModelInfo) -> bool {
@@ -921,6 +944,28 @@ mod ts30_switch_tests {
     }
 
     /// 030：tool_search 开关——精确名匹配；缺省/空数组/其他名/近似名均关闭。
+    #[test]
+    fn supports_js_orchestration_dual_opt_in() {
+        let model_with = |list: Option<Vec<&str>>| ModelInfo {
+            id: "m".into(),
+            experimental_supported_tools: list.map(|l| l.into_iter().map(String::from).collect()),
+            ..Default::default()
+        };
+        // 双 opt-in 才开放；缺省/空/只含其一/只含其他均关闭
+        assert!(supports_js_orchestration(&model_with(Some(vec!["exec", "wait"]))));
+        assert!(supports_js_orchestration(&model_with(Some(vec!["wait", "exec", "other"]))));
+        assert!(!supports_js_orchestration(&model_with(None)));
+        assert!(!supports_js_orchestration(&model_with(Some(vec![]))));
+        assert!(!supports_js_orchestration(&model_with(Some(vec!["exec"]))));
+        assert!(!supports_js_orchestration(&model_with(Some(vec!["wait"]))));
+        assert!(!supports_js_orchestration(&model_with(Some(vec!["exec_command", "wait"]))));
+        // 部分配置提示：只配一个时返回缺失名
+        assert_eq!(js_orchestration_missing(&model_with(Some(vec!["exec"]))), Some("wait"));
+        assert_eq!(js_orchestration_missing(&model_with(Some(vec!["wait"]))), Some("exec"));
+        assert_eq!(js_orchestration_missing(&model_with(Some(vec!["exec", "wait"]))), None);
+        assert_eq!(js_orchestration_missing(&model_with(None)), None);
+    }
+
     #[test]
     fn supports_tool_search_exact_name_only() {
         assert!(supports_tool_search(&model_with(Some(vec!["tool_search"]))));

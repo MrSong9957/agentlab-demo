@@ -30,11 +30,16 @@ fn needs_v2(history: &[HistoryItem]) -> bool {
 
 /// 032：含上下文检查点的快照必须写 V3（§1.6——旧程序对 V3 明确拒绝，
 /// 不能把检查点塞进会被忽略的旧格式后声称恢复等价）。
+/// 034：编排事件同样只在 V3（旧程序拒绝；仅支持 032 而不认识编排事件的
+/// V3 程序也必须禁止错误续接——装载校验见 validate_orchestration_chain）。
 fn needs_v3(history: &[HistoryItem]) -> bool {
     needs_v2(history)
-        || history
-            .iter()
-            .any(|item| matches!(item, HistoryItem::ContextCheckpoint { .. }))
+        || history.iter().any(|item| {
+            matches!(
+                item,
+                HistoryItem::ContextCheckpoint { .. } | HistoryItem::OrchestrationEvent { .. }
+            )
+        })
 }
 
 fn meta_line(version: u64) -> &'static str {
@@ -265,6 +270,124 @@ fn batch_line_ok(item: &HistoryItem, seen: &mut HashSet<String>) -> bool {
     true
 }
 
+
+/// 034：编排事件链语义校验（V3 装载时整文件执行；§1.6「严格校验事件次序/
+/// 关联/容量」）：
+/// - cell 内 seq 自 1 连续递增；首个事件必为 cell_started；cell_closed 至多
+///   一次且为该 cell 最后一个事件；
+/// - call_started 必须先于同 leaf_id 的 call_finished；call_finished 必有
+///   前置 call_started；孤儿 call_started（无 call_finished，链尾或 cell_closed
+///   截断）合法——恢复显示结果未知，不自动重发；
+/// - 同 cell 的 exec_call_id 恒一致；call 事件必带 leaf_id 与 tool_name；
+/// - 容量：arguments ≤512 KiB；result 片段 ≤64 KiB＋超限必带原始字节数与
+///   SHA-256 且 truncated=true。
+pub(crate) fn validate_orchestration_chain(history: &[HistoryItem]) -> Result<(), String> {
+    use crate::prompt::OrchestrationEventKind as K;
+    #[derive(Default)]
+    struct CellState {
+        exec_call_id: Option<String>,
+        next_seq: u64,
+        closed: bool,
+        started_leaves: std::collections::HashSet<u64>,
+        finished_leaves: std::collections::HashSet<u64>,
+    }
+    let mut cells: std::collections::HashMap<String, CellState> = Default::default();
+    for item in history {
+        let HistoryItem::OrchestrationEvent {
+            kind,
+            cell_id,
+            exec_call_id,
+            seq,
+            leaf_id,
+            tool_name,
+            arguments,
+            result,
+            ..
+        } = item
+        else {
+            continue;
+        };
+        let state = cells.entry(cell_id.clone()).or_default();
+        if state.closed {
+            return Err(format!("cell {cell_id} 在 cell_closed 之后仍有事件"));
+        }
+        if *seq != state.next_seq + 1 {
+            return Err(format!(
+                "cell {cell_id} 事件序号不连续（期望 {}，实为 {seq}）",
+                state.next_seq + 1
+            ));
+        }
+        state.next_seq = *seq;
+        let first = state.exec_call_id.is_none();
+        if first {
+            if !matches!(kind, K::CellStarted) {
+                return Err(format!("cell {cell_id} 首个事件不是 cell_started"));
+            }
+            state.exec_call_id = Some(exec_call_id.clone());
+        } else if state.exec_call_id.as_deref() != Some(exec_call_id.as_str()) {
+            return Err(format!("cell {cell_id} 的 exec_call_id 中途变化"));
+        }
+        match kind {
+            K::CellStarted => {
+                if !first {
+                    return Err(format!("cell {cell_id} 重复 cell_started"));
+                }
+                if arguments.as_deref().map(str::len).unwrap_or(0) > 512 * 1024 {
+                    return Err(format!("cell {cell_id} 的 cell_started 参数超过 512 KiB"));
+                }
+            }
+            K::CallStarted => {
+                let Some(leaf) = leaf_id else {
+                    return Err(format!("cell {cell_id} 的 call_started 缺少 leaf_id"));
+                };
+                if tool_name.as_deref().unwrap_or("").is_empty() {
+                    return Err(format!("cell {cell_id} 的 call_started 缺少工具名"));
+                }
+                if !state.started_leaves.insert(*leaf) {
+                    return Err(format!("cell {cell_id} 叶子 {leaf} 重复 call_started"));
+                }
+                if arguments.as_deref().map(str::len).unwrap_or(0) > 64 * 1024 {
+                    return Err(format!("cell {cell_id} 叶子 {leaf} 参数超过 64 KiB"));
+                }
+            }
+            K::CallFinished => {
+                let Some(leaf) = leaf_id else {
+                    return Err(format!("cell {cell_id} 的 call_finished 缺少 leaf_id"));
+                };
+                if !state.started_leaves.contains(leaf) {
+                    return Err(format!(
+                        "cell {cell_id} 叶子 {leaf} 的 call_finished 没有前置 call_started"
+                    ));
+                }
+                if !state.finished_leaves.insert(*leaf) {
+                    return Err(format!("cell {cell_id} 叶子 {leaf} 重复 call_finished"));
+                }
+                if let Some(result) = result {
+                    if result.content.len() > 64 * 1024 && !result.truncated {
+                        return Err(format!(
+                            "cell {cell_id} 叶子 {leaf} 结果超过 64 KiB 但未标记 truncated"
+                        ));
+                    }
+                    if result.truncated
+                        && (result.original_bytes.is_none() || result.sha256.is_none())
+                    {
+                        return Err(format!(
+                            "cell {cell_id} 叶子 {leaf} 截断结果缺少原始字节数或 SHA-256"
+                        ));
+                    }
+                    if result.execution.is_empty() {
+                        return Err(format!("cell {cell_id} 叶子 {leaf} 结果缺少执行状态"));
+                    }
+                }
+            }
+            K::CellClosed => {
+                state.closed = true;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 从任意读取器装载（流式单遍：逐行读→解析→入临时 Vec）。
 /// 坏 meta 或未知 v 是唯一整文件拒绝情形；行损坏跳过＋计数＋行号；
 /// 配对修复只合成/丢弃记录文本，绝不重放工具（§3 加载规则 1–5）。
@@ -327,6 +450,16 @@ pub fn load_from_reader<R: Read>(reader: R) -> Result<Loaded, String> {
         if version == 1 && parsed.as_ref().is_some_and(|item| matches!(item, HistoryItem::NativeAssistant { .. })) {
             return Err("V1 会话含原生状态，拒绝按旧格式装载".into());
         }
+        // 034：编排事件只可能在 V3——V1/V2 携带事件＝外来自称事实，拒绝装载。
+        if version != 3
+            && parsed
+                .as_ref()
+                .is_some_and(|item| matches!(item, HistoryItem::OrchestrationEvent { .. }))
+        {
+            return Err(format!(
+                "V{version} 会话含编排事件，拒绝按旧格式装载（事件仅存在于 V3）"
+            ));
+        }
         // 019 §5.1：图片载荷校验——只接受有界且有效的本地图片 data URL；
         // 远程 URL、非法 base64、错误 MIME、错误 detail 或超限额按坏行处理
         //（配对修复补未知结果；不为校验加载原路径或访问网络）。
@@ -347,6 +480,18 @@ pub fn load_from_reader<R: Read>(reader: R) -> Result<Loaded, String> {
                 {
                     return Err(format!(
                         "V3 会话第 {line_no} 行为损坏的上下文检查点，整文件拒绝（防止用错误视图续接）"
+                    ));
+                }
+                // 034：损坏的编排事件行同样整文件拒绝——按坏行跳过会把「已
+                // 发生的调用」悄悄变成「未知是否发生」，破坏恢复事实边界（C14）。
+                if version == 3
+                    && unparseable
+                    && line_buf
+                        .windows(b"orchestration_e".len())
+                        .any(|w| w == b"orchestration_e")
+                {
+                    return Err(format!(
+                        "V3 会话第 {line_no} 行为损坏的编排事件，整文件拒绝（防止恢复出错误的执行事实）"
                     ));
                 }
                 entries.push(Entry::Bad);
@@ -371,6 +516,9 @@ pub fn load_from_reader<R: Read>(reader: R) -> Result<Loaded, String> {
     if version == 3 {
         crate::context_window::validate_checkpoint_chain(&history).map_err(|e| {
             format!("V3 会话检查点语义校验失败，整文件拒绝（{e}）")
+        })?;
+        validate_orchestration_chain(&history).map_err(|e| {
+            format!("V3 会话编排事件语义校验失败，整文件拒绝（{e}）")
         })?;
     }
     if version == 2 && skipped > 0 {
@@ -431,6 +579,12 @@ fn repair_pairs(entries: Vec<Entry>) -> (usize, Vec<HistoryItem>) {
             // 可展示恢复事实，但不得悄悄丢标记并用错误视图续接）。
             Entry::Item(item @ HistoryItem::ContextCheckpoint { .. }) => {
                 finalize_open_batch(&mut out, &mut open, &mut repairs);
+                out.push(item);
+            }
+            // 034：编排事件透传（不闭合开放批——cell_started/call_finished 出
+            // 现在 exec 调用与其结果之间；事件不是提供方 tool_calls/
+            // tool_results，配对修复不把它们当作结果消费，§1.6）。
+            Entry::Item(item @ HistoryItem::OrchestrationEvent { .. }) => {
                 out.push(item);
             }
             Entry::Item(item @ HistoryItem::NativeAssistant { .. }) => {
@@ -711,6 +865,11 @@ pub struct Session {
     durable_len: u64,
     /// 写失败提示只打一次（同一失败串流），补写成功后复位。
     error_reported: bool,
+    /// 034：已写盘但游标尚未吸收的编排事件行数（事件行经
+    /// commit_orchestration_event 先落盘、调用方观察返回后才推入内存——
+    /// flush/开篇写入时按此计数跳过内存中已写过的事件前缀，保证不重复写、
+    /// 顺序恒一致）。
+    orch_untracked: usize,
 }
 
 impl Session {
@@ -723,6 +882,7 @@ impl Session {
             persisted_upto: 0,
             durable_len: 0,
             error_reported: false,
+            orch_untracked: 0,
         }
     }
 
@@ -854,6 +1014,81 @@ impl Session {
         }
     }
 
+    /// 034：提交一条编排事件——专用可失败回执路径（与检查点同模式：保存
+    /// 成功才算发生，cell_started 未保存不创建、call_started 未保存零执行、
+    /// call_finished 未保存不兑现，§1.6）。滞留待写段随事件行按序写入；失败
+    /// 截回 durable_len 并返回原因。调用方随后把同一记录推入内存历史（on_record
+    /// 无新增待写）。行超限：提交前拒绝，不动追加状态。
+    pub fn commit_orchestration_event(
+        &mut self,
+        history: &[HistoryItem],
+        event: &HistoryItem,
+    ) -> Result<usize, String> {
+        let line = record_line(event);
+        if line_over_limit(&line) {
+            return Err(format!(
+                "{}，已拒绝提交编排事件",
+                line_limit_error("编排事件序列化后")
+            ));
+        }
+        if matches!(self.state, State::Disabled) {
+            return Err("自动保存已停用，无法提交编排事件".into());
+        }
+        for item in &history[self.persisted_upto..] {
+            if line_over_limit(&record_line(item)) {
+                return Err(format!(
+                    "{}，滞留记录无法随编排事件提交",
+                    line_limit_error("待写段记录")
+                ));
+            }
+        }
+        if self.version != 3 {
+            let (path, file, bytes) = self.create_v3_target_with_tail(history, &[line.as_str()])?;
+            self.version = 3;
+            self.state = State::Writing { _path: path, file };
+            self.durable_len = bytes;
+            // 迁移开篇已写完整 transcript＋事件行；游标停在普通记录末，
+            // 事件行由 untracked 吸收（内存 push 后 flush 跳过）。
+            self.persisted_upto = history.len();
+            self.orch_untracked += 1;
+            self.error_reported = false;
+            return Ok(self.persisted_upto);
+        }
+        let State::Writing { file, .. } = &mut self.state else {
+            return Err("自动保存目标不可用，无法提交编排事件".into());
+        };
+        let outcome = (|| -> Result<(), std::io::Error> {
+            for item in &history[self.persisted_upto..] {
+                let line = record_line(item);
+                file.write_all(line.as_bytes())?;
+                self.durable_len += line.len() as u64;
+                self.persisted_upto += 1;
+            }
+            file.write_all(line.as_bytes())?;
+            self.durable_len += line.len() as u64;
+            self.orch_untracked += 1; // 游标不越过事件行（flush 吸收）
+            Ok(())
+        })();
+        match outcome {
+            Ok(()) => {
+                self.error_reported = false;
+                Ok(self.persisted_upto)
+            }
+            Err(e) => {
+                let msg = format!("编排事件提交写入失败（{e}）：未提交");
+                match file.set_len(self.durable_len) {
+                    Ok(()) => Err(msg),
+                    Err(te) => {
+                        self.state = State::Disabled;
+                        Err(format!(
+                            "{msg}；截回失败（{te}），自动保存已停用，文件尾部半行将由下次装载按坏行跳过"
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
     /// 退出排空：同一补写逻辑执行一次；成功静默，失败返回明确错误——
     /// 排空是最后机会，不受"追加期打印一次"纪律影响。未产生新记录即退出时
     /// 不创建文件（恢复后直接退出亦然）。
@@ -908,6 +1143,7 @@ impl Session {
             self.persisted_upto = 0;
             self.durable_len = 0;
             self.error_reported = false;
+            self.orch_untracked = 0;
             return Ok(ResumeInfo { loaded, degraded: false });
         }
         // 同名恢复（2026-10-10 第四批整改）：当前写者持锁同一文件时，复用已持锁
@@ -947,6 +1183,7 @@ impl Session {
             self.native_seen = loaded.history.len();
             self.durable_len = durable_len;
             self.error_reported = false;
+            self.orch_untracked = 0;
             return Ok(ResumeInfo { loaded, degraded: false });
         }
         // auto 续写：打开（读写＋追加）→立即取锁→同一 fd 持锁装载与尾置（坑012）
@@ -980,6 +1217,7 @@ impl Session {
                 self.native_seen = loaded.history.len();
                 self.durable_len = durable_len;
                 self.error_reported = false;
+                self.orch_untracked = 0;
                 self.state = State::Writing { _path: path, file };
                 Ok(ResumeInfo { loaded, degraded: false })
             }
@@ -1011,6 +1249,8 @@ impl Session {
                 self.state = State::Writing { _path: path, file };
                 self.durable_len = bytes;
                 self.persisted_upto = history.len();
+                // 开篇已含全部内存记录（含已提交事件）——计数清零。
+                self.orch_untracked = 0;
                 None
             }
             Err(msg) => {
@@ -1105,6 +1345,16 @@ impl Session {
         history: &[HistoryItem],
         cp_line: &str,
     ) -> Result<(PathBuf, File, u64), String> {
+        self.create_v3_target_with_tail(history, &[cp_line])
+    }
+
+    /// 032 迁移原语（034 起检查点与编排事件共用）：新 V3 目标＝meta v3＋完整
+    /// transcript 开篇＋尾行（提交中的记录行）；全部成功才替换 self。
+    fn create_v3_target_with_tail(
+        &self,
+        history: &[HistoryItem],
+        tail_lines: &[&str],
+    ) -> Result<(PathBuf, File, u64), String> {
         catalog::ensure_private_dir(&self.dir)
             .map_err(|e| format!("自动会话目录初始化失败：{e}"))?;
         let base = auto_file_name();
@@ -1165,9 +1415,11 @@ impl Session {
                         .map_err(|e| format!("自动会话写入失败：{e}"))?;
                     bytes += line.len() as u64;
                 }
-                file.write_all(cp_line.as_bytes())
-                    .map_err(|e| format!("自动会话写入失败：{e}"))?;
-                bytes += cp_line.len() as u64;
+                for tail in tail_lines {
+                    file.write_all(tail.as_bytes())
+                        .map_err(|e| format!("自动会话写入失败：{e}"))?;
+                    bytes += tail.len() as u64;
+                }
                 Ok(())
             })();
             match outcome {
@@ -1193,6 +1445,17 @@ impl Session {
         }
         if !matches!(self.state, State::Writing { .. }) {
             return None; // 停用后仅内存，不重复报错
+        }
+        // 034：吸收已写盘的编排事件行（内存前缀中的事件已落盘，跳过不重写）。
+        while self.orch_untracked > 0
+            && self.persisted_upto < history.len()
+            && matches!(
+                history[self.persisted_upto],
+                HistoryItem::OrchestrationEvent { .. }
+            )
+        {
+            self.persisted_upto += 1;
+            self.orch_untracked -= 1;
         }
         let step = loop {
             if self.persisted_upto >= history.len() {
@@ -1281,6 +1544,7 @@ mod tests {
             persisted_upto: 1,
             durable_len: 64,
             error_reported: false,
+            orch_untracked: 0,
         };
         let history = vec![
             text_user("已提交一"),
@@ -1349,6 +1613,7 @@ mod tests {
             persisted_upto: 2,
             durable_len: 1234,
             error_reported: false,
+            orch_untracked: 0,
         };
         let mut history = vec![
             text_user("已提交一"),
@@ -1405,5 +1670,26 @@ impl crate::context_window::CheckpointHost for SessionCellSink<'_, '_> {
         checkpoint: &HistoryItem,
     ) -> Result<usize, String> {
         self.0.borrow_mut().commit_checkpoint(history, checkpoint)
+    }
+}
+
+/// 034：编排事件提交宿主——经 RefCell 与 on_record 顺序共享同一会话保存器
+///（观察在 turn 线程内单线程调用）。落盘回执可失败；内存入史由 turn 侧在
+/// 观察返回后统一执行（Session 以 untracked 计数吸收已写盘的事件行）。
+pub struct SessionOrchestrationSink<'c, 'a>(pub &'c std::cell::RefCell<&'a mut Session>);
+
+impl crate::js_orchestration::runtime::OrchestrationSink
+    for SessionOrchestrationSink<'_, '_>
+{
+    fn commit(
+        &mut self,
+        event: &crate::js_orchestration::runtime::Event<'_>,
+        history: &[HistoryItem],
+    ) -> Result<(), String> {
+        let item = crate::js_orchestration::runtime::event_to_history_item(event);
+        let mut session = self.0.borrow_mut();
+        session
+            .commit_orchestration_event(history, &item)
+            .map(|_| ())
     }
 }

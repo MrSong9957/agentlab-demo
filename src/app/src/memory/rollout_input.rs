@@ -151,11 +151,37 @@ fn process_line(line: &[u8], items: &mut Vec<HistoryItem>, remaining: &mut usize
 /// 在序列化侧过滤（已计入预算）——本地会话结构性不含注入块（§2.2-7），该
 /// 差异当前影响为零，登记备查。
 /// 032：上下文管理控制工具名（其调用/结果不作为用户/工具经历）。
+/// 034：exec/wait 编排外壳同列——脚本源码不当成已执行的工具；真实叶子
+/// 事实改由编排事件（call_started/call_finished）合成提取（§1.6）。
 fn is_context_control_tool(name: &str) -> bool {
     matches!(
         name,
-        crate::context_window::QUERY_TOOL_NAME | crate::context_window::SWITCH_TOOL_NAME
+        crate::context_window::QUERY_TOOL_NAME
+            | crate::context_window::SWITCH_TOOL_NAME
+            | crate::js_orchestration::EXEC_TOOL_NAME
+            | crate::js_orchestration::WAIT_TOOL_NAME
     )
+}
+
+/// 034：同一 (cell, leaf) 的 call_started 参数（合成叶子事实行用）。
+fn call_arguments_of(
+    items: &[HistoryItem],
+    cell_id: &str,
+    leaf: u64,
+) -> Option<String> {
+    items.iter().find_map(|item| {
+        let HistoryItem::OrchestrationEvent {
+            kind: crate::prompt::OrchestrationEventKind::CallStarted,
+            cell_id: cid,
+            leaf_id: Some(l),
+            arguments,
+            ..
+        } = item.portable()
+        else {
+            return None;
+        };
+        (cid == cell_id && *l == leaf).then(|| arguments.clone()).flatten()
+    })
 }
 
 pub fn serialize_filtered_history_items(items: &[HistoryItem]) -> Result<String, String> {
@@ -185,6 +211,53 @@ pub fn serialize_filtered_history_items(items: &[HistoryItem]) -> Result<String,
         .iter()
         .filter_map(|item| match item.portable() {
             HistoryItem::ContextCheckpoint { .. } => None,
+            // 034：编排事件——cell_started（含脚本源码）与 cell_closed 不进
+            // 提炼输入；叶子事实按 call_started/call_finished 合成一条真实
+            // 经历（参数与结果原文，不把源码当工具输出；大结果已是降级片段
+            // ＋哈希形态，如实呈现）。
+            HistoryItem::OrchestrationEvent { kind, cell_id, leaf_id, tool_name, arguments, result, .. } => {
+                match (kind, leaf_id, tool_name) {
+                    (crate::prompt::OrchestrationEventKind::CallStarted, Some(_leaf), Some(_tool)) => {
+                        None // 参数随 call_finished 一并合成（避免同一事实两行）
+                    }
+                    (crate::prompt::OrchestrationEventKind::CallFinished, Some(leaf), Some(tool)) => {
+                        let args = call_arguments_of(items, cell_id, *leaf);
+                        let result_line = result
+                            .as_ref()
+                            .map(|r| {
+                                let state = r.execution.as_str();
+                                if r.truncated {
+                                    format!(
+                                        "结果（截断，原文 {} 字节，sha256:{}）：{}",
+                                        r.original_bytes.unwrap_or(0),
+                                        r.sha256.as_deref().unwrap_or("?"),
+                                        crate::display::truncate_chars(&r.content, 2048)
+                                    )
+                                } else {
+                                    format!(
+                                        "结果（{state}）：{}",
+                                        crate::display::truncate_chars(&r.content, 4096)
+                                    )
+                                }
+                            })
+                            .unwrap_or_else(|| "结果：未知（未记录 call_finished）".into());
+                        let args_line = args
+                            .as_deref()
+                            .map(|a| crate::display::truncate_chars(a, 2048))
+                            .unwrap_or_else(|| "（参数未记录）".into());
+                        Some(HistoryItem::Text(HistoryMessage {
+                            role: HistoryRole::User,
+                            content: format!(
+                                "[编排叶子事实 {cell_id}#{leaf}] 工具 {tool} 参数 {args_line} → {result_line}"
+                            ),
+                            user_input_event: None,
+                            images: None,
+                            text_elements: Vec::new(),
+                        }))
+                    }
+                    _ => None,
+                }
+            }
             HistoryItem::AssistantToolCalls { tool_calls, .. } => {
                 let kept: Vec<_> = tool_calls
                     .iter()
