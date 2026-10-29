@@ -110,6 +110,17 @@ pub enum DriverEvent {
         live: Arc<std::sync::atomic::AtomicBool>,
         display_filter: fn(&str) -> String,
     },
+    /// 031：权限确认申请（专用事件，§1.8——不经一般问询通道）。载荷形态与
+    /// [`DriverEvent::UserInput`] 同构以复用问答视图构件（§1.8 允许复用界面
+    /// 构件）；回执仍是独立 typed 通道（应用侧 PermissionHost 映射
+    /// Allow/Deny，一般问询答案不会转成授权）。详情（路径/网络/说明）由
+    /// 宿主先行 [`DriverEvent::Info`] 全量展示。
+    PermissionPrompt {
+        questions: Vec<RequestUserInputQuestion>,
+        reply: UserInputReply,
+        live: Arc<std::sync::atomic::AtomicBool>,
+        display_filter: fn(&str) -> String,
+    },
     /// 018-B：显式等待开始——自动打开本轮唯一未决问询窗口（不创建第二次问询）。
     UserInputAsyncWait {
         request_id: String,
@@ -444,6 +455,30 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                 live,
                                 display_filter,
                             } => {
+                                if turn_running
+                                    && !turn_cancelled
+                                    && live.load(std::sync::atomic::Ordering::SeqCst)
+                                    && pane.active_view_id() != Some("user-input")
+                                {
+                                    tool_detail = None;
+                                    pane.show_user_input(questions, reply, live, display_filter);
+                                } else {
+                                    reply.send(Err(if turn_cancelled {
+                                        RequestUserInputError::Cancelled
+                                    } else {
+                                        RequestUserInputError::Closed
+                                    }));
+                                }
+                            }
+                            DriverEvent::PermissionPrompt {
+                                questions,
+                                reply,
+                                live,
+                                display_filter,
+                            } => {
+                                // 031：同一问答视图构件（一个宿主同一时刻只允许
+                                // 一个权限确认——宿主侧阻塞保证）；迟到/取消轮的
+                                // 回执按 Closed/Cancelled 拒绝，不复活。
                                 if turn_running
                                     && !turn_cancelled
                                     && live.load(std::sync::atomic::Ordering::SeqCst)

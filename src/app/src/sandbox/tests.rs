@@ -551,3 +551,296 @@ fn symlink_or_skip(target: &Path, link: &Path) {
         panic!("符号链接用例仅适用于 unix");
     }
 }
+
+// ---------- 031：动态策略（M2） ----------
+
+fn sbx_dir(name: &str) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "tchat-031-sbx-{}-{name}-{n}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// P06(b) 点 1/2：deny 目录内部文件的预存硬链接 → 拒绝（反例变体 A 闭合）。
+#[cfg(unix)]
+#[test]
+fn deny_dir_internal_hardlink_refuses_launch() {
+    let root = sbx_dir("p06-dir");
+    let private = root.join("private");
+    let allowed = root.join("allowed");
+    fs::create_dir_all(&private).unwrap();
+    fs::create_dir_all(&allowed).unwrap();
+    fs::write(private.join("secret.txt"), "FAKE-P06-SECRET").unwrap();
+    // 预存硬链接到「允许树」
+    fs::hard_link(private.join("secret.txt"), allowed.join("alias.txt")).unwrap();
+
+    // 无别名（nlink=1）：通过
+    verify_deny_boundaries(&[private.join("nothing")], &DEFAULT_TRAVERSAL_BUDGET).unwrap();
+    let mut deny = vec![private.clone()];
+    // 目录内部存在 nlink=2 的文件 → 拒绝启动（fail-closed）
+    let err = verify_deny_boundaries(&deny, &DEFAULT_TRAVERSAL_BUDGET).unwrap_err();
+    assert!(err.contains("硬链接"), "目录内部硬链接应拒绝：{err}");
+    deny.clear();
+    drop(deny);
+    fs::remove_dir_all(&root).ok();
+}
+
+/// P06(b) 点 1：deny 文件本身的 nlink 检查（033 B1 推广到 031 入口）。
+#[cfg(unix)]
+#[test]
+fn deny_file_hardlink_refuses_launch() {
+    let root = sbx_dir("p06-file");
+    fs::write(root.join("a.txt"), "x").unwrap();
+    fs::hard_link(root.join("a.txt"), root.join("b.txt")).unwrap();
+    let err = verify_deny_boundaries(
+        &[root.join("a.txt")],
+        &DEFAULT_TRAVERSAL_BUDGET,
+    )
+    .unwrap_err();
+    assert!(err.contains("硬链接"));
+    fs::remove_file(root.join("b.txt")).unwrap();
+    verify_deny_boundaries(&[root.join("a.txt")], &DEFAULT_TRAVERSAL_BUDGET).unwrap();
+    fs::remove_dir_all(&root).ok();
+}
+
+/// P06(b) 点 2：遍历失败（不可读子目录）＝拒绝，不静默跳过。
+#[cfg(unix)]
+#[test]
+fn deny_dir_traversal_failure_refuses() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = sbx_dir("p06-eacces");
+    let private = root.join("private");
+    let sub = private.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("s.txt"), "x").unwrap();
+    fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let err = verify_deny_boundaries(&[private.clone()], &DEFAULT_TRAVERSAL_BUDGET).unwrap_err();
+    // 恢复权限再清理（夹具卫生）
+    fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(err.contains("遍历失败") || err.contains("读取失败"), "不可访问应拒绝：{err}");
+    fs::remove_dir_all(&root).ok();
+}
+
+/// P06(b) 点 4：条目数预算超限＝拒绝（fail-closed，不静默截断）。
+#[test]
+fn deny_traversal_budget_entries_refuses() {
+    let root = sbx_dir("p06-budget");
+    let private = root.join("private");
+    fs::create_dir_all(&private).unwrap();
+    for i in 0..10 {
+        fs::write(private.join(format!("f{i}.txt")), "x").unwrap();
+    }
+    let budget = TraversalBudget { max_entries: 5, timeout_ms: 60_000 };
+    let err = verify_deny_boundaries(&[private.clone()], &budget).unwrap_err();
+    assert!(err.contains("预算"), "条目超限应拒绝：{err}");
+    let ok_budget = TraversalBudget { max_entries: 20, timeout_ms: 60_000 };
+    verify_deny_boundaries(&[private.clone()], &ok_budget).unwrap();
+    fs::remove_dir_all(&root).ok();
+}
+
+/// P06(b) 点 4：墙钟超时＝拒绝（timeout=0 立即触发）。
+#[test]
+fn deny_traversal_budget_timeout_refuses() {
+    let root = sbx_dir("p06-timeout");
+    let private = root.join("private");
+    fs::create_dir_all(&private).unwrap();
+    fs::write(private.join("f.txt"), "x").unwrap();
+    let budget = TraversalBudget { max_entries: 100, timeout_ms: 0 };
+    // 至少一个目录项后即超时（deadline 在遍历前已过）
+    let err = verify_deny_boundaries(&[private.clone()], &budget).unwrap_err();
+    assert!(err.contains("时限"), "超时应拒绝：{err}");
+    fs::remove_dir_all(&root).ok();
+}
+
+/// P06(b) 点 3：mountinfo 别名枚举——同设备 bind 的两个挂载点互相显形
+///（不能仅靠 st_dev 变化检测）。以本进程真实 /proc/self/mountinfo 验证：
+/// 任一路径至少映射出自身（identity 投影）。
+#[test]
+fn deny_aliases_identity_projection() {
+    let mounts = parse_mountinfo();
+    assert!(!mounts.is_empty(), "mountinfo 应可解析");
+    let root = sbx_dir("alias-id");
+    let aliases = deny_aliases(&root, &mounts);
+    assert!(aliases.contains(&root), "canonical 自身必须在别名集中");
+    fs::remove_dir_all(&root).ok();
+}
+
+/// mountinfo octal 转义还原（`\040`＝空格）。
+#[test]
+fn mountinfo_unescapes_octal() {
+    let p = unescape_mountinfo_path("/mnt/my\\040dir");
+    assert_eq!(p, PathBuf::from("/mnt/my dir"));
+}
+
+/// dev 分解与 mountinfo 第 3 列同构（真实根路径上验证）。
+#[test]
+fn path_dev_matches_mountinfo_format() {
+    let mounts = parse_mountinfo();
+    let root = PathBuf::from("/");
+    let dev = path_dev(&root).expect("根路径应有设备号");
+    assert!(dev.contains(':'), "major:minor 形态：{dev}");
+    // 根设备应出现在 mountinfo 中（/ 挂载必然存在）
+    assert!(
+        mounts.iter().any(|m| m.mount_point == PathBuf::from("/") && m.dev == dev),
+        "根设备 {dev} 应与 mountinfo 一致"
+    );
+}
+
+/// 受限读树布局：固定运行时白名单＋内容挂载＋逐实例 deny 遮蔽＋网络开关。
+#[test]
+fn permission_layout_runtime_and_carveouts() {
+    let root = sbx_dir("layout");
+    let data = root.join("data");
+    let sub = data.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    let secret_dir = data.join("private");
+    fs::create_dir_all(&secret_dir).unwrap();
+    let snapshot = PolicySnapshot {
+        read_paths: vec![],
+        write_paths: vec![data.clone()],
+        deny_paths: vec![secret_dir.clone()],
+        network: false,
+        poison: None,
+    };
+    let mut args = Vec::new();
+    create_permission_filesystem_args(&mut args, &snapshot, None).unwrap();
+    let joined = args.join(" ");
+    // 受限读树：tmpfs 根＋/usr ro＋usrmerge 符号链接＋/etc ro＋私有 /tmp
+    assert!(joined.contains("--tmpfs /"));
+    assert!(joined.contains("--ro-bind /usr /usr"));
+    assert!(joined.contains("--symlink usr/bin /bin"));
+    assert!(joined.contains("--ro-bind /etc /etc"));
+    assert!(joined.contains("--tmpfs /tmp"));
+    // 内容挂载（write）
+    assert!(joined.contains(&format!("--bind {d} {d}", d = data.display())));
+    // 该实例下的 deny 遮蔽（目录：perms 000 tmpfs remount-ro）
+    assert!(
+        joined.contains(&format!("--tmpfs {s}", s = secret_dir.display())),
+        "deny 目录应在该挂载实例后遮蔽：{joined}"
+    );
+    // 网络关闭在 flags 层（此处只验证布局函数不含网络项）
+    fs::remove_dir_all(&root).ok();
+}
+
+/// 毒丸快照：启动入口显式拒绝（不产出 argv）。
+#[test]
+fn poisoned_snapshot_refuses_launch() {
+    let snap = PolicySnapshot::poisoned("矛盾".into());
+    assert!(snap.valid().is_none());
+    let err = permission_launch_argv(vec!["/bin/true".into()], &snap, Path::new("/"))
+        .unwrap_err();
+    assert!(err.to_string().contains("无法编码"));
+}
+
+/// seccomp 过滤器形状：8 字节整除、RET 收尾、长度 > 最小门（M0 教训）。
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn seccomp_filter_shape_valid() {
+    let filter = build_seccomp_filter();
+    assert_eq!(filter.len() % 8, 0, "bwrap 按 8 字节整除校验");
+    // 末条必须 RET（BPF_RET|BPF_K=0x06；ALLOW=0x7fff0000）
+    let n = filter.len();
+    let last_code = u16::from_le_bytes(filter[n - 8..n - 6].try_into().unwrap());
+    let last_k = u32::from_le_bytes(filter[n - 4..].try_into().unwrap());
+    assert_eq!(last_code, 0x06);
+    assert_eq!(last_k, 0x7FFF_0000);
+    // 门：第二条（arch JEQ）后跟 KILL_PROCESS
+    let kill_k = u32::from_le_bytes(filter[16 + 4..16 + 8].try_into().unwrap());
+    assert_eq!(kill_k, 0x8000_0000);
+}
+
+/// memfd 构造：可读回且偏移归零（bwrap 从当前偏移读取）。
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn seccomp_fd_roundtrip() {
+    let guard = build_seccomp_fd().unwrap().expect("x86_64 应有过滤器");
+    let fd = guard.raw();
+    let filter = build_seccomp_filter();
+    let mut buf = vec![0u8; filter.len()];
+    let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+    assert_eq!(n as usize, filter.len(), "应从偏移 0 读到完整过滤器");
+    assert_eq!(buf, filter);
+}
+
+
+
+
+
+/// 运行时挂载面（/usr、/etc ro-bind）同样是遮蔽实例：deny 别名落在其下的
+/// 必须在 ro-bind 之后 carve（M1 变异首跑未检出的覆盖缺口——deny 优先对
+/// 全部挂载面成立）。
+#[test]
+fn runtime_mounts_also_carve_denies() {
+    let root = sbx_dir("rt-carve");
+    let snapshot = PolicySnapshot {
+        read_paths: vec![],
+        write_paths: vec![root.clone()],
+        deny_paths: vec![PathBuf::from("/etc/hosts")],
+        network: false,
+        poison: None,
+    };
+    let mut args = Vec::new();
+    create_permission_filesystem_args(&mut args, &snapshot, None).unwrap();
+    let joined = args.join(" ");
+    let etc_idx = joined.find("--ro-bind /etc /etc").expect("/etc ro-bind 应存在");
+    let carve_idx = joined
+        .find("--ro-bind /dev/null /etc/hosts")
+        .expect("/etc 下的 deny 文件应被 carve");
+    assert!(
+        carve_idx > etc_idx,
+        "运行时 deny 遮蔽必须在 /usr、/etc ro-bind 之后：{joined}"
+    );
+    fs::remove_dir_all(&root).ok();
+}
+
+/// 审查 #3 回归：带可选字段（master:N/shared:N）的 mountinfo 行不得被丢弃
+///（proc(5)：可选字段零或多——固定下标会把带传播标记的 bind 挂载整行漏掉）。
+#[test]
+fn mountinfo_optional_fields_are_parsed() {
+    // 真实容器形态（/cache 卷，ext4 8:48，master:30）——列序：id parent dev
+    // root mount_point options [optional...] - fstype source super_options
+    let text = "453 452 8:48 /data/docker/volumes/x/_data /cache rw,relatime master:30 - ext4 /dev/sdd rw";
+    let mounts = parse_mountinfo_from(text);
+    assert_eq!(mounts.len(), 1, "带 master:30 的行必须被解析");
+    assert_eq!(mounts[0].mount_point, PathBuf::from("/cache"));
+    assert_eq!(mounts[0].dev, "8:48");
+    assert_eq!(mounts[0].root, PathBuf::from("/data/docker/volumes/x/_data"));
+    // 多个可选字段 + 无可选字段两种形态（双行文本）
+    let text2 = "1 0 0:1 / / rw shared:1 master:2 - overlay none rw\n3 2 0:2 / /other ro - tmpfs none ro";
+    let m2 = parse_mountinfo_from(text2);
+    assert_eq!(m2.len(), 2, "shared+master 与无可选字段行都应解析");
+    assert_eq!(m2[1].mount_point, PathBuf::from("/other"));
+}
+
+/// 审查 #3 回归：同设备双挂载的别名互相显形（跨挂载投影，非 identity）。
+/// 场景（deny 路径真实存在——deny_aliases 经 path_dev 取设备号）：文件系统
+/// 内 <T>/a/x 同时经两条挂载可见——挂载一（root=<T>/a，point=<T>/a，即原
+/// 位）与挂载二（root=<T> 整盘 bind 到 <T>/m2）；deny <T>/a/x 的别名必须
+/// 同时显形 <T>/a/x 与 <T>/m2/a/x，遮蔽须覆盖两者。
+#[test]
+fn deny_aliases_cross_mount_projection() {
+    let t = sbx_dir("cross-mount");
+    let a = t.join("a");
+    fs::create_dir_all(&a).unwrap();
+    fs::write(a.join("x"), "k").unwrap();
+    let m2 = t.join("m2");
+    let dev = path_dev(&a.join("x")).expect("真实文件应有设备号");
+    let mounts = vec![
+        MountInfo { root: a.clone(), mount_point: a.clone(), dev: dev.clone() },
+        MountInfo { root: t.clone(), mount_point: m2.clone(), dev },
+    ];
+    let aliases = deny_aliases(&a.join("x"), &mounts);
+    assert!(aliases.contains(&a.join("x")), "identity 别名：{aliases:?}");
+    assert!(
+        aliases.contains(&m2.join("a").join("x")),
+        "跨挂载别名必须显形（bind 到 m2 的同一文件）：{aliases:?}"
+    );
+    fs::remove_dir_all(&t).ok();
+}
+
+

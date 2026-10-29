@@ -10627,3 +10627,512 @@ fn s30_pty_search_display_call_save_resume() {
         "新用户轮不得继承历史加载集合：{names3:?}"
     );
 }
+
+// ---------- 031：权限申请（真实 CLI＋PTY＋真实 bwrap 沙箱） ----------
+
+/// 031 能力声明版目录（experimental_supported_tools 精确包含
+/// request_permissions）。
+fn write_manual_permission_capable(dir: &Path, base_url: &str, key_ref: &str) {
+    let m = catalog::ManualRoot {
+        selected_provider: Some("deepseek".into()),
+        selected_model: Some("deepseek-flash".into()),
+        memories: None,
+        providers: [(
+            "deepseek".to_string(),
+            catalog::ManualProvider {
+                base_url: Some(base_url.into()),
+                key_ref: Some(key_ref.into()),
+                models: [(
+                    "deepseek-flash".to_string(),
+                    catalog::ModelInfo {
+                        id: "deepseek-flash".into(),
+                        experimental_supported_tools: Some(vec![
+                            "request_permissions".into(),
+                        ]),
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    fs::write(
+        dir.join("manual.json"),
+        serde_json::to_string_pretty(&m).unwrap(),
+    )
+    .unwrap();
+}
+
+/// S140：request_permissions 全链路——模型申请临时目录写权限 → 行式宿主展示
+/// 规范化路径（默认拒绝）→ 用户 y 允许 → granted 回传 → **同轮后续 exec 在
+/// 批准面真实写入成功**；工作区 .env（自动敏感边界）正文不可得；拒绝路径
+/// （第二次申请另一目录）保持 denied 不扩大。
+#[test]
+fn s140_request_permissions_cli_grant_and_enforce() {
+    let cfg = TempDir::new("s140-cfg");
+    let user = TempDir::new("s140-user");
+    // 工作区与用户私有根（自动敏感边界，整体 deny）分离——真实部署拓扑；
+    // 混放会被 build_snapshot 的「内容位于 deny 之下」检查正确拒绝（fail-closed）
+    let proj = TempDir::new("s140-proj");
+    let work = proj.path().join("work");
+    let export = proj.path().join("export");
+    let other = proj.path().join("other");
+    let home = user.path().join("home");
+    for d in [&work, &export, &other, &home] {
+        fs::create_dir_all(d).unwrap();
+    }
+    fs::write(work.join(".env"), "FAKE-S140-ENV=1\n").unwrap();
+    // 可信策略：位于 anchor/写面/temp 之外（TMPDIR 指向不含策略的目录）
+    let policy_dir = TempDir::new("s140-policy");
+    let fake_tmp = TempDir::new("s140-tmp");
+    let policy_path = policy_dir.path().join("p.json");
+    fs::write(
+        &policy_path,
+        format!(
+            r#"{{"version": 1, "base": {{"file_system": {{"entries": [{{"path": {{"type": "path", "path": {:?}}}, "access": "write"}}]}}, "network": {{"enabled": false}}}}, "requestable": {{"file_system": {{"entries": [{{"path": {{"type": "path", "path": {:?}}}, "access": "write"}}]}}, "network": {{"enabled": false}}}}, "deny_paths": []}}"#,
+            work.canonicalize().unwrap(),
+            export.canonicalize().unwrap(),
+        ),
+    )
+    .unwrap();
+
+    let ask_args = |path: &Path| {
+        json!({"reason": "S140-需要写入导出目录",
+            "permissions": {"file_system": {"entries": [
+                {"path": {"type": "path", "path": path}, "access": "write"}]}}})
+    };
+    let tc1 = json!({"choices":[{"message":{"tool_calls":[{"id":"s140-ask","type":"function","function":{
+        "name":"request_permissions","arguments":ask_args(&export).to_string()}}]}}]})
+        .to_string();
+    // 第二次申请：requestable 之外的目录（超出上限）——error，不弹确认
+    let tc2 = json!({"choices":[{"message":{"tool_calls":[{"id":"s140-bad","type":"function","function":{
+        "name":"request_permissions","arguments":ask_args(&other).to_string()}}]}}]})
+        .to_string();
+    // 同轮后续 exec：批准面写入＋读回；.env 读取应被拒
+    let exec_cmd = format!(
+        "echo GRANTED-WRITE > {p}/proof.txt && cat {p}/proof.txt; cat {e} 2>&1 | head -1",
+        p = export.display(),
+        e = work.join(".env").display(),
+    );
+    let tc3 = json!({"choices":[{"message":{"tool_calls":[{"id":"s140-exec","type":"function","function":{
+        "name":"exec_command","arguments":json!({"cmd": exec_cmd, "yield_time_ms": 8000}).to_string()}}]}}]})
+        .to_string();
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc1),
+        MockResp::json(200, tc2),
+        MockResp::json(200, tc3),
+        MockResp::json(200, chat_body("S140-完成")),
+    ]);
+    write_manual_permission_capable(cfg.path(), &mock.url, "env:TCHAT_S140_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s140"),
+    );
+
+    // §1.3 部署前提：nlink=1 固定副本＋专用安装目录（cargo 构建/调试 产物是
+    // 硬链接对——nlink=2 会被启动前检查按契约拒绝；安装目录整体 deny，须与
+    // 工作区分离）
+    let bin_dir = TempDir::new("s140-bin");
+    let exe_copy = bin_dir.path().join("terminal-chat");
+    fs::copy(env!("CARGO_BIN_EXE_terminal-chat"), &exe_copy).unwrap();
+    let mut cmd = Command::new(&exe_copy);
+    cmd.current_dir(&work);
+    for (k, v) in [
+        ("TCHAT_CONFIG_DIR", cfg.path().to_str().unwrap()),
+        ("TCHAT_USER_DIR", user.path().to_str().unwrap()),
+        ("TCHAT_S140_KEY", "fake-s140"),
+    ] {
+        cmd.env(k, v);
+    }
+    let home = user.path().join("home");
+    cmd.env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &home)
+        .env("APPDATA", &home)
+        .env("TZ", "UTC")
+        .env("LC_ALL", "C.UTF-8")
+        .env("SHELL", "/bin/sh")
+        .env("TCHAT_SESSION_TS", "20260101T000000")
+        .env("TERM", "dumb")
+        .env_remove("TCHAT_PUBLIC_CATALOG_URL");
+    cmd.env("TCHAT_SANDBOX", "1");
+    cmd.env("TCHAT_PERMISSION_POLICY", &policy_path);
+    cmd.env("TMPDIR", fake_tmp.path());
+    let mut pty = PtySession::spawn(cmd);
+
+    pty.wait_screen("你>").unwrap();
+    pty.send_line("S140-开始");
+    // 宿主展示申请（默认拒绝），路径为规范化绝对路径
+    pty.wait_screen_timeout("权限申请", Duration::from_secs(8)).unwrap();
+    pty.wait_screen("写入").unwrap();
+    pty.wait_screen("export").unwrap();
+    pty.wait_screen("仅当前用户轮").unwrap();
+    // 允许
+    pty.send_line("y");
+    // 第二次申请（超上限）→ error 结果回传模型（无第二次确认窗——屏幕上
+    // 只出现一次「权限申请」框），随后 exec 与终文
+    pty.wait_screen_timeout("S140-完成", Duration::from_secs(20)).unwrap();
+    pty.wait_screen("S140-完成").unwrap();
+    pty.send_raw(b"\x04"); // EOF 退出（行式）
+    let _ = pty.finish();
+
+    // 文件系统证据
+    let proof = fs::read_to_string(export.join("proof.txt")).unwrap();
+    assert_eq!(proof.trim(), "GRANTED-WRITE");
+    // 请求配对：第 2 个请求含 granted 结果；第 3 个含 error（超上限）；第 4 个含 exec 输出
+    let bodies: Vec<Value> = mock.requests()[1..4]
+        .iter()
+        .map(|r| serde_json::from_str(&r.body).unwrap())
+        .collect();
+    let find_result = |b: &Value, id: &str| -> Value {
+        b["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["tool_call_id"] == id)
+            .map(|m| serde_json::from_str(m["content"].as_str().unwrap()).unwrap())
+            .unwrap()
+    };
+    assert_eq!(find_result(&bodies[0], "s140-ask")["status"], "granted");
+    assert_eq!(find_result(&bodies[1], "s140-bad")["status"], "error");
+    let exec_result = find_result(&bodies[2], "s140-exec");
+    assert!(exec_result["output"].as_str().unwrap().contains("GRANTED-WRITE"));
+    assert!(
+        !exec_result["output"].as_str().unwrap().contains("FAKE-S140-ENV"),
+        ".env 正文不可得（自动敏感边界）"
+    );
+    // 声明面：模型请求 tools 含 request_permissions
+    let tools: Vec<String> = bodies[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+        .collect();
+    assert!(tools.contains(&"request_permissions".to_string()));
+}
+
+/// S141：TUI 权限确认全链路——专用事件＋问答视图构件：申请详情入转录、
+/// 弹窗默认拒绝、j+Enter 允许、Enter 直接拒绝、批准面真实可用、被拒面不可
+/// 用、授权随轮结束回收（下一轮未批面再次不可用）。
+#[test]
+fn s141_tui_permission_prompt_allow_and_deny() {
+    let cfg = TempDir::new("s141-cfg");
+    let user = TempDir::new("s141-user");
+    let proj = TempDir::new("s141-proj");
+    let work = proj.path().join("work");
+    let export = proj.path().join("export");
+    let other = proj.path().join("other");
+    let home = user.path().join("home");
+    for d in [&work, &export, &other, &home] {
+        fs::create_dir_all(d).unwrap();
+    }
+    let policy_dir = TempDir::new("s141-policy");
+    let fake_tmp = TempDir::new("s141-tmp");
+    let policy_path = policy_dir.path().join("p.json");
+    fs::write(
+        &policy_path,
+        format!(
+            r#"{{"version": 1, "base": {{"file_system": {{"entries": [{{"path": {{"type": "path", "path": {:?}}}, "access": "write"}}]}}, "network": {{"enabled": false}}}}, "requestable": {{"file_system": {{"entries": [{{"path": {{"type": "path", "path": {:?}}}, "access": "write"}}, {{"path": {{"type": "path", "path": {:?}}}, "access": "write"}}]}}, "network": {{"enabled": false}}}}, "deny_paths": []}}"#,
+            work.canonicalize().unwrap(),
+            export.canonicalize().unwrap(),
+            other.canonicalize().unwrap(),
+        ),
+    )
+    .unwrap();
+
+    let ask = |path: &Path| {
+        json!({"reason": "S141-申请",
+            "permissions": {"file_system": {"entries": [
+                {"path": {"type": "path", "path": path}, "access": "write"}]}}})
+    };
+    let tc = |id: &str, path: &Path| {
+        json!({"choices":[{"message":{"tool_calls":[{"id":id,"type":"function","function":{
+        "name":"request_permissions","arguments":ask(path).to_string()}}]}}]}).to_string()
+    };
+    let exec_tc = |id: &str, cmd: String| {
+        json!({"choices":[{"message":{"tool_calls":[{"id":id,"type":"function","function":{
+        "name":"exec_command","arguments":json!({"cmd": cmd, "yield_time_ms": 8000}).to_string()}}]}}]}).to_string()
+    };
+    let mock = spawn_mock(vec![
+        MockResp::json(200, tc("s141-allow", &export)),
+        MockResp::json(200, tc("s141-deny", &other)),
+        MockResp::json(
+            200,
+            exec_tc(
+                "s141-exec1",
+                format!("echo TUI-GRANTED > {}/proof.txt && cat {}/proof.txt", export.display(), export.display()),
+            ),
+        ),
+        MockResp::json(200, chat_body("S141-完成")),
+    ]);
+    write_manual_permission_capable(cfg.path(), &mock.url, "env:TCHAT_S141_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s141"),
+    );
+
+    // §1.3 部署前提：nlink=1 固定副本＋专用安装目录（cargo target 产物为硬
+    // 链接对；二进制与工作区分离——安装目录整体 deny 不遮蔽内容面）
+    let bin_dir = TempDir::new("s141-bin");
+    let exe_copy = bin_dir.path().join("terminal-chat");
+    fs::copy(env!("CARGO_BIN_EXE_terminal-chat"), &exe_copy).unwrap();
+    let mut cmd = Command::new(&exe_copy);
+    cmd.current_dir(&work);
+    for (k, v) in [
+        ("TCHAT_CONFIG_DIR", cfg.path().to_str().unwrap()),
+        ("TCHAT_USER_DIR", user.path().to_str().unwrap()),
+        ("TCHAT_S141_KEY", "fake-s141"),
+    ] {
+        cmd.env(k, v);
+    }
+    cmd.env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &home)
+        .env("APPDATA", &home)
+        .env("TZ", "UTC")
+        .env("LC_ALL", "C.UTF-8")
+        .env("SHELL", "/bin/sh")
+        .env("TCHAT_SESSION_TS", "20260101T000000")
+        .env("TERM", "xterm")
+        .env_remove("TCHAT_PUBLIC_CATALOG_URL")
+        .env("TCHAT_SANDBOX", "1")
+        .env("TCHAT_PERMISSION_POLICY", &policy_path)
+        .env("TMPDIR", fake_tmp.path());
+    let mut pty = PtySession::spawn(cmd);
+
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.send_line("S141-开始");
+    // 申请 1：详情 Info 入转录＋弹窗（默认拒绝）
+    pty.wait_screen_timeout("权限申请（仅当前用户轮）", Duration::from_secs(8)).unwrap();
+    pty.wait_screen("允许本次权限申请").unwrap();
+    // j 高亮「本轮允许」，Enter 提交
+    pty.send_raw(b"j");
+    std::thread::sleep(Duration::from_millis(120));
+    pty.send_raw(b"\r");
+    // 申请 2：直接 Enter＝默认拒绝
+    pty.wait_screen_timeout("S141-申请", Duration::from_secs(8)).unwrap();
+    std::thread::sleep(Duration::from_millis(120));
+    pty.send_raw(b"\r");
+    // exec：批准面写入成功
+    pty.wait_screen_timeout("S141-完成", Duration::from_secs(20)).unwrap();
+    pty.send_raw(b"\x03");
+    let _ = pty.finish();
+
+    assert_eq!(
+        fs::read_to_string(export.join("proof.txt")).unwrap().trim(),
+        "TUI-GRANTED"
+    );
+    // 请求配对：allow=granted、deny=denied、exec 含 TUI-GRANTED
+    let bodies: Vec<Value> = mock.requests()[1..4]
+        .iter()
+        .map(|r| serde_json::from_str(&r.body).unwrap())
+        .collect();
+    let find_result = |b: &Value, id: &str| -> Value {
+        b["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["tool_call_id"] == id)
+            .map(|m| serde_json::from_str(m["content"].as_str().unwrap()).unwrap())
+            .unwrap()
+    };
+    assert_eq!(find_result(&bodies[0], "s141-allow")["status"], "granted");
+    assert_eq!(find_result(&bodies[1], "s141-deny")["status"], "denied");
+    assert!(
+        find_result(&bodies[2], "s141-exec1")["output"]
+            .as_str()
+            .unwrap()
+            .contains("TUI-GRANTED")
+    );
+    // TUI 声明面：首请求 tools 含 request_permissions
+    let first: Value = serde_json::from_str(&mock.requests()[0].body).unwrap();
+    assert!(first["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["function"]["name"] == "request_permissions"));
+}
+
+/// S142（031 P15）：真实 TUI 确认并保存后 `/resume`——历史申请可见（路径与
+/// 访问级别入转录）、恢复后无活动授权（同路径申请重新弹确认，不因历史
+/// granted 静默放行）、旧 granted JSON 不能授权新执行（exec 落回基线拒绝）。
+#[test]
+fn s142_resume_shows_permission_history_and_requires_new_confirmation() {
+    let cfg = TempDir::new("s142-cfg");
+    let user = TempDir::new("s142-user");
+    let proj = TempDir::new("s142-proj");
+    let work = proj.path().join("work");
+    let export = proj.path().join("export");
+    let home = user.path().join("home");
+    for d in [&work, &export, &home] {
+        fs::create_dir_all(d).unwrap();
+    }
+    let policy_dir = TempDir::new("s142-policy");
+    let fake_tmp = TempDir::new("s142-tmp");
+    let policy_path = policy_dir.path().join("p.json");
+    fs::write(
+        &policy_path,
+        format!(
+            r#"{{"version": 1, "base": {{"file_system": {{"entries": [{{"path": {{"type": "path", "path": {:?}}}, "access": "write"}}]}}, "network": {{"enabled": false}}}}, "requestable": {{"file_system": {{"entries": [{{"path": {{"type": "path", "path": {:?}}}, "access": "write"}}]}}, "network": {{"enabled": false}}}}, "deny_paths": []}}"#,
+            work.canonicalize().unwrap(),
+            export.canonicalize().unwrap(),
+        ),
+    )
+    .unwrap();
+
+    let ask = |path: &Path| {
+        json!({"reason": "S142-申请",
+            "permissions": {"file_system": {"entries": [
+                {"path": {"type": "path", "path": path}, "access": "write"}]}}})
+    };
+    let perm_tc = |id: &str, path: &Path| {
+        json!({"choices":[{"message":{"tool_calls":[{"id":id,"type":"function","function":{
+        "name":"request_permissions","arguments":ask(path).to_string()}}]}}]}).to_string()
+    };
+    let exec_tc = |id: &str, cmd: String| {
+        json!({"choices":[{"message":{"tool_calls":[{"id":id,"type":"function","function":{
+        "name":"exec_command","arguments":json!({"cmd": cmd, "yield_time_ms": 8000}).to_string()}}]}}]}).to_string()
+    };
+    let proof1 = format!("echo S142-GRANTED > {}/proof.txt", export.display());
+    let proof2 = format!("echo S142-PROOF2 > {}/proof2.txt", export.display());
+    let mock = spawn_mock(vec![
+        // 会话 1：申请→允许→exec 用授权写入→完成
+        MockResp::json(200, perm_tc("s142-a1", &export)),
+        MockResp::json(200, exec_tc("s142-e1", proof1)),
+        MockResp::json(200, chat_body("S142-完成")),
+        // 会话 2（恢复后）：同路径再次申请（必须重新弹确认）→默认拒绝→exec
+        // 落回基线（无授权面，proof2 不得产生）→完成
+        MockResp::json(200, perm_tc("s142-r2", &export)),
+        MockResp::json(200, exec_tc("s142-e2", proof2)),
+        MockResp::json(200, chat_body("S142-恢复完成")),
+    ]);
+    write_manual_permission_capable(cfg.path(), &mock.url, "env:TCHAT_S142_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s142"),
+    );
+
+    // §1.3 部署前提：nlink=1 固定副本＋专用安装目录（同 S140/S141）
+    let bin_dir = TempDir::new("s142-bin");
+    let exe_copy = bin_dir.path().join("terminal-chat");
+    fs::copy(env!("CARGO_BIN_EXE_terminal-chat"), &exe_copy).unwrap();
+    let mut cmd = Command::new(&exe_copy);
+    cmd.current_dir(&work);
+    for (k, v) in [
+        ("TCHAT_CONFIG_DIR", cfg.path().to_str().unwrap()),
+        ("TCHAT_USER_DIR", user.path().to_str().unwrap()),
+        ("TCHAT_S142_KEY", "fake-s142"),
+    ] {
+        cmd.env(k, v);
+    }
+    cmd.env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &home)
+        .env("APPDATA", &home)
+        .env("TZ", "UTC")
+        .env("LC_ALL", "C.UTF-8")
+        .env("SHELL", "/bin/sh")
+        .env("TCHAT_SESSION_TS", "20260101T000000")
+        .env("TERM", "xterm")
+        .env_remove("TCHAT_PUBLIC_CATALOG_URL")
+        .env("TCHAT_SANDBOX", "1")
+        .env("TCHAT_PERMISSION_POLICY", &policy_path)
+        .env("TMPDIR", fake_tmp.path());
+    let mut pty = PtySession::spawn(cmd);
+
+    pty.wait_screen("? for shortcuts").unwrap();
+    pty.send_line("S142-开始");
+    // 申请：详情 Info 入转录＋弹窗；j 高亮「本轮允许」，Enter 提交
+    pty.wait_screen_timeout("权限申请（仅当前用户轮）", Duration::from_secs(8)).unwrap();
+    pty.send_raw(b"j");
+    std::thread::sleep(Duration::from_millis(120));
+    pty.send_raw(b"\r");
+    // exec：批准面写入成功，随后完成并保存
+    pty.wait_screen_timeout("S142-完成", Duration::from_secs(20)).unwrap();
+    pty.send_line("/save s142");
+    pty.wait_screen("已保存").unwrap();
+    pty.send_raw(b"\x03");
+    assert!(pty.finish().1.success());
+    assert_eq!(
+        fs::read_to_string(export.join("proof.txt")).unwrap().trim(),
+        "S142-GRANTED",
+        "会话 1 的允许授权应真实生效"
+    );
+
+    // 恢复会话：历史申请可见（Info 行含访问级别与路径）
+    let mut resumed = PtySession::spawn({
+        let mut cmd = Command::new(&exe_copy);
+        cmd.current_dir(&work);
+        for (k, v) in [
+            ("TCHAT_CONFIG_DIR", cfg.path().to_str().unwrap()),
+            ("TCHAT_USER_DIR", user.path().to_str().unwrap()),
+            ("TCHAT_S142_KEY", "fake-s142"),
+        ] {
+            cmd.env(k, v);
+        }
+        cmd.env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &home)
+            .env("APPDATA", &home)
+            .env("TZ", "UTC")
+            .env("LC_ALL", "C.UTF-8")
+            .env("SHELL", "/bin/sh")
+            .env("TCHAT_SESSION_TS", "20260101T000000")
+            .env("TERM", "xterm")
+            .env_remove("TCHAT_PUBLIC_CATALOG_URL")
+            .env("TCHAT_SANDBOX", "1")
+            .env("TCHAT_PERMISSION_POLICY", &policy_path)
+            .env("TMPDIR", fake_tmp.path());
+        cmd
+    });
+    resumed.wait_screen("? for shortcuts").unwrap();
+    resumed.send_line("/resume s142");
+    resumed.wait_screen("S142-完成").unwrap();
+    // §1.8：仅保存普通 ToolResult——恢复面以结果 JSON 呈现历史申请的
+    // 路径/access/scope（turn 范围），实时 Info 卡不入会话。
+    resumed.wait_screen("\"status\":\"granted\"").unwrap();
+    resumed.wait_screen("\"scope\":\"turn\"").unwrap();
+    resumed.wait_screen("export").unwrap();
+
+    // 恢复后同路径申请：历史 granted 不是当前许可——必须重新弹确认（若错误
+    // 地沿用旧授权，此处按「已覆盖」静默 granted，不弹窗，等待将超时失败）
+    resumed.send_line("S142-恢复后再试");
+    resumed.wait_screen_timeout("允许本次权限申请", Duration::from_secs(8)).unwrap();
+    std::thread::sleep(Duration::from_millis(120));
+    resumed.send_raw(b"\r"); // 默认拒绝
+    resumed.wait_screen_timeout("S142-恢复完成", Duration::from_secs(20)).unwrap();
+    resumed.send_raw(b"\x03");
+    let _ = resumed.finish();
+
+    // 旧 granted JSON 不能授权新执行：proof2 未产生
+    assert!(
+        !export.join("proof2.txt").exists(),
+        "恢复后无活动授权：exec 不得写入批准面（proof2 不应存在）"
+    );
+    // 请求配对：恢复轮申请＝denied（重新确认后被拒）；exec 输出不含 S142-PROOF2
+    let bodies: Vec<Value> = mock.requests()[4..6]
+        .iter()
+        .map(|r| serde_json::from_str(&r.body).unwrap())
+        .collect();
+    let find_result = |b: &Value, id: &str| -> Value {
+        b["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["tool_call_id"] == id)
+            .map(|m| serde_json::from_str(m["content"].as_str().unwrap()).unwrap())
+            .unwrap()
+    };
+    assert_eq!(find_result(&bodies[0], "s142-r2")["status"], "denied");
+    assert!(
+        !find_result(&bodies[1], "s142-e2")["output"]
+            .as_str()
+            .unwrap()
+            .contains("S142-PROOF2"),
+        "恢复后的 exec 应落回基线拒绝"
+    );
+}

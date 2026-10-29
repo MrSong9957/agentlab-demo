@@ -127,6 +127,100 @@ pub struct TuiHost {
     mcp: Arc<crate::mcp::manager::McpManager>,
 }
 
+/// 031：TUI 权限确认宿主（§1.5）。专用事件 [`DriverEvent::PermissionPrompt`]
+/// ＋独立 typed 回执（不经一般问询通道）；申请详情（会话 cwd、规范化路径与
+/// read/write、网络实际含义、模型 reason「未信任说明」经显示过滤、永久拒绝
+/// 仍有效、仅当前用户轮）先以 [`DriverEvent::Info`] 全量入转录，再以问答视图
+/// 构件收集决定（默认首项＝拒绝；Esc/取消＝拒绝本次；EOF/宿主断开＝Err →
+/// error 结果，不伪造允许）。
+struct TuiPermissionHost {
+    tx: std_mpsc::Sender<DriverEvent>,
+}
+
+/// 权限问题的「允许」选项文案（回执按此精确匹配；其余一律拒绝）。
+const PERMISSION_ALLOW_LABEL: &str = "本轮允许";
+
+impl crate::permissions::PermissionHost for TuiPermissionHost {
+    fn confirm(
+        &mut self,
+        view: &crate::permissions::PermissionRequestView,
+    ) -> Result<crate::permissions::PermissionDecision, String> {
+        // 详情全量展示（信息 cell；reason 单独标注并过滤）
+        let mut summary = format!(
+            "权限申请（仅当前用户轮）· 会话目录 {}",
+            view.cwd.display()
+        );
+        for (path, access) in &view.entries {
+            let label = match access {
+                crate::permissions::Access::Write => "写入（含读取与目录内变更）",
+                crate::permissions::Access::Read => "只读",
+            };
+            summary.push_str(&format!("；{label}：{}", path.display()));
+        }
+        if view.network {
+            summary.push_str("；网络：本轮本地命令的广泛 IP 网络访问（可含外网、宿主/局域网与监听端口）");
+        }
+        if let Some(reason) = &view.reason {
+            summary.push_str(&format!(
+                "；模型说明（未信任内容）：{}",
+                crate::display::sanitize_for_terminal(reason)
+            ));
+        }
+        summary.push_str("；永久拒绝路径与管理员上限仍然有效，拒绝不影响已有授权");
+        self.tx
+            .send(DriverEvent::Info(summary))
+            .map_err(|_| "宿主已断开".to_string())?;
+        // 专用事件：问答视图构件复用；一个宿主同一时刻只允许一个确认（本
+        // 方法阻塞直到回执，天然串行）。
+        let question = crate::user_input::Question {
+            id: "permission".into(),
+            header: "权限申请".into(),
+            question: "允许本次权限申请？（仅当前用户轮，默认拒绝）".into(),
+            is_other: false,
+            is_secret: false,
+            options: Some(vec![
+                crate::user_input::QuestionOption {
+                    label: "拒绝（默认）".into(),
+                    description: "不授予本次申请的额外权限".into(),
+                },
+                crate::user_input::QuestionOption {
+                    label: PERMISSION_ALLOW_LABEL.into(),
+                    description: "授予本申请路径/网络权限，仅当前用户轮有效".into(),
+                },
+            ]),
+        };
+        let (reply, receiver) = std_mpsc::channel();
+        let live = Arc::new(AtomicBool::new(true));
+        self.tx
+            .send(DriverEvent::PermissionPrompt {
+                questions: vec![question],
+                reply: tchat_tui::chat_driver::UserInputReply::new(reply),
+                live: live.clone(),
+                display_filter: crate::display::sanitize_for_terminal,
+            })
+            .map_err(|_| "宿主已断开".to_string())?;
+        match crate::user_input::wait_for_response(receiver, &HOST_CANCEL, &live) {
+            // 明确选中「本轮允许」＝Allow；任何其他答案（默认首项＝拒绝）＝Deny
+            Ok(resp) => {
+                let allow = resp
+                    .answers
+                    .get("permission")
+                    .is_some_and(|a| a.answers.iter().any(|s| s == PERMISSION_ALLOW_LABEL));
+                Ok(if allow {
+                    crate::permissions::PermissionDecision::Allow
+                } else {
+                    crate::permissions::PermissionDecision::Deny
+                })
+            }
+            // Esc/取消轮＝只拒绝本次申请（不伪造允许，不清已有授权）
+            Err(crate::user_input::InputError::Cancelled) => {
+                Ok(crate::permissions::PermissionDecision::Deny)
+            }
+            Err(e) => Err(format!("权限确认通道关闭：{}", e.message())),
+        }
+    }
+}
+
 impl TuiHost {
     /// 驱动取消钩子直连（006 N2b：置标志→工具线程终止进程组）。
     pub fn set_cancel(&self, requested: bool) {
@@ -552,6 +646,16 @@ impl TuiHost {
                     return;
                 }
             };
+            // 031：TUI 权限确认宿主——031 冻结策略＋模型目录能力齐备才装配
+            //（§1.2-4；合并轮由 turn 层强制忽略）。专用事件＋typed 回执；详情
+            // 先以 Info 全量入转录，决定经问答视图构件收集（默认拒绝）。
+            let mut perm_host = if crate::permissions::frozen().is_some()
+                && crate::catalog::supports_request_permissions(&model)
+            {
+                Some(TuiPermissionHost { tx: tx.clone() })
+            } else {
+                None
+            };
             // 032：上下文工具宿主（查询/切换按目录开关；检查点提交经共享保存器
             // 锁的可失败回执——轮线程内与 on_record 顺序加锁，无竞争）。
             let mut checkpoint_sink = TuiCheckpointSink(autosave.clone());
@@ -571,7 +675,22 @@ impl TuiHost {
                     switch_declared: catalog::supports_new_context(&model),
                     checkpoints: Some(&mut checkpoint_sink),
                 }),
+                // 031：权限确认宿主（None＝不声明不执行 request_permissions）
+                permissions: perm_host
+                    .as_mut()
+                    .map(|h| crate::permissions::PermissionExtras {
+                        host: h as &mut dyn crate::permissions::PermissionHost,
+                    }),
             };
+            // 审查 #2（§1.7-7）：收尾失败门——拒绝开始新用户轮直到回收成功。
+            if let Some(gate) = procs.extra_reap_gate() {
+                if procs.reap_extra_permission_sessions().is_err() {
+                    let _ = tx.send(DriverEvent::Failed(format!(
+                        "{gate}；本轮拒绝开始（额外权限进程仍在运行）",
+                    )));
+                    return;
+                }
+            }
             let result = turn::run_user_turn_with_context_and_caps(
                 &mut history.lock().unwrap(),
                 &submission.text,

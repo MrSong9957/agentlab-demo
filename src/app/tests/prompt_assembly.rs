@@ -704,7 +704,7 @@ fn s30_search_mode_declaration_split() {
     let resource_def = json!({"type": "function", "function": {"name": "list_mcp_resources"}});
     let loaded_def = json!({"type": "function", "function": {"name": "mcp__fx__echo"}});
     let body = build_turn_request_with_tool_search(
-        &[], None, false, false, false, false, false, false,
+        &[], None, false, false, false, false, false, false, false,
         Some(&ts_def),
         &[resource_def.clone(), loaded_def.clone()],
     );
@@ -731,10 +731,10 @@ fn s30_off_mode_appends_mcp_defs_without_injecting_search() {
     let history = [msg(HistoryRole::User, "任务")];
     let dyn_def = json!({"type": "function", "function": {"name": "mcp__fx__echo"}});
     let baseline = build_turn_request_with_tool_search(
-        &history, None, false, false, false, false, false, false, None, &[],
+        &history, None, false, false, false, false, false, false, false, None, &[],
     );
     let with_mcp = build_turn_request_with_tool_search(
-        &history, None, false, false, false, false, false, false, None, &[dyn_def.clone()],
+        &history, None, false, false, false, false, false, false, false, None, &[dyn_def.clone()],
     );
     assert_eq!(with_mcp["messages"], baseline["messages"], "messages 不变");
     // system 在 messages[0]，已随上断言覆盖；tools 结构对照：

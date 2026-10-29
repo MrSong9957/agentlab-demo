@@ -2320,7 +2320,7 @@ fn ts30_search_mode_tools_convert_across_five_protocols() {
             },
         )];
         let mut body = terminal_chat::prompt::build_turn_request_with_tool_search(
-            &history, None, false, false, false, false, false, false,
+            &history, None, false, false, false, false, false, false, false,
             Some(&ts_def), &[resource_def, loaded_def],
         );
         body["_history"] = serde_json::to_value(&history).unwrap();
@@ -2475,10 +2475,10 @@ fn ts30_context_effect_bytes_search_vs_full_declaration() {
         text_elements: Vec::new(),
     })];
     let first_off_body = terminal_chat::prompt::build_turn_request_with_tool_search(
-        &first_history, None, false, false, false, false, false, false, None, &all_defs,
+        &first_history, None, false, false, false, false, false, false, false, None, &all_defs,
     );
     let first_on_body = terminal_chat::prompt::build_turn_request_with_tool_search(
-        &first_history, None, false, false, false, false, false, false,
+        &first_history, None, false, false, false, false, false, false, false,
         Some(&ts_def), &[],
     );
     let first_off_tools = serde_json::to_string(&first_off_body["tools"]).unwrap().len();
@@ -2509,11 +2509,11 @@ fn ts30_context_effect_bytes_search_vs_full_declaration() {
             ..Default::default()
         };
         let mut off_body =
-            terminal_chat::prompt::build_turn_request_with_tool_search(&off_history, None, false, false, false, false, false, false, None, &all_defs);
+            terminal_chat::prompt::build_turn_request_with_tool_search(&off_history, None, false, false, false, false, false, false, false, None, &all_defs);
         off_body["_history"] = serde_json::to_value(&off_history).unwrap();
         let mut on_body =
             terminal_chat::prompt::build_turn_request_with_tool_search(
-                &on_history, None, false, false, false, false, false, false,
+                &on_history, None, false, false, false, false, false, false, false,
                 Some(&ts_def), &loaded_defs,
             );
         on_body["_history"] = serde_json::to_value(&on_history).unwrap();

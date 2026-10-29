@@ -14,6 +14,7 @@ pub mod plan;
 pub mod proc_session;
 pub mod prompt;
 pub mod sandbox;
+pub mod permissions;  // 031：权限申请（可信策略、请求解析、轮次授权）
 pub mod session;
 pub mod turn;
 pub mod user_input;

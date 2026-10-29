@@ -161,6 +161,10 @@ pub struct TurnExtras<'a> {
     pub steer: Option<&'a mut dyn SteerChannel>,
     /// 032：上下文管理工具宿主（None＝两工具均不声明不执行）。
     pub context: Option<crate::context_window::ContextHost<'a>>,
+    /// 031：权限确认宿主（None＝不声明不执行 request_permissions；MemoryMerge
+    /// 强制忽略——内部记忆轮无申请入口）。实际生效还需启动装配的冻结策略
+    /// （031 后端可用）与模型目录能力声明。
+    pub permissions: Option<crate::permissions::PermissionExtras<'a>>,
 }
 
 impl TurnExtras<'_> {
@@ -172,6 +176,7 @@ impl TurnExtras<'_> {
             tool_search: false,
             steer: None,
             context: None,
+            permissions: None,
         }
     }
 }
@@ -281,6 +286,7 @@ fn execute_tool(
     cancel: Option<&std::sync::atomic::AtomicBool>,
     mode: &ToolMode<'_>,
     procs: &ProcessManager,
+    mut perm: Option<&mut crate::permissions::TurnPermState<'_>>,
 ) -> (String, Option<ToolDisplay>) {
     if let ToolMode::MemoryMerge {
         root,
@@ -293,12 +299,39 @@ fn execute_tool(
             None,
         );
     }
+    // 031：出生快照——**以冻结策略为键**（审查 #1/§1.2-3：模型能力与宿主只
+    // 决定申请入口，不决定基线约束）：无宿主/未声明能力的会话同样取「基线＋
+    // 空授权」快照；构建失败＝毒丸，本次执行工具显式失败（fail-closed，不回
+    // 退 033/普通模式）。
+    let exec_snapshot: Option<std::sync::Arc<crate::sandbox::PolicySnapshot>> =
+        crate::permissions::frozen().map(|f| {
+            let grants = perm
+                .as_ref()
+                .map(|st| &st.grants)
+                .cloned()
+                .unwrap_or_default();
+            std::sync::Arc::new(match crate::permissions::build_snapshot(
+                &f.policy,
+                &grants,
+                &f.deny_ctx,
+            ) {
+                Ok(s) => s,
+                Err(e) => crate::sandbox::PolicySnapshot::poisoned(e),
+            })
+        });
     match call.name.as_str() {
         "exec_command" => match serde_json::from_str::<Value>(&call.arguments) {
             Ok(v) => match crate::exec::ExecArgs::from_value(&v) {
                 Ok(args) => {
                     let started = std::time::Instant::now();
-                    let outcome = procs.start(&args, cancel);
+                    // 031 快照 poisoned ＝显式错误（见 start_with_policy）。
+                    let extra = perm.is_some_and(|st| !st.grants.is_empty());
+                    let outcome = procs.start_with_policy(
+                        &args,
+                        cancel,
+                        exec_snapshot.as_ref(),
+                        extra,
+                    );
                     let display = ToolDisplay::Exec {
                         duration_ms: u64::try_from(started.elapsed().as_millis())
                             .unwrap_or(u64::MAX),
@@ -364,10 +397,29 @@ fn execute_tool(
             Ok(v) => {
                 // 033：沙箱模式下补丁经 bwrap 包装的本二进制 --internal-apply
                 // 子进程应用（读、判型、写全部在沙箱内完成）；普通模式进程内执行。
-                let (r, changes) = if crate::sandbox::sandbox_requested() {
-                    crate::apply_patch::apply_patch_sandboxed(&v)
-                } else {
-                    crate::apply_patch::apply_patch_with_display(&v)
+                // 031：动态策略启用时改走出生快照（基线＋当前有效授权）。
+                // 毒丸快照（生效策略不可编码）＝显式错误（安全攻防 H1 修复：
+                // 不得与「未启用 031」混淆而回退 033 固定全盘只读策略）。
+                let (r, changes) = match exec_snapshot.as_ref().map(|s| s.valid()) {
+                    Some(Some(snap)) => crate::apply_patch::apply_patch_sandboxed(&v, Some(snap)),
+                    Some(None) => {
+                        let reason = exec_snapshot
+                            .as_ref()
+                            .and_then(|s| s.poison.clone())
+                            .unwrap_or_else(|| "未知原因".into());
+                        (
+                            crate::apply_patch::ApplyPatchResult::error(
+                                format!("生效策略无法编码：{reason}（本次补丁拒绝，不回退）"),
+                                Vec::new(),
+                                false,
+                            ),
+                            Vec::new(),
+                        )
+                    }
+                    None if crate::sandbox::sandbox_requested() => {
+                        crate::apply_patch::apply_patch_sandboxed(&v, None)
+                    }
+                    None => crate::apply_patch::apply_patch_with_display(&v),
                 };
                 (
                     serde_json::to_string(&r).expect("ApplyPatchResult 可序列化"),
@@ -388,6 +440,36 @@ fn execute_tool(
         // 017：update_plan——解析参数、回传两字段结果；不执行步骤、不触文件或
         // 命令，无展示数据（恢复投影由成功结果＋原始参数重建，display 保持 None）。
         "update_plan" => (crate::plan::execute(&call.arguments), None),
+        // 031：request_permissions——声明与执行同门（§1.2-4：无 031 状态或无
+        // 宿主＝未注册工具，伪造调用按未知工具契约拒绝，不启动确认界面）。
+        name if name == crate::permissions::TOOL_NAME => match perm {
+            Some(st) => {
+                let frozen = crate::permissions::frozen()
+                    .expect("轮内权限状态存在则 031 冻结策略已装配");
+                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+                (
+                    crate::permissions::execute_request_permissions(
+                        &call.arguments,
+                        &cwd,
+                        &frozen.policy,
+                        &mut st.grants,
+                        st.host,
+                        &frozen.deny_ctx,
+                    ),
+                    None,
+                )
+            }
+            None => (
+                json!({
+                    "error": format!(
+                        "未知工具 {}，当前模式未启用权限申请（需要 031 策略与确认宿主）",
+                        call.name
+                    )
+                })
+                .to_string(),
+                None,
+            ),
+        },
         other => (
             json!({
                 "error": format!("未知工具 {other}，可用：exec_command、apply_patch、write_stdin、update_plan")
@@ -905,6 +987,48 @@ pub fn run_tool_turn_with_hosts_extras(
     on_record: &mut dyn FnMut(&[HistoryItem]),
     mode: ToolMode<'_>,
     procs: &ProcessManager,
+    input_host: Option<&mut crate::user_input::InputHost<'_>>,
+    async_host: Option<&mut crate::user_input_async::AsyncInputHost<'_>>,
+    image_input: bool,
+    user_images: Option<&crate::prompt::UserImagePayload>,
+    extras: TurnExtras<'_>,
+) -> Result<String, String> {
+    let result = run_tool_turn_body(
+        history,
+        current_input,
+        sender,
+        notify,
+        cancel,
+        on_record,
+        mode,
+        procs,
+        input_host,
+        async_host,
+        image_input,
+        user_images,
+        extras,
+    );
+    // 031 §1.7-4：统一轮出口收尾——额外权限进程（含子孙）终止并回收；收尾
+    // 失败＝Err 追加报告（不宣称已安全撤销，宿主据此拒绝开始下一轮）。基线
+    // 权限进程不受影响（016 可续接保留）。所有出口（成功/取消/模型错误/
+    // 额度耗尽/参数失败）都经此路径。
+    if let Err(failure) = procs.reap_extra_permission_sessions() {
+        return Err(format!("{failure}（本轮额外权限到期收尾失败）"));
+    }
+    result
+}
+
+/// [`run_tool_turn_with_hosts_extras`] 的原主体（私有）：全部轮出口最终回到
+/// 公开包装的统一收尾门。
+fn run_tool_turn_body(
+    history: &mut Vec<HistoryItem>,
+    current_input: &str,
+    sender: &mut dyn FnMut(&Value) -> Result<Value, String>,
+    notify: &mut dyn FnMut(TurnNotify),
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    on_record: &mut dyn FnMut(&[HistoryItem]),
+    mode: ToolMode<'_>,
+    procs: &ProcessManager,
     mut input_host: Option<&mut crate::user_input::InputHost<'_>>,
     mut async_host: Option<&mut crate::user_input_async::AsyncInputHost<'_>>,
     image_input: bool,
@@ -941,6 +1065,21 @@ pub fn run_tool_turn_with_hosts_extras(
     };
     // 032：上下文工具宿主——合并轮双层隔离（误传也不声明、不执行）。
     let mut context_host = if merge_mode { None } else { extras.context };
+    // 031：轮内权限状态——宿主经 extras 传入（调用方已核对模型能力与交互
+    // 前提），冻结策略未装配（后端不可用）时整体不生效；合并轮双层隔离。
+    let mut permission_state: Option<crate::permissions::TurnPermState<'_>> =
+        if merge_mode {
+            None
+        } else {
+            match (extras.permissions, crate::permissions::frozen()) {
+                (Some(p), Some(_)) => Some(crate::permissions::TurnPermState {
+                    grants: crate::permissions::TurnGrants::new(),
+                    host: p.host,
+                }),
+                _ => None,
+            }
+        };
+    let permissions_declared = permission_state.is_some();
     // 取消状态不跨用户轮（006：每轮开始复位）
     if let Some(c) = cancel {
         c.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -1078,6 +1217,7 @@ pub fn run_tool_turn_with_hosts_extras(
                 send_message,
                 context_query,
                 context_switch,
+                permissions_declared,
                 tool_search_definition.as_ref(),
                 mcp_definitions,
             ),
@@ -1090,6 +1230,7 @@ pub fn run_tool_turn_with_hosts_extras(
                 send_message,
                 context_query,
                 context_switch,
+                permissions_declared,
                 tool_search_definition.as_ref(),
                 mcp_definitions,
             ),
@@ -1491,10 +1632,35 @@ pub fn run_tool_turn_with_hosts_extras(
             {
                 // 019：图片能力快照决定执行分派——能力关闭（text/未知）时
                 // 返回能力错误且不读取文件；MemoryMerge 不执行任何用户工具。
+                // 031：动态策略启用时经出生快照的沙箱内部入口读取（主进程
+                // 不代读模型路径，§1.6 接入面）。
                 let outcome = if image_input {
                     let cwd =
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                    crate::view_image::execute(&call.arguments, &cwd, cancel)
+                    // 031 出生快照（审查 #1：与 execute_tool 同源——以冻结策略
+                    // 为键，无宿主同样执行基线快照）
+                    let snap = crate::permissions::frozen().map(|f| {
+                        let grants = permission_state
+                            .as_ref()
+                            .map(|st| st.grants.clone())
+                            .unwrap_or_default();
+                        crate::permissions::build_snapshot(&f.policy, &grants, &f.deny_ctx)
+                    });
+                    match snap {
+                        Some(Ok(snap)) => crate::view_image::execute_sandboxed(
+                            &call.arguments,
+                            &cwd,
+                            cancel,
+                            &snap,
+                        ),
+                        Some(Err(e)) => {
+                            let o = crate::view_image::error_outcome(&format!(
+                                "生效策略无法编码：{e}（本次读取拒绝）"
+                            ));
+                            o
+                        }
+                        None => crate::view_image::execute(&call.arguments, &cwd, cancel),
+                    }
                 } else {
                     crate::view_image::unsupported_outcome()
                 };
@@ -1667,7 +1833,8 @@ pub fn run_tool_turn_with_hosts_extras(
                 };
                 (content, None, None)
             } else {
-                let (content, display) = execute_tool(call, cancel, &mode, procs);
+                let (content, display) =
+                    execute_tool(call, cancel, &mode, procs, permission_state.as_mut());
                 (content, display, None)
             };
             notify(TurnNotify::ToolEnd {
@@ -1760,6 +1927,24 @@ pub fn run_tool_turn_with_hosts_extras(
             match applied {
                 Some(Ok(())) => {
                     switch_committed = true;
+                    // 审查 #16（§1.7-4）：成功的会话切换是轮边界出口——先终止
+                    // 并回收额外权限进程再继续（带授权进程不得进入新上下文）；
+                    // 回收失败按切换失败处理（保留原窗口语义之外再报告收尾失败）。
+                    if let Err(failure) = procs.reap_extra_permission_sessions() {
+                        history.push(HistoryItem::Text(HistoryMessage {
+                            images: None,
+                            text_elements: Vec::new(),
+                            role: HistoryRole::User,
+                            content: format!(
+                                "[宿主通知，非用户输入] 上下文切换后额外权限收尾失败：{failure}"
+                            ),
+                            user_input_event: None,
+                        }));
+                        on_record(history);
+                        notify(TurnNotify::Info(format!(
+                            "上下文切换后额外权限收尾失败：{failure}"
+                        )));
+                    }
                     notify(TurnNotify::Info(format!(
                         "上下文检查点已提交（代数 {}）：旧前缀已归档，活动上下文自交接摘要继续",
                         crate::context_window::current_context_id(history)
@@ -2031,6 +2216,7 @@ mod tests {
             None,
             &ToolMode::User,
             &ProcessManager::new(),
+            None,
         );
         assert_eq!(r.0, r#"{"ok":true,"error":null}"#);
         assert!(r.1.is_none(), "017：计划结果无展示数据（display 保持 None）");
@@ -2044,6 +2230,7 @@ mod tests {
             None,
             &ToolMode::User,
             &ProcessManager::new(),
+            None,
         );
         let v: Value = serde_json::from_str(&r.0).unwrap();
         assert_eq!(v["ok"], json!(false), "{v}");
@@ -2066,6 +2253,7 @@ mod tests {
                 expected_epoch: 0,
             },
             &ProcessManager::new(),
+            None,
         );
         let v: Value = serde_json::from_str(&r.0).unwrap();
         assert!(
@@ -2107,6 +2295,7 @@ mod tests {
             None,
             &ToolMode::User,
             &ProcessManager::new(),
+            None,
         );
         let v: Value = serde_json::from_str(&r.0).unwrap();
         assert!(
@@ -2126,6 +2315,7 @@ mod tests {
             None,
             &ToolMode::User,
             &ProcessManager::new(),
+            None,
         );
         let v: Value = serde_json::from_str(&r.0).unwrap();
         assert_eq!(
@@ -2142,6 +2332,7 @@ mod tests {
             None,
             &ToolMode::User,
             &ProcessManager::new(),
+            None,
         );
         let v: Value = serde_json::from_str(&r.0).unwrap();
         assert_eq!(
@@ -2705,5 +2896,27 @@ mod tests {
             .collect();
         assert_eq!(ids2, vec!["p1", "e2", "a3", "u4"], "续请求完整携带四条结果");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 031 P01：无权限状态（未启用 031/无宿主）时，模型伪造 request_permissions
+    /// 调用＝未知工具契约拒绝——分派层即权限边界，不启动确认界面或后端。
+    #[test]
+    fn request_permissions_without_state_is_unknown_tool() {
+        let r = execute_tool(
+            &ParsedToolCall {
+                id: "pp1".into(),
+                name: "request_permissions".into(),
+                arguments: r#"{"permissions":{"network":{"enabled":true}}}"#.into(),
+            },
+            None,
+            &ToolMode::User,
+            &ProcessManager::new(),
+            None,
+        );
+        let v: Value = serde_json::from_str(&r.0).unwrap();
+        assert!(
+            v["error"].as_str().unwrap().contains("未启用权限申请"),
+            "伪造调用应按未知工具契约拒绝：{v}"
+        );
     }
 }

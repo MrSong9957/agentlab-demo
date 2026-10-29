@@ -636,6 +636,7 @@ pub fn build_turn_request_with_async_host(
         send_message,
         false,
         false,
+        false,
         None,
         &[],
     )
@@ -655,6 +656,7 @@ pub fn build_turn_request_with_tool_search(
     send_message: bool,
     context_query: bool,
     context_switch: bool,
+    permissions: bool,
     tool_search: Option<&Value>,
     mcp_tools: &[Value],
 ) -> Value {
@@ -684,6 +686,11 @@ pub fn build_turn_request_with_tool_search(
     // 021：模型目录声明的用户轮加声明即时消息工具（每轮固定快照）
     if send_message {
         tools.push(crate::message_to_user::tool_definition());
+    }
+    // 031：权限申请工具（每用户轮固定快照；声明门控见 turn.rs 装配处——
+    // 031 后端可用＋模型能力＋专用宿主，缺一不声明）
+    if permissions {
+        tools.push(crate::permissions::tool_definition());
     }
     // 032：上下文管理工具（每用户轮固定快照；查询与切换分别独立声明）
     if context_query {

@@ -1,0 +1,41 @@
+
+===== probe: probe-08-upstream.sh @ 2026-10-28T13:40:26Z =====
+cwd: /tmp/m0-031
+host: b2f35f825d62 6.18.33.2-microsoft-standard-WSL2 x86_64 GNU/Linux
++ set -x
++ C1=d8acdf151577132d4ee1de47a4d1822ae5acb762
++ C2=d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4
++ timeout 15 curl -sS -o /tmp/m0-031/fix/gh_connect.json -w 'HTTP %{http_code}\n' https://api.github.com/rate_limit
+HTTP 200
++ echo 'connect rc=0'
+connect rc=0
++ timeout 20 curl -sS https://api.github.com/repos/openai/codex/commits/d8acdf151577132d4ee1de47a4d1822ae5acb762 -o /tmp/m0-031/fix/c1.json
++ echo 'c1 rc=0'
+c1 rc=0
++ timeout 20 curl -sS https://api.github.com/repos/openai/codex/commits/d138398cef7d49e46fe33f1d0ddbd2ca0ed16aa4 -o /tmp/m0-031/fix/c2.json
++ echo 'c2 rc=0'
+c2 rc=0
++ python3 -
+c1 (033 backend): VERIFY-FAILED ([Errno 2] No such file or directory: '/tmp/m0-031/fix/c.json')
+c2 (031 reference): VERIFY-FAILED ([Errno 2] No such file or directory: '/tmp/m0-031/fix/c.json')
++ echo 'sha-check rc=0'
+sha-check rc=0
++ timeout 20 curl -sS 'https://api.github.com/repos/openai/codex/contents/codex-rs/linux-sandbox?ref=d8acdf151577132d4ee1de47a4d1822ae5acb762' -o /tmp/m0-031/fix/ls_dir.json
++ echo 'lsdir rc=0'
+lsdir rc=0
++ python3 -
+linux-sandbox@C1 files: ['BUILD.bazel', 'Cargo.toml', 'README.md', 'build.rs', 'src', 'tests']
+LICENSE-in-dir: not-in-dir — check repo root
++ timeout 20 curl -sS 'https://api.github.com/repos/openai/codex/license?ref=d8acdf151577132d4ee1de47a4d1822ae5acb762' -o /tmp/m0-031/fix/license.json
++ echo 'license rc=0'
+license rc=0
++ python3 -
+LICENSE path: LICENSE | name: Apache License 2.0 | first lines: ['                                 Apache License', '                           Version 2.0, January 2004']
++ set +x
+PROBE-08 DONE
+----- exit=0 -----
+
+== sha-check 重跑（解析器修正：c1/c2 文件名） ==
+c1 (033 backend): exists=True sha_prefix=d8acdf151577 date=2026-10-23T12:08:11Z msg='Make sandbox mount cleanup tests tolerate file descriptor reuse (#56454)'
+c2 (031 reference): exists=True sha_prefix=d138398cef7d date=2026-10-21T12:39:12Z msg='Expand enterprise MCP authorization lifecycle test coverage (#55883)'
+sha-check-fix rc=0

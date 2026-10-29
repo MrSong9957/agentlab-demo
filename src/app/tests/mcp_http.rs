@@ -1011,6 +1011,7 @@ fn ts30_search_load_call_over_http_json() {
             tool_search: true,
             steer: None,
             context: None,
+            permissions: None,
         },
     );
     assert_eq!(reply, Ok("HTTP 完成".to_string()));
@@ -1106,6 +1107,7 @@ fn ts30_search_load_call_over_http_sse() {
             tool_search: true,
             steer: None,
             context: None,
+            permissions: None,
         },
     );
     assert_eq!(reply, Ok("SSE 完成".to_string()));

@@ -1,0 +1,53 @@
+
+===== probe: probe-03-net.sh @ 2026-10-28T13:24:04Z =====
+cwd: /tmp/m0-031
+host: b2f35f825d62 6.18.33.2-microsoft-standard-WSL2 x86_64 GNU/Linux
++ set -x
++ SERVER_PID=404118
++ python3 /tmp/m0-031/bin/loopback_server.py
++ sleep 0.5
++ cat /tmp/m0-031/fix/net_server.out
+LISTEN 127.0.0.1:24613
++ echo '== N1 宿主命名空间正例 =='
+== N1 宿主命名空间正例 ==
++ timeout 3 bash -c 'echo probe-031-m0 > /dev/tcp/127.0.0.1/24613'
++ echo 'host-ns rc=0'
+host-ns rc=0
++ sleep 0.3
++ cat /tmp/m0-031/fix/net_server.out
+LISTEN 127.0.0.1:24613
+ACCEPTED from ('127.0.0.1', 48752) data=b'probe-031-m0\n'
++ echo '== N2 033 现状布局（无 --unshare-net）沙箱内可达 =='
+== N2 033 现状布局（无 --unshare-net）沙箱内可达 ==
++ SERVER_PID2=404128
++ python3 /tmp/m0-031/bin/loopback_server.py
++ sleep 0.5
++ bwrap --as-pid-1 --new-session --die-with-parent --ro-bind / / --dev /dev --unshare-user --unshare-pid --unshare-ipc --proc /proc --cap-drop ALL -- /bin/bash -c 'echo probe-031-m0 > /dev/tcp/127.0.0.1/24613 && echo INNER-NET-OK'
+INNER-NET-OK
++ echo 'bwrap-no-unshare-net rc=0'
+bwrap-no-unshare-net rc=0
++ sleep 0.3
++ cat /tmp/m0-031/fix/net_server2.out
+LISTEN 127.0.0.1:24613
+ACCEPTED from ('127.0.0.1', 48766) data=b'probe-031-m0\n'
++ echo '== N3 --unshare-net 沙箱内不可达（031 待验证能力） =='
+== N3 --unshare-net 沙箱内不可达（031 待验证能力） ==
++ bwrap --as-pid-1 --new-session --die-with-parent --ro-bind / / --dev /dev --unshare-user --unshare-pid --unshare-ipc --unshare-net --proc /proc --cap-drop ALL -- /bin/bash -c '
+    echo "netdev-inside: $(ls /sys/class/net | tr "\n" " ")"
+    echo probe-031-m0 > /dev/tcp/127.0.0.1/24613 && echo INNER-NET-LEAK || echo INNER-NET-BLOCKED
+  '
+netdev-inside: eth0 lo 
+/bin/bash: connect: Connection refused
+/bin/bash: line 3: /dev/tcp/127.0.0.1/24613: Connection refused
+INNER-NET-BLOCKED
++ echo 'bwrap-unshare-net rc=0'
+bwrap-unshare-net rc=0
++ sleep 0.3
++ cat /tmp/m0-031/fix/net_server2.out
+LISTEN 127.0.0.1:24613
+ACCEPTED from ('127.0.0.1', 48766) data=b'probe-031-m0\n'
++ kill 404118 404128
++ wait
++ set +x
+PROBE-03 DONE
+----- exit=0 -----

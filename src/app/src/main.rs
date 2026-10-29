@@ -62,8 +62,25 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("--internal-apply") {
         std::process::exit(terminal_chat::apply_patch::run_internal_apply());
     }
+    // 031：受控内部图片准备入口（仅经 031 沙箱包装的本二进制调用）
+    if std::env::args().nth(1).as_deref() == Some("--internal-view-image") {
+        std::process::exit(terminal_chat::view_image::run_internal_view_image());
+    }
     // .env 是环境变量的可选来源：启动时载入，已存在的变量不覆盖
     catalog::load_dotenv_from(std::path::Path::new(".env"));
+    // 031：可信策略装配（§1.2：CLI/TUI 分流前统一加载并冻结；两宿主取得同
+    // 一快照，dotenv 不能重配信任根）。设置 TCHAT_PERMISSION_POLICY 而装配
+    // 失败（缺开关/策略不可信/后端不可用）＝明确退出——不回退普通 shell 或
+    // 033 固定策略。内部子进程模式在上方已提前退出，不经此路径。
+    match terminal_chat::permissions::install_from_env(
+        &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")),
+    ) {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("错误：{e}");
+            std::process::exit(1);
+        }
+    }
     // 020 A04：-i/--image 启动图片（TUI 存宿主待就绪提交；行式随首条输入）
     let startup_images = match parse_image_args(std::env::args().skip(1)) {
         Ok(v) => v,
@@ -281,6 +298,60 @@ fn prompt_y_n(rl: &mut DefaultEditor, question: &str) -> bool {
     match rl.readline(question) {
         Ok(line) => matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
         Err(_) => false,
+    }
+}
+
+/// 031：行式 CLI 权限确认宿主（§1.5）。唯一终端读取者仍是主线程；默认拒绝
+/// ——空回车/非 y 一律 Deny；Ctrl+C＝取消当前轮（既有 001/018 键位语义）并
+/// Deny 本次申请（不伪造允许）；EOF＝Err（error 结果）。展示面：会话 cwd、
+/// 规范化路径与 read/write、网络实际含义、永久拒绝仍有效、仅当前用户轮；
+/// 模型 reason 单独标注为未信任说明并经显示过滤。
+/// `rl` 经 RefCell 与问询宿主共享（轮内单线程；两个宿主不并发读取）。
+struct CliPermissionHost<'a> {
+    rl: &'a std::cell::RefCell<&'a mut DefaultEditor>,
+}
+
+impl terminal_chat::permissions::PermissionHost for CliPermissionHost<'_> {
+    fn confirm(
+        &mut self,
+        view: &terminal_chat::permissions::PermissionRequestView,
+    ) -> Result<terminal_chat::permissions::PermissionDecision, String> {
+        say("┌── 权限申请（仅当前用户轮）");
+        say(&format!("│ 会话目录：{}", view.cwd.display()));
+        for (path, access) in &view.entries {
+            let label = match access {
+                terminal_chat::permissions::Access::Write => "写入（含读取与目录内变更）",
+                terminal_chat::permissions::Access::Read => "只读",
+            };
+            say(&format!("│ {label}：{}", path.display()));
+        }
+        if view.network {
+            say("│ 网络：本轮本地命令的广泛 IP 网络访问（可含外网、宿主/局域网与监听端口）");
+        }
+        if let Some(reason) = &view.reason {
+            say(&format!(
+                "│ 模型说明（未信任内容）：{}",
+                terminal_chat::display::sanitize_for_terminal(reason)
+            ));
+        }
+        say("│ 永久拒绝路径与管理员上限仍然有效；拒绝不影响已有授权。");
+        say("└── 默认拒绝");
+        let mut rl = self.rl.borrow_mut();
+        match rl.readline("允许本次申请？[y/N] ") {
+            Ok(line) => {
+                if matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                    Ok(terminal_chat::permissions::PermissionDecision::Allow)
+                } else {
+                    Ok(terminal_chat::permissions::PermissionDecision::Deny)
+                }
+            }
+            Err(ReadlineError::Interrupted) => {
+                TOOL_CANCEL.store(true, Ordering::SeqCst);
+                Ok(terminal_chat::permissions::PermissionDecision::Deny)
+            }
+            Err(ReadlineError::Eof) => Err("终端已关闭（EOF）".to_string()),
+            Err(_) => Ok(terminal_chat::permissions::PermissionDecision::Deny),
+        }
     }
 }
 
@@ -847,13 +918,38 @@ fn cmd_chat(
                     let mut checkpoint_sink = session::SessionCellSink(&autosave_cell);
                     // 015：用户轮上下文来源（每轮解析：全局规则目录、cwd、SHELL、时钟）
                     let context_sources = terminal_chat::context::ContextSources::from_env();
+                    // 轮内行编辑器共享单元：问询宿主与 031 权限宿主都读终端，
+                    // 单线程顺序使用（两宿主不并发）。
+                    let rl_cell = std::cell::RefCell::new(rl);
                     let mut input_host = |_: &turn::ParsedToolCall,
                                           questions: &[terminal_chat::user_input::Question]| {
-                        let result = ask_cli(rl, questions);
+                        let result = {
+                            let mut rl_b = rl_cell.borrow_mut();
+                            ask_cli(&mut rl_b, questions)
+                        };
                         if matches!(result, Err(terminal_chat::user_input::InputError::HostExited)) {
                             exit_host = true;
                         }
                         result
+                    };
+                    // 审查 #2（§1.7-7）：收尾失败门——上一轮额外权限进程未证实终止时
+                    // 拒绝开始本轮（重试一次 reap，仍失败则本轮拒绝且不调用模型）。
+                    if let Some(gate) = procs.extra_reap_gate() {
+                        if procs.reap_extra_permission_sessions().is_err() {
+                            say(&format!("错误：{gate}；本轮拒绝开始（额外权限进程仍在运行）"));
+                            unsafe { libc::signal(libc::SIGINT, libc::SIG_DFL); }
+                            return exit_host;
+                        }
+                    }
+                    // 031：行式 CLI 权限宿主——交互终端＋031 冻结策略＋模型目录
+                    // 能力三条件齐备才装配（§1.2-4；非交互/内部轮不声明不执行）。
+                    let mut perm_host = if interactive
+                        && terminal_chat::permissions::frozen().is_some()
+                        && catalog::supports_request_permissions(&model)
+                    {
+                        Some(CliPermissionHost { rl: &rl_cell })
+                    } else {
+                        None
                     };
                     let outcome = turn::run_user_turn_with_context_and_caps(
                         history,
@@ -904,6 +1000,12 @@ fn cmd_chat(
                                 switch_declared: catalog::supports_new_context(&model),
                                 checkpoints: Some(&mut checkpoint_sink),
                             }),
+                            // 031：权限确认宿主（perm_host 为 None 时不声明不执行）
+                            permissions: perm_host
+                                .as_mut()
+                                .map(|h| terminal_chat::permissions::PermissionExtras {
+                                    host: h as &mut dyn terminal_chat::permissions::PermissionHost,
+                                }),
                         },
                     );
                     unsafe {

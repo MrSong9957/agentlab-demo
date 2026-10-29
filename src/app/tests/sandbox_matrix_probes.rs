@@ -109,7 +109,7 @@ fn exec_probe(spec: &Value) -> Value {
 fn apply_patch_probe(spec: &Value) -> Value {
     let exe = Path::new(env!("CARGO_BIN_EXE_terminal-chat"));
     let (result, changes) =
-        terminal_chat::apply_patch::apply_patch_sandboxed_with_exe(exe, &spec["input"]);
+        terminal_chat::apply_patch::apply_patch_sandboxed_with_exe(exe, &spec["input"], None);
     json!({"result": result, "changes": changes.len()})
 }
 
