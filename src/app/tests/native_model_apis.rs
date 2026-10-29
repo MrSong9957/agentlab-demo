@@ -2284,3 +2284,251 @@ fn tui_native_image_request_carries_anthropic_image_block() {
     let (output, code) = tui.finish();
     assert_eq!(code, Some(0), "{output}");
 }
+
+// ---------- 030 M4：搜索模式声明经五协议真实出站转换 ----------
+
+/// S11（请求侧）：tool_search＋固定资源工具＋已加载动态定义进入各协议
+/// 实际序列化请求（本地 HTTP mock 捕获线上字节）；普通函数格式各自正确；
+/// 不注入任何协议原生搜索类型（无 tool_search_call / custom search item）。
+#[test]
+fn ts30_search_mode_tools_convert_across_five_protocols() {
+    let protocols = [
+        "openai-chat",
+        "openai-responses",
+        "anthropic-messages",
+        "google-interactions",
+        "google-generate-content",
+    ];
+    for protocol in protocols {
+        let overview = r#"{"sources":[{"server_id":"fx","tool_count":1}]}"#;
+        let ts_def = terminal_chat::tool_search::tool_definition(overview);
+        let resource_def =
+            json!({"type": "function", "function": {"name": "list_mcp_resources"}});
+        let loaded_def = json!({"type": "function", "function": {
+            "name": "mcp__fx__send_mail",
+            "description": "Send an email message to a recipient",
+            "parameters": {"type": "object",
+                           "properties": {"to": {"type": "string"}},
+                           "required": ["to"]}}});
+        let history = vec![terminal_chat::prompt::HistoryItem::Text(
+            terminal_chat::prompt::HistoryMessage {
+                role: terminal_chat::prompt::HistoryRole::User,
+                content: "发邮件".into(),
+                user_input_event: None,
+                images: None,
+                text_elements: Vec::new(),
+            },
+        )];
+        let mut body = terminal_chat::prompt::build_turn_request_with_tool_search(
+            &history, None, false, false, false, false, false, false,
+            Some(&ts_def), &[resource_def, loaded_def],
+        );
+        body["_history"] = serde_json::to_value(&history).unwrap();
+
+        let service = spawn_mock(vec![MockResp::json(
+            200,
+            final_response(protocol, "fin").to_string(),
+        )]);
+        let conn = catalog::EffectiveConnection {
+            base_url: service.url.clone(),
+            protocol: protocol.into(),
+            key_ref: None,
+            request_params: Default::default(),
+        };
+        let model = catalog::ModelInfo {
+            id: "fixture-model".into(),
+            max_output: Some(256),
+            ..Default::default()
+        };
+        let agent = api::agent();
+        api::chat_with_body(&conn, "fixture-key", &model, &body, &agent)
+            .unwrap_or_else(|e| panic!("{protocol} 发送失败：{e}"));
+
+        let requests = service.requests();
+        assert_eq!(requests.len(), 1, "{protocol}：恰一次请求");
+        let wire: Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert!(
+            !requests[0].body.contains("tool_search_call"),
+            "{protocol}：不得注入协议原生搜索类型"
+        );
+        // 各协议普通函数格式中两个关键名字均可见，且参数 Schema 保留
+        let flat_names = |wire: &Value| -> Vec<String> {
+            match protocol {
+                "openai-chat" => wire["tools"].as_array().unwrap().iter()
+                    .map(|t| t["function"]["name"].as_str().unwrap().to_string()).collect(),
+                "openai-responses" | "google-interactions" => wire["tools"].as_array().unwrap().iter()
+                    .map(|t| t["name"].as_str().unwrap().to_string()).collect(),
+                "anthropic-messages" => wire["tools"].as_array().unwrap().iter()
+                    .map(|t| t["name"].as_str().unwrap().to_string()).collect(),
+                _ => wire["tools"][0]["functionDeclarations"].as_array().unwrap().iter()
+                    .map(|t| t["name"].as_str().unwrap().to_string()).collect(),
+            }
+        };
+        let names = flat_names(&wire);
+        assert!(names.contains(&"tool_search".to_string()), "{protocol}：{names:?}");
+        assert!(names.contains(&"mcp__fx__send_mail".to_string()), "{protocol}：{names:?}");
+        assert!(names.contains(&"list_mcp_resources".to_string()), "{protocol}：{names:?}");
+        // 已加载定义的参数（required 原样保留）
+        let body_text = &requests[0].body;
+        assert!(body_text.contains("\"to\""), "{protocol}：参数 Schema 须保留");
+        assert!(body_text.contains("\"required\""), "{protocol}：required 须保留");
+    }
+}
+
+/// S17：96 工具单服务器夹具、仅需 2 工具的任务——开启搜索后首次 tools
+/// 数组字节与**使用两项工具后**的最终完整请求字节（含新增搜索历史）均须
+/// 小于关闭对照；五协议分别计量（`measure_request_body_bytes`＝实际出站
+/// 字节口径）。字节数不当作 token/费用/缓存收益。
+#[test]
+fn ts30_context_effect_bytes_search_vs_full_declaration() {
+    use terminal_chat::prompt::{HistoryItem, HistoryMessage, HistoryRole, ToolCallRecord};
+    use terminal_chat::tool_search::{
+        build_catalog, catalog_entry_from_parts, success_result, tool_definition,
+    };
+
+    // 96 工具：仅 2 项含 email/weather 用途词（本任务要用的两工具），
+    // 其余为互不重叠的通用描述——查询一次恰命中 2（96→0→2 冻结口径）。
+    let entries: Vec<_> = (0..96)
+        .map(|i| {
+            let desc = if i == 0 {
+                "Send an email message to a recipient"
+            } else if i == 80 {
+                "Fetch the weather forecast for a city"
+            } else {
+                "generic utility task for the fixture"
+            };
+            catalog_entry_from_parts(
+                &format!("mcp__fx__tool_{i:02}"),
+                "fx",
+                &format!("tool_{i:02}"),
+                Some(desc),
+                &["param_alpha", "param_beta"],
+                None,
+            )
+            .expect("夹具条目")
+        })
+        .collect();
+    let all_defs: Vec<Value> = entries.iter().map(|e| e.definition()).collect();
+
+    // 任务历史（两工具各一次调用＋结果）
+    let mut history = vec![HistoryItem::Text(HistoryMessage {
+        role: HistoryRole::User,
+        content: "给 a@b.c 发邮件并查 c 城天气".into(),
+        user_input_event: None,
+        images: None,
+        text_elements: Vec::new(),
+    })];
+    let push_call = |history: &mut Vec<HistoryItem>, id: &str, name: &str, args: &str| {
+        history.push(HistoryItem::AssistantToolCalls {
+            tool_calls: vec![ToolCallRecord {
+                id: id.into(),
+                name: name.into(),
+                arguments: args.into(),
+            }],
+            content: None,
+        });
+    };
+    let push_result = |history: &mut Vec<HistoryItem>, id: &str, content: &str| {
+        history.push(HistoryItem::ToolResult {
+            tool_call_id: id.into(),
+            content: content.into(),
+            display: None,
+            image: None,
+        });
+    };
+
+    // 关闭模式：请求 1（声明 96）→ 调 tool_00 → 结果 → 调 tool_80 → 结果
+    let mut off_history = history.clone();
+    push_call(&mut off_history, "o1", "mcp__fx__tool_00", r#"{"param_alpha":"a@b.c"}"#);
+    push_result(&mut off_history, "o1", r#"{"ok":true,"sent":true}"#);
+    push_call(&mut off_history, "o2", "mcp__fx__tool_80", r#"{"param_alpha":"c"}"#);
+    push_result(&mut off_history, "o2", r#"{"ok":true,"temp":"22C"}"#);
+
+    // 开启模式：请求 1（仅 tool_search）→ 搜索（命中 2）→ 调两工具 → 结果
+    let catalog = build_catalog(entries.clone());
+    let both: Vec<_> = catalog.search("email weather", 8);
+    assert_eq!(both.len(), 2, "一次搜索恰命中本任务两项工具");
+    let search_result = success_result(&both).unwrap();
+    let ts_def = tool_definition(&catalog.sources_json());
+    let mut on_history = history;
+    push_call(
+        &mut on_history,
+        "s1",
+        "tool_search",
+        r#"{"query":"email weather","limit":8}"#,
+    );
+    push_result(&mut on_history, "s1", &search_result.to_string());
+    push_call(&mut on_history, "s2", "mcp__fx__tool_00", r#"{"param_alpha":"a@b.c"}"#);
+    push_result(&mut on_history, "s2", r#"{"ok":true,"sent":true}"#);
+    push_call(&mut on_history, "s3", "mcp__fx__tool_80", r#"{"param_alpha":"c"}"#);
+    push_result(&mut on_history, "s3", r#"{"ok":true,"temp":"22C"}"#);
+
+    let loaded_defs: Vec<Value> = both.iter().map(|e| e.definition()).collect();
+
+    // 首次请求 tools 数组字节数（同一用户消息；关闭＝内置＋96 动态，
+    // 开启＝内置＋tool_search——真实组装入口）
+    let first_history = vec![HistoryItem::Text(HistoryMessage {
+        role: HistoryRole::User,
+        content: "给 a@b.c 发邮件并查 c 城天气".into(),
+        user_input_event: None,
+        images: None,
+        text_elements: Vec::new(),
+    })];
+    let first_off_body = terminal_chat::prompt::build_turn_request_with_tool_search(
+        &first_history, None, false, false, false, false, false, false, None, &all_defs,
+    );
+    let first_on_body = terminal_chat::prompt::build_turn_request_with_tool_search(
+        &first_history, None, false, false, false, false, false, false,
+        Some(&ts_def), &[],
+    );
+    let first_off_tools = serde_json::to_string(&first_off_body["tools"]).unwrap().len();
+    let first_on_tools = serde_json::to_string(&first_on_body["tools"]).unwrap().len();
+    println!("TS30-S17 first_tools off={first_off_tools}B on={first_on_tools}B");
+    assert!(
+        first_on_tools < first_off_tools,
+        "首次 tools 数组：开启 {first_on_tools}B 须小于关闭 {first_off_tools}B"
+    );
+
+    // 最终完整请求（关闭：96 定义；开启：tool_search＋2 定义＋搜索历史）
+    for protocol in [
+        "openai-chat",
+        "openai-responses",
+        "anthropic-messages",
+        "google-interactions",
+        "google-generate-content",
+    ] {
+        let conn = catalog::EffectiveConnection {
+            base_url: "http://127.0.0.1:9".into(),
+            protocol: protocol.into(),
+            key_ref: None,
+            request_params: Default::default(),
+        };
+        let model = catalog::ModelInfo {
+            id: "fixture-model".into(),
+            max_output: Some(4096),
+            ..Default::default()
+        };
+        let mut off_body =
+            terminal_chat::prompt::build_turn_request_with_tool_search(&off_history, None, false, false, false, false, false, false, None, &all_defs);
+        off_body["_history"] = serde_json::to_value(&off_history).unwrap();
+        let mut on_body =
+            terminal_chat::prompt::build_turn_request_with_tool_search(
+                &on_history, None, false, false, false, false, false, false,
+                Some(&ts_def), &loaded_defs,
+            );
+        on_body["_history"] = serde_json::to_value(&on_history).unwrap();
+        let off_bytes = terminal_chat::api::measure_request_body_bytes(
+            &conn, "k", &model, &off_body,
+        )
+        .unwrap();
+        let on_bytes = terminal_chat::api::measure_request_body_bytes(
+            &conn, "k", &model, &on_body,
+        )
+        .unwrap();
+        println!("TS30-S17 final_request {protocol} off={off_bytes}B on={on_bytes}B");
+        assert!(
+            on_bytes < off_bytes,
+            "{protocol}：最终完整请求（含搜索历史）开启 {on_bytes}B 须小于关闭 {off_bytes}B"
+        );
+    }
+}

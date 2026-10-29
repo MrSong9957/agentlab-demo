@@ -60,6 +60,16 @@ impl McpSnapshot {
         &self.definitions
     }
 
+    /// 030：动态工具条目（按 (server_id, raw_tool) 稳定排序；只读）。
+    pub fn dynamic_entries(&self) -> &[ToolEntry] {
+        &self.entries
+    }
+
+    /// 030：固定资源工具定义（追加在动态定义之后的后缀切片）。
+    pub fn resource_definitions(&self) -> &[Value] {
+        &self.definitions[self.entries.len()..]
+    }
+
     /// 本轮是否存在可用资源服务器（固定资源工具的声明与执行条件）。
     pub fn has_resources(&self) -> bool {
         !self.resources.is_empty()
@@ -1021,5 +1031,26 @@ use super::naming::NameAssignError;
 impl From<NameAssignError> for String {
     fn from(e: NameAssignError) -> String {
         e.to_string()
+    }
+}
+
+#[cfg(test)]
+mod ts30_access_tests {
+    use super::*;
+
+    /// 030：动态/资源定义拆分切片（definitions 前缀＝动态，后缀＝资源）。
+    /// 真实对应关系（前缀与 entries 逐条同构）由 publish_snapshot 结构保证，
+    /// 集成侧在 mcp_turn/e2e 以真实快照覆盖。
+    #[test]
+    fn definition_split_slices() {
+        let dynamic_only = McpSnapshot {
+            entries: Vec::new(),
+            definitions: vec![serde_json::json!({"type": "function", "function": {"name": "mcp__a__x"}})],
+            resources: Vec::new(),
+            manager: None,
+        };
+        assert!(dynamic_only.dynamic_entries().is_empty());
+        assert_eq!(dynamic_only.resource_definitions().len(), 1);
+        assert_eq!(dynamic_only.definitions().len(), 1); // 全量入口保留
     }
 }

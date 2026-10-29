@@ -627,7 +627,7 @@ pub fn build_turn_request_with_async_host(
     image_input: bool,
     send_message: bool,
 ) -> Value {
-    build_turn_request_with_mcp(
+    build_turn_request_with_tool_search(
         history,
         memory_context,
         has_input_host,
@@ -636,16 +636,17 @@ pub fn build_turn_request_with_async_host(
         send_message,
         false,
         false,
+        None,
         &[],
     )
 }
 
-/// 022：MCP 工具定义追加在现有原生（含条件）工具之后（§2.3：按原始身份
-/// 稳定排序，由快照保证）；空切片时请求与既有入口逐字节一致。
-/// 工具总数上限（128）由 turn 层在组装后、发送前按 tools 数组长度检查。
-/// 032：`context_query`/`context_switch`＝本轮声明快照（experimental_supported_tools
-/// 精确匹配＋宿主可用性；声明与执行共用同一快照）。
-pub fn build_turn_request_with_mcp(
+
+/// 030：搜索模式组装——`tool_search` 声明（含来源概览数据块）插在条件
+/// 原生工具之后、MCP 工具之前；`mcp_tools` 由调用方按模式拆分（开启＝
+/// 固定资源工具＋累计已加载动态定义；关闭＝全量定义，且传 `None` 时与
+/// 既有入口逐字节一致）。S01：无可搜索动态工具时调用方不传 tool_search。
+pub fn build_turn_request_with_tool_search(
     history: &[HistoryItem],
     memory_context: Option<&str>,
     has_input_host: bool,
@@ -654,6 +655,7 @@ pub fn build_turn_request_with_mcp(
     send_message: bool,
     context_query: bool,
     context_switch: bool,
+    tool_search: Option<&Value>,
     mcp_tools: &[Value],
 ) -> Value {
     let mut system = sent_instructions();
@@ -689,6 +691,10 @@ pub fn build_turn_request_with_mcp(
     }
     if context_switch {
         tools.push(crate::context_window::switch_tool_definition());
+    }
+    // 030：搜索工具声明（每用户轮固定快照；描述内嵌来源概览）
+    if let Some(definition) = tool_search {
+        tools.push(definition.clone());
     }
     // 022：本轮 MCP 快照的定义（已排序；声明与执行共用同一快照）
     tools.extend(mcp_tools.iter().cloned());

@@ -927,3 +927,196 @@ fn a18_http_inflight_close_bounded_late_result_discarded() {
     assert_eq!(inits, 1, "无重初始化");
     ctx.close();
 }
+
+// ---------- 030 S12：HTTP JSON 传输上的搜索→加载→真实调用 ----------
+
+/// S12（HTTP JSON 腿）：真实 HTTP MCP 服务＋真实 turn——搜索本地执行零
+/// 业务请求，加载后下一请求携带定义，业务调用恰一次（SSE 腿见
+/// ts30_search_load_call_over_http_sse 同构用例）。
+#[test]
+fn ts30_search_load_call_over_http_json() {
+    use terminal_chat::context::ContextSources;
+    use terminal_chat::prompt::{HistoryItem, HistoryRole};
+    use terminal_chat::proc_session::ProcessManager;
+    use terminal_chat::turn::{run_user_turn_with_context_and_caps, ToolMode, TurnExtras, TurnNotify};
+
+    let calls_seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = calls_seen.clone();
+    let server = start_shared(Arc::new(move |_index, req| {
+        let method = method_of(&req.body);
+        match req.method.as_str() {
+            "POST" if method == "initialize" => json_response(
+                200,
+                &init_ok(request_id_of(&req.body)),
+                &[("MCP-Session-Id", "session-ts30")],
+            ),
+            "POST" if method.starts_with("notifications/") => json_response(202, "", &[]),
+            "POST" if method == "tools/list" => {
+                json_response(200, &list_ok(request_id_of(&req.body)), &[])
+            }
+            "POST" if method == "tools/call" => {
+                recorder.lock().unwrap().push(method_of(&req.body));
+                json_response(
+                    200,
+                    &call_ok(request_id_of(&req.body), "called:search"),
+                    &[],
+                )
+            }
+            _ => json_response(404, "{}", &[]),
+        }
+    }));
+    let ctx = setup_http("", server);
+    assert_eq!(ctx.snapshot.len(), 1, "HTTP 目录恰一项动态工具");
+
+    let mut history: Vec<HistoryItem> = Vec::new();
+    let mgr = ProcessManager::new();
+    let sources = ContextSources::from_env();
+    let mut bodies: Vec<serde_json::Value> = Vec::new();
+    let mut responses = [
+        serde_json::json!({"choices":[{"message":{"role":"assistant","content":null,
+            "tool_calls":[{"id":"h1","type":"function","function":{
+                "name":"tool_search","arguments":r#"{"query":"search"}"#}}]},
+            "finish_reason":"tool_calls"}]})
+            .to_string(),
+        serde_json::json!({"choices":[{"message":{"role":"assistant","content":null,
+            "tool_calls":[{"id":"h2","type":"function","function":{
+                "name":"mcp__web__search","arguments":r#"{"q":"x"}"#}}]},
+            "finish_reason":"tool_calls"}]})
+            .to_string(),
+        serde_json::json!({"choices":[{"message":{"role":"assistant","content":"HTTP 完成"},
+            "finish_reason":"stop"}]}).to_string(),
+    ]
+    .into_iter();
+    let mut sender = |body: &serde_json::Value| -> Result<serde_json::Value, String> {
+        bodies.push(body.clone());
+        Ok(serde_json::from_str(&responses.next().expect("预设响应")).unwrap())
+    };
+    let reply = run_user_turn_with_context_and_caps(
+        &mut history,
+        "HTTP 搜索任务",
+        &mut sender,
+        &mut |_| {},
+        None,
+        &mut |_| {},
+        ToolMode::User,
+        &sources,
+        &mgr,
+        None,
+        None,
+        false,
+        None,
+        TurnExtras {
+            mcp: Some(&ctx.snapshot),
+            send_message: false,
+            tool_search: true,
+            steer: None,
+            context: None,
+        },
+    );
+    assert_eq!(reply, Ok("HTTP 完成".to_string()));
+    let names0: Vec<&str> = bodies[0]["tools"]
+        .as_array().unwrap().iter()
+        .map(|t| t["function"]["name"].as_str().unwrap()).collect();
+    assert!(!names0.contains(&"mcp__web__search"), "HTTP 动态定义同样延迟");
+    assert!(names0.contains(&"tool_search"));
+    let names1: Vec<&str> = bodies[1]["tools"]
+        .as_array().unwrap().iter()
+        .map(|t| t["function"]["name"].as_str().unwrap()).collect();
+    assert!(names1.contains(&"mcp__web__search"), "加载后下一请求携带定义");
+    assert_eq!(*calls_seen.lock().unwrap(), vec!["tools/call"], "业务调用恰一次（搜索零业务请求）");
+    ctx.close();
+}
+
+/// S12（HTTP SSE 腿）：SSE 事件形态的 HTTP MCP 服务上完成搜索→加载→
+/// 真实调用（审查 #8：此前注释把该腿委托给不存在的覆盖记录）。
+#[test]
+fn ts30_search_load_call_over_http_sse() {
+    use terminal_chat::context::ContextSources;
+    use terminal_chat::prompt::{HistoryItem, HistoryMessage, HistoryRole};
+    use terminal_chat::proc_session::ProcessManager;
+    use terminal_chat::turn::{run_user_turn_with_context_and_caps, ToolMode, TurnExtras};
+
+    let calls_seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = calls_seen.clone();
+    let server = start_shared(Arc::new(move |_index, req| {
+        let method = method_of(&req.body);
+        match req.method.as_str() {
+            "POST" if method == "initialize" => json_response(
+                200,
+                &init_ok(request_id_of(&req.body)),
+                &[("MCP-Session-Id", "session-ts30sse")],
+            ),
+            "POST" if method.starts_with("notifications/") => json_response(202, "", &[]),
+            "POST" if method == "tools/list" => {
+                json_response(200, &list_ok(request_id_of(&req.body)), &[])
+            }
+            "POST" if method == "tools/call" => {
+                recorder.lock().unwrap().push(method_of(&req.body));
+                sse_response(
+                    &[call_ok(request_id_of(&req.body), "called:search")],
+                    Some("session-ts30sse"),
+                )
+            }
+            _ => json_response(404, "{}", &[]),
+        }
+    }));
+    let ctx = setup_http("", server);
+    assert_eq!(ctx.snapshot.len(), 1);
+
+    let mut history: Vec<HistoryItem> = Vec::new();
+    let mgr = ProcessManager::new();
+    let sources = ContextSources::from_env();
+    let mut bodies: Vec<serde_json::Value> = Vec::new();
+    let mut responses = [
+        serde_json::json!({"choices":[{"message":{"role":"assistant","content":null,
+            "tool_calls":[{"id":"s1","type":"function","function":{
+                "name":"tool_search","arguments":r#"{"query":"search"}"#}}]},
+            "finish_reason":"tool_calls"}]})
+            .to_string(),
+        serde_json::json!({"choices":[{"message":{"role":"assistant","content":null,
+            "tool_calls":[{"id":"s2","type":"function","function":{
+                "name":"mcp__web__search","arguments":r#"{"q":"x"}"#}}]},
+            "finish_reason":"tool_calls"}]})
+            .to_string(),
+        serde_json::json!({"choices":[{"message":{"role":"assistant","content":"SSE 完成"},
+            "finish_reason":"stop"}]}).to_string(),
+    ]
+    .into_iter();
+    let mut sender = |body: &serde_json::Value| -> Result<serde_json::Value, String> {
+        bodies.push(body.clone());
+        Ok(serde_json::from_str(&responses.next().expect("预设响应")).unwrap())
+    };
+    let reply = run_user_turn_with_context_and_caps(
+        &mut history,
+        "SSE 搜索任务",
+        &mut sender,
+        &mut |_| {},
+        None,
+        &mut |_| {},
+        ToolMode::User,
+        &sources,
+        &mgr,
+        None,
+        None,
+        false,
+        None,
+        TurnExtras {
+            mcp: Some(&ctx.snapshot),
+            send_message: false,
+            tool_search: true,
+            steer: None,
+            context: None,
+        },
+    );
+    assert_eq!(reply, Ok("SSE 完成".to_string()));
+    let names1: Vec<&str> = bodies[0]["tools"]
+        .as_array().unwrap().iter()
+        .map(|t| t["function"]["name"].as_str().unwrap()).collect();
+    assert!(!names1.contains(&"mcp__web__search"), "SSE 腿同样延迟动态定义");
+    let names2: Vec<&str> = bodies[1]["tools"]
+        .as_array().unwrap().iter()
+        .map(|t| t["function"]["name"].as_str().unwrap()).collect();
+    assert!(names2.contains(&"mcp__web__search"), "加载后下一请求携带定义");
+    assert_eq!(*calls_seen.lock().unwrap(), vec!["tools/call"], "业务调用恰一次");
+    ctx.close();
+}

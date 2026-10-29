@@ -65,6 +65,7 @@ fn run_resource_turn(
         false,
         None,
         TurnExtras {
+            tool_search: false,
             mcp: Some(&snapshot),
             send_message: false,
             steer: None, context: None
@@ -467,6 +468,7 @@ fn m2_memory_merge_turn_never_executes_resource_tools() {
         false,
         None,
         TurnExtras {
+            tool_search: false,
             mcp: Some(&snapshot),
             send_message: false,
             steer: None, context: None
@@ -891,6 +893,7 @@ fn m4_cancel_before_dispatch_skips_request() {
         false,
         None,
         TurnExtras {
+            tool_search: false,
             mcp: Some(&snapshot),
             send_message: false,
             steer: None, context: None
@@ -973,6 +976,7 @@ fn m4_cancel_during_aggregate_fails_wholesale_and_keeps_batch_pairing() {
         false,
         None,
         TurnExtras {
+            tool_search: false,
             mcp: Some(&snapshot),
             send_message: false,
             steer: None, context: None
@@ -1326,6 +1330,7 @@ fn m6_cancel_outranks_partial_failure_with_collected_data() {
         false,
         None,
         TurnExtras {
+            tool_search: false,
             mcp: Some(&snapshot),
             send_message: false,
             steer: None, context: None

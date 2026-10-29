@@ -439,7 +439,12 @@ impl TuiHost {
                     turn::TurnNotify::ToolEnd { id, name, arguments, result, display, cancelled } => {
                         // 032：上下文工具结果——估算/未知与排定/拒绝以提示行呈现
                         //（已应用边界由提交回执的 Info 通知另行呈现）。
-                        if name == crate::context_window::QUERY_TOOL_NAME {
+                        // 030：搜索结果以提示行呈现（query、命中数与模型工具名）
+                        if name == crate::tool_search::TOOL_NAME {
+                            Some(DriverEvent::Info(crate::display::sanitize_for_terminal(
+                                &crate::tool_search::search_display_line(&arguments, &result),
+                            )))
+                        } else if name == crate::context_window::QUERY_TOOL_NAME {
                             Some(DriverEvent::Info(crate::display::sanitize_for_terminal(
                                 &crate::context_window::query_display_line(&result),
                             )))
@@ -555,6 +560,8 @@ impl TuiHost {
                 mcp: mcp_snapshot.as_deref(),
                 // 021：每用户轮固定能力快照（声明与执行共用）
                 send_message: catalog::supports_send_message_to_user(&model),
+                // 030：工具搜索按模型目录声明（快照内无动态工具时不声明）
+                tool_search: catalog::supports_tool_search(&model),
                 steer: Some(&mut steer_channel),
                 context: Some(crate::context_window::ContextHost {
                     conn: &conn,

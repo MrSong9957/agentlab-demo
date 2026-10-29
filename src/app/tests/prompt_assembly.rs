@@ -690,3 +690,61 @@ fn s17_send_message_declaration_follows_capability_snapshot() {
         t["function"]["name"] == json!("request_user_input_async")
     }));
 }
+
+// ---------- 030 M2：搜索开关与首次声明 ----------
+
+use terminal_chat::prompt::build_turn_request_with_tool_search;
+
+#[test]
+fn s30_search_mode_declaration_split() {
+    // 开启且有可搜索动态工具：声明＝内置＋tool_search＋[资源 defs＋已加载 defs]；
+    // 未加载动态定义不发送；tool_search 描述内嵌来源概览 JSON 数据块。
+    let overview = r#"{"sources":[{"server_id":"fx","tool_count":2}]}"#;
+    let ts_def = terminal_chat::tool_search::tool_definition(overview);
+    let resource_def = json!({"type": "function", "function": {"name": "list_mcp_resources"}});
+    let loaded_def = json!({"type": "function", "function": {"name": "mcp__fx__echo"}});
+    let body = build_turn_request_with_tool_search(
+        &[], None, false, false, false, false, false, false,
+        Some(&ts_def),
+        &[resource_def.clone(), loaded_def.clone()],
+    );
+    let tools = body["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 7, "4 内置＋tool_search＋资源＋已加载＝7");
+    assert_eq!(tools[4]["function"]["name"], json!("tool_search"));
+    let description = tools[4]["function"]["description"].as_str().unwrap();
+    assert!(description.contains(overview), "描述须含来源概览数据块");
+    assert_eq!(tools[5], resource_def);
+    assert_eq!(tools[6], loaded_def);
+    // 全量入口兼容：None＝与既有入口完全一致
+    let names: Vec<&str> = tools
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap())
+        .collect();
+    assert!(!names.contains(&"mcp__fx__unloaded"));
+}
+
+#[test]
+fn s30_off_mode_appends_mcp_defs_without_injecting_search() {
+    // 关闭搜索（None）：对照无 MCP 基线——messages/system 完全不变，tools
+    // 仅在尾部追加 MCP 定义（位置与顺序契约），且不注入 tool_search。
+    // （审查 #13：原断言比较转发壳与其委托目标，恒真。）
+    let history = [msg(HistoryRole::User, "任务")];
+    let dyn_def = json!({"type": "function", "function": {"name": "mcp__fx__echo"}});
+    let baseline = build_turn_request_with_tool_search(
+        &history, None, false, false, false, false, false, false, None, &[],
+    );
+    let with_mcp = build_turn_request_with_tool_search(
+        &history, None, false, false, false, false, false, false, None, &[dyn_def.clone()],
+    );
+    assert_eq!(with_mcp["messages"], baseline["messages"], "messages 不变");
+    // system 在 messages[0]，已随上断言覆盖；tools 结构对照：
+    let base_tools = baseline["tools"].as_array().unwrap().clone();
+    let mcp_tools = with_mcp["tools"].as_array().unwrap().clone();
+    assert_eq!(mcp_tools.len(), base_tools.len() + 1, "仅追加一项");
+    assert_eq!(&mcp_tools[..base_tools.len()], &base_tools[..], "原有工具原位不变");
+    assert_eq!(mcp_tools[base_tools.len()], dyn_def, "MCP 定义追加在尾部");
+    assert!(
+        !mcp_tools.iter().any(|t| t["function"]["name"] == json!("tool_search")),
+        "关闭模式不得注入 tool_search"
+    );
+}

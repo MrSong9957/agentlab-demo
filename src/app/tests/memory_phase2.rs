@@ -758,6 +758,8 @@ fn dispatch_rejects_unregistered_tools_in_merge_mode() {
         tool_call("x1", "exec_command", json!({ "cmd": "echo PWNED > probe.txt", "workdir": dir.display().to_string() })),
         tool_call("x2", "apply_patch", json!({ "patch": format!("*** Begin Patch\n*** Add File: {}\n+x\n*** End Patch", patch_probe.display()) })),
         tool_call("x3", "web_search", json!({ "q": "x" })),
+        // 030 S15：合并轮伪造 tool_search 沿用未知工具通用错误契约（§1.3）
+        tool_call("x3b", "tool_search", json!({ "query": "x" })),
         tool_call("x4", "mem_write", json!({ "path": "MEMORY.md", "content": "# M\n" })),
     ]);
     let tc = assistant_with_calls(calls.as_array().unwrap().clone());
@@ -792,7 +794,7 @@ fn dispatch_rejects_unregistered_tools_in_merge_mode() {
             _ => None,
         })
         .collect();
-    assert_eq!(results.len(), 4);
+    assert_eq!(results.len(), 5);
     for (id, content) in &results {
         let v: Value = serde_json::from_str(content).unwrap();
         match id.as_str() {
@@ -1823,4 +1825,68 @@ fn empty_selection_first_merge_then_short_circuit() {
         Phase2Outcome::SucceededNoWorkspaceChanges { sql_committed: true }
     );
     assert_eq!(calls2.load(Ordering::SeqCst), 0);
+}
+
+/// 030 S15 守护组合：extras.tool_search=true 且 MemoryMerge——即使误传
+/// 开关也不声明、不执行（turn 层双层隔离），伪造 tool_search 沿未知工具
+/// 通用错误契约拒绝。
+#[test]
+fn merge_mode_ignores_tool_search_flag() {
+    use terminal_chat::turn::{
+        run_user_turn_with_context_and_caps, TurnExtras,
+    };
+    let e = env("ts30-merge");
+    let calls = json!([
+        tool_call("x1", "tool_search", json!({ "query": "email" })),
+        tool_call("x2", "mem_write", json!({ "path": "MEMORY.md", "content": "# M\n" })),
+    ]);
+    let tc = assistant_with_calls(calls.as_array().unwrap().clone());
+    let fin = final_reply("done");
+    let mut history = Vec::new();
+    let mut sent = 0usize;
+    let root = e.root.clone();
+    let system = CONSOLIDATION_SYSTEM;
+    let sources = terminal_chat::context::ContextSources::from_env();
+    let reply = run_user_turn_with_context_and_caps(
+        &mut history,
+        "merge",
+        &mut |_| {
+            sent += 1;
+            if sent == 1 { Ok(tc.clone()) } else { Ok(fin.clone()) }
+        },
+        &mut |_| {},
+        None,
+        &mut |_| {},
+        ToolMode::MemoryMerge { root: &root, system, expected_epoch: 0 },
+        &sources,
+        &ProcessManager::new(),
+        None,
+        None,
+        false,
+        None,
+        TurnExtras {
+            mcp: None,
+            send_message: false,
+            tool_search: true,
+            steer: None,
+            context: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(reply, "done");
+    let x1 = history
+        .iter()
+        .find_map(|h| match h {
+            terminal_chat::prompt::HistoryItem::ToolResult { tool_call_id, content, .. }
+                if tool_call_id == "x1" =>
+            {
+                Some(serde_json::from_str::<Value>(content).unwrap())
+            }
+            _ => None,
+        })
+        .expect("缺少 x1 结果");
+    assert!(
+        x1.get("error").and_then(Value::as_str).unwrap_or("").contains("未知工具"),
+        "合并轮伪造搜索按未知工具拒绝：{x1}"
+    );
 }

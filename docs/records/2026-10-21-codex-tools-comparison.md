@@ -27,7 +27,7 @@
 | 查看图片 | `view_image` | [019](../specs/019-view-image.md) 已实施（2026-10-23）：按路径加载真实图片并传给模型（Chat Completions 批末 user 附件）、能力开关、保存恢复与 TUI 卡片（[证据](2026-10-23-view-image-impl.md)） |
 | MCP 外部工具 | 按服务器动态注册工具 | [022](../specs/022-mcp-tools.md) 已实施并批准本地交付（2026-10-24）：stdio／Streamable HTTP、每轮快照、原始身份路由、真实调用与凭证污染拒绝（[证据](2026-10-24-022-mcp-tools-implementation.md)）；资源接口、工具搜索另定范围 |
 | MCP 资源 | `list_mcp_resources`、`list_mcp_resource_templates`、`read_mcp_resource` | [023](../specs/023-mcp-resources.md) 已交付本地 main（2026-10-25）：三接口、分页、读取及宿主接入；2026-10-26 复核实现与回归用例均存在（[实施证据](2026-10-24-023-mcp-resources-implementation.md)） |
-| 工具搜索与按需加载 | `tool_search` | 已建立 [030 规格与实施计划](../specs/030-tool-search.md)（待实现，待用户审阅）：本地 BM25 搜索、动态 MCP 工具按需声明、五协议普通函数适配及请求级执行集合；当前代码仍全量发送定义，尚未实施。固定上游机制见本文末尾 |
+| 工具搜索与按需加载 | `tool_search` | [030 规格](../specs/030-tool-search.md) 已实现（2026-10-29，待验收）：本地 BM25 搜索（bm25 2.3.2，冻结词法/排序夹具）、动态 MCP 工具按需声明＋请求级执行集合门、五协议普通函数适配；容量边界 2048 项/10 MiB/1 MiB/128 声明；关闭模式逐字节兼容。证据见 [030 日志目录](../logs/030-tool-search/)。固定上游机制见本文末尾 |
 | 权限申请 | `request_permissions` | 已建立 [031 规格与实施计划](../specs/031-request-permissions.md)（待实现，待用户审阅）：扩展 033 统一沙箱入口，补齐受限读/网络/系统调用策略、可信基线/上限、专用确认、本轮授权与到期收尾；同 UID 下的永久拒绝及别名边界须先验证，当前尚无实际权限申请入口 |
 | 上下文管理 | `get_context_remaining`、`new_context` | [032 规格](../specs/032-context-management.md) 已实现（2026-10-28，待验收）：离线预算估算/未知、显式交接摘要、批末活动视图切换、V3 完整历史检查点与提交回执；不重置逻辑轮/环境；五协议计量与发送共用纯定型（出站字节不变） |
 | JavaScript 工具编排 | `exec`、`wait` | 已建立 [034 规格与实施计划](../specs/034-javascript-tool-orchestration.md)（待实现，待用户审阅）：本地 QuickJS 子进程、五协议普通函数适配、受限工具代理、增量 wait 与 V3 调用证据；032 会话基建为实施前置，当前尚未实施 |

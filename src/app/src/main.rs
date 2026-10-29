@@ -768,6 +768,12 @@ fn cmd_chat(
                             // 失败/取消输出原因，不把失败调用画成清单；结果未知不打印）
                             // 032：上下文工具结果——估算/未知与排定/拒绝各一行；
                             // 已应用边界由提交回执的 Info 通知另行呈现。
+                            // 030：搜索结果——query、命中数与模型工具名；失败原因
+                            if name == terminal_chat::tool_search::TOOL_NAME {
+                                say(&terminal_chat::tool_search::search_display_line(
+                                    &arguments, &result,
+                                ));
+                            }
                             if name == terminal_chat::context_window::QUERY_TOOL_NAME {
                                 say(&terminal_chat::context_window::query_display_line(&result));
                             }
@@ -885,6 +891,8 @@ fn cmd_chat(
                             send_message: catalog::supports_send_message_to_user(&model),
                             // 022：声明与分派共用本轮快照
                             mcp: mcp_snapshot.as_deref(),
+                            // 030：工具搜索按模型目录声明（快照内无动态工具时不声明）
+                            tool_search: catalog::supports_tool_search(&model),
                             steer: None,
                             // 032：上下文工具宿主（查询/切换按目录开关；检查点提交
                             // 经共享保存器的可失败回执）

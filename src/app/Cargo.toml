@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 diffy = "0.4"  # 012：apply_patch 展示差异（真实前后内容的统一 diff；与 tchat-tui 同锁版本）
+bm25 = "2.3.2"  # 030：tool_search 本地词法检索（MIT；与上游 codex@d138398 同版本；English 默认词法、按语料拟合）
 libc = "0.2"
 rustyline = { version = "18", default-features = false, features = ["buffer-redux"] }
 serde = { version = "1.0.229", features = ["derive"] }
