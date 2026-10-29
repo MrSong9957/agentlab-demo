@@ -204,27 +204,63 @@ impl StdioProcess {
         // 033：沙箱模式（TCHAT_SANDBOX）下经 bwrap 包装启动——文件系统策略在
         // 主进程构造（全盘只读＋cwd 可写＋.env 遮蔽）；沙箱不可用＝错误，不静默
         // 回退。普通模式按原样启动，行为零变化。
+        // 031：启用动态策略时 MCP stdio 走**基线**快照（受限读树等）——长期
+        // 连接不继承任何本轮临时授权（§1.6：需更宽范围由管理员改基线并重启）。
         let mut cmd_parts = vec![command.to_string()];
         cmd_parts.extend(args.iter().cloned());
         let mut cmd;
-        let sandbox_env = match crate::sandbox::tool_launch_argv(cmd_parts)? {
-            Some((program, sandbox_args, child_env)) => {
-                cmd = tokio::process::Command::new(program);
-                cmd.args(sandbox_args);
-                // 033-B2：同 exec 面——继承 fd ≥3 标记 CLOEXEC（execve 时关闭）；
-                // tokio Command 自带 pre_exec（委托 std）。仅沙箱分支、unix。
-                #[cfg(unix)]
-                unsafe {
-                    cmd.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
-                }
-                // 白名单环境在下方 env_clear **之后**注入（env_clear 是清除不是
-                // 覆盖——先注会被清掉，033 审查轮修正）。
-                Some(child_env)
+        // 031 分支的快照/argv 构造失败＝Err（fail-closed：不回退 033 固定策略）。
+        let is_031_launch = crate::permissions::frozen().is_some();
+        let permission_launch = match crate::permissions::frozen() {
+            Some(f) => {
+                let snap = crate::permissions::baseline_snapshot(&f)
+                    .map_err(|e| io::Error::other(format!("031 基线快照构建失败：{e}")))?;
+                let launch = crate::sandbox::permission_launch_argv(cmd_parts.clone(), &snap, cwd)?;
+                Some(launch)
             }
-            None => {
-                cmd = tokio::process::Command::new(command);
-                cmd.args(args);
-                None
+            None => None,
+        };
+        // seccomp fd 守卫存活到下方 spawn 语句执行完毕（绑定保持所有权）。
+        let _seccomp_guard;
+        let sandbox_env = if let Some(launch) = permission_launch {
+            _seccomp_guard = launch.seccomp;
+            cmd = tokio::process::Command::new(&launch.program);
+            cmd.args(&launch.args);
+            #[cfg(unix)]
+            unsafe {
+                match _seccomp_guard.as_ref() {
+                    Some(g) => {
+                        let fd = g.raw();
+                        cmd.pre_exec(move || {
+                            crate::sandbox::close_inherited_fds_except_cloexec(fd)
+                        });
+                    }
+                    None => {
+                        cmd.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
+                    }
+                }
+            }
+            Some(launch.env)
+        } else {
+            match crate::sandbox::tool_launch_argv(cmd_parts)? {
+                Some((program, sandbox_args, child_env)) => {
+                    cmd = tokio::process::Command::new(program);
+                    cmd.args(sandbox_args);
+                    // 033-B2：同 exec 面——继承 fd ≥3 标记 CLOEXEC（execve 时关闭）；
+                    // tokio Command 自带 pre_exec（委托 std）。仅沙箱分支、unix。
+                    #[cfg(unix)]
+                    unsafe {
+                        cmd.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
+                    }
+                    // 白名单环境在下方 env_clear **之后**注入（env_clear 是清除不是
+                    // 覆盖——先注会被清掉，033 审查轮修正）。
+                    Some(child_env)
+                }
+                None => {
+                    cmd = tokio::process::Command::new(command);
+                    cmd.args(args);
+                    None
+                }
             }
         };
         cmd.current_dir(cwd)
@@ -249,6 +285,13 @@ impl StdioProcess {
         // 显式 close/进程组终止不受影响。
         cmd.kill_on_drop(true);
         let mut child = cmd.spawn()?;
+        // 审查 #27（§1.6 逐启动确认）：031 分支核验载荷确在新 PID ns
+        // （031 分支判定在上方 if-let 前记录——launch 已部分移动）
+        if is_031_launch {
+            crate::sandbox::verify_child_pid_namespace(
+                child.id().ok_or_else(|| io::Error::other("MCP 进程已退出"))?,
+            )?;
+        }
         let pid = child.id().ok_or_else(|| io::Error::other("MCP 进程已退出"))?;
         let stdin = child
             .stdin

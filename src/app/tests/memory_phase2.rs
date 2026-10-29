@@ -1870,6 +1870,7 @@ fn merge_mode_ignores_tool_search_flag() {
             tool_search: true,
             steer: None,
             context: None,
+            permissions: None,
         },
     )
     .unwrap();

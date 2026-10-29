@@ -40,7 +40,7 @@ type SandboxOutcome = (
 );
 
 fn run_sandboxed(exe: &std::path::Path, patch: &str) -> SandboxOutcome {
-    terminal_chat::apply_patch::apply_patch_sandboxed_with_exe(exe, &input_of(patch))
+    terminal_chat::apply_patch::apply_patch_sandboxed_with_exe(exe, &input_of(patch), None)
 }
 
 /// `--internal-apply` 内部入口：stdin 补丁 → (结果, 变更) JSON（027 的 uid
@@ -300,9 +300,10 @@ fn offline_child_mode() -> bool {
     let output = std::env::var_os("TCHAT_029_OFFLINE_OUTPUT").expect("缺少 TCHAT_029_OFFLINE_OUTPUT");
     let spec: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&input).unwrap()).unwrap();
-    let (result, changes) = terminal_chat::apply_patch::apply_patch_sandboxed(&serde_json::json!({
-        "patch": spec["patch"].as_str().unwrap()
-    }));
+    let (result, changes) = terminal_chat::apply_patch::apply_patch_sandboxed(
+        &serde_json::json!({ "patch": spec["patch"].as_str().unwrap() }),
+        None,
+    );
     std::fs::write(
         output,
         serde_json::json!({ "result": result, "changes": changes }).to_string(),

@@ -233,13 +233,15 @@ pub struct FinalDict {
 /// 不得经它重定位配置/授权记录/凭证根或目录来源（2026-10-09 安全报告 F1）。
 /// 名单来自全库 env 读取点审计：`config_dir`、`user_dir`、公共目录 URL 回退。
 /// 注意不能用 `TCHAT_` 前缀一刀切：普通凭证变量允许从 .env 加载。
-const TRUST_CONTROL_VARS: [&str; 8] = [
+const TRUST_CONTROL_VARS: [&str; 9] = [
     "TCHAT_CONFIG_DIR",
     "TCHAT_USER_DIR",
     "TCHAT_PUBLIC_CATALOG_URL",
     // 033：沙箱模式只能由管理员 wrapper（真实环境）启用；.env 不是信任根，
     // 不得借它开启沙箱（沿用 027 安全攻防 F2 的信任根结论）
     "TCHAT_SANDBOX",
+    // 031：可信策略路径只能来自可信启动环境；.env 不得启用、关闭或改换策略
+    "TCHAT_PERMISSION_POLICY",
     // 007 会话时钟/pid 注入提供者：仅测试子进程经真实环境注入；.env 固定时间戳
     // 会破坏 auto 文件名"字典序＝时间序"的最近会话选择，按 F1 先例跳过
     "TCHAT_SESSION_TS",
@@ -890,6 +892,18 @@ pub fn supports_tool_search(model: &ModelInfo) -> bool {
         .is_some_and(|list| {
             list.iter()
                 .any(|t| t == crate::tool_search::TOOL_NAME)
+        })
+}
+
+/// 031：experimental_supported_tools 精确匹配声明 request_permissions（§1.2-4
+/// 的模型能力半边；实际声明还要求 031 冻结策略与专用交互宿主——见 turn 装配）。
+pub fn supports_request_permissions(model: &ModelInfo) -> bool {
+    model
+        .experimental_supported_tools
+        .as_ref()
+        .is_some_and(|list| {
+            list.iter()
+                .any(|t| t == crate::permissions::TOOL_NAME)
         })
 }
 

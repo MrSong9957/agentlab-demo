@@ -86,10 +86,14 @@ struct MgrInner {
 
 /// 创建线程的请求（033 生命周期修复）：仅串行化 fork/exec 本身；工具执行、
 /// 监控与读取仍按会话并发，创建线程不取任何管理器锁。
+/// 031：`policy`＝工具调用开始时冻结的出生策略快照（Arc 携带；创建线程
+/// 不临时重读授权——排队创建不因后续授权变化升级权限）；`extra`＝本进程
+/// 是否使用了基线之外的额外授权（到期收尾只针对此类进程，§1.7-5）。
 struct SpawnJob {
     cmd: String,
     workdir: std::path::PathBuf,
     tty: bool,
+    policy: Option<std::sync::Arc<crate::sandbox::PolicySnapshot>>,
     reply: std::sync::mpsc::Sender<std::io::Result<Spawned>>,
 }
 
@@ -97,6 +101,9 @@ struct MgrState {
     closed: bool,
     next_id: u64,
     sessions: HashMap<String, Arc<Session>>,
+    /// 审查 #2（§1.7-7）：收尾失败闩锁——置位后宿主须拒绝开始下一用户轮，
+    /// 直到再次 reap 成功清除（不可杀的额外权限进程仍带着授权存活）。
+    reap_failed: Option<String>,
 }
 
 impl Default for ProcessManager {
@@ -123,9 +130,9 @@ impl ProcessManager {
             .spawn(move || {
                 while let Ok(job) = spawner_rx.recv() {
                     let res = if job.tty {
-                        spawn_pty(&job.cmd, &job.workdir)
+                        spawn_pty(&job.cmd, &job.workdir, job.policy.as_deref())
                     } else {
-                        spawn_piped(&job.cmd, &job.workdir)
+                        spawn_piped(&job.cmd, &job.workdir, job.policy.as_deref())
                     };
                     let _ = job.reply.send(res);
                 }
@@ -136,6 +143,7 @@ impl ProcessManager {
                     closed: false,
                     next_id: 1,
                     sessions: HashMap::new(),
+                    reap_failed: None,
                 }),
                 spawner_tx: Mutex::new(spawner_tx),
             }),
@@ -229,6 +237,93 @@ impl ProcessManager {
     /// exec_command 入口：参数校验已在参数层完成；本方法校验截止时间安全
     /// 性并启动进程，等待 `yield_time_ms` 后返回（进程继续运行，不重新启动）。
     pub fn start(&self, args: &ExecArgs, cancel: Option<&AtomicBool>) -> ToolOutcome {
+        self.start_with_policy(args, cancel, None, false)
+    }
+
+    /// 审查 #2（§1.7-7）：收尾失败门查询——Some(reason) 表示存在未证实终止
+    /// 的额外权限进程，宿主必须拒绝开始下一用户轮（可先重试 reap 以恢复）。
+    pub fn extra_reap_gate(&self) -> Option<String> {
+        self.lock_mgr().reap_failed.clone()
+    }
+
+    /// 031 §1.7-4/7：轮出口统一收尾——终止并回收全部「额外权限」进程。
+    /// 统一先 SIGTERM，再共享 3 秒有界窗口等待全部（不逐项串行 3 秒）；到期
+    /// 仍未终止的组升级 SIGKILL（走 monitor 的既有终止/回收路径）；无法证实
+    /// 全部已终止＝Err（收尾失败如实报告，不宣称已安全撤销，宿主据此拒绝开
+    /// 始下一轮）。基线权限进程不受影响（016 可续接语义保留）。
+    pub fn reap_extra_permission_sessions(&self) -> Result<(), String> {
+        let extras: Vec<Arc<Session>> = {
+            let st = self.lock_mgr();
+            st.sessions.values().filter(|s| s.extra).cloned().collect()
+        };
+        if extras.is_empty() {
+            self.lock_mgr().reap_failed = None;
+            return Ok(());
+        }
+        // 统一温和终止（一次发齐）。
+        for s in &extras {
+            if let Phase::Running { pgid } = s.phase() {
+                unsafe {
+                    libc::killpg(pgid, libc::SIGTERM);
+                }
+            }
+        }
+        // 共享有界窗口。
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if extras.iter().all(|s| !matches!(s.phase(), Phase::Running { .. })) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // 升级强杀（monitor 回收），再短窗核实。
+        for s in &extras {
+            if matches!(s.phase(), Phase::Running { .. }) {
+                s.request_kill(KillReq::Terminate);
+            }
+        }
+        let hard_deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            let pending: Vec<String> = extras
+                .iter()
+                .filter(|s| matches!(s.phase(), Phase::Running { .. }))
+                .map(|s| s.id.clone())
+                .collect();
+            if pending.is_empty() {
+                return Ok(());
+            }
+            if Instant::now() >= hard_deadline {
+                let msg = format!(
+                    "额外权限进程未能全部终止（{}）：不宣称已安全撤销，拒绝开始下一轮",
+                    pending.join("、")
+                );
+                self.lock_mgr().reap_failed = Some(msg.clone());
+                return Err(msg);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// [`ProcessManager::start`] 的 031 变体：`policy`＝出生策略快照（调用
+    /// 开始时构建，经创建线程携带——不临时重读授权）；`extra`＝是否使用基线
+    /// 之外的额外授权（到期收尾只针对此类进程，§1.7-5——016 对该条的修订：
+    /// 额外权限进程不跨用户轮存活）。毒丸快照＝显式错误，零命令执行。
+    pub fn start_with_policy(
+        &self,
+        args: &ExecArgs,
+        cancel: Option<&AtomicBool>,
+        policy: Option<&std::sync::Arc<crate::sandbox::PolicySnapshot>>,
+        extra: bool,
+    ) -> ToolOutcome {
+        if let Some(reason) = policy.and_then(|p| p.poison.as_ref()) {
+            return ExecResult::error(format!(
+                "生效策略无法编码：{reason}（本次执行拒绝，不回退普通模式）"
+            ))
+            .into();
+        }
         let workdir = match resolve_workdir(args.workdir.as_deref()) {
             Ok(p) => p,
             Err(msg) => return ExecResult::error(msg).into(),
@@ -274,6 +369,7 @@ impl ProcessManager {
                     cmd: args.cmd.clone(),
                     workdir: workdir.clone(),
                     tty: args.tty,
+                    policy: policy.cloned(),
                     reply: reply_tx,
                 };
                 if let Err(_e) = self
@@ -310,6 +406,7 @@ impl ProcessManager {
                         sp.child.id() as libc::pid_t,
                         sp.master.clone(),
                         readers_total,
+                        extra,
                     ));
                     st.sessions.insert(session.id.clone(), session.clone());
                     (session, sp, deadline)
@@ -709,6 +806,9 @@ fn cancelled_before_start(cancel: Option<&AtomicBool>) -> Option<ExecResult> {
 struct Session {
     id: String,
     cmd: String,
+    /// 031：本进程是否以「基线＋额外授权」出生（§1.7-5——到期收尾只针对
+    /// 此类进程；基线进程继续 016 可续接语义）。
+    extra: bool,
     st: Mutex<SessionState>,
     cv: Condvar,
 }
@@ -768,10 +868,12 @@ impl Session {
         pgid: libc::pid_t,
         master: Option<Arc<File>>,
         readers: usize,
+        extra: bool,
     ) -> Self {
         Self {
             id,
             cmd,
+            extra,
             st: Mutex::new(SessionState {
                 phase: Phase::Running { pgid },
                 pending: PendingBuffer::new(),
@@ -1220,42 +1322,85 @@ struct Spawned {
 /// 凭据 env 不进工具——027 R1 环境面防线在此保留）；沙箱不可用时返回 Err，
 /// 由调用侧显式报错（禁止静默回退到无沙箱执行）。策略锚定主进程 cwd（G1 修
 /// 复），workdir 仅作沙箱内 --chdir，不参与策略。
-fn build_tool_command(cmd: &str) -> std::io::Result<Command> {
-    match crate::sandbox::tool_launch_argv(vec![
-        SHELL.to_string(),
-        "-c".to_string(),
-        cmd.to_string(),
-    ])? {
-        Some((program, args, child_env)) => {
-            let mut c = Command::new(program);
-            c.args(args);
-            // 033-B2：继承 fd ≥3 标记 CLOEXEC（execve 时关闭）——launcher 遗留的
-            // 非 CLOEXEC fd 不再进入沙箱载荷；仅沙箱分支（普通模式零变化）。
-            // 闭包为无捕获 fn 项，pre_exec 异步信号安全（单个 syscall）。
-            unsafe {
-                c.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
+/// 031：`policy` 携带时改走 [`crate::sandbox::permission_launch_argv`]（受限
+/// 读树＋deny 优先＋网络开关＋seccomp 的动态策略入口）；seccomp fd 守卫须
+/// 存活到 spawn 返回——本函数内联完成 spawn 前‥后的全部时序。
+fn build_tool_command(
+    cmd: &str,
+    workdir: &std::path::Path,
+    policy: Option<&crate::sandbox::PolicySnapshot>,
+) -> std::io::Result<(Command, Option<crate::sandbox::SeccompFd>)> {
+    if let Some(snapshot) = policy {
+        let launch = crate::sandbox::permission_launch_argv(
+            vec![SHELL.to_string(), "-c".to_string(), cmd.to_string()],
+            snapshot,
+            workdir,
+        )?;
+        let mut c = Command::new(&launch.program);
+        c.args(&launch.args);
+        match launch.seccomp.as_ref() {
+            Some(guard) => {
+                let fd = guard.raw();
+                unsafe {
+                    c.pre_exec(move || {
+                        crate::sandbox::close_inherited_fds_except_cloexec(fd)
+                    });
+                }
             }
-            c.env_clear();
-            c.envs(child_env);
-            Ok(c)
+            None => unsafe {
+                c.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
+            },
         }
-        None => {
-            let mut c = Command::new(SHELL);
-            c.arg("-c").arg(cmd);
-            Ok(c)
+        c.env_clear();
+        c.envs(launch.env);
+        Ok((c, launch.seccomp))
+    } else {
+        match crate::sandbox::tool_launch_argv(vec![
+            SHELL.to_string(),
+            "-c".to_string(),
+            cmd.to_string(),
+        ])? {
+            Some((program, args, child_env)) => {
+                let mut c = Command::new(program);
+                c.args(args);
+                // 033-B2：继承 fd ≥3 标记 CLOEXEC（execve 时关闭）——launcher 遗留的
+                // 非 CLOEXEC fd 不再进入沙箱载荷；仅沙箱分支（普通模式零变化）。
+                // 闭包为无捕获 fn 项，pre_exec 异步信号安全（单个 syscall）。
+                unsafe {
+                    c.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
+                }
+                c.env_clear();
+                c.envs(child_env);
+                Ok((c, None))
+            }
+            None => {
+                let mut c = Command::new(SHELL);
+                c.arg("-c").arg(cmd);
+                Ok((c, None))
+            }
         }
     }
 }
 
 /// 管道模式：stdin 关闭，stdout/stderr 管道；独立进程组。
-fn spawn_piped(cmd: &str, workdir: &std::path::Path) -> std::io::Result<Spawned> {
-    let mut c = build_tool_command(cmd)?;
+/// 031：spawn 后 best-effort 验证 bwrap 子进程的 PID 命名空间确已隔离
+///（仍存活且与主进程同 ns ⇒ 立即整组终止并报错——隔离创建失败的执行前
+/// 拒绝链闭合；子进程已退出时以 bwrap 自身 fail-hard 语义为准）。
+fn spawn_piped(
+    cmd: &str,
+    workdir: &std::path::Path,
+    policy: Option<&crate::sandbox::PolicySnapshot>,
+) -> std::io::Result<Spawned> {
+    let (mut c, _seccomp_guard) = build_tool_command(cmd, workdir, policy)?;
     c.current_dir(workdir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0); // 组长即本子进程：终止时覆盖其全部后代
     let mut child = c.spawn()?;
+    if policy.is_some() {
+        crate::sandbox::verify_child_pid_namespace(child.id())?;
+    }
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     Ok(Spawned { child, master: None, stdout, stderr })
@@ -1263,13 +1408,18 @@ fn spawn_piped(cmd: &str, workdir: &std::path::Path) -> std::io::Result<Spawned>
 
 /// PTY 模式：分配真实伪终端作为控制终端；会话组长自身成组
 ///（pre_exec setsid，不用 process_group——setpgid 后 setsid 会失败）。
-fn spawn_pty(cmd: &str, workdir: &std::path::Path) -> std::io::Result<Spawned> {
+/// 031：同管道模式的 spawn 后 PID 命名空间验证（TTY 组终止路径）。
+fn spawn_pty(
+    cmd: &str,
+    workdir: &std::path::Path,
+    policy: Option<&crate::sandbox::PolicySnapshot>,
+) -> std::io::Result<Spawned> {
     let (master, slave) = open_pty()?;
     // 三路指向同一从设备；pre_exec 内 setsid＋挂控制终端。
     let in_f = slave.try_clone()?;
     let out_f = slave.try_clone()?;
     let err_f = slave;
-    let mut c = build_tool_command(cmd)?;
+    let (mut c, _seccomp_guard) = build_tool_command(cmd, workdir, policy)?;
     c.current_dir(workdir)
         .stdin(Stdio::from(in_f))
         .stdout(Stdio::from(out_f))
@@ -1287,8 +1437,11 @@ fn spawn_pty(cmd: &str, workdir: &std::path::Path) -> std::io::Result<Spawned> {
             Ok(())
         });
     }
-    let child = c.spawn()?;
+    let mut child = c.spawn()?;
     drop(c); // 关闭父进程持有的从设备副本（Command 内 Stdio 的 fd）
+    if policy.is_some() {
+        crate::sandbox::verify_child_pid_namespace(child.id())?;
+    }
     let master = Arc::new(master);
     Ok(Spawned { child, master: Some(master), stdout: None, stderr: None })
 }

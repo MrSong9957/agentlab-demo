@@ -1,0 +1,25 @@
+# P16 完整启动 p95＋峰值 RSS 样本（2026-10-29 第三轮，补齐 §1.8「完整启动／峰值 RSS」验收对象）
+# 环境：WSL2 容器（内核 6.18.33.2-microsoft-standard-WSL2）；bwrap 0.9.0（/usr/bin/bwrap，nlink=1，uid=1000 同宿主 UID）；cargo 1.99.0；载荷二进制＝debug 构建副本（nlink=1，专用安装目录）。
+# 口径（§1.8 M0 约定沿用）：单并发、预热 5 次、100 次×3 轮取 p95 中位轮；faces 分别测（exec pipes／exec PTY／apply_patch／view_image）；排除人的答复时间（全程无确认交互）。计时范围＝生产形态完整启动：permission_launch_argv 组装（含 P06(b) 递归 nlink 检查＋seccomp memfd）＋spawn＋bwrap execve＋载荷退出。
+# 生成方式：cargo test --test request_permissions_sandbox p16_full_launch_faces_and_peak_rss -- --nocapture（与全量回归同负载形态：文件内其余用例并行执行）。
+
+## 测量结果（µs；三轮 p95 ＝ 每轮 100 样本的第 95 位，报告中位轮）
+- exec pipes（/bin/sh -c true）：p95 中位轮＝4945；三轮＝[4800, 4992, 4945]
+- exec PTY（/bin/true，生产 spawn_pty 机制：open_pty＋setsid/TIOCSCTTY＋PID ns 复核）：p95 中位轮＝4052；三轮＝[4045, 4148, 4052]
+- apply_patch（--internal-apply 载荷，Add File 小补丁 305 次全部真实落盘）：p95 中位轮＝121830；三轮＝[129557, 107516, 121830]
+- view_image（--internal-view-image 载荷，1×1 PNG，成功断言防空跑）：p95 中位轮＝117884；三轮＝[122153, 117884, 111030]
+- 峰值 RSS（RUSAGE_CHILDREN ru_maxrss 跨全部回收子进程的上界）：13788 KB ≈ 13.5 MiB
+
+## 成分核对（诊断实测，同机）
+- /bin/true 类载荷完整启动 ≈4–5ms；载荷为本二进制（debug）时 ≈60–75ms——debug 二进制进程启动占主导（release 载荷显著更快，阈值为 debug 口径上界）。
+- 单测独跑（无并行用例）时补丁/图片面 ≈65–75ms；全量回归并行负载下升至 ≈108–130ms——冻结阈值按并行负载口径取值。
+- 计量有效性反例（已修）：载荷 chdir 落在未挂载面时 bwrap「Can't chdir」快速失败 ≈6.5ms 恒定——若无成功断言会把失败样本当性能基线（补丁面已加 r.ok 断言＋305 文件计数）。
+
+## 冻结阈值（实测基线 2–3 倍余量；见规格 §1.8 冻结行；回归门禁断言于 p16_full_launch_faces_and_peak_rss）
+- exec pipes / exec PTY 完整启动 p95 中位轮 < 30 ms（实测 ≈4–5ms，≈6–7× 余量）
+- apply_patch / view_image 完整启动 p95 中位轮 < 250 ms（实测并行负载 p95 ≈118–130ms，≈1.9–2.1× 余量；独跑 ≈65–75ms，≈3.3–3.8×）
+- 沙箱启动子进程峰值 RSS 上界 < 128 MiB（实测 ≈13.5 MiB，≈9.5× 余量）
+
+## 与既有冻结项的关系
+- 启动前检查（不含 spawn）p95 中位轮阈值 50ms 与遍历预算 20000 项/2000ms 不变（证据：2026-10-29-p16-launch-check-samples.txt；其归档数字为终验重跑输出 p95 中位轮 521µs/1.14µs·项⁻¹，与冻结时测量 531µs/1.08µs·项⁻¹ 同形态，波动 ≈2%，阈值判定不受影响）。
+- 本文件补齐的是「完整启动（含 spawn）」与「峰值 RSS」两个独立验收对象；三项互不替代。

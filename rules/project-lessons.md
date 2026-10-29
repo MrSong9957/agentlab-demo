@@ -238,3 +238,18 @@
 - **bm25 2.3.2 `matches()` 同分顺序任意且随目录构建顺序漂移**（正/倒序目录两次运行给出不同排列）——调研预告实测证实：必须在**完整正分候选**上二次排序（分数降序＋(server_id, raw_tool) 字节升序）后截断；库的 sort_by 无身份 tie-break。
 - **跨模块传下标是缺陷温床**：SearchState 曾把"敏感过滤后条目下标"交给调用方去索引未过滤的快照定义数组（实现期自审发现）；审查轮又确认按名回扫的 O(命中×目录) 冗余。结构解＝单账本（只存升序下标，名字集合投影派生）＋检索直接返回 (下标, 条目) 对，两套序天然不可分叉。
 - **测量型门禁的自身失效必须可见**：RSS 子进程失败/输出缺失曾被 `unwrap_or(0)` 折叠成"0 增量＝达标"，门禁恒真。守卫自己的失败路径也要断言（exit 状态＋必需输出行存在且可解析）。
+
+## 031 权限申请实施与审查（2026-10-29，已交付）
+
+- **seccomp cBPF 的 per-syscall 参数检查必须先门控 nr**：clone-flags 掩码块若对全部调用执行，任意调用的 args[0]（如 execve 的路径指针）按位与掩码几乎恒非零 → 全载荷 EPERM（集成首跑 `execvp /bin/sh: Operation not permitted` 实证）。结构：arch 门（偏移 4）→ nr 拒绝清单（偏移 0）→ JEQ clone 后才做 flags 掩码（偏移 16）→ RET ALLOW 收尾；8 字节整除是 bwrap 的硬校验。
+- **直连 bwrap 子进程是 PID ns 之外的监督者**：其自身 ns/pid_for_children 与主进程相同属正常形态；逐启动隔离验证须遍历 `/proc/<bwrap>/task/*/children` 找**载荷**进程比对其 ns/pid，且要有界轮询（bwrap 多次 re-exec，spawn 返回时载荷可能未出现）。
+- **§1.2-3 的实现陷阱：基线约束的键是「冻结策略」不是「权限宿主」**：把快照构建挂在 perm 状态上会让非交互管道/未声明能力的模型静默回退 033 全盘读（审查 P0；MCP stdio 恰好按 frozen() 正确，同会话三种执行面强度）。正确形状：`frozen().map(|f| build_snapshot(f, 无宿主时空授权, f.deny_ctx))`。
+- **mountinfo 解析必须扫描 `-` 分隔符**：可选字段（shared:N/master:N）零或多，固定下标 `fields[6]=="-"` 会整行丢弃带传播标记的挂载——恰是同设备 bind 别名最密集的类（本容器 32 行中 5 行）。同设备双挂载的别名投影测试需要**真实存在的 deny 路径**（deny_aliases 先取 st_dev，不存在即早退）。
+- **信任来源检查一律用 canonical 路径**：策略路径/exe 路径的 `..`/符号链接词法形态可绕过组件前缀比较；同模块先 canonicalize 再比较（exe 侧）与不 canonicalize（policy 侧）并存就是漏掉的证据。同一 env 变量读两次（一次 trim 一次不 trim）会让 deny 安装目录装配静默落空——单次读取返回 (值, 路径)。
+- **「拒绝开始下一轮」类契约需要宿主侧门，不只是错误文案**：ProcessManager 落收尾失败闩锁（失败置位/成功清除），两宿主轮入口查询＋重试一次 reap；§1.7-4 的「成功切换」出口（032 commit）同样要调用回收。
+- **fail-closed 分派的三分支形状**：`Some(Some(快照))/Some(None)＝毒丸显式错误/None＝非 031 原路径`——把毒丸折叠进 None 分支就是 H1（apply_patch 回退 033 全盘）的根因；启动期基线预检（baseline_snapshot）把拓扑型毒丸提前到启动失败。
+- **测试有效性三连坑**：`sleep 30` 不读 stdin → write_stdin 断言恒真（须读循环 shell＋先注入存活标记）；`assert!(x || true)` 恒真断言；把「超限先弹窗后失败」钉成 `host.calls==1` 预期（§1.7-1 是确认前失败）。安全攻防脚手架修复回归的归属要在文件头与 git 状态一致（要么常驻回归集，要么迁走再删）。
+- **bash 的 /dev/tcp 语法是 host/port（斜杠）不是 host:port**——冒号形态 ENOENT，曾被误当成沙箱/seccomp 缺陷排查了一整轮（对照变体矩阵才定位）。
+- **授权模型单调时，挂载面必须先化简为规范形**：read 严格位于 write 之下＝冗余授权（write ⊇ read，access 只累加；「只读 carve-out」不存在，收窄原语只有 deny）。不化简时深度升序挂载使冗余 ro-bind 遮蔽祖先 rw 面——已批准写权限在子树内静默 EROFS，且 covers() 判「已覆盖」让再次申请无法自愈（审查 #15）。快照构建处一次 retain 即闭合，deny carving 不受影响。
+- **性能计量的 face 必须断言载荷真实成功**：载荷 chdir 落在未挂载面时 bwrap「Can't chdir」快速失败 ≈6.5ms 恒定——无成功断言会把失败样本当性能基线（本轮补丁面首测 8–17ms 即此伪基线，修正后真实 ≈65–130ms）。另：debug 载荷二进制进程启动（≈60ms）远大于 bwrap＋/bin/true（≈5ms），faces 计量要区分载荷成本与沙箱成本并注明构建口径。
+- **安装 deny 白名单内外分级（031 方案 A，2026-10-29 用户裁决）**：策略目录无论位置目录级 deny；应用/bwrap 安装对象位于固定运行时白名单树（/usr、/etc，usrmerge 下 bwrap 即在 /usr/bin）之内时单文件 deny，之外目录级 deny。依据：目录级 deny 共享运行时树会遮蔽 shell/coreutils 且 dpkg 合法硬链接（nlink=2）使目录递归检查必拒＝功能不可用；保护对象（二进制/bwrap 本体）遮蔽与 nlink/别名/逐启动复查不变。后端版本/摘要按 §1.6「可追溯」走部署记录（发行版包固定＋SHA-256 记录），不做逐次运行时校验。

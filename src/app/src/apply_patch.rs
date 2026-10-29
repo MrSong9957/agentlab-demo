@@ -91,7 +91,7 @@ pub struct ApplyPatchResult {
 }
 
 impl ApplyPatchResult {
-    fn error(msg: String, changed: Vec<ChangedFile>, state_known: bool) -> Self {
+    pub(crate) fn error(msg: String, changed: Vec<ChangedFile>, state_known: bool) -> Self {
         Self { ok: false, changed_files: changed, state_known, error: Some(msg) }
     }
 }
@@ -106,13 +106,16 @@ pub fn apply_patch(input: &serde_json::Value) -> ApplyPatchResult {
 /// （复用进程内同套边界与 /proc/self/fd 同 inode 语义）；结果
 /// (ApplyPatchResult, 展示变更) JSON 经 stdout 返回。不经 shell（execve 数组
 /// 直传）。沙箱不可用＝结果内显式错误，不静默回退为进程内执行。
+/// 031：`policy` 携带时改走动态策略入口（受限读树＋deny 优先＋网络开关＋
+/// seccomp；§1.6——源读取、判型、生成与写入均在同一沙箱内）。
 pub fn apply_patch_sandboxed(
     input: &serde_json::Value,
+    policy: Option<&crate::sandbox::PolicySnapshot>,
 ) -> (ApplyPatchResult, Vec<crate::prompt::PatchChange>) {
     // 生产入口＝当前二进制。集成测试进程的 current_exe 是测试 harness，
     // 由测试经 [`apply_patch_sandboxed_with_exe`] 传 CARGO_BIN_EXE 解析。
     match std::env::current_exe() {
-        Ok(exe) => apply_patch_sandboxed_with_exe(&exe, input),
+        Ok(exe) => apply_patch_sandboxed_with_exe(&exe, input, policy),
         Err(e) => (
             ApplyPatchResult::error(format!("定位自身二进制失败：{e}"), Vec::new(), false),
             Vec::new(),
@@ -124,6 +127,7 @@ pub fn apply_patch_sandboxed(
 pub fn apply_patch_sandboxed_with_exe(
     exe: &std::path::Path,
     input: &serde_json::Value,
+    policy: Option<&crate::sandbox::PolicySnapshot>,
 ) -> (ApplyPatchResult, Vec<crate::prompt::PatchChange>) {
     let err =
         |msg: String, state_known: bool| (ApplyPatchResult::error(msg, Vec::new(), state_known), Vec::new());
@@ -132,29 +136,59 @@ pub fn apply_patch_sandboxed_with_exe(
         Err(msg) => return err(msg, true),
     };
     // 策略锚定主进程 cwd（G1 修复，sandbox 内部取用）；补丁路径的解析基准
-    // 与进程内执行一致＝主进程 cwd。
-    let (program, sandbox_args, child_env) = match crate::sandbox::tool_launch_argv(vec![
-        exe.to_string_lossy().into_owned(),
-        "--internal-apply".to_string(),
-    ]) {
-        Ok(Some(t)) => t,
-        Ok(None) => return err("沙箱模式未启用（TCHAT_SANDBOX 未设置）".into(), false),
-        Err(e) => return err(format!("沙箱不可用：{e}"), false),
+    // 与进程内执行一致＝主进程 cwd。031 分支：cwd 同时是 --chdir 落点。
+    let (program, sandbox_args, child_env, seccomp_guard) = if let Some(snap) = policy {
+        match crate::sandbox::permission_launch_argv(
+            vec![
+                exe.to_string_lossy().into_owned(),
+                "--internal-apply".to_string(),
+            ],
+            snap,
+            &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")),
+        ) {
+            Ok(l) => (l.program, l.args, l.env, l.seccomp),
+            Err(e) => return err(format!("031 沙箱不可用：{e}"), false),
+        }
+    } else {
+        match crate::sandbox::tool_launch_argv(vec![
+            exe.to_string_lossy().into_owned(),
+            "--internal-apply".to_string(),
+        ]) {
+            Ok(Some((p, a, e))) => (p, a, e, None),
+            Ok(None) => return err("沙箱模式未启用（TCHAT_SANDBOX 未设置）".into(), false),
+            Err(e) => return err(format!("沙箱不可用：{e}"), false),
+        }
     };
+    // seccomp fd 守卫存活到 spawn 返回（memfd 非 CLOEXEC 穿越 execve 交给
+    // bwrap；其余继承 fd 按掩码跳过该 fd 后标记 CLOEXEC）。
+    let _ = seccomp_guard.as_ref().map(|g| g.raw());
     use std::io::Write;
     use std::process::Stdio;
     let mut spawn_cmd = std::process::Command::new(program);
     spawn_cmd.args(sandbox_args);
     // 033-B2：同 exec 面——继承 fd ≥3 标记 CLOEXEC（execve 时关闭）；仅沙箱
-    // 分支。pre_exec 为 unix API；非 unix 下 tool_launch_argv 恒 None，不会
+    // 分支。031：seccomp fd 是唯一例外（非 CLOEXEC，bwrap 经 --seccomp 读取）。
+    // pre_exec 为 unix API；非 unix 下 tool_launch_argv 恒 None，不会
     // 到达此分支（cfg 门控仅为可编译性）。
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         unsafe {
-            spawn_cmd.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
+            match seccomp_guard.as_ref() {
+                Some(g) => {
+                    let fd = g.raw();
+                    spawn_cmd
+                        .pre_exec(move || crate::sandbox::close_inherited_fds_except_cloexec(fd));
+                }
+                None => {
+                    spawn_cmd.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
+                }
+            }
         }
     }
+    // 审查 #27（§1.6 逐启动确认）：031 分支 spawn 后核验载荷确在新 PID ns
+    //（033 分支不适用——033 验收契约不含该检查）。
+    let is_031 = policy.is_some();
     let child = spawn_cmd
         .env_clear() // 033：凭据环境不进补丁子进程（027 R1 环境面防线保留）
         .envs(child_env)
@@ -166,6 +200,11 @@ pub fn apply_patch_sandboxed_with_exe(
         Ok(c) => c,
         Err(e) => return err(format!("沙箱执行启动失败：{e}"), false),
     };
+    if is_031 {
+        if let Err(e) = crate::sandbox::verify_child_pid_namespace(child.id()) {
+            return err(format!("沙箱执行隔离验证失败：{e}"), false);
+        }
+    }
     if let Err(e) = child.stdin.take().unwrap().write_all(args.patch.as_bytes()) {
         return err(format!("补丁传输失败：{e}"), false);
     }

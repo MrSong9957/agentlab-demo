@@ -1,0 +1,40 @@
+
+===== probe: probe-09-perf.py @ 2026-10-28T13:41:47Z =====
+cwd: /tmp/m0-031
+host: b2f35f825d62 6.18.33.2-microsoft-standard-WSL2 x86_64 GNU/Linux
++ 'M0 验证 10：沙箱启动性能初步样本（M0 初测，非冻结阈值）。
+口径：单并发、预热 5、100 次计时 × 3 轮、每轮 p95、三轮取中位轮；
+原始样本全量落盘；另测峰值 RSS（wait4 ru_maxrss）。
+变体 A＝033 产品同构最小沙箱（全盘只读）；变体 B＝031 受限读取树原型。'
+/tmp/m0-031/bin/probe-09-perf.py: line 5: $'M0 验证 10：沙箱启动性能初步样本（M0 初测，非冻结阈值）。\n口径：单并发、预热 5、100 次计时 × 3 轮、每轮 p95、三轮取中位轮；\n原始样本全量落盘；另测峰值 RSS（wait4 ru_maxrss）。\n变体 A＝033 产品同构最小沙箱（全盘只读）；变体 B＝031 受限读取树原型。': command not found
++ import os, subprocess, time, json, statistics, platform
+/tmp/m0-031/bin/probe-09-perf.py: line 6: import: command not found
++ BWRAP = /usr/bin/bwrap
+/tmp/m0-031/bin/probe-09-perf.py: line 8: BWRAP: command not found
++ TREE = /tmp/m0-031/fix/hl/approved
+/tmp/m0-031/bin/probe-09-perf.py: line 9: TREE: command not found
++ LOGDIR = /workspace/docs/logs/031-request-permissions
+/tmp/m0-031/bin/probe-09-perf.py: line 10: LOGDIR: command not found
+/tmp/m0-031/bin/probe-09-perf.py: line 11: syntax error near unexpected token `('
+/tmp/m0-031/bin/probe-09-perf.py: line 11: `SAMPLES = os.path.join(LOGDIR, "2026-10-28-m0-perf-samples.txt")'
+----- exit=2 -----
+
+===== probe: probe-09-perf.sh @ 2026-10-28T13:41:57Z =====
+cwd: /tmp/m0-031
+host: b2f35f825d62 6.18.33.2-microsoft-standard-WSL2 x86_64 GNU/Linux
++ set -x
++ exec python3 /tmp/m0-031/bin/probe-09-perf.py
+host: Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39
+cpu: 	: 13th Gen Intel(R) Core(TM) i5-13500H
+A-033-full-ro round1: p50=2.88ms p95=4.41ms p99=5.06ms max=6.97ms
+A-033-full-ro round2: p50=2.93ms p95=3.61ms p99=3.82ms max=4.07ms
+A-033-full-ro round3: p50=3.06ms p95=3.99ms p99=4.39ms max=4.43ms
+A-033-full-ro HEADLINE: median-round p95 = 3.99 ms (rounds p95: [4.41, 3.61, 3.99])
+A-033-full-ro peak RSS (bwrap tree, max of 3): 13100 KB (12.8 MiB)
+B-031-restricted-tree round1: p50=2.80ms p95=3.70ms p99=4.88ms max=6.91ms
+B-031-restricted-tree round2: p50=2.85ms p95=3.32ms p99=3.66ms max=3.68ms
+B-031-restricted-tree round3: p50=2.67ms p95=2.96ms p99=3.35ms max=3.38ms
+B-031-restricted-tree HEADLINE: median-round p95 = 3.32 ms (rounds p95: [3.7, 3.32, 2.96])
+B-031-restricted-tree peak RSS (bwrap tree, max of 3): 13100 KB (12.8 MiB)
+samples file: /workspace/docs/logs/031-request-permissions/2026-10-28-m0-perf-samples.txt lines: 602
+----- exit=0 -----

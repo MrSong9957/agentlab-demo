@@ -33,7 +33,7 @@ const HIGH_DETAIL_MAX_DIMENSION: u32 = 2048;
 const HIGH_DETAIL_MAX_PATCHES: usize = 2500;
 
 /// 准备后的图片（上游 `EncodedImage` 的本地形态；无缓存共享故用 Vec）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EncodedImage {
     pub bytes: Vec<u8>,
     pub mime: String,
@@ -72,6 +72,14 @@ fn error_summary(error: &str) -> String {
 }
 
 /// 能力关闭（text-only／未知）时的结果：不读取文件（§3.2——声明与执行两层关闭）。
+/// 以错误摘要构造结果（031 编码失败等调用方侧失败；不读取文件）。
+pub fn error_outcome(error: &str) -> ViewImageOutcome {
+    ViewImageOutcome {
+        summary: error_summary(error),
+        image: None,
+    }
+}
+
 pub fn unsupported_outcome() -> ViewImageOutcome {
     ViewImageOutcome {
         summary: error_summary(
@@ -145,6 +153,143 @@ pub(crate) fn prepare_from_path(
         return Err("用户已取消：本调用未完成".into());
     }
     prepare_image(resolved, bytes)
+}
+
+/// 031（§1.6 接入面）：受控内部图片准备入口——模型指定路径的**打开与读取
+/// 发生在 031 沙箱子进程**（本二进制 `--internal-view-image <path>`），主进程
+/// 只接收有界编码图片（JSON on stdout），不因格式门存在而先读取越权文件。
+/// 沙箱不可用＝显式错误（fail-closed，不回退进程内读取）。
+pub fn execute_sandboxed(
+    arguments: &str,
+    cwd: &Path,
+    cancel: Option<&AtomicBool>,
+    snapshot: &crate::sandbox::PolicySnapshot,
+) -> ViewImageOutcome {
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from(
+        "/proc/self/exe",
+    ));
+    execute_sandboxed_with_exe(arguments, cwd, cancel, snapshot, &exe)
+}
+
+/// [`execute_sandboxed`] 的显式二进制变体（测试注入 CARGO_BIN_EXE——测试
+/// 进程的 current_exe 是 harness，内部入口模式在真实二进制上）。
+pub fn execute_sandboxed_with_exe(
+    arguments: &str,
+    cwd: &Path,
+    cancel: Option<&AtomicBool>,
+    snapshot: &crate::sandbox::PolicySnapshot,
+    exe: &Path,
+) -> ViewImageOutcome {
+    let run = || -> Result<(PathBuf, EncodedImage), String> {
+        let path = parse_arguments(arguments)?;
+        let resolved = resolve_path(cwd, &path);
+        if cancelled(cancel) {
+            return Err("用户已取消：本调用未完成".into());
+        }
+        let launch = crate::sandbox::permission_launch_argv(
+            vec![
+                exe.to_string_lossy().into_owned(),
+                "--internal-view-image".to_string(),
+                resolved.to_string_lossy().into_owned(),
+            ],
+            snapshot,
+            cwd,
+        )
+        .map_err(|e| format!("031 沙箱不可用：{e}"))?;
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut cmd = std::process::Command::new(&launch.program);
+        cmd.args(&launch.args);
+        cmd.env_clear();
+        cmd.envs(launch.env.iter().cloned());
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                match launch.seccomp.as_ref() {
+                    Some(g) => {
+                        let fd = g.raw();
+                        cmd.pre_exec(move || {
+                            crate::sandbox::close_inherited_fds_except_cloexec(fd)
+                        });
+                    }
+                    None => {
+                        cmd.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
+                    }
+                }
+            }
+        }
+        // seccomp fd 守卫存活到 spawn 完成（memfd 非 CLOEXEC 穿越 execve）。
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("沙箱图片准备启动失败：{e}"))?;
+        drop(launch.seccomp);
+        let mut child = child;
+        // 审查 #27（§1.6 逐启动确认）：载荷确在新 PID ns
+        crate::sandbox::verify_child_pid_namespace(child.id())
+            .map_err(|e| format!("沙箱图片准备隔离验证失败：{e}"))?;
+        let out = child
+            .wait_with_output()
+            .map_err(|e| format!("沙箱图片准备等待失败：{e}"))?;
+        if !out.status.success() {
+            let tail: String = {
+                let all = String::from_utf8_lossy(&out.stderr);
+                let skip = all.chars().count().saturating_sub(200);
+                all.chars().skip(skip).collect()
+            };
+            return Err(format!("沙箱图片准备失败（exit {:?}）：{tail}", out.status.code()));
+        }
+        // 有界接收：编码图片上限即进程内同款 4 MiB＋元数据余量
+        if out.stdout.len() > MAX_PREPARED_IMAGE_BYTES + 1024 {
+            return Err("沙箱图片结果超过有界上限".to_string());
+        }
+        let encoded: EncodedImage = serde_json::from_slice(&out.stdout)
+            .map_err(|e| format!("沙箱图片结果解析失败：{e}"))?;
+        if cancelled(cancel) {
+            return Err("用户已取消：本调用未完成".into());
+        }
+        Ok((resolved, encoded))
+    };
+    match run() {
+        Ok((resolved, encoded)) => ViewImageOutcome {
+            summary: ok_summary(&resolved, &encoded),
+            image: Some(ToolResultImage {
+                image_url: data_url_from_bytes(&encoded.mime, &encoded.bytes),
+                detail: "high".into(),
+            }),
+        },
+        Err(error) => ViewImageOutcome { summary: error_summary(&error), image: None },
+    }
+}
+
+/// `--internal-view-image <path>` 子进程入口：读取并准备单张图片，编码 JSON
+/// 写 stdout（仅由 [`execute_sandboxed`] 经 031 沙箱包装调用）。返回进程退出码。
+pub fn run_internal_view_image() -> i32 {
+    let Some(path) = std::env::args().nth(2) else {
+        eprintln!("internal-view-image：缺少路径参数");
+        return 2;
+    };
+    match prepare_from_path(Path::new(&path), None) {
+        Ok(encoded) => {
+            use std::io::Write;
+            let mut ok = false;
+            if let Ok(json) = serde_json::to_vec(&encoded) {
+                ok = std::io::stdout().write_all(&json).is_ok();
+            }
+            if ok {
+                0
+            } else {
+                2
+            }
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
 }
 
 /// 020 §2.1：用户附件提交准备——能力检查先于任何文件打开（A11），随后逐图
