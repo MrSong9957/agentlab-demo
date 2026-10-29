@@ -1,0 +1,5 @@
+test ts30_perf_gates ... TS30 96 build_med_us=5870 query_p95_us=23
+TS30 2048 build_med_us=129962 query_p95_us=472
+TS30 empty build_us=0 query_us=0
+TS30 rss_96 baseline_kb=4440 after_build_kb=5256 delta_kb=816
+TS30 rss_2048 baseline_kb=10376 after_build_kb=18136 delta_kb=7760

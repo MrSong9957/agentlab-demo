@@ -146,6 +146,8 @@ pub trait SteerChannel {
 /// 021：用户轮附加能力与接续通道（宿主按每轮快照传入；既有入口默认全关）。
 /// 022：`mcp`＝本轮冻结的 MCP 工具快照（声明与分派共用；None＝无 MCP；
 /// MemoryMerge 强制忽略）。
+/// 030：`tool_search`＝模型目录显式声明 tool_search（声明与执行共用快照；
+/// 实际声明还要求本轮快照存在可搜索动态工具；MemoryMerge 强制忽略）。
 /// 032：`context`＝上下文管理工具宿主（查询计量＋检查点提交；None＝不声明
 /// 不执行；MemoryMerge 强制忽略——内部记忆轮不开放上下文工具）。
 pub struct TurnExtras<'a> {
@@ -153,6 +155,8 @@ pub struct TurnExtras<'a> {
     pub send_message: bool,
     /// 022：本轮 MCP 快照（工具定义＋原始身份映射＋连接句柄）。
     pub mcp: Option<&'a crate::mcp::manager::McpSnapshot>,
+    /// 030：模型目录显式声明 tool_search（本地目录搜索；旧入口默认关闭）。
+    pub tool_search: bool,
     /// 运行中普通输入接续通道（None＝无运行中接续能力；MemoryMerge 强制忽略）。
     pub steer: Option<&'a mut dyn SteerChannel>,
     /// 032：上下文管理工具宿主（None＝两工具均不声明不执行）。
@@ -160,9 +164,15 @@ pub struct TurnExtras<'a> {
 }
 
 impl TurnExtras<'_> {
-    /// 既有入口的兼容取值：无消息能力、无 MCP、无接续通道、无上下文工具。
+    /// 既有入口的兼容取值：无消息能力、无 MCP、无搜索、无接续通道、无上下文工具。
     pub fn none() -> Self {
-        Self { send_message: false, mcp: None, steer: None, context: None }
+        Self {
+            send_message: false,
+            mcp: None,
+            tool_search: false,
+            steer: None,
+            context: None,
+        }
     }
 }
 
@@ -226,6 +236,10 @@ fn skipped_without_execution(
         .expect("ApplyPatchResult 可序列化"),
         // 017：update_plan 未执行＝两字段失败结构（不产生成功计划快照）
         "update_plan" => json!({ "ok": false, "error": error }).to_string(),
+        // 030：tool_search 未执行＝三字段失败结构（§1.5：空 tools、明确原因）
+        name if name == crate::tool_search::TOOL_NAME => {
+            crate::tool_search::failure_result(error).to_string()
+        }
         _ => json!({ "error": error }).to_string(),
     }
 }
@@ -962,6 +976,45 @@ pub fn run_tool_turn_with_hosts_extras(
     // 失败不被自动补写/退出 flush/手动保存复活）；每用户轮最多一次成功提交。
     let mut pending_switch: Option<PendingSwitch> = None;
     let mut switch_committed = false;
+    // 030：搜索模式——模型开关＋合并轮隔离（误传也不声明不执行）；快照
+    // 存在可搜索动态工具才启用（S01：无可搜索项不声明，保留原全量路径）。
+    // 目录总量检查（≤2048 项/10 MiB）在首次模型请求前完成：超限明确结束
+    // 本轮，不先发半份目录、不静默切回全量声明（§1.6）。索引惰性建立、
+    // 同轮拟合一次；轮结束整体释放（§1.4-7）。
+    let mut search_state: Option<crate::tool_search::SearchState> = None;
+    let mut tool_search_definition: Option<Value> = None;
+    if extras.tool_search && !merge_mode {
+        if let Some(snapshot) = mcp_snapshot {
+            // 审查 #7：先借用快照条目做容量计量（瞬态序列化，超限即停），
+            // 过门后才物化 owned 目录——不在门前整表克隆 Schema。
+            if let Err(reason) = crate::tool_search::check_snapshot_capacity(snapshot) {
+                close_steer_restore(
+                    &mut steer,
+                    notify,
+                    crate::user_input_async::CLOSE_REQUEST_LIMIT,
+                );
+                close_pending_async(
+                    history,
+                    on_record,
+                    notify,
+                    &mut pending_async,
+                    crate::user_input_async::CLOSE_REQUEST_LIMIT,
+                );
+                return Err(reason);
+            }
+            let entries: Vec<crate::tool_search::CatalogEntry> = snapshot
+                .dynamic_entries()
+                .iter()
+                .filter_map(crate::tool_search::catalog_entry_from_tool)
+                .collect();
+            if !entries.is_empty() {
+                tool_search_definition = Some(crate::tool_search::tool_definition(
+                    &crate::tool_search::sources_json(&entries),
+                ));
+                search_state = Some(crate::tool_search::SearchState::new(entries));
+            }
+        }
+    }
     loop {
         if requests >= MAX_MODEL_REQUESTS_PER_TURN {
             close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_REQUEST_LIMIT);
@@ -980,9 +1033,34 @@ pub fn run_tool_turn_with_hosts_extras(
             }
         };
         let empty_tools: Vec<Value> = Vec::new();
-        let mcp_definitions: &[Value] = mcp_snapshot
-            .map(|s| s.definitions())
-            .unwrap_or(&empty_tools);
+        // 030：搜索模式按累计加载拆分声明（固定资源工具＋已加载动态定义，
+        // 按快照身份序）；关闭走原全量路径（逐字节兼容）。`declared_dynamic`
+        // 为本次请求「已声明且可执行」的动态集合——只有它能授权本响应里的
+        // 动态调用（§1.4-2；同批先搜索后猜名不升级）。
+        let mut assembled_mcp: Vec<Value>;
+        let declared_dynamic: std::collections::HashSet<String>;
+        let mcp_definitions: &[Value] = match (&search_state, mcp_snapshot) {
+            (Some(state), Some(snapshot)) => {
+                assembled_mcp = snapshot.resource_definitions().to_vec();
+                // 已加载定义来自搜索状态自身条目（敏感排除不改变对应关系）
+                assembled_mcp.extend(state.loaded_definitions());
+                declared_dynamic = state.loaded_names();
+                &assembled_mcp
+            }
+            _ => {
+                declared_dynamic = mcp_snapshot
+                    .map(|s| {
+                        s.dynamic_entries()
+                            .iter()
+                            .map(|e| e.model_name.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                mcp_snapshot
+                    .map(|s| s.definitions())
+                    .unwrap_or(&empty_tools)
+            }
+        };
         // 032：声明快照——查询按目录开关；切换还要求真实检查点提交宿主（§1.2）。
         let context_query = context_host
             .as_ref()
@@ -991,7 +1069,7 @@ pub fn run_tool_turn_with_hosts_extras(
             .as_ref()
             .is_some_and(|h| h.switch_declared && h.checkpoints.is_some());
         let mut body = match &mode {
-            ToolMode::User => crate::prompt::build_turn_request_with_mcp(
+            ToolMode::User => crate::prompt::build_turn_request_with_tool_search(
                 &active_items,
                 None,
                 input_host.is_some(),
@@ -1000,9 +1078,10 @@ pub fn run_tool_turn_with_hosts_extras(
                 send_message,
                 context_query,
                 context_switch,
+                tool_search_definition.as_ref(),
                 mcp_definitions,
             ),
-            ToolMode::UserWithMemory { .. } => crate::prompt::build_turn_request_with_mcp(
+            ToolMode::UserWithMemory { .. } => crate::prompt::build_turn_request_with_tool_search(
                 &active_items,
                 memory_context.as_deref(),
                 input_host.is_some(),
@@ -1011,6 +1090,7 @@ pub fn run_tool_turn_with_hosts_extras(
                 send_message,
                 context_query,
                 context_switch,
+                tool_search_definition.as_ref(),
                 mcp_definitions,
             ),
             ToolMode::MemoryMerge { system, .. } => build_turn_request_with(
@@ -1522,6 +1602,30 @@ pub fn run_tool_turn_with_hosts_extras(
                 let result =
                     outcome.unwrap_or_else(|error| json!({"ok":false,"status":"rejected","error":error}));
                 (result.to_string(), None, None)
+            } else if call.name == crate::tool_search::TOOL_NAME && !merge_mode {
+                // 030：本地目录搜索——零网络/零 tools/call；结果三字段结构。
+                // 声明与执行共用本轮快照（未声明或无可搜索目录的伪造调用按
+                // 不可用失败）；一次搜索全部成功或全部失败，此前成功加载不
+                // 回滚；结果提交前检查取消（§1.5）。
+                let native_declared = declared_tools.saturating_sub(declared_dynamic.len());
+                let outcome = match search_state.as_mut() {
+                    Some(state) if tool_search_definition.is_some() => {
+                        match crate::tool_search::parse_arguments(&call.arguments) {
+                            Err(reason) => crate::tool_search::failure_result(&reason),
+                            Ok(parsed) => state.execute_search(
+                                &parsed.query,
+                                parsed.limit,
+                                native_declared,
+                                cancel,
+                            ),
+                        }
+                    }
+                    _ => crate::tool_search::failure_result(&format!(
+                        "{} 不可用：当前模型未声明支持（experimental_supported_tools）或本轮没有可搜索工具",
+                        crate::tool_search::TOOL_NAME
+                    )),
+                };
+                (outcome.to_string(), None, None)
             } else if mcp_snapshot.is_some_and(|s| s.has_resources())
                 && crate::mcp::resources::is_resource_tool(&call.name)
             {
@@ -1534,10 +1638,15 @@ pub fn run_tool_turn_with_hosts_extras(
                     .expect("已确认存在")
                     .call_resource_tool(&call.name, &call.arguments, cancel_flag);
                 (content, None, None)
-            } else if let Some(entry) = mcp_snapshot.and_then(|s| s.entry(&call.name)) {
+            } else if let Some(entry) = mcp_snapshot
+                .and_then(|s| s.entry(&call.name))
+                .filter(|entry| declared_dynamic.contains(&entry.model_name))
+            {
                 // 022：MCP 分派——按快照精确命中（原始身份映射；不拆 `__`、
-                // 不看前缀）。参数错误在发送前返回；结果投影与凭证污染检查
-                // 在快照调用内完成。
+                // 不看前缀）。030：还须在**本次请求**的已声明动态集合内
+                //（§1.4-2）——同批先搜索后猜名、未搜索猜名、其他轮名称即使
+                // 目录命中也零调用，落入下方未知工具通用错误。参数错误在发送
+                // 前返回；结果投影与凭证污染检查在快照调用内完成。
                 let no_cancel = std::sync::atomic::AtomicBool::new(false);
                 let cancel_flag = cancel.unwrap_or(&no_cancel);
                 let content = match serde_json::from_str::<Value>(&call.arguments) {

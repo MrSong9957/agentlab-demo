@@ -1,10 +1,10 @@
 # 规格：工具搜索与按需加载
 
-- 状态：待实现
-- 更新时间：2026-10-26
+- 状态：待验收（实现方标记；最终由验收人判定）
+- 更新时间：2026-10-29
 - 对应原表项目：[工具能力对照表](../records/2026-10-21-codex-tools-comparison.md)的「工具搜索与按需加载」。一行作为一项任务，本项同时交付规格文档与实施计划。
 - 关联契约：[006 工具调用循环](006-tool-call-loop.md)、[007 会话保存](007-session-persistence.md)、[021 模型工具能力开关](021-send-message-to-user-async.md)、[022 MCP 工具](022-mcp-tools.md)、[023 MCP 资源](023-mcp-resources.md)、[024 五协议适配](024-native-model-apis.md)、[025 凭证脱敏](025-credential-redaction.md)。
-- 本轮交付：规格与实施计划，未实施程序行为。下一项为原表「权限申请」，须等待用户同意后才处理。
+- 本轮交付：完整实现（2026-10-29）：本地 BM25 搜索、按需声明、请求级执行集合门与容量边界。证据：[M0 基线](../logs/030-tool-search/2026-10-28-m0-baseline.md)、[性能冻结](../logs/030-tool-search/2026-10-28-m0-perf-freeze.md)、[变异反证](../logs/030-tool-search/2026-10-29-mutation-evidence.md)、[S17 上下文效果](../logs/030-tool-search/2026-10-29-s17-context-effect.txt)、[安全报告](../security/reports/2026-10-29-030-tool-search-security.md)。
 
 ## 1. 要做什么，有哪些要求
 
@@ -154,13 +154,13 @@
 
 | 步骤 | 修改落点与工作 | 验证与退出条件 |
 |---|---|---|
-| M0 固定基线与资源要求 | 记录已有工作区改动及 MCP、循环、多协议相关测试的原有结果；用固定 bm25 最小原型冻结词法、排序夹具和 §1.6 的性能基线/阈值；原型和样本存入仓库证据目录 | 既有失败与新增失败分清；中文、零命中、同分顺序已能判定；p95/RSS 冻结值及测法齐全，未测不填写通过 |
-| M1 参数、索引与来源 | 新增 `src/app/src/tool_search.rs` 并从 `lib.rs` 导出；先写非法输入及搜索红例，再接入 bm25；`mcp/manager.rs` 增加只读动态条目/固定资源访问，保留原全量定义方法；增加 `src/app/tests/tool_search.rs` | 真实搜索覆盖 query/limit、全部检索字段、排序、零命中、Schema 原样及来源敏感值拒绝；目录和结果边界有效；不调用网络、不修改原快照 |
+| M0 固定基线与资源要求 | 记录已有工作区改动及 MCP、循环、多协议相关测试的原有结果；用固定 bm25 最小原型冻结词法、排序夹具和 §1.6 的性能基线/阈值；加入同分项多于 limit、目录重排的夹具；原型和样本存入仓库证据目录 | 既有失败与新增失败分清；中文、零命中、同分跨截断边界的名单和顺序已能判定；p95/RSS 冻结值及测法齐全，未测不填写通过 |
+| M1 参数、索引与来源 | 新增 `src/app/src/tool_search.rs` 并从 `lib.rs` 导出；先写非法输入及搜索红例，再接入 bm25；对完整正分候选按 §1.3 的分数及原始身份排序后再取 limit，不先截断再补同分排序；`mcp/manager.rs` 增加只读动态条目/固定资源访问，保留原全量定义方法；增加 `src/app/tests/tool_search.rs` | 真实搜索覆盖 query/limit、全部检索字段、排序、零命中、Schema 原样及来源敏感值拒绝；目录和结果边界有效；不调用网络、不修改原快照 |
 | M2 开关与首次声明 | `catalog.rs` 复用 experimental_supported_tools，`main.rs/tui_host.rs` 每轮传入开关，`TurnExtras` 的旧入口默认关闭；`prompt.rs` 组装来源概览和分离后的工具集合；扩充 `prompt_assembly.rs` | 关闭/空目录与既有请求兼容；开启时仅动态目录延迟，内置和资源工具仍直接可用；128/2048 项两种范围不混淆 |
 | M3 循环状态与权限 | `turn.rs` 接入本轮索引、累计加载集合和每次请求固定的执行集合；按工具结果成功提交后开放下一请求；更新已知工具取消结果；扩充 `tool_loop.rs`、`mcp_turn.rs` | 搜索→后续声明→真实调用成功；同批新命中、未命中、伪造名和旧轮工具零调用；重复、多搜索、取消及第 8 次请求符合规格 |
 | M4 五协议与传输 | 复用 024 普通函数转换，仅在发现真实缺口时修正相应适配器；在 `native_model_apis.rs` 及 MCP stdio/HTTP 测试中通过本地模型 mock 和真实 MCP 服务验证 | 五协议下一请求都带完整新定义，调用结果与 ID 配对、原生状态不丢；stdio、HTTP JSON/SSE 的实际 tools/call 各一次，无原生搜索类型串入 |
 | M5 展示、恢复与上下文效果 | 复用 `main.rs/tui_host.rs` 通用活动与文本展示，按需增加该工具投影分支；在 `session.rs/e2e_acceptance.rs` 覆盖真实 CLI/PTY、保存与恢复；按 §1.6 比较完整请求与性能 | query/命中/失败可见，展示控制字符安全；旧会话可读，恢复不激活/不重放；96 工具夹具的动态声明 96→0→2，有计入历史的完整字节测量与 p95/RSS 实测 |
-| M6 加固、审查与全量验证 | TDD 后依次执行 comprehensive-testing、Security Testing、code-review、全量验证和修复；同步 022 声明上限适用范围、024 接入说明、工具对照表与实际受影响注释 | 独立只读审查按 rules/REVIEW.md；安全覆盖绕过加载/权限、污染元数据与容量；关键用例有反证，最终报告通过/失败/忽略/未运行数量，保留缺口 |
+| M6 加固、审查与全量验证 | ce-work 承接实施并保持 TDD，随后依次执行 comprehensive-testing、Security Testing、ce-code-review、全量验证和修复，再执行 ce-compound；同步 022 声明上限适用范围、024 接入说明、工具对照表与实际受影响注释 | 独立只读审查按 rules/REVIEW.md；安全覆盖绕过加载/权限、污染元数据与容量；关键用例有反证，最终报告通过/失败/忽略/未运行数量，保留缺口 |
 
 M0 定向基线命令（工作目录 `/workspace`；只作为基线，不替代交付回归）：
 
@@ -168,36 +168,42 @@ M0 定向基线命令（工作目录 `/workspace`；只作为基线，不替代�
 cargo test --locked --test mcp_l1 --test mcp_turn --test mcp_resources --test prompt_assembly --test tool_loop --test native_model_apis --test session
 ```
 
-M1 增加的 `tool_search` 测试目标在文件创建后纳入回归；M5 运行 `cargo test --locked --test e2e_acceptance` 保存 PTY 屏幕。最终全量必须运行 `cargo check && cargo test --workspace --no-fail-fast`，lint/格式检查按实施时核实的工具链执行。任一阶段错误先用 diagnosing-bugs 定位，修复后复验受影响检查并完成最终全量；独立副本使用专用 `--target-dir`。
+M1 增加的 `tool_search` 测试目标在文件创建后纳入回归；M5 运行 `cargo test --locked --test e2e_acceptance` 保存 PTY 屏幕。最终全量必须运行 `cargo check && cargo test --workspace --no-fail-fast`，lint/格式检查按实施时核实的工具链执行。任一阶段错误先用 ce-debug 定位，修复后复验受影响检查并完成最终全量；独立副本使用专用 `--target-dir`。
+
+### 3.3 计划前调研复核（2026-10-28）
+
+倒序第 4/6 项的[汇总报告](../think-tank/2026-10-28-030-tool-search.md)及完整原始输出：[BM25 检索专家](../think-tank/raw/2026-10-28-030-tool-search-systems.md)、[请求协议与工具资格专家](../think-tank/raw/2026-10-28-030-tool-search-storage.md)、[性能与数据边界专家](../think-tank/raw/2026-10-28-030-tool-search-security.md)、[侦察兵](../think-tank/raw/2026-10-28-030-tool-search-scout.md)。
+
+M0/M1 补充同分候选跨 limit 时先排序后截断的实施与验证；M2–M5 的请求级资格、五协议和完整请求字节测法已充分，保留。§1、§2、§5 不变，功能仍待实现、验收仍待测。门禁按现行 AGENTS 对齐，ce-compound 的复用经验统一进入 `rules/project-lessons.md`。
 
 ## 4. 踩过的坑，怎样解决
 
-本项尚未实现，没有运行失败或修复经验。原表[分项约定](../../rules/project-lessons.md#7-实现取舍与问题根因)及既有[协议路线](../../rules/project-lessons.md#工具搜索的目录与上下文边界2026-10-24仅文档)见项目经验；本轮读取依据和方案取舍见[核对记录](../logs/030-tool-search/2026-10-26-spec-research.md)。实现中记录真实问题，能复用的结论提炼到 `rules/project-lessons.md`，此处留指针。
+实施期真实问题与修复：独立审查（十人团队，2026-10-29）确认 13 项（1×P1/7×P2/5×P3，含跨搜索声明序偏离 §1.4-2、RSS 门禁空转、容量门前整表物化等），全部修复并附回归；同轮发现实现前的自审缺陷（过滤后下标误索引未过滤快照定义）已在实现期修复。可复用结论（serde 派生接受数组形式/Map 合并重复键、冻结基线须建模真实数据形状等）统一记录到[项目经验 030 节](../../rules/project-lessons.md)。方案依据见[核对记录](../logs/030-tool-search/2026-10-26-spec-research.md)，此处只留引用。
 
 ## 5. 先预测，再实测，最后确认是否合格
 
 | 编号 | 准备输入 → 执行动作 | 预测与验收标准 | 实测 |
 |---|---|---|---|
-| S01 | 无开关/开关错误/空动态目录/仅资源目录 → 开始用户轮 | 原有请求及条件工具契约不变；不声明无效搜索；伪造搜索零外部调用 | 待测 |
-| S02 | 开启搜索且有动态目录 → 第一次请求 | 内置/资源常驻，动态完整定义未发送；来源只含安全服务器 ID 和数量 | 待测 |
-| S03 | 非法 query/limit/未知字段，含 4096 字节边界和中文多字节 → 搜索 | 精确边界允许；非法失败、无加载变更；错误不泄露敏感数据 | 待测 |
-| S04 | 固定英文用途、中文同词、参数名、准确工具名、同分和无关词 → 真实 BM25 | 预先冻结的命中名单/排序正确；零命中返回空成功；结果 Schema 与快照一致 | 待测 |
-| S05 | 先搜索 2 项 → 后续模型请求调用其中一项 | 下一请求含完整 2 项定义；服务器仅收到映射后的原始名与原参数，真实调用一次 | 待测 |
-| S06 | 未搜索直接猜名，或同批搜索后调用新命中工具 | 即使宿主目录有该项也零业务调用；失败结果保留原 ID/name；已声明项不受影响 | 待测 |
-| S07 | 重复搜索、多次搜索、同批搜索、成功后容量失败 → 下一请求 | 定义去重、顺序稳定；每次全部成功或全部失败；先前成功状态不丢；128 边界正确 | 待测 |
-| S08 | 过滤名单、重复目录、Schema 不支持、凭证进入说明/新来源字段 → 发现再搜索 | 沿用 022 排除；不进入概览/索引/模型/历史/普通日志；不可猜名绕过 | 待测 |
-| S09 | 2048 项及多 1 项、目录 10 MiB 及多 1 字节、结果 1 MiB 边界 → 开启或搜索 | 各自边界准确；跨服务器合计受限；超限不半发布、不裁剪、不改变本次加载集合 | 待测 |
-| S10 | 历史、原生状态和搜索结果把实际请求推至 10 MiB 边界 → 五协议发送 | 最终序列化上限准确；超限发送次数为零，不删除历史或 Schema | 待测 |
-| S11 | 固定五协议响应 → 搜索、加载、调用、继续 | 普通函数格式各自正确；原生签名/块保留；无 Responses 原生搜索类型；ID/结果完整配对 | 待测 |
-| S12 | 同一模型流程配真实 stdio、HTTP JSON、HTTP SSE 服务 → 搜索后调用 | 搜索阶段零业务请求；每次实际调用仅一请求，断连/超时不重放 | 待测 |
-| S13 | 屏障协调 list_changed、下一轮重列、reload 或移除 → 再搜索 | 本轮快照不漂移，新轮从空集合使用新目录；被移除名称不恢复权限 | 待测 |
-| S14 | 搜索提交前取消、批内取消、超限批或断流响应、第 8 次响应才搜索 | 未提交不加载；未执行逐项配对；结构失败整批零执行；不产生第 9 次模型请求 | 待测 |
-| S15 | 带本轮 MCP 快照/能力标记 → 内部 MemoryMerge／提炼轮 | 不声明、不搜索、不加载、不执行外部工具；仍只允许内部 mem 工具 | 待测 |
-| S16 | 真实 CLI 与 PTY 搜索成功/失败，保存并 /resume，再发新用户输入 | 屏幕含 query、命中名称和失败原因；恢复不重放；旧定义历史不能激活当前工具；转义只影响显示 | 待测 |
-| S17 | 固定 96 工具夹具，开关前后完成同一仅需 2 工具的任务 → 比较五协议请求 | 动态声明数量 96→0→2；首次 tools 及完成调用后的最终完整请求字节均小于关闭对照；分项计入搜索历史，不把字节节省宣称为 token/实付费用或缓存收益 | 待测 |
-| S18 | §1.6 冻结后的原型、96/2048 目录与正式实现 → 三轮性能测量 | 测法和样本一致，p95/RSS 不越 M0 冻结阈值；原始样本、环境、总量边界齐全 | 待测 |
-| S19 | 关键用例断言不变 → 旧实现对照/临时破坏行为 → 恢复 | S02/S05 在旧实现失败；只凭目录执行、同批立即开放、Schema 裁剪、恢复激活旧定义分别被 S06/S09/S16 捕获；恢复后通过 | 待测 |
+| S01 | 无开关/开关错误/空动态目录/仅资源目录 → 开始用户轮 | 原有请求及条件工具契约不变；不声明无效搜索；伪造搜索零外部调用 | 通过：supports_tool_search_exact_name_only（精确名）；ts30_empty_dynamic_catalog（不声明＋伪造不可用）；ts30_off_mode_full_declaration_and_call（关闭全量不变）；ts30_fake_search_unavailable |
+| S02 | 开启搜索且有动态目录 → 第一次请求 | 内置/资源常驻，动态完整定义未发送；来源只含安全服务器 ID 和数量 | 通过：s30_search_mode_declaration_split＋ts30_resource_tools_cocxist_with_search |
+| S03 | 非法 query/limit/未知字段，含 4096 字节边界和中文多字节 → 搜索 | 精确边界允许；非法失败、无加载变更；错误不泄露敏感数据 | 通过：arguments_shape_and_limits＋arguments_query_byte_boundary_multibyte＋sec_arguments_reject_duplicate_and_malformed_keys（重复键/数组形式拒绝） |
+| S04 | 固定英文用途、中文同词、参数名、准确工具名、同分和无关词 → 真实 BM25 | 预先冻结的命中名单/排序正确；零命中返回空成功；结果 Schema 与快照一致 | 通过：frozen_lexicon_ordering＋catalog_reorder_keeps_results_identical＋result_keeps_schema_verbatim（M0 词法探针冻结） |
+| S05 | 先搜索 2 项 → 后续模型请求调用其中一项 | 下一请求含完整 2 项定义；服务器仅收到映射后的原始名与原参数，真实调用一次 | 通过：ts30_search_then_load_then_call（stdio）＋ts30_search_load_call_over_http_{json,sse}＋e2e s30 |
+| S06 | 未搜索直接猜名，或同批搜索后调用新命中工具 | 即使宿主目录有该项也零业务调用；失败结果保留原 ID/name；已声明项不受影响 | 通过：ts30_same_batch_guess_zero_calls＋ts30_unsearched_guess_zero_calls（变异反证 1） |
+| S07 | 重复搜索、多次搜索、同批搜索、成功后容量失败 → 下一请求 | 定义去重、顺序稳定；每次全部成功或全部失败；先前成功状态不丢；128 边界正确 | 通过：ts30_multi_search_accumulate_and_dedupe（含审查 #2 修复后的快照身份序断言）＋ts30_declared_budget_over_128_fails_whole_search＋declared_budget_exact_boundary_128（恰 128 允许/129 拒绝） |
+| S08 | 过滤名单、重复目录、Schema 不支持、凭证进入说明/新来源字段 → 发现再搜索 | 沿用 022 排除；不进入概览/索引/模型/历史/普通日志；不可猜名绕过 | 通过：sensitive_sources_excluded_from_everything（生产判定 sensitive_hit 共享实现，审查 #5）＋022 既有排除矩阵（mcp_l1） |
+| S09 | 2048 项及多 1 项、目录 10 MiB 及多 1 字节、结果 1 MiB 边界 → 开启或搜索 | 各自边界准确；跨服务器合计受限；超限不半发布、不裁剪、不改变本次加载集合 | 通过：catalog_entry_count_boundary＋catalog_json_size_boundary（二分恰边界）＋result_json_size_boundary＋ts30_catalog_over_limit_fails_before_first_request（借用计量先行，审查 #7） |
+| S10 | 历史、原生状态和搜索结果把实际请求推至 10 MiB 边界 → 五协议发送 | 最终序列化上限准确；超限发送次数为零，不删除历史或 Schema | 通过：沿用 024 既有请求级 10 MiB 上限测试（搜索结果为普通工具结果，同一请求体）；含搜索历史的组合用例登记为残留（见 M6 验证记录） |
+| S11 | 固定五协议响应 → 搜索、加载、调用、继续 | 普通函数格式各自正确；原生签名/块保留；无 Responses 原生搜索类型；ID/结果完整配对 | 通过：ts30_search_mode_tools_convert_across_five_protocols（五协议线上字节断言＋无 tool_search_call 注入）；响应侧配对沿 024 既有回归 |
+| S12 | 同一模型流程配真实 stdio、HTTP JSON、HTTP SSE 服务 → 搜索后调用 | 搜索阶段零业务请求；每次实际调用仅一请求，断连/超时不重放 | 通过：stdio（mcp_turn ts30 系列）＋HTTP JSON＋HTTP SSE（ts30_search_load_call_over_http_json / …_over_http_sse，审查 #8 补齐） |
+| S13 | 屏障协调 list_changed、下一轮重列、reload 或移除 → 再搜索 | 本轮快照不漂移，新轮从空集合使用新目录；被移除名称不恢复权限 | 通过：ts30_new_turn_resets_loaded＋结构性冻结（一轮一快照，搜索状态轮内构建一次；list_changed 重列沿 022 矩阵） |
+| S14 | 搜索提交前取消、批内取消、超限批或断流响应、第 8 次响应才搜索 | 未提交不加载；未执行逐项配对；结构失败整批零执行；不产生第 9 次模型请求 | 通过：ts30_cancel_backfill_three_field（三字段回填）＋ts30_eighth_response_search_no_ninth_request；批结构/断流沿 006 既有路径 |
+| S15 | 带本轮 MCP 快照/能力标记 → 内部 MemoryMerge／提炼轮 | 不声明、不搜索、不加载、不执行外部工具；仍只允许内部 mem 工具 | 通过：memory_phase2 dispatch_rejects…（含伪造 tool_search 的未知工具契约）＋merge_mode_ignores_tool_search_flag（开关误传组合） |
+| S16 | 真实 CLI 与 PTY 搜索成功/失败，保存并 /resume，再发新用户输入 | 屏幕含 query、命中名称和失败原因；恢复不重放；旧定义历史不能激活当前工具；转义只影响显示 | 通过：e2e s30_pty_search_display_call_save_resume（展示行/恢复不重放/新轮空集/V1 格式不升级）＋display_line_truncates_long_hit_lists＋display_line_shows_query_hits_and_failure_reason（单测） |
+| S17 | 固定 96 工具夹具，开关前后完成同一仅需 2 工具的任务 → 比较五协议请求 | 动态声明数量 96→0→2；首次 tools 及完成调用后的最终完整请求字节均小于关闭对照；分项计入搜索历史，不把字节节省宣称为 token/实付费用或缓存收益 | 通过：ts30_context_effect_bytes_search_vs_full_declaration——首次 tools 5,402B vs 25,966B；最终完整请求 28,117–28,354B vs 44,937–47,853B（五协议均小于对照，含搜索历史）；实测记录 [2026-10-29-s17-context-effect.txt](../logs/030-tool-search/2026-10-29-s17-context-effect.txt) |
+| S18 | §1.6 冻结后的原型、96/2048 目录与正式实现 → 三轮性能测量 | 测法和样本一致，p95/RSS 不越 M0 冻结阈值；原始样本、环境、总量边界齐全 | 通过：tool_search_perf 门禁（真实模块路径；修复轮后复测绿；RSS 子进程失败即失败，审查 #3）；原型/真实模块样本与 RSS 修订见 [冻结日志](../logs/030-tool-search/2026-10-28-m0-perf-freeze.md) |
+| S19 | 关键用例断言不变 → 旧实现对照/临时破坏行为 → 恢复 | S02/S05 在旧实现失败；只凭目录执行、同批立即开放、Schema 裁剪、恢复激活旧定义分别被 S06/S09/S16 捕获；恢复后通过 | 通过：4/4 变异红→还原绿（执行集合门/同分先截断/128 预算/目录容量短路），[变异记录](../logs/030-tool-search/2026-10-29-mutation-evidence.md) |
 
-- 本轮只检查文档内容、命名、链接和空白。以上是未来实施的验收条件，全部保持待测；[本轮核对与文档检查记录](../logs/030-tool-search/2026-10-26-spec-research.md)不是运行验收。
+- 实测结论见上表（2026-10-29 实现＋十人独立审查修复轮后）；复现命令、退出码与脱敏原始输出统一在 `docs/logs/030-tool-search/` 与 `docs/security/reports/2026-10-29-030-tool-search-security.md`，方案核对入口为[核对记录](../logs/030-tool-search/2026-10-26-spec-research.md)。
 - 实施证据统一放 `docs/logs/030-tool-search/`，含实际命令、工作目录、退出码、脱敏原始输出、固定夹具/原型及性能样本、真实外部调用次数与 PTY 最终屏幕。安全报告按安全代理要求保存到 `docs/security/reports/` 并从本目录引用。
 - 完成条件：M0 性能阈值已冻结，S01–S19 全部有证据，规定门禁及最终全量验证完成，无本项未修复阻塞问题；实现方最多标为「待验收」。最终验收由验收人依据规格、证据与可运行产物判定，不自行写「已通过」。

@@ -880,6 +880,44 @@ pub fn supports_new_context(model: &ModelInfo) -> bool {
         })
 }
 
+/// 030：experimental_supported_tools 精确匹配声明 tool_search（§1.2：唯一
+/// 开关来源；缺省/空数组/只含其他名称均保留原全量声明路径，不按模型名或
+/// 协议名猜测）。
+pub fn supports_tool_search(model: &ModelInfo) -> bool {
+    model
+        .experimental_supported_tools
+        .as_ref()
+        .is_some_and(|list| {
+            list.iter()
+                .any(|t| t == crate::tool_search::TOOL_NAME)
+        })
+}
+
+#[cfg(test)]
+mod ts30_switch_tests {
+    use super::*;
+
+    fn model_with(tools: Option<Vec<&str>>) -> ModelInfo {
+        ModelInfo {
+            experimental_supported_tools: tools.map(|t| {
+                t.into_iter().map(|s| s.to_string()).collect::<Vec<_>>()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// 030：tool_search 开关——精确名匹配；缺省/空数组/其他名/近似名均关闭。
+    #[test]
+    fn supports_tool_search_exact_name_only() {
+        assert!(supports_tool_search(&model_with(Some(vec!["tool_search"]))));
+        assert!(supports_tool_search(&model_with(Some(vec!["other", "tool_search"]))));
+        assert!(!supports_tool_search(&model_with(None)));
+        assert!(!supports_tool_search(&model_with(Some(vec![]))));
+        assert!(!supports_tool_search(&model_with(Some(vec!["tool_searching"]))));
+        assert!(!supports_tool_search(&model_with(Some(vec!["get_context_remaining"]))));
+    }
+}
+
 /// 参数能力检查：能力未知不算不支持（不带可选参数的基础对话照常发送）；
 /// 显式使用的参数必须先确认能力；已确认不支持的发送前报错。
 pub fn check_request_param(model: &ModelInfo, param: &str) -> Result<(), String> {

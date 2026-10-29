@@ -382,6 +382,7 @@ fn m2_turn_executes_query_with_fixed_fields() {
         false,
         None,
         TurnExtras {
+            tool_search: false,
             send_message: false,
             mcp: None,
             steer: None,
@@ -477,6 +478,7 @@ fn m2_unregistered_query_call_rejected_and_not_declared() {
         false,
         None,
         TurnExtras {
+            tool_search: false,
             send_message: false,
             mcp: None,
             steer: None,
@@ -560,6 +562,7 @@ fn m2_query_images_unknown_and_bad_args_error() {
         false,
         Some(&payload),
         TurnExtras {
+            tool_search: false,
             send_message: false,
             mcp: None,
             steer: None,
@@ -667,6 +670,7 @@ fn m2_context_id_and_active_view_with_handmade_checkpoint() {
             false,
             None,
             TurnExtras {
+            tool_search: false,
                 send_message: false,
                 mcp: None,
                 steer: None,
@@ -1059,6 +1063,7 @@ fn run_ctx_turn(
         false,
         None,
         TurnExtras {
+            tool_search: false,
             send_message: false,
             mcp: None,
             steer: None,
@@ -1323,6 +1328,7 @@ fn m4_cancel_after_scheduled_before_receipt_drops_candidate() {
         false,
         None,
         TurnExtras {
+            tool_search: false,
             send_message: false,
             mcp: None,
             steer: None,
@@ -1551,6 +1557,7 @@ fn m4_unanswered_async_blocks_switch_and_answer_enters_seed() {
         false,
         None,
         TurnExtras {
+            tool_search: false,
             send_message: false,
             mcp: None,
             steer: None,
@@ -1870,6 +1877,7 @@ fn ct_steer_inputs_before_and_after_barrier() {
         false,
         None,
         TurnExtras {
+            tool_search: false,
             send_message: false,
             mcp: None,
             steer: Some(&mut steer),
@@ -1950,6 +1958,7 @@ fn ct_switch_rejected_when_budget_insufficient() {
         false,
         None,
         TurnExtras {
+            tool_search: false,
             send_message: false,
             mcp: None,
             steer: None,
@@ -2079,6 +2088,7 @@ fn ct_query_snapshot_includes_prior_batch_results() {
         false,
         None,
         TurnExtras {
+            tool_search: false,
             send_message: false,
             mcp: None,
             steer: None,
@@ -2190,6 +2200,7 @@ fn sec_memory_merge_cannot_use_context_tools() {
         false,
         None,
         TurnExtras {
+            tool_search: false,
             send_message: false,
             mcp: None,
             steer: None,
@@ -2309,6 +2320,7 @@ fn sec_no_credential_leakage_in_metering_and_checkpoint() {
         false,
         None,
         TurnExtras {
+            tool_search: false,
             send_message: false,
             mcp: None,
             steer: None,
@@ -2472,6 +2484,7 @@ fn fix_no_checkpoint_host_new_context_not_declared_and_rejected() {
         false,
         None,
         TurnExtras {
+            tool_search: false,
             send_message: false,
             mcp: None,
             steer: None,
@@ -2617,6 +2630,7 @@ fn fix_native_opaque_history_query_unknown() {
         false,
         None,
         TurnExtras {
+            tool_search: false,
             send_message: false,
             mcp: None,
             steer: None,
@@ -2804,6 +2818,7 @@ fn fix_batch_end_revalidation_failure_keeps_old_view() {
         false,
         None,
         TurnExtras {
+            tool_search: false,
             send_message: false,
             mcp: None,
             steer: None,

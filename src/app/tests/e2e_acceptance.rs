@@ -10460,3 +10460,170 @@ fn s32_pty_context_query_switch_and_checkpoint() {
     pty.send_line("exit");
     assert_eq!(pty.finish().1.code(), Some(0));
 }
+
+// ========== 030 工具搜索与按需加载（M5/S16/S17） ==========
+
+/// 030：声明 tool_search 的 manual。
+fn write_manual_tool_search_capable(dir: &Path, base_url: &str, key_ref: &str) {
+    let m = catalog::ManualRoot {
+        selected_provider: Some("deepseek".into()),
+        selected_model: Some("deepseek-flash".into()),
+        memories: None,
+        providers: [(
+            "deepseek".into(),
+            catalog::ManualProvider {
+                base_url: Some(base_url.into()),
+                key_ref: Some(key_ref.into()),
+                models: [(
+                    "deepseek-flash".into(),
+                    catalog::ModelInfo {
+                        id: "deepseek-flash".into(),
+                        context_length: Some(32768),
+                        max_output: Some(4096),
+                        experimental_supported_tools: Some(vec!["tool_search".into()]),
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+    };
+    std::fs::write(dir.join("manual.json"), serde_json::to_string(&m).unwrap()).unwrap();
+}
+
+/// S16/S05：行式 PTY——搜索结果可见（query/命中/模型名），业务调用真实
+/// 发生一次；首请求不带动态定义；保存恢复只展示、不重放（记录仍一次），
+/// 恢复后的新用户轮从空加载集合开始；会话格式不升级（无新记录类型）。
+#[test]
+fn s30_pty_search_display_call_save_resume() {
+    let cfg = TempDir::new("s30-cfg");
+    let user = TempDir::new("s30-user");
+    let record_dir = TempDir::new("s30-record");
+    let record = record_dir.path().join("record.jsonl");
+    write_mcp_config(user.path(), "searchable", &record, "");
+    let mock = spawn_mock(vec![
+        MockResp::json(
+            200,
+            tool_batch_json(&[tool_call_json(
+                "s30-c1",
+                "tool_search",
+                &json!({"query": "email", "limit": 2}).to_string(),
+            )]),
+        ),
+        MockResp::json(
+            200,
+            tool_batch_json(&[tool_call_json(
+                "s30-c2",
+                "mcp__fx__send_mail",
+                &json!({"to": "e2e@x"}).to_string(),
+            )]),
+        ),
+        MockResp::json(200, chat_body("S30-已发送")),
+        MockResp::json(200, chat_body("S30-恢复后完成")),
+    ]);
+    write_manual_tool_search_capable(cfg.path(), &mock.url, "env:TCHAT_S30_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("fake-s30"),
+    );
+    let mut pty = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S30_KEY",
+        "fake-s30",
+        false,
+    ));
+    pty.wait_output("你> ", WATCHDOG).unwrap();
+    pty.send_line("搜索并调用邮件工具");
+    // 展示行：query、命中数、模型工具名；失败分支见 s30 屏幕兜底断言
+    pty.wait_output("[工具] tool_search「email」命中 1 项：mcp__fx__send_mail", WATCHDOG)
+        .unwrap();
+    pty.wait_output("S30-已发送", WATCHDOG).unwrap();
+    pty.wait_output("你> ", WATCHDOG).unwrap();
+
+    // 真实调用恰一次（原始名+原参数）；搜索阶段零业务请求
+    let entries = mcp_record(&record);
+    let calls: Vec<&Value> = entries.iter().filter(|e| e["kind"] == "call").collect();
+    assert_eq!(calls.len(), 1, "业务调用恰一次");
+    assert_eq!(calls[0]["name"], "send_mail");
+    assert_eq!(calls[0]["arguments"]["to"], "e2e@x");
+
+    // 请求侧：首请求延迟动态定义并声明 tool_search；下一请求携带命中定义
+    let first: Value = serde_json::from_str(&mock.requests()[0].body).unwrap();
+    let names: Vec<&str> = first["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap_or(""))
+        .collect();
+    assert!(names.contains(&"tool_search"), "须声明搜索工具：{names:?}");
+    assert!(!names.contains(&"mcp__fx__send_mail"), "动态定义须延迟");
+    let second: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
+    let names2: Vec<&str> = second["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap_or(""))
+        .collect();
+    assert!(names2.contains(&"mcp__fx__send_mail"), "下一请求携带命中定义");
+
+    // 保存（普通工具调用入史；会话格式不升级）
+    pty.send_line("/save s30");
+    pty.wait_output("已保存", WATCHDOG).unwrap();
+    pty.send_raw(b"\x04");
+    let (out, status) = pty.finish();
+    assert!(status.success(), "{out}");
+    let sessions_dir = user.path().join("sessions");
+    let saved = fs::read_dir(&sessions_dir)
+        .unwrap()
+        .flatten()
+        .find(|e| e.file_name().to_string_lossy().contains("s30"))
+        .expect("会话文件存在");
+    let text = fs::read_to_string(saved.path()).unwrap();
+    assert!(
+        text.starts_with("{\"v\":1}\n"),
+        "会话格式不升级（仍 V1 meta）：{}",
+        &text[..text.len().min(40)]
+    );
+    assert!(text.contains("tool_search"), "搜索调用按普通工具入史");
+    assert!(text.contains("s30-c1"), "调用记录原样保留");
+
+    // 恢复：只展示；新输入的轮从空加载集合开始（不再继承 send_mail）
+    let mut resumed = PtySession::spawn(input_pty_cmd(
+        cfg.path(),
+        user.path(),
+        "TCHAT_S30_KEY",
+        "fake-s30",
+        false,
+    ));
+    resumed.wait_output("你> ", WATCHDOG).unwrap();
+    resumed.send_line("/resume s30");
+    resumed.wait_output("恢复 ", WATCHDOG).unwrap();
+    resumed.wait_output("你> ", WATCHDOG).unwrap();
+    resumed.send_line("继续");
+    resumed.wait_output("S30-恢复后完成", WATCHDOG).unwrap();
+    resumed.wait_output("你> ", WATCHDOG).unwrap();
+    resumed.send_raw(b"\x04");
+    let (out2, status2) = resumed.finish();
+    assert!(status2.success(), "{out2}");
+    assert_eq!(mock.count(), 4, "恢复后仅新增一轮模型请求");
+    let entries2 = mcp_record(&record);
+    let calls2: Vec<&Value> = entries2.iter().filter(|e| e["kind"] == "call").collect();
+    assert_eq!(calls2.len(), 1, "恢复不重放业务调用");
+    let third: Value = serde_json::from_str(&mock.requests()[3].body).unwrap();
+    let names3: Vec<&str> = third["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap_or(""))
+        .collect();
+    assert!(
+        !names3.contains(&"mcp__fx__send_mail"),
+        "新用户轮不得继承历史加载集合：{names3:?}"
+    );
+}

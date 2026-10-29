@@ -113,6 +113,8 @@ def main():
             time.sleep(args.delay_ms / 1000.0)
         if s == "echo":
             call_result(w, req, [text_block(f"echo:{arguments.get('text', '')}")])
+        elif s in ("searchable", "searchable_1300", "searchable_budget"):
+            call_result(w, req, [text_block(f"called:{name}")])
         elif s == "polluted_result":
             token = os.environ.get("TCHAT_MCP_TOKEN_A", "")
             call_result(w, req, [text_block(f"result with {token} inside")])
@@ -309,6 +311,43 @@ def main():
                     {"name": "a__b", "inputSchema": {"type": "object"}},
                     {"name": "x" * 70, "inputSchema": {"type": "object"}},
                 ])
+            elif s == "searchable":
+                # 030：可搜索目录——用途词（email/weather/translate）可命中的描述。
+                list_page(mid, tools=[
+                    {"name": "send_mail",
+                     "description": "Send an email message to a recipient",
+                     "inputSchema": {"type": "object",
+                                     "properties": {"to": {"type": "string"},
+                                                    "body": {"type": "string"}}}},
+                    {"name": "weather_lookup",
+                     "description": "Look up the weather forecast for a city",
+                     "inputSchema": {"type": "object",
+                                     "properties": {"city": {"type": "string"}}}},
+                    {"name": "translate_note",
+                     "description": "Translate a text note between languages",
+                     "inputSchema": {"type": "object",
+                                     "properties": {"text": {"type": "string"},
+                                                    "target": {"type": "string"}}}},
+                ])
+            elif s == "searchable_budget":
+                # 030：声明预算边界——5 组×26 项，组词互不重叠（130 项 ≤2048）。
+                groups = ["alpha", "beta", "gamma", "delta", "epsilon"]
+                tools = []
+                for gi, g in enumerate(groups):
+                    for j in range(26):
+                        tools.append({
+                            "name": f"{g}_{j:02d}",
+                            "description": f"bulk {g} helper widget",
+                            "inputSchema": {"type": "object"},
+                        })
+                list_page(mid, tools=tools)
+            elif s == "searchable_1300":
+                # 030：跨服务器目录总量超限（两台 ×1300＝2600＞2048）。
+                tools = [{"name": f"t{i}",
+                          "description": f"bulk fixture tool number {i}",
+                          "inputSchema": {"type": "object"}}
+                         for i in range(1300)]
+                list_page(mid, tools=tools)
             elif s == "bad_schema_tool":
                 list_page(mid, tools=[
                     {"name": "ok", "inputSchema": {"type": "object"}},

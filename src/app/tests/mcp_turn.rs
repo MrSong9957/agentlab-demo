@@ -81,6 +81,7 @@ fn run_turn_with(
         false,
         None,
         TurnExtras {
+            tool_search: false,
             mcp: Some(&snapshot),
             send_message: false,
             steer: None, context: None
@@ -248,6 +249,7 @@ fn a07_memory_merge_turn_never_declares_or_executes_mcp() {
         false,
         None,
         TurnExtras {
+            tool_search: false,
             mcp: Some(&snapshot),
             send_message: true,
             steer: None, context: None
@@ -594,6 +596,7 @@ fn a17_mcp_call_coexists_with_user_input_in_batch() {
         false,
         None,
         TurnExtras {
+            tool_search: false,
             mcp: Some(&snapshot),
             send_message: false,
             steer: None, context: None
@@ -766,6 +769,7 @@ fn a17_mcp_with_view_image_batch_pairs_then_image_projection() {
         /*image_input*/ true,
         None,
         TurnExtras {
+            tool_search: false,
             mcp: Some(&snapshot),
             send_message: false,
             steer: Some(&mut channel), context: None
@@ -819,4 +823,418 @@ fn a17_mcp_with_view_image_batch_pairs_then_image_projection() {
     std::env::remove_var(CANARY);
     std::env::remove_var("TCHAT_USER_DIR");
     drop(env_guard);
+}
+
+// ---------- 030：工具搜索与按需加载（真实 turn＋stdio MCP＋mock 模型） ----------
+
+/// 带 tool_search 开关的轮运行（复用 run_turn_with 全套真实边界）。
+fn run_turn_ex(
+    ctx: &common::mcp_fixtures::TestCtx,
+    responses: Vec<String>,
+    cancel: Option<Arc<AtomicBool>>,
+    mut on_notify: impl FnMut(&TurnNotify),
+    tool_search: bool,
+) -> TurnRun {
+    let snapshot = ctx
+        .manager
+        .prepare_for_turn(&AtomicBool::new(false))
+        .expect("准备不取消");
+    let mut history: Vec<HistoryItem> = Vec::new();
+    let mgr = ProcessManager::new();
+    let sources = ContextSources::from_env();
+    let mut bodies: Vec<serde_json::Value> = Vec::new();
+    let mut events: Vec<TurnNotify> = Vec::new();
+    let mut iter = responses.into_iter();
+    let mut sender = |body: &serde_json::Value| -> Result<serde_json::Value, String> {
+        bodies.push(body.clone());
+        let resp = iter.next().expect("预设响应耗尽");
+        Ok(serde_json::from_str(&resp).unwrap())
+    };
+    let mut notify = |n: TurnNotify| {
+        on_notify(&n);
+        events.push(n);
+    };
+    let default_cancel = AtomicBool::new(false);
+    let cancel_ref = cancel.as_deref().unwrap_or(&default_cancel);
+    let reply = run_user_turn_with_context_and_caps(
+        &mut history,
+        "执行任务",
+        &mut sender,
+        &mut notify,
+        Some(cancel_ref),
+        &mut |_| {},
+        ToolMode::User,
+        &sources,
+        &mgr,
+        None,
+        None,
+        false,
+        None,
+        TurnExtras {
+            mcp: Some(&snapshot),
+            send_message: false,
+            tool_search,
+            steer: None,
+            context: None
+        },
+    );
+    TurnRun { reply, history, bodies, events }
+}
+
+fn tool_names(body: &serde_json::Value) -> Vec<String> {
+    body["tools"]
+        .as_array()
+        .expect("tools 数组")
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn result_of(history: &[HistoryItem], id: &str) -> serde_json::Value {
+    let (_, content) = tool_results(history)
+        .into_iter()
+        .find(|(cid, _)| cid == id)
+        .unwrap_or_else(|| panic!("缺少 {id} 的结果"));
+    serde_json::from_str(&content).expect("工具结果为 JSON")
+}
+
+fn recorded_calls(record_path: &std::path::Path) -> Vec<serde_json::Value> {
+    let text = std::fs::read_to_string(record_path).unwrap_or_default();
+    text.lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["kind"] == "call")
+        .collect()
+}
+
+#[test]
+fn ts30_search_then_load_then_call() {
+    let ctx = setup("searchable", "");
+    let run = run_turn_ex(
+        &ctx,
+        vec![
+            tc_response(&[call("c1", "tool_search", serde_json::json!({"query": "email", "limit": 2}))]),
+            tc_response(&[call("c2", "mcp__fx__send_mail", serde_json::json!({"to": "a@b.c"}))]),
+            fin("done"),
+        ],
+        None,
+        |_| {},
+        true,
+    );
+    // 请求 1：仅常驻＋tool_search；未加载动态定义不发送
+    let names1 = tool_names(&run.bodies[0]);
+    assert!(names1.contains(&"tool_search".to_string()), "须声明搜索工具");
+    assert!(!names1.iter().any(|n| n.starts_with("mcp__fx__")), "动态定义须延迟：{names1:?}");
+    // c1：三字段成功＋完整定义（Schema 原样）
+    let r1 = result_of(&run.history, "c1");
+    assert_eq!(r1["ok"], serde_json::json!(true));
+    assert_eq!(r1["error"], serde_json::Value::Null);
+    assert_eq!(r1["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(r1["tools"][0]["function"]["name"], serde_json::json!("mcp__fx__send_mail"));
+    assert!(r1["tools"][0]["function"]["parameters"]["properties"]["to"].is_object());
+    // 请求 2：声明已加载 send_mail（仍无 weather_lookup）
+    let names2 = tool_names(&run.bodies[1]);
+    assert!(names2.contains(&"mcp__fx__send_mail".to_string()), "下一请求须带命中定义");
+    assert!(!names2.contains(&"mcp__fx__weather_lookup".to_string()));
+    // 真实调用恰一次：服务器只收到原始名与原参数
+    let calls = recorded_calls(&ctx.record_path);
+    assert_eq!(calls.len(), 1, "搜索零业务调用，业务调用恰一次");
+    assert_eq!(calls[0]["name"], serde_json::json!("send_mail"));
+    assert_eq!(calls[0]["arguments"]["to"], serde_json::json!("a@b.c"));
+    assert_eq!(run.reply, Ok("done".to_string()));
+}
+
+#[test]
+fn ts30_same_batch_guess_zero_calls() {
+    let ctx = setup("searchable", "");
+    let run = run_turn_ex(
+        &ctx,
+        vec![
+            tc_response(&[
+                call("c1", "tool_search", serde_json::json!({"query": "email"})),
+                call("c2", "mcp__fx__send_mail", serde_json::json!({"to": "x"})),
+            ]),
+            fin("done"),
+        ],
+        None,
+        |_| {},
+        true,
+    );
+    // 同批先搜索后猜名：目录命中也不可执行（请求集合门）
+    let r2 = result_of(&run.history, "c2");
+    assert!(r2.get("error").is_some(), "未声明调用走未知工具通用错误：{r2}");
+    assert!(recorded_calls(&ctx.record_path).is_empty(), "零业务调用");
+    // 下一请求已声明 send_mail（批末搜索已入加载集合）
+    let names2 = tool_names(&run.bodies[1]);
+    assert!(names2.contains(&"mcp__fx__send_mail".to_string()));
+    assert_eq!(run.reply, Ok("done".to_string()));
+}
+
+#[test]
+fn ts30_unsearched_guess_zero_calls() {
+    let ctx = setup("searchable", "");
+    let run = run_turn_ex(
+        &ctx,
+        vec![
+            tc_response(&[call("c1", "mcp__fx__weather_lookup", serde_json::json!({"city": "x"}))]),
+            fin("done"),
+        ],
+        None,
+        |_| {},
+        true,
+    );
+    let r1 = result_of(&run.history, "c1");
+    assert!(r1.get("error").is_some(), "未搜索直接猜名须失败：{r1}");
+    assert!(recorded_calls(&ctx.record_path).is_empty(), "零业务调用");
+}
+
+#[test]
+fn ts30_off_mode_full_declaration_and_call() {
+    let ctx = setup("searchable", "");
+    let run = run_turn_ex(
+        &ctx,
+        vec![
+            tc_response(&[call("c1", "mcp__fx__send_mail", serde_json::json!({"to": "y"}))]),
+            fin("done"),
+        ],
+        None,
+        |_| {},
+        false,
+    );
+    let names1 = tool_names(&run.bodies[0]);
+    assert!(names1.contains(&"mcp__fx__send_mail".to_string()), "关闭模式全量声明不变");
+    assert!(!names1.contains(&"tool_search".to_string()), "关闭模式不声明搜索工具");
+    assert_eq!(recorded_calls(&ctx.record_path).len(), 1);
+}
+
+#[test]
+fn ts30_fake_search_unavailable() {
+    let ctx = setup("searchable", "");
+    let run = run_turn_ex(
+        &ctx,
+        vec![
+            tc_response(&[call("c1", "tool_search", serde_json::json!({"query": "email"}))]),
+            fin("done"),
+        ],
+        None,
+        |_| {},
+        false,
+    );
+    let r1 = result_of(&run.history, "c1");
+    assert_eq!(r1["ok"], serde_json::json!(false), "未声明模型的伪造搜索须失败");
+    assert_eq!(r1["tools"], serde_json::json!([]));
+    assert!(r1["error"].as_str().unwrap().contains("不可用"));
+    assert!(recorded_calls(&ctx.record_path).is_empty());
+}
+
+#[test]
+fn ts30_multi_search_accumulate_and_dedupe() {
+    let ctx = setup("searchable", "");
+    // 审查 #2 回归：先搜快照靠后的 weather（下标 2）再搜靠前的 email
+    //（下标 0）——下一请求声明必须按快照身份序（send_mail 在前）。
+    let run = run_turn_ex(
+        &ctx,
+        vec![
+            tc_response(&[
+                call("c1", "tool_search", serde_json::json!({"query": "weather"})),
+                call("c2", "tool_search", serde_json::json!({"query": "email"})),
+            ]),
+            tc_response(&[call("c3", "tool_search", serde_json::json!({"query": "email"}))]),
+            fin("done"),
+        ],
+        None,
+        |_| {},
+        true,
+    );
+    // 请求 2：两批搜索累计，两个定义各一次，且按快照身份序（§1.4-2）
+    let names2 = tool_names(&run.bodies[1]);
+    assert_eq!(names2.iter().filter(|n| n == &"mcp__fx__send_mail").count(), 1);
+    assert_eq!(names2.iter().filter(|n| n == &"mcp__fx__weather_lookup").count(), 1);
+    let pos_mail = names2.iter().position(|n| n == "mcp__fx__send_mail").unwrap();
+    let pos_weather = names2.iter().position(|n| n == "mcp__fx__weather_lookup").unwrap();
+    assert!(pos_mail < pos_weather, "声明序＝快照身份序：{names2:?}");
+    // 请求 3：重复命中不复制声明
+    let names3 = tool_names(&run.bodies[2]);
+    assert_eq!(names3.iter().filter(|n| n == &"mcp__fx__send_mail").count(), 1);
+    // c3 结果仍返回定义（重复命中可再次返回；加载集合去重）
+    let r3 = result_of(&run.history, "c3");
+    assert_eq!(r3["ok"], serde_json::json!(true));
+    assert_eq!(r3["tools"][0]["function"]["name"], serde_json::json!("mcp__fx__send_mail"));
+}
+
+#[test]
+fn ts30_eighth_response_search_no_ninth_request() {
+    let ctx = setup("searchable", "");
+    let mut responses: Vec<String> = (1..=8)
+        .map(|i| tc_response(&[call(&format!("c{i}"), "tool_search", serde_json::json!({"query": "email"}))]))
+        .collect();
+    responses.push(fin("unused"));
+    let run = run_turn_ex(&ctx, responses, None, |_| {}, true);
+    assert_eq!(run.bodies.len(), 8, "不发第 9 次请求");
+    assert!(run.reply.is_err(), "额度耗尽须明确失败");
+    // 第 8 次响应中的搜索照常执行并入史
+    assert_eq!(
+        run.history.iter().filter(|h| matches!(h, HistoryItem::ToolResult { tool_call_id, .. } if tool_call_id == "c8")).count(),
+        1
+    );
+}
+
+#[test]
+fn ts30_cancel_backfill_three_field() {
+    let ctx = setup("searchable", "");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = cancel.clone();
+    let run = run_turn_ex(
+        &ctx,
+        vec![
+            tc_response(&[
+                call("c1", "update_plan", serde_json::json!({"plan": {"step": "s", "status": "completed"}})),
+                call("c2", "tool_search", serde_json::json!({"query": "email"})),
+            ]),
+            fin("done"),
+        ],
+        Some(cancel),
+        move |n| {
+            if let TurnNotify::ToolEnd { name, .. } = n {
+                if name == "update_plan" {
+                    flag.store(true, Ordering::SeqCst);
+                }
+            }
+        },
+        true,
+    );
+    let r2 = result_of(&run.history, "c2");
+    assert_eq!(r2["ok"], serde_json::json!(false), "取消未执行搜索按三字段回填：{r2}");
+    assert_eq!(r2["tools"], serde_json::json!([]));
+    assert!(r2["error"].as_str().unwrap().contains("取消"));
+}
+
+#[test]
+fn ts30_catalog_over_limit_fails_before_first_request() {
+    let ctx = common::mcp_fixtures::setup_two("searchable_1300", "searchable_1300", "", "");
+    let run = run_turn_ex(
+        &ctx,
+        vec![fin("unused")],
+        None,
+        |_| {},
+        true,
+    );
+    let err = run.reply.expect_err("目录超限须明确失败");
+    assert!(err.contains("2048"), "错误须说明条目上限：{err}");
+    assert!(run.bodies.is_empty(), "超限不发半份目录、不发任何模型请求");
+}
+
+#[test]
+fn ts30_new_turn_resets_loaded() {
+    let ctx = setup("searchable", "");
+    let first = run_turn_ex(
+        &ctx,
+        vec![
+            tc_response(&[call("c1", "tool_search", serde_json::json!({"query": "email"}))]),
+            fin("done"),
+        ],
+        None,
+        |_| {},
+        true,
+    );
+    assert!(tool_names(&first.bodies[1]).contains(&"mcp__fx__send_mail".to_string()));
+    // 下一用户轮：加载集合从空开始（不跨轮恢复）
+    let second = run_turn_ex(
+        &ctx,
+        vec![
+            tc_response(&[call("d1", "tool_search", serde_json::json!({"query": "weather"}))]),
+            fin("done"),
+        ],
+        None,
+        |_| {},
+        true,
+    );
+    let names = tool_names(&second.bodies[0]);
+    assert!(!names.contains(&"mcp__fx__send_mail".to_string()), "新轮不得继承旧加载集合");
+    assert!(!names.iter().any(|n| n.starts_with("mcp__fx__")));
+}
+
+#[test]
+fn ts30_declared_budget_over_128_fails_whole_search() {
+    // S07/S09：常驻＋tool_search＋累计加载 ≤128；超限本次搜索整体失败，
+    // 此前成功加载不回滚、不被淘汰；成功定义恰一次进入下一请求。
+    let ctx = setup("searchable_budget", "");
+    let groups = ["alpha", "beta", "gamma", "delta", "epsilon"];
+    let searches: Vec<serde_json::Value> = groups
+        .iter()
+        .enumerate()
+        .map(|(i, g)| call(&format!("c{}", i + 1), "tool_search", serde_json::json!({"query": g, "limit": 26})))
+        .collect();
+    let run = run_turn_ex(
+        &ctx,
+        vec![tc_response(&searches), fin("done")],
+        None,
+        |_| {},
+        true,
+    );
+    // 前 4 组加载 104 项（5 常驻＋104＝109 ≤128）；第 5 组 109+26＝135＞128 → 失败
+    for i in 1..=4 {
+        let r = result_of(&run.history, &format!("c{i}"));
+        assert_eq!(r["ok"], serde_json::json!(true), "第 {i} 组应成功：{r}");
+        assert_eq!(r["tools"].as_array().unwrap().len(), 26);
+    }
+    let r5 = result_of(&run.history, "c5");
+    assert_eq!(r5["ok"], serde_json::json!(false), "第 5 组须整体失败：{r5}");
+    assert_eq!(r5["tools"], serde_json::json!([]));
+    let err = r5["error"].as_str().unwrap();
+    assert!(err.contains("128"), "错误须说明声明上限：{err}");
+    assert!(err.contains("limit"), "错误须提示缩小 limit：{err}");
+    // 下一请求：恰 104 项已加载定义（无淘汰、无重复）
+    let names2 = tool_names(&run.bodies[1]);
+    let loaded = names2.iter().filter(|n| n.starts_with("mcp__fx__")).count();
+    assert_eq!(loaded, 104, "此前成功加载全部保留");
+    assert_eq!(names2.len(), 5 + 104, "4 内置＋tool_search＋104 动态");
+    assert_eq!(run.reply, Ok("done".to_string()));
+}
+
+#[test]
+fn ts30_resource_tools_cocxist_with_search() {
+    // S02：仅资源能力的服务器仍提供固定资源工具；动态工具（echo）延迟。
+    let ctx = setup("tools_and_resources", "");
+    let run = run_turn_ex(
+        &ctx,
+        vec![
+            tc_response(&[call("c1", "tool_search", serde_json::json!({"query": "echo"}))]),
+            tc_response(&[call("c2", "mcp__fx__echo", serde_json::json!({"text": "hi"}))]),
+            fin("done"),
+        ],
+        None,
+        |_| {},
+        true,
+    );
+    let names1 = tool_names(&run.bodies[0]);
+    assert!(names1.contains(&"tool_search".to_string()));
+    assert!(names1.contains(&"list_mcp_resources".to_string()), "固定资源工具保持直接可用");
+    assert!(names1.contains(&"read_mcp_resource".to_string()));
+    assert!(!names1.contains(&"mcp__fx__echo".to_string()), "动态 echo 延迟");
+    assert!(tool_names(&run.bodies[1]).contains(&"mcp__fx__echo".to_string()));
+    assert_eq!(recorded_calls(&ctx.record_path).len(), 1);
+    assert_eq!(run.reply, Ok("done".to_string()));
+}
+
+#[test]
+fn ts30_empty_dynamic_catalog_no_declaration() {
+    // S01：开启搜索但无可搜索动态工具——不声明 tool_search（原路径不变），
+    // 伪造搜索调用按不可用失败；空目录轮不产生任何业务调用。
+    let ctx = setup("empty_catalog", "");
+    let run = run_turn_ex(
+        &ctx,
+        vec![
+            tc_response(&[call("c1", "tool_search", serde_json::json!({"query": "x"}))]),
+            fin("done"),
+        ],
+        None,
+        |_| {},
+        true,
+    );
+    let names1 = tool_names(&run.bodies[0]);
+    assert!(!names1.contains(&"tool_search".to_string()), "无可搜索目录不声明搜索工具");
+    let r1 = result_of(&run.history, "c1");
+    assert_eq!(r1["ok"], serde_json::json!(false), "伪造搜索须失败：{r1}");
+    assert!(r1["error"].as_str().unwrap().contains("不可用"));
+    assert_eq!(run.reply, Ok("done".to_string()));
 }
