@@ -45,7 +45,10 @@
 | Windows 编译 | 16 个 unix 门控文件＋pty 模块不编译，其余全部编译 | 未通过→已修：tchat-tui 缺 `objc2-foundation/objc2-app-kit` 声明（对照上游 97771b1 补齐）、windows-sys feature 不全、codex-utils-path 缺 windows-sys、`windows_sys::core::BOOL` 为 0.59 不存在的路径（改 `Win32::Foundation::BOOL`）——CI 首轮实证 |
 | macOS 编译 | 库与测试可编译 | 未通过→已修：libc crate apple 目标无 `ptsname_r`（proc_session 与 common/pty 加 macOS 分支＋串行化锁）、apple ioctl request 为 c_ulong（TIOCSCTTY 显式提升）、close_range syscall 436 补 `target_os = "linux"` 门——CI 实证 |
 | runner 环境（磁盘/依赖/时序） | 全量可运行 | 未通过→已修：debug 产物 26GB 超 14GB 磁盘（`CARGO_PROFILE_DEV_DEBUG=0`＋`CARGO_INCREMENTAL=0`）；ripgrep 缺失（workflow 三端安装）；5 处固定时序窗口改 poll＋截止（项目时序约定） |
-| push / PR 自动触发 | 三平台矩阵各一次运行 | 通过：PR #1 两种事件各触发一轮三平台运行（41099056065/41098966111 等） |
+| push / PR 自动触发 | 三平台矩阵各一次运行 | 通过：PR #1 两种事件各触发一轮三平台运行（第 1～8 轮，见 `docs/logs/038-github-actions-ci/`） |
+| ubuntu-latest 全量 | 可运行、全绿 | **通过（第 7 轮 run 41118738663）：3856 通过 / 0 失败 / 6 忽略**（含既定门控与采样跳过）；https://github.com/MrSong9957/agentlab-demo/actions/runs/41118738663 |
+| macos-latest 全量 | 可运行、全绿 | 进行中：编译全部通过（第 6/7 轮实证，cargo check 成功并进入测试阶段）；第 7 轮被 90 分钟超时截断（冷缓存构建约 55 分钟），第 8 轮起超时放宽 150 分钟，但私有仓库 Actions 分钟数额度耗尽（"recent account payments have failed or spending limit"），待额度恢复后 `workflow_dispatch` 重跑（入口已就绪） |
+| windows-latest | 编译并运行 | 产品级移植项：lib 的 POSIX 进程语义层（killpg/pid_t/进程组整批回收/pre_exec）无 Windows 等价实现，62 处编译缺口（第 4 轮实证）——任务标 `continue-on-error`（可见、不阻塞），见第 5 节第 9 条 |
 
 ### 038 三端 CI 揪出的存量问题清单（按轮次）
 
