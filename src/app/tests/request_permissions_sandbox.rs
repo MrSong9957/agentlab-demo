@@ -782,6 +782,10 @@ fn nested_read_grant_does_not_mask_approved_write_face() {
 
 /// 打开一对伪终端（镜像 proc_session::open_pty 的生产机制：master O_CLOEXEC、
 /// grantpt/unlockpt、ptsname_r）。
+/// 038-CI：macOS ptsname 静态缓冲的串行化锁（见 open_pty_pair 内注释）。
+#[cfg(target_os = "macos")]
+static PTY_NAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn open_pty_pair() -> std::io::Result<(std::fs::File, std::fs::File)> {
     unsafe {
         let master_fd = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
@@ -796,18 +800,42 @@ fn open_pty_pair() -> std::io::Result<(std::fs::File, std::fs::File)> {
             libc::close(master_fd);
             return Err(e);
         }
-        let mut name = [0u8; 256];
-        if libc::ptsname_r(master_fd, name.as_mut_ptr().cast(), name.len()) != 0 {
-            let e = std::io::Error::last_os_error();
-            libc::close(master_fd);
-            return Err(e);
-        }
-        let slave_fd = libc::open(name.as_ptr().cast(), libc::O_RDWR | libc::O_NOCTTY);
-        if slave_fd < 0 {
-            let e = std::io::Error::last_os_error();
-            libc::close(master_fd);
-            return Err(e);
-        }
+        // 038-CI：libc crate 在 apple 目标不提供 ptsname_r——分支化（本文件面向
+        // Linux/bwrap 环境，macOS 分支仅保编译；见 common/pty.rs 同款注释）。
+        #[cfg(not(target_os = "macos"))]
+        let slave_fd = {
+            let mut name = [0u8; 256];
+            if libc::ptsname_r(master_fd, name.as_mut_ptr().cast(), name.len()) != 0 {
+                let e = std::io::Error::last_os_error();
+                libc::close(master_fd);
+                return Err(e);
+            }
+            let fd = libc::open(name.as_ptr().cast(), libc::O_RDWR | libc::O_NOCTTY);
+            if fd < 0 {
+                let e = std::io::Error::last_os_error();
+                libc::close(master_fd);
+                return Err(e);
+            }
+            fd
+        };
+        #[cfg(target_os = "macos")]
+        let slave_fd = {
+            let _guard = PTY_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let ptr = libc::ptsname(master_fd);
+            if ptr.is_null() {
+                let e = std::io::Error::last_os_error();
+                libc::close(master_fd);
+                return Err(e);
+            }
+            let c_path = std::ffi::CStr::from_ptr(ptr);
+            let fd = libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+            if fd < 0 {
+                let e = std::io::Error::last_os_error();
+                libc::close(master_fd);
+                return Err(e);
+            }
+            fd
+        };
         Ok((
             std::fs::File::from(std::os::unix::io::OwnedFd::from_raw_fd(master_fd)),
             std::fs::File::from(std::os::unix::io::OwnedFd::from_raw_fd(slave_fd)),
@@ -836,15 +864,16 @@ fn run_payload_pty(snapshot: &PolicySnapshot, cwd: &Path) -> std::io::Result<std
         .stdout(std::process::Stdio::from(out_f))
         .stderr(std::process::Stdio::from(err_f));
     unsafe {
-        c.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+                c.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    // 038-CI：apple ioctl request 形参为 c_ulong，显式提升（Linux 无操作）。
+                    if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
     }
     let mut child = c.spawn()?;
     drop(c);
