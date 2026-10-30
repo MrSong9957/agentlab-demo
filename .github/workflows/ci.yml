@@ -8,7 +8,7 @@
 #     docs/specs/038-github-actions-ci.md；除门控外不删减、不改写任何测试。
 name: CI
 
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
