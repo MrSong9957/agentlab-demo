@@ -5,3 +5,6 @@
 .git
 target
 .worktrees
+
+# Agent 运行数据可能含凭证，不发送到构建上下文。
+.container-state/

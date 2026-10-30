@@ -76,6 +76,17 @@ services:
       - type: volume
         source: codex-home
         target: /home/dev/.codex
+      # 项目目录已绑定到宿主；数据预先迁入此处，重建时直接使用，不再另行导入空卷。
+      - type: bind
+        source: ../.container-state/pi
+        target: /home/dev/.pi
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../.container-state/cc-switch
+        target: /home/dev/.cc-switch
+        bind:
+          create_host_path: false
       - type: volume
         source: cargo-home
         target: /home/dev/.cargo

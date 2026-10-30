@@ -7,6 +7,9 @@ db
 # 本地 API 凭证
 .env
 
+# 容器外持久化的 Agent 配置、会话与凭证
+/.container-state/
+
 # 根目录 pytest 缓存
 /.pytest_cache/
 
@@ -18,3 +21,8 @@ __pycache__/
 
 # 运行时生成的本地模型选择配置（cargo run 于 src/app 目录时产生）
 /src/app/config/
+
+# CE 技能本地草稿（ce-setup）
+.context/compound-engineering/
+.claude
+.compound-engineering
