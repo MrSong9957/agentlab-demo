@@ -5,6 +5,8 @@
 //! 关——快照显式传入），验证：受限读树正/负例、deny 优先（含目录遮蔽）、
 //! 网络开关、启动前 deny 边界检查的 fail-closed（工具零执行）、PID 命名空
 //! 间隔离真实生效。全程假数据，不触真实凭据。
+#![cfg(unix)]
+// 038-CI：本文件依赖 POSIX 语义（fd 继承/pre_exec），Windows 不编译；沙箱用例自带可用性分支（无 bwrap＝显式失败断言），macOS 照常运行。
 
 use std::fs;
 use std::os::fd::FromRawFd;

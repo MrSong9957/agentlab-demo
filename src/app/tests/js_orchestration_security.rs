@@ -10,6 +10,8 @@
 //!
 //! 全部经真实 worker 子进程（CARGO_BIN_EXE）或直接装载/纯函数路径；独立
 //! 临时目录，不触真实用户环境；普通模式运行（env -u TCHAT_SANDBOX）。
+#![cfg(unix)]
+// 038-CI：本文件依赖 POSIX 语义（PTY/Unix fd/文件权限位），Windows 不编译；
 
 mod common;
 

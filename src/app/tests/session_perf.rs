@@ -6,6 +6,8 @@
 //! ≤50 ms 且 chmod 000 正文仍列出；替换窗口 ≤ B0＋u×(N_old+N_new)＋128 MiB、
 //! 连续 5 次不逐次累积；VmRSS 仅观测。每项 3 次取中位数。
 //! 单一 #[test] 串行执行，避免并行用例干扰计时与内存采样。
+#![cfg(unix)]
+// 038-CI：本文件依赖 POSIX 语义（PTY/Unix fd/文件权限位），Windows 不编译；
 
 mod common;
 

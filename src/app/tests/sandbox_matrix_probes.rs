@@ -196,6 +196,8 @@ fn sandbox_env(work: &Path) -> Box<dyn FnOnce(&mut Command) + '_> {
 /// （外部先证可读）；mcp.json 显式 env 保留；HOME＝锚定根、TERM 传递、污染 env
 /// 不进入（env_clear）；载荷＝新 PID ns 的 pid 1。普通模式对照：.env 可读、
 /// HOME＝主进程值、pid≠1——差异证明来自沙箱。
+#[cfg(target_os = "linux")]
+// 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn c_mcp_face_masks_env_and_keeps_explicit_env() {
     for sandbox in [true, false] {
@@ -333,6 +335,8 @@ fn c_apply_patch_face_cannot_touch_env() {
 ///（错误指向硬链接）、无执行副作用、不回退普通模式；单链接控制组照常运行且
 /// 遮蔽有效。只处理检查时已存在的硬链接——检查到挂载之间及运行期的并发变化
 /// 仍是边界（如实声明，见 B1/B2 核实记录）。
+#[cfg(target_os = "linux")]
+// 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn b1_hardlinked_deny_refused_on_all_three_faces() {
     // ── 多链接：三面拒绝 ──
@@ -431,6 +435,8 @@ fn b1_hardlinked_deny_refused_on_all_three_faces() {
 /// 夹具未变。真实 CLI 固定策略下该夹具先命中可写符号链接 fail-closed 分支
 ///（错误含 "writable symlink"）；元数据错误三分类的单元证据见 sandbox::tests
 ///（ELOOP rootless／父目录 EACCES 两个稳定夹具＋ENOTDIR 控制组）。
+#[cfg(target_os = "linux")]
+// 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn b1_unverifiable_deny_target_refused_before_launch() {
     let work = TempDir::new("033b1-loop");
@@ -469,6 +475,8 @@ fn b1_unverifiable_deny_target_refused_before_launch() {
 /// `close_range(CLOSE_RANGE_CLOEXEC)` 于 execve 时关闭（`/proc/self/fd/N`
 /// 不再可读）；普通对照分支继承行为不变（零变化承诺）。动态 fd 编号（避免与
 /// 并发用例的 PTY/套接字 fd 互踩）。
+#[cfg(target_os = "linux")]
+// 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn d_fd_inheritance_sandbox_closed_normal_unchanged() {
     for sandbox in [true, false] {
@@ -641,6 +649,8 @@ fn b2_fix_feasibility_preexec_close_fds_keeps_stdio() {
 ///（零变化）。exec 面由 d_fd/b2_real 覆盖（管道＋真实 CLI 全链路）；PTY 与
 /// exec 共用 build_tool_command 注入位；apply_patch 面共用同一助手，其子进程
 ///（--internal-apply）无 fd 观测面，由共用机制＋代码审查覆盖（记录注明）。
+#[cfg(target_os = "linux")]
+// 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn b2_mcp_face_fd_closed() {
     for sandbox in [true, false] {
@@ -712,6 +722,8 @@ fn b2_mcp_face_fd_closed() {
 /// E：四组合（管道/PTY × 取消/超时）各重复 3 次＋正常完成两型＋纯短命令两型。
 /// 回收证据＝双侧扫描（子进程 close 前后＋父进程在子进程退出后）皆无 marker
 /// 进程；沙箱下正常完成的后台子/孙进程随 PID ns 回收（pid 1 退出→内核 SIGKILL）。
+#[cfg(target_os = "linux")]
+// 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn e_reaping_cancel_timeout_completion_pipe_and_pty() {
     let mk_cmd = |tag: &str, fg: &str| {

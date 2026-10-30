@@ -1,4 +1,6 @@
 //! 018 安全门禁：直接攻击执行层，并经真实 CLI/TUI 验证回答始终是工具数据。
+#![cfg(unix)]
+// 038-CI：本文件依赖 POSIX 语义（PTY/Unix fd/文件权限位），Windows 不编译；
 mod common;
 
 use common::{pty::PtyCli, spawn_mock, MockResp, TempDir};

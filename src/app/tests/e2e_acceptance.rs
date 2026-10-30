@@ -8,6 +8,8 @@
 //! - S5（EFBIG 半写）与 F2 同步屏障不在本文件：复用既有用例，验收记录单独列示。
 //! - 时序约定：所有等待均为 poll＋截止时间（看门狗），无固定延迟猜测关键时序；
 //!   子进程异常时杀死并回收，不留孤儿。
+#![cfg(unix)]
+// 038-CI：本文件依赖 POSIX 语义（PTY/Unix fd/文件权限位），Windows 不编译；
 
 mod common;
 
@@ -10672,6 +10674,8 @@ fn write_manual_permission_capable(dir: &Path, base_url: &str, key_ref: &str) {
 /// 规范化路径（默认拒绝）→ 用户 y 允许 → granted 回传 → **同轮后续 exec 在
 /// 批准面真实写入成功**；工作区 .env（自动敏感边界）正文不可得；拒绝路径
 /// （第二次申请另一目录）保持 denied 不扩大。
+#[cfg(target_os = "linux")]
+// 038-CI：本场景要求 bwrap 真实执行（031 权限沙箱后端），macOS/Windows 不编译。
 #[test]
 fn s140_request_permissions_cli_grant_and_enforce() {
     let cfg = TempDir::new("s140-cfg");
@@ -10819,6 +10823,8 @@ fn s140_request_permissions_cli_grant_and_enforce() {
 /// S141：TUI 权限确认全链路——专用事件＋问答视图构件：申请详情入转录、
 /// 弹窗默认拒绝、j+Enter 允许、Enter 直接拒绝、批准面真实可用、被拒面不可
 /// 用、授权随轮结束回收（下一轮未批面再次不可用）。
+#[cfg(target_os = "linux")]
+// 038-CI：本场景要求 bwrap 真实执行（031 权限沙箱后端），macOS/Windows 不编译。
 #[test]
 fn s141_tui_permission_prompt_allow_and_deny() {
     let cfg = TempDir::new("s141-cfg");
@@ -10961,6 +10967,8 @@ fn s141_tui_permission_prompt_allow_and_deny() {
 /// S142（031 P15）：真实 TUI 确认并保存后 `/resume`——历史申请可见（路径与
 /// 访问级别入转录）、恢复后无活动授权（同路径申请重新弹确认，不因历史
 /// granted 静默放行）、旧 granted JSON 不能授权新执行（exec 落回基线拒绝）。
+#[cfg(target_os = "linux")]
+// 038-CI：本场景要求 bwrap 真实执行（031 权限沙箱后端），macOS/Windows 不编译。
 #[test]
 fn s142_resume_shows_permission_history_and_requires_new_confirmation() {
     let cfg = TempDir::new("s142-cfg");

@@ -13,6 +13,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// 011：PTY 尺寸常量（e2e 沟位列/行号断言与 PtySession 建立共用单一事实源）。
+// 038-CI：pty 模块基于 posix_openpt（POSIX 语义），Windows 不编译；唯一消费方
+// e2e_acceptance 同为 unix 门控。
+#[cfg(unix)]
 pub(crate) use pty::{PTY_COLS, PTY_ROWS};
 
 #[derive(Clone, Debug)]
@@ -292,6 +295,9 @@ pub fn cleanup_cred_file(tag: &str) {
     );
 }
 pub mod mcp_fixtures;
+// 038-CI：PTY 测试设施基于 posix_openpt/grantpt（POSIX 语义），Windows 不编译；
+// 依赖本模块的测试文件均带同级 unix 门控。
+#[cfg(unix)]
 pub mod pty;
 
 /// 022：持有 ENV_LOCK 的守卫类型（与 mcp 测试的 Drop 清理模式配合）。
