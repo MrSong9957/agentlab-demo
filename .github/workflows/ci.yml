@@ -25,6 +25,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     # 本地全量约 12–20 分钟；CI 冷缓存构建翻倍，上限防挂起运行。
     timeout-minutes: 90
+    env:
+      # 034 冻结阈值为校准机器口径，CI 机器不可比——按模块设计的采样模式
+      # 执行全部场景并跳过阈值断言（阈值门禁仍在本机容器全量验证中生效）。
+      JS34_PERF_SAMPLE: "1"
+      # runner 磁盘 14GB：debug 产物含全量 debuginfo 本地实测 26GB，链接期
+      # SIGBUS（首轮 ubuntu 实证）——CI 去 debuginfo（panic 位置信息来自宏，
+      # 不受影响）并关闭增量缓存（rust-cache 官方建议）。
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
     steps:
       # Windows 检出保持 LF（仓库 .gitattributes 为 * text=auto；runner 默认
       # autocrlf 行为不作依赖），避免行结尾差异污染文本断言。
@@ -42,10 +51,4 @@ jobs:
       - name: cargo check
         run: cargo check --locked
       - name: cargo test（全量：单元＋集成＋回归＋E2E）
-        # JS34_PERF_SAMPLE：034 性能冻结阈值为校准机器口径（docs/logs/034-javascript-tool-orchestration/
-        # 2026-10-29-perf-freeze.md，「机器或构建变化须重新冻结」）——CI 托管机器临时且性能
-        # 不可比，无法重新冻结；按该模块设计的采样模式执行全部场景（预热/正式/轮次不变）
-        # 并跳过阈值断言，阈值门禁仍在本机容器全量验证中生效。
-        env:
-          JS34_PERF_SAMPLE: "1"
         run: cargo test --workspace --no-fail-fast --locked
