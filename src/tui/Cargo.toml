@@ -95,7 +95,17 @@ libc = "0.2"
 uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_IO", "Win32_UI_WindowsAndMessaging"] }
+# 038-CI：feature 清单按本 crate 实际 Win32 用面补齐（clock_format 的
+# GetLocaleInfoEx、terminal_probe 的 WriteFile/WaitForSingleObject、
+# screen_reader_windows 的 ToolHelp/RemoteDesktop 等）——Windows 分支此前从未
+# 编译过（本项目只在 Linux 容器开发），三端 CI 首跑暴露缺口。
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_RemoteDesktop", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+
+# 038-CI：clock_format/screen_reader/system_motion 的 macOS 分支依赖此前未声明
+#（与 windows-sys 同类缺口），声明对照上游 97771b1 codex-rs/tui 原样补齐。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAccessibility", "NSWorkspace"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSDateFormatter", "NSFormatter", "NSLocale", "NSString"] }
 
 [dev-dependencies]
 insta = { version = "1.46", features = ["filters"] }
