@@ -918,6 +918,33 @@ pub fn js_orchestration_missing(model: &ModelInfo) -> Option<&'static str> {
     }
 }
 
+/// 035：六控制工具整组 opt-in——`experimental_supported_tools` 须同时显式
+/// 含全部六个精确名称（spawn_agent/send_message/followup_task/wait_agent/
+/// interrupt_agent/list_agents）才开放；缺任一即整组关闭（§1.2：只配部分
+/// 时整组关闭并提示一次，不按子集开放）。
+pub fn supports_multi_agent(model: &ModelInfo) -> bool {
+    let list = model.experimental_supported_tools.as_deref().unwrap_or(&[]);
+    crate::agents::TOOL_NAMES
+        .iter()
+        .all(|name| list.iter().any(|t| t == *name))
+}
+
+/// 035：返回缺失的精确名列表（部分配置时宿主提示一次；全配或全缺为空）。
+pub fn multi_agent_missing(model: &ModelInfo) -> Vec<&'static str> {
+    let list = model.experimental_supported_tools.as_deref().unwrap_or(&[]);
+    let missing: Vec<&'static str> = crate::agents::TOOL_NAMES
+        .iter()
+        .filter(|name| !list.iter().any(|t| t == *name))
+        .copied()
+        .collect();
+    // 全缺＝未配置该能力（不提示）；部分缺＝配置不完整（提示缺失名）。
+    if missing.len() == crate::agents::TOOL_NAMES.len() {
+        Vec::new()
+    } else {
+        missing
+    }
+}
+
 /// 031：experimental_supported_tools 精确匹配声明 request_permissions（§1.2-4
 /// 的模型能力半边；实际声明还要求 031 冻结策略与专用交互宿主——见 turn 装配）。
 pub fn supports_request_permissions(model: &ModelInfo) -> bool {

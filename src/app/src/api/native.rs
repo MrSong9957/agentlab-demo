@@ -379,7 +379,10 @@ fn response_input(items: &[HistoryItem], current: &NativeOwner) -> Result<Vec<Va
             // 032：检查点标记不进入原生输入——活动视图由调用方展开为 seed＋尾部；
             // 直达此处（误传完整历史）时防御性跳过，不把 seed 伪装成原生块。
             // 034：编排事件同样不进入原生输入（模型只看外层 exec/wait 汇总）。
-            HistoryItem::ContextCheckpoint { .. } | HistoryItem::OrchestrationEvent { .. } => {}
+            // 035：Agent 控制事件同过滤（根投影不含非根 child_record/控制事件）。
+            HistoryItem::ContextCheckpoint { .. }
+            | HistoryItem::OrchestrationEvent { .. }
+            | HistoryItem::AgentEvent { .. } => {}
             HistoryItem::Text(m) => {
                 let images = user_images(m);
                 input.push(if images.is_empty() {text_message(m.role.as_str(),&m.content)} else {

@@ -117,7 +117,7 @@ API、网络服务按需使用 VCR（录制并回放响应）或等价方案。
 在实际项目中核实后填写，不猜测命令；不适用的项目注明原因。
 
 - 技术栈、运行时、包管理器：Rust CLI `terminal-chat`（edition 2021，rustup stable rustc/cargo 1.99.0，Cargo，Cargo.lock 锁版本）；纯 Rust 项目。
-- 核心入口与模块边界：根 Cargo.toml 为 workspace 入口、默认成员 `src/app`（主程序 crate）；TUI 渲染层在 `src/tui/`＋`src/shims/`＋`src/vendor/`；`src/app/src/lib.rs` 导出十二个模块（catalog、api、prompt、turn、exec、proc_session、apply_patch、plan、session、memory、display、tui_host），`src/app/src/main.rs` 是终端循环与命令入口；模块职责与目录迁移背景见 `rules/project-lessons.md`。
+- 核心入口与模块边界：根 Cargo.toml 为 workspace 入口、默认成员 `src/app`（主程序 crate）；TUI 渲染层在 `src/tui/`＋`src/shims/`＋`src/vendor/`；`src/app/src/lib.rs` 导出十三个模块（catalog、api、prompt、turn、exec、proc_session、apply_patch、plan、session、memory、display、tui_host、agents），`src/app/src/main.rs` 是终端循环与命令入口；模块职责与目录迁移背景见 `rules/project-lessons.md`。
 - 必须保持的行为，如接口、配置和已有数据兼容性：已验收契约覆盖 REPL 回显与退出语义（001）、`config/` 配置与 `/refresh`（002）、exec_command/apply_patch 执行契约（003/004，016 修订：可续接进程会话）、tool_calls `id`/`name` 原样保留（006，017 起用户轮四工具＋update_plan）、进程会话生命周期与取消/时限/容量边界（016，已交付）、会话格式与锁语义（007）、TUI 按键单一职责（010/012）、凭证与输入安全边界、记忆存储位置与 V1 范围（013/014）；契约明细与来源见 `rules/project-lessons.md` §4，行为变更须先核对对应规格。
 
 | 用途 | 命令与工作目录 |

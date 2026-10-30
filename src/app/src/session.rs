@@ -32,12 +32,15 @@ fn needs_v2(history: &[HistoryItem]) -> bool {
 /// 不能把检查点塞进会被忽略的旧格式后声称恢复等价）。
 /// 034：编排事件同样只在 V3（旧程序拒绝；仅支持 032 而不认识编排事件的
 /// V3 程序也必须禁止错误续接——装载校验见 validate_orchestration_chain）。
+/// 035：Agent 事件同只在 V3（链校验见 agents::events::validate_agent_chain）。
 fn needs_v3(history: &[HistoryItem]) -> bool {
     needs_v2(history)
         || history.iter().any(|item| {
             matches!(
                 item,
-                HistoryItem::ContextCheckpoint { .. } | HistoryItem::OrchestrationEvent { .. }
+                HistoryItem::ContextCheckpoint { .. }
+                    | HistoryItem::OrchestrationEvent { .. }
+                    | HistoryItem::AgentEvent { .. }
             )
         })
 }
@@ -460,6 +463,16 @@ pub fn load_from_reader<R: Read>(reader: R) -> Result<Loaded, String> {
                 "V{version} 会话含编排事件，拒绝按旧格式装载（事件仅存在于 V3）"
             ));
         }
+        // 035：Agent 事件只可能在 V3——V1/V2 携带＝外来自称事实，拒绝装载。
+        if version != 3
+            && parsed
+                .as_ref()
+                .is_some_and(|item| matches!(item, HistoryItem::AgentEvent { .. }))
+        {
+            return Err(format!(
+                "V{version} 会话含 Agent 事件，拒绝按旧格式装载（事件仅存在于 V3）"
+            ));
+        }
         // 019 §5.1：图片载荷校验——只接受有界且有效的本地图片 data URL；
         // 远程 URL、非法 base64、错误 MIME、错误 detail 或超限额按坏行处理
         //（配对修复补未知结果；不为校验加载原路径或访问网络）。
@@ -494,6 +507,16 @@ pub fn load_from_reader<R: Read>(reader: R) -> Result<Loaded, String> {
                         "V3 会话第 {line_no} 行为损坏的编排事件，整文件拒绝（防止恢复出错误的执行事实）"
                     ));
                 }
+                // 035：损坏的 Agent 事件行整文件拒绝——恢复不得重放/错误续接
+                // 旧组事实（§1.7）。
+                if version == 3
+                    && unparseable
+                    && line_buf.windows(b"agent_event".len()).any(|w| w == b"agent_event")
+                {
+                    return Err(format!(
+                        "V3 会话第 {line_no} 行为损坏的 Agent 事件，整文件拒绝（防止恢复出错误的组事实）"
+                    ));
+                }
                 entries.push(Entry::Bad);
                 skipped += 1;
                 skipped_line_numbers.push(line_no);
@@ -519,6 +542,9 @@ pub fn load_from_reader<R: Read>(reader: R) -> Result<Loaded, String> {
         })?;
         validate_orchestration_chain(&history).map_err(|e| {
             format!("V3 会话编排事件语义校验失败，整文件拒绝（{e}）")
+        })?;
+        crate::agents::events::validate_agent_chain(&history).map_err(|e| {
+            format!("V3 会话 Agent 事件语义校验失败，整文件拒绝（{e}）")
         })?;
     }
     if version == 2 && skipped > 0 {
@@ -585,6 +611,10 @@ fn repair_pairs(entries: Vec<Entry>) -> (usize, Vec<HistoryItem>) {
             // 现在 exec 调用与其结果之间；事件不是提供方 tool_calls/
             // tool_results，配对修复不把它们当作结果消费，§1.6）。
             Entry::Item(item @ HistoryItem::OrchestrationEvent { .. }) => {
+                out.push(item);
+            }
+            // 035：Agent 控制事件透传（同上——不当作结果消费，不闭合开放批）。
+            Entry::Item(item @ HistoryItem::AgentEvent { .. }) => {
                 out.push(item);
             }
             Entry::Item(item @ HistoryItem::NativeAssistant { .. }) => {
@@ -870,6 +900,10 @@ pub struct Session {
     /// flush/开篇写入时按此计数跳过内存中已写过的事件前缀，保证不重复写、
     /// 顺序恒一致）。
     orch_untracked: usize,
+    /// 035：同机制的 Agent 事件先行落盘行数（调度泵线程在根阻塞期间写盘，
+    /// 根线程随后在安全点推入内存历史；吸收逻辑与 034 共用——事件行按
+    /// 写盘顺序进入内存，计数逐条吸收）。
+    agent_untracked: usize,
 }
 
 impl Session {
@@ -883,6 +917,7 @@ impl Session {
             durable_len: 0,
             error_reported: false,
             orch_untracked: 0,
+            agent_untracked: 0,
         }
     }
 
@@ -1089,6 +1124,123 @@ impl Session {
         }
     }
 
+    /// 035：根线程提交一条 Agent 事件（spawn/send/followup/interrupt 等根侧
+    /// 准入记录）——与编排事件同模式：滞留待写段随事件行按序写入，保存成功
+    /// 才算发生（未保存不启动、不回 accepted）。事件行由 `agent_untracked`
+    /// 计数吸收（内存推入后 flush 跳过）。
+    pub fn commit_agent_event_root(
+        &mut self,
+        history: &[HistoryItem],
+        event: &HistoryItem,
+    ) -> Result<usize, String> {
+        let line = record_line(event);
+        if line_over_limit(&line) {
+            return Err(format!(
+                "{}，已拒绝提交 Agent 事件",
+                line_limit_error("Agent 事件序列化后")
+            ));
+        }
+        if matches!(self.state, State::Disabled) {
+            return Err("自动保存已停用，无法提交 Agent 事件".into());
+        }
+        for item in &history[self.persisted_upto..] {
+            if line_over_limit(&record_line(item)) {
+                return Err(format!(
+                    "{}，滞留记录无法随 Agent 事件提交",
+                    line_limit_error("待写段记录")
+                ));
+            }
+        }
+        if self.version != 3 {
+            let (path, file, bytes) = self.create_v3_target_with_tail(history, &[line.as_str()])?;
+            self.version = 3;
+            self.state = State::Writing { _path: path, file };
+            self.durable_len = bytes;
+            self.persisted_upto = history.len();
+            self.agent_untracked += 1;
+            self.error_reported = false;
+            return Ok(self.persisted_upto);
+        }
+        let State::Writing { file, .. } = &mut self.state else {
+            return Err("自动保存目标不可用，无法提交 Agent 事件".into());
+        };
+        let outcome = (|| -> Result<(), std::io::Error> {
+            for item in &history[self.persisted_upto..] {
+                let line = record_line(item);
+                file.write_all(line.as_bytes())?;
+                self.durable_len += line.len() as u64;
+                self.persisted_upto += 1;
+            }
+            file.write_all(line.as_bytes())?;
+            self.durable_len += line.len() as u64;
+            self.agent_untracked += 1;
+            Ok(())
+        })();
+        match outcome {
+            Ok(()) => {
+                self.error_reported = false;
+                Ok(self.persisted_upto)
+            }
+            Err(e) => {
+                let msg = format!("Agent 事件提交写入失败（{e}）：未提交");
+                match file.set_len(self.durable_len) {
+                    Ok(()) => Err(msg),
+                    Err(te) => {
+                        self.state = State::Disabled;
+                        Err(format!(
+                            "{msg}；截回失败（{te}），自动保存已停用，文件尾部半行将由下次装载按坏行跳过"
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
+    /// 035：调度泵线程提交一条 Agent 事件（根阻塞于模型/工具/wait 期间）。
+    /// 泵不持有根内存历史，**不排空根待写段**——只追加事件行并计数；根线程
+    /// 的待写段由其自身 on_record 路径按序补写（文件顺序＝真实提交时序，
+    /// 事件行与根记录的内存顺序差异由吸收计数兜底）。前置：version 已为 3
+    ///（首个 Agent 事件必由根线程 agent_created 经 `commit_agent_event_root`
+    /// 完成迁移后才可能有子事件；防御性拒绝其他情形）。
+    pub fn commit_agent_event_pump(&mut self, event: &HistoryItem) -> Result<(), String> {
+        let line = record_line(event);
+        if line_over_limit(&line) {
+            return Err(format!(
+                "{}，已拒绝提交 Agent 事件",
+                line_limit_error("Agent 事件序列化后")
+            ));
+        }
+        if self.version != 3 {
+            return Err("Agent 事件只能写入 V3 会话（泵路径无迁移能力，前置缺失）".into());
+        }
+        if matches!(self.state, State::Disabled) {
+            return Err("自动保存已停用，无法提交 Agent 事件".into());
+        }
+        let State::Writing { file, .. } = &mut self.state else {
+            return Err("自动保存目标不可用，无法提交 Agent 事件".into());
+        };
+        match file.write_all(line.as_bytes()) {
+            Ok(()) => {
+                self.durable_len += line.len() as u64;
+                self.agent_untracked += 1;
+                self.error_reported = false;
+                Ok(())
+            }
+            Err(e) => {
+                let msg = format!("Agent 事件提交写入失败（{e}）：未提交");
+                match file.set_len(self.durable_len) {
+                    Ok(()) => Err(msg),
+                    Err(te) => {
+                        self.state = State::Disabled;
+                        Err(format!(
+                            "{msg}；截回失败（{te}），自动保存已停用，文件尾部半行将由下次装载按坏行跳过"
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
     /// 退出排空：同一补写逻辑执行一次；成功静默，失败返回明确错误——
     /// 排空是最后机会，不受"追加期打印一次"纪律影响。未产生新记录即退出时
     /// 不创建文件（恢复后直接退出亦然）。
@@ -1144,6 +1296,7 @@ impl Session {
             self.durable_len = 0;
             self.error_reported = false;
             self.orch_untracked = 0;
+            self.agent_untracked = 0;
             return Ok(ResumeInfo { loaded, degraded: false });
         }
         // 同名恢复（2026-10-10 第四批整改）：当前写者持锁同一文件时，复用已持锁
@@ -1184,6 +1337,7 @@ impl Session {
             self.durable_len = durable_len;
             self.error_reported = false;
             self.orch_untracked = 0;
+            self.agent_untracked = 0;
             return Ok(ResumeInfo { loaded, degraded: false });
         }
         // auto 续写：打开（读写＋追加）→立即取锁→同一 fd 持锁装载与尾置（坑012）
@@ -1218,6 +1372,7 @@ impl Session {
                 self.durable_len = durable_len;
                 self.error_reported = false;
                 self.orch_untracked = 0;
+                self.agent_untracked = 0;
                 self.state = State::Writing { _path: path, file };
                 Ok(ResumeInfo { loaded, degraded: false })
             }
@@ -1251,6 +1406,7 @@ impl Session {
                 self.persisted_upto = history.len();
                 // 开篇已含全部内存记录（含已提交事件）——计数清零。
                 self.orch_untracked = 0;
+                self.agent_untracked = 0;
                 None
             }
             Err(msg) => {
@@ -1447,15 +1603,23 @@ impl Session {
             return None; // 停用后仅内存，不重复报错
         }
         // 034：吸收已写盘的编排事件行（内存前缀中的事件已落盘，跳过不重写）。
-        while self.orch_untracked > 0
+        // 035：Agent 事件同机制（先行写盘的行按到达序吸收，两类计数分开核销；
+        // 事件行进入内存的顺序与写盘顺序一致——泵/根线程经同一序号分配与
+        // FIFO 通道，保证计数与行一一对应）。
+        while (self.orch_untracked + self.agent_untracked) > 0
             && self.persisted_upto < history.len()
-            && matches!(
-                history[self.persisted_upto],
-                HistoryItem::OrchestrationEvent { .. }
-            )
         {
-            self.persisted_upto += 1;
-            self.orch_untracked -= 1;
+            match &history[self.persisted_upto] {
+                HistoryItem::OrchestrationEvent { .. } if self.orch_untracked > 0 => {
+                    self.persisted_upto += 1;
+                    self.orch_untracked -= 1;
+                }
+                HistoryItem::AgentEvent { .. } if self.agent_untracked > 0 => {
+                    self.persisted_upto += 1;
+                    self.agent_untracked -= 1;
+                }
+                _ => break,
+            }
         }
         let step = loop {
             if self.persisted_upto >= history.len() {
@@ -1545,6 +1709,7 @@ mod tests {
             durable_len: 64,
             error_reported: false,
             orch_untracked: 0,
+            agent_untracked: 0,
         };
         let history = vec![
             text_user("已提交一"),
@@ -1614,6 +1779,7 @@ mod tests {
             durable_len: 1234,
             error_reported: false,
             orch_untracked: 0,
+            agent_untracked: 0,
         };
         let mut history = vec![
             text_user("已提交一"),
@@ -1659,35 +1825,39 @@ mod tests {
     }
 }
 
-/// 032：CLI 行式的检查点提交宿主——经 RefCell 与 on_record 顺序共享同一会话
-/// 保存器（单线程轮内顺序调用，无运行时借用冲突；提交失败候选不进内存历史）。
-pub struct SessionCellSink<'c, 'a>(pub &'c std::cell::RefCell<&'a mut Session>);
+/// 032：CLI 行式的检查点提交宿主——与 on_record 共享同一会话保存器
+///（035 起经 `Arc<Mutex<Session>>` 共享，与子 Agent 调度提交串行；提交失败
+/// 候选不进内存历史）。
+pub struct SessionCellSink(pub std::sync::Arc<std::sync::Mutex<Session>>);
 
-impl crate::context_window::CheckpointHost for SessionCellSink<'_, '_> {
+impl crate::context_window::CheckpointHost for SessionCellSink {
     fn commit_checkpoint(
         &mut self,
         history: &[HistoryItem],
         checkpoint: &HistoryItem,
     ) -> Result<usize, String> {
-        self.0.borrow_mut().commit_checkpoint(history, checkpoint)
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .commit_checkpoint(history, checkpoint)
     }
 }
 
-/// 034：编排事件提交宿主——经 RefCell 与 on_record 顺序共享同一会话保存器
-///（观察在 turn 线程内单线程调用）。落盘回执可失败；内存入史由 turn 侧在
-/// 观察返回后统一执行（Session 以 untracked 计数吸收已写盘的事件行）。
-pub struct SessionOrchestrationSink<'c, 'a>(pub &'c std::cell::RefCell<&'a mut Session>);
+/// 034：编排事件提交宿主——经共享 `Arc<Mutex<Session>>` 与 on_record 共享
+/// 同一保存器（035 起 main 与 tui_host 同款共享形态：子 Agent 调度提交与
+/// 根线程写入经同一互斥串行，单追加写者不变）。落盘回执可失败；内存入史
+/// 由 turn 侧在观察返回后统一执行（Session 以 untracked 计数吸收已写盘的
+/// 事件行）。
+pub struct SessionOrchestrationSink(pub std::sync::Arc<std::sync::Mutex<Session>>);
 
-impl crate::js_orchestration::runtime::OrchestrationSink
-    for SessionOrchestrationSink<'_, '_>
-{
+impl crate::js_orchestration::runtime::OrchestrationSink for SessionOrchestrationSink {
     fn commit(
         &mut self,
         event: &crate::js_orchestration::runtime::Event<'_>,
         history: &[HistoryItem],
     ) -> Result<(), String> {
         let item = crate::js_orchestration::runtime::event_to_history_item(event);
-        let mut session = self.0.borrow_mut();
+        let mut session = self.0.lock().unwrap_or_else(|e| e.into_inner());
         session
             .commit_orchestration_event(history, &item)
             .map(|_| ())

@@ -1013,6 +1013,7 @@ fn ts30_search_load_call_over_http_json() {
             context: None,
             permissions: None,
             orchestration: None,
+            agents: None,
         },
     );
     assert_eq!(reply, Ok("HTTP 完成".to_string()));
@@ -1110,6 +1111,7 @@ fn ts30_search_load_call_over_http_sse() {
             context: None,
             permissions: None,
             orchestration: None,
+            agents: None,
         },
     );
     assert_eq!(reply, Ok("SSE 完成".to_string()));

@@ -63,6 +63,21 @@ pub struct ToolOutcome {
     pub session_cmd: Option<(String, String)>,
 }
 
+/// 035：进程归属标签——**宿主可信逻辑标签，不是 Unix UID**（033 的同宿主
+/// UID 与独立 PID 命名空间不能替代句柄归属校验）。根轮进程＝`Root`（沿
+/// 016 原行为）；子 Agent 进程＝(group, agent, assignment)。兄弟 Agent 猜
+/// 句柄操作它人的会话时按 owner 不匹配拒绝；assignment 结束/中断/组关闭
+/// 按 (group, agent) 回收其所拥有的命令进程（宿主 PGID，非沙箱内 PID）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerTag {
+    Root,
+    Agent {
+        group: u64,
+        agent: String,
+        assignment: u64,
+    },
+}
+
 impl From<ExecResult> for ToolOutcome {
     fn from(result: ExecResult) -> Self {
         Self { result, session_cmd: None }
@@ -307,6 +322,107 @@ impl ProcessManager {
         }
     }
 
+    /// 035 §1.5：回收一个 assignment 的命令进程（子轮终态/中断调用）——
+    /// 精确匹配 (group, agent, assignment)，不误伤同 Agent 后续 assignment
+    /// 或兄弟进程。统一先 SIGTERM、共享 3 秒有界窗口、到期升级 SIGKILL
+    /// （monitor 回收路径），随后移除记录；未证实全部终止＝Err（如实报告，
+    /// 不宣称已安全撤销）。
+    pub fn reap_agent_assignment(
+        &self,
+        group: u64,
+        agent: &str,
+        assignment: u64,
+    ) -> Result<(), String> {
+        self.reap_where(&|owner: &OwnerTag| {
+            matches!(
+                owner,
+                OwnerTag::Agent {
+                    group: g,
+                    agent: a,
+                    assignment: asg,
+                } if *g == group && a == agent && *asg == assignment
+            )
+        })
+        .map_err(|pending| {
+            format!("Agent 进程未能全部终止（{}）：不宣称已安全撤销", pending.join("、"))
+        })
+    }
+
+    /// 035 §1.5：回收整组 Agent 进程（组关闭；该组全部 Agent 全部
+    /// assignment；Root 与其他组不受影响）。
+    pub fn reap_agent_group(&self, group: u64) -> Result<(), String> {
+        self.reap_where(&|owner: &OwnerTag| {
+            matches!(owner, OwnerTag::Agent { group: g, .. } if *g == group)
+        })
+        .map_err(|pending| {
+            format!("Agent 组进程未能全部终止（{}）：不宣称已安全撤销", pending.join("、"))
+        })
+    }
+
+    /// 回收谓词选中的会话（上方两方法的共用实现；含全局 64 容量释放与
+    /// killpg 走宿主 PGID——沙箱内 PID 不是宿主进程组号）。
+    fn reap_where(&self, pred: &dyn Fn(&OwnerTag) -> bool) -> Result<(), Vec<String>> {
+        let owned: Vec<Arc<Session>> = {
+            let st = self.lock_mgr();
+            st.sessions
+                .values()
+                .filter(|s| pred(&s.owner))
+                .cloned()
+                .collect()
+        };
+        if owned.is_empty() {
+            return Ok(());
+        }
+        for s in &owned {
+            if let Phase::Running { pgid } = s.phase() {
+                unsafe {
+                    libc::killpg(pgid, libc::SIGTERM);
+                }
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if owned.iter().all(|s| !matches!(s.phase(), Phase::Running { .. })) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        for s in &owned {
+            if matches!(s.phase(), Phase::Running { .. }) {
+                s.request_kill(KillReq::Terminate);
+            }
+        }
+        let hard_deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            if owned.iter().all(|s| !matches!(s.phase(), Phase::Running { .. })) {
+                break;
+            }
+            if Instant::now() >= hard_deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut pending = Vec::new();
+        {
+            let mut st = self.lock_mgr();
+            for s in &owned {
+                if matches!(s.phase(), Phase::Running { .. }) {
+                    pending.push(s.id.clone());
+                } else {
+                    st.sessions.remove(&s.id);
+                }
+            }
+        }
+        if pending.is_empty() {
+            Ok(())
+        } else {
+            Err(pending)
+        }
+    }
+
     /// [`ProcessManager::start`] 的 031 变体：`policy`＝出生策略快照（调用
     /// 开始时构建，经创建线程携带——不临时重读授权）；`extra`＝是否使用基线
     /// 之外的额外授权（到期收尾只针对此类进程，§1.7-5——016 对该条的修订：
@@ -317,6 +433,20 @@ impl ProcessManager {
         cancel: Option<&AtomicBool>,
         policy: Option<&std::sync::Arc<crate::sandbox::PolicySnapshot>>,
         extra: bool,
+    ) -> ToolOutcome {
+        self.start_with_owner(args, cancel, policy, extra, OwnerTag::Root)
+    }
+
+    /// 035：带归属标签的启动——子 Agent 的命令进程按 (group, agent,
+    /// assignment) 登记（句柄校验与按 owner 回收的依据；根入口沿用
+    /// `start_with_policy`＝Root）。
+    pub fn start_with_owner(
+        &self,
+        args: &ExecArgs,
+        cancel: Option<&AtomicBool>,
+        policy: Option<&std::sync::Arc<crate::sandbox::PolicySnapshot>>,
+        extra: bool,
+        owner: OwnerTag,
     ) -> ToolOutcome {
         if let Some(reason) = policy.and_then(|p| p.poison.as_ref()) {
             return ExecResult::error(format!(
@@ -407,6 +537,7 @@ impl ProcessManager {
                         sp.master.clone(),
                         readers_total,
                         extra,
+                        owner,
                     ));
                     st.sessions.insert(session.id.clone(), session.clone());
                     (session, sp, deadline)
@@ -452,6 +583,17 @@ impl ProcessManager {
     /// write_stdin 入口：查询／输入／中断／明确终止共用一套句柄校验与
     /// 终态收尾；参数互斥与输入上限在参数层已校验。
     pub fn interact(&self, args: &WriteStdinArgs, cancel: Option<&AtomicBool>) -> ToolOutcome {
+        self.interact_as_owner(args, cancel, &OwnerTag::Root)
+    }
+
+    /// 035：带归属校验的 write_stdin——会话 owner 须与调用者一致（兄弟
+    /// Agent 猜句柄操作它人会话＝拒绝；根入口 `interact`＝Root 原行为）。
+    pub fn interact_as_owner(
+        &self,
+        args: &WriteStdinArgs,
+        cancel: Option<&AtomicBool>,
+        caller: &OwnerTag,
+    ) -> ToolOutcome {
         let Some(session) = self.lock_mgr().sessions.get(&args.session_id).cloned() else {
             return ExecResult::error(format!(
                 "未知或已失效的会话句柄：{}（句柄仅在当前对话内有效）",
@@ -459,6 +601,16 @@ impl ProcessManager {
             ))
             .into();
         };
+        if &session.owner != caller {
+            // 035 安全 F3：与「不存在」共用同一文案——句柄为顺序号，可枚举
+            // 探测；归属不符若可区分即构成存在性预言（操作本就被拒，这里
+            // 只消除信息泄露面）。
+            return ExecResult::error(format!(
+                "未知或已失效的会话句柄：{}（句柄仅在当前对话内有效）",
+                args.session_id
+            ))
+            .into();
+        }
         let command = session.cmd.clone();
         let attach = |mut outcome: ToolOutcome| {
             if outcome.result.session_id.is_some() {
@@ -809,6 +961,8 @@ struct Session {
     /// 031：本进程是否以「基线＋额外授权」出生（§1.7-5——到期收尾只针对
     /// 此类进程；基线进程继续 016 可续接语义）。
     extra: bool,
+    /// 035：宿主可信归属标签（句柄校验与按 owner 回收的依据）。
+    owner: OwnerTag,
     st: Mutex<SessionState>,
     cv: Condvar,
 }
@@ -869,11 +1023,13 @@ impl Session {
         master: Option<Arc<File>>,
         readers: usize,
         extra: bool,
+        owner: OwnerTag,
     ) -> Self {
         Self {
             id,
             cmd,
             extra,
+            owner,
             st: Mutex::new(SessionState {
                 phase: Phase::Running { pgid },
                 pending: PendingBuffer::new(),

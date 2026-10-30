@@ -135,6 +135,12 @@ pub enum SteerSeal {
 pub trait SteerChannel {
     /// 非阻塞收取已受理输入（受理保持开放；入史边界由循环固定在完整批末）。
     fn drain(&mut self) -> Vec<SteerInput>;
+    /// 035：非消费性探测「是否有已受理未收取输入」（wait_agent 的 steer
+    /// 唤醒判定——只观察不收取，收取仍固定在批末 drain）。默认 false＝
+    /// 宿主无探测能力（steer 原因退化为 timeout）。
+    fn pending_hint(&self) -> bool {
+        false
+    }
     /// 终文竞态原子判定（§2.3-5）：已有已受理输入→收取且保持受理开放；
     /// 为空→原子封口。
     fn seal(&mut self) -> SteerSeal;
@@ -150,6 +156,8 @@ pub trait SteerChannel {
 /// 实际声明还要求本轮快照存在可搜索动态工具；MemoryMerge 强制忽略）。
 /// 032：`context`＝上下文管理工具宿主（查询计量＋检查点提交；None＝不声明
 /// 不执行；MemoryMerge 强制忽略——内部记忆轮不开放上下文工具）。
+/// 035：`agents`＝多 Agent 宿主（六工具声明与执行同门；模型目录六名全配
+/// 已由调用方核对；MemoryMerge 强制忽略——内部记忆轮不声明不执行六工具）。
 pub struct TurnExtras<'a> {
     /// 模型目录显式声明 send_message_to_user_async（声明与执行共用快照）。
     pub send_message: bool,
@@ -168,6 +176,8 @@ pub struct TurnExtras<'a> {
     /// 034：编排宿主（None＝不声明不执行 exec/wait；模型目录双 opt-in 已由
     /// 调用方核对；MemoryMerge 强制忽略——内部记忆轮始终不声明不执行）。
     pub orchestration: Option<crate::js_orchestration::runtime::OrchestrationExtras<'a>>,
+    /// 035：多 Agent 宿主（None＝不声明不执行六工具）。
+    pub agents: Option<&'a crate::agents::runtime::AgentExtras<'a>>,
 }
 
 impl TurnExtras<'_> {
@@ -181,6 +191,7 @@ impl TurnExtras<'_> {
             context: None,
             permissions: None,
             orchestration: None,
+            agents: None,
         }
     }
 }
@@ -289,6 +300,20 @@ pub(crate) fn execute_core_tool(
     procs: &ProcessManager,
     grants: Option<&crate::permissions::TurnGrants>,
 ) -> (String, Option<ToolDisplay>) {
+    execute_core_tool_owned(name, arguments, cancel, procs, grants, &crate::proc_session::OwnerTag::Root)
+}
+
+/// M2（035）：带进程归属的执行核心——子 Agent 的 exec/write_stdin 按
+/// (group, agent, assignment) 登记（句柄校验与按 owner 回收）；根调用
+/// （直接与嵌套）沿用 [`execute_core_tool`]＝Root。
+pub(crate) fn execute_core_tool_owned(
+    name: &str,
+    arguments: &str,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    procs: &ProcessManager,
+    grants: Option<&crate::permissions::TurnGrants>,
+    owner: &crate::proc_session::OwnerTag,
+) -> (String, Option<ToolDisplay>) {
     // 031 出生快照——以冻结策略为键（031 §1.2-3：无宿主同样取「基线＋空授权」；
     // 构建失败＝毒丸，本次执行显式失败）。
     let empty = crate::permissions::TurnGrants::default();
@@ -310,7 +335,7 @@ pub(crate) fn execute_core_tool(
                     let started = std::time::Instant::now();
                     let extra = grants.is_some_and(|g| !g.is_empty());
                     let outcome =
-                        procs.start_with_policy(&args, cancel, exec_snapshot.as_ref(), extra);
+                        procs.start_with_owner(&args, cancel, exec_snapshot.as_ref(), extra, owner.clone());
                     let display = ToolDisplay::Exec {
                         duration_ms: u64::try_from(started.elapsed().as_millis())
                             .unwrap_or(u64::MAX),
@@ -336,7 +361,7 @@ pub(crate) fn execute_core_tool(
             Ok(v) => match crate::exec::WriteStdinArgs::from_value(&v) {
                 Ok(args) => {
                     let started = std::time::Instant::now();
-                    let outcome = procs.interact(&args, cancel);
+                    let outcome = procs.interact_as_owner(&args, cancel, owner);
                     let duration_ms =
                         u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                     let display = Some(
@@ -1364,8 +1389,59 @@ pub fn run_tool_turn_with_hosts_extras(
 }
 
 /// [`run_tool_turn_with_hosts_extras`] 的原主体（私有）：全部轮出口最终回到
-/// 公开包装的统一收尾门。
+/// 公开包装的统一收尾门。035：本包装另承载多 Agent 组的创建与**轮出口
+/// 统一封组**（成功/取消/模型错误/额度耗尽全部出口都经此——封组幂等；
+/// 在途传输排空由子线程按自身门继续，占槽至真实释放）。
 fn run_tool_turn_body(
+    history: &mut Vec<HistoryItem>,
+    current_input: &str,
+    sender: &mut dyn FnMut(&Value) -> Result<Value, String>,
+    notify: &mut dyn FnMut(TurnNotify),
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    on_record: &mut dyn FnMut(&[HistoryItem]),
+    mode: ToolMode<'_>,
+    procs: &ProcessManager,
+    input_host: Option<&mut crate::user_input::InputHost<'_>>,
+    async_host: Option<&mut crate::user_input_async::AsyncInputHost<'_>>,
+    image_input: bool,
+    user_images: Option<&crate::prompt::UserImagePayload>,
+    extras: TurnExtras<'_>,
+) -> Result<String, String> {
+    // 035：每根逻辑用户轮一个新 group_id（旧组路径不可执行、旧回调不能命中
+    // 新组）；合并轮不装配（六工具双层隔离——不声明不执行）。
+    let agent_runtime = extras
+        .agents
+        .filter(|_| !matches!(mode, ToolMode::MemoryMerge { .. }))
+        .map(|a| a.manager.begin_turn(a.session.clone(), procs.clone()));
+    let result = turn_body_inner(
+        history,
+        current_input,
+        sender,
+        notify,
+        cancel,
+        on_record,
+        mode,
+        procs,
+        input_host,
+        async_host,
+        image_input,
+        user_images,
+        extras,
+        agent_runtime.as_ref(),
+    );
+    if let Some(runtime) = &agent_runtime {
+        let reason = match &result {
+            Ok(_) => "turn_completed",
+            Err(_) => "turn_exit_error",
+        };
+        runtime.close_for_turn_exit(history, on_record, reason);
+    }
+    result
+}
+
+/// 主体（私有）：`agent_runtime`＝本用户轮的 Agent 组（None＝能力关闭）。
+#[allow(clippy::too_many_arguments)]
+fn turn_body_inner(
     history: &mut Vec<HistoryItem>,
     current_input: &str,
     sender: &mut dyn FnMut(&Value) -> Result<Value, String>,
@@ -1379,6 +1455,7 @@ fn run_tool_turn_body(
     image_input: bool,
     user_images: Option<&crate::prompt::UserImagePayload>,
     extras: TurnExtras<'_>,
+    agent_runtime: Option<&std::sync::Arc<crate::agents::runtime::GroupRuntime>>,
 ) -> Result<String, String> {
     // 020 A05：空文字＋有图＝合法纯图消息；空文字＋无图仍拒绝
     let has_user_images = user_images.is_some_and(|p| !p.data_urls.is_empty());
@@ -1574,8 +1651,10 @@ fn run_tool_turn_body(
             .as_ref()
             .is_some_and(|h| h.switch_declared && h.checkpoints.is_some());
         let orch_declared = orch_extras.is_some();
+        // 035：六工具声明与执行同门（extras 装配＝目录六名全配＋共享会话）。
+        let agents_declared = agent_runtime.is_some();
         let mut body = match &mode {
-            ToolMode::User => crate::prompt::build_turn_request_with_orchestration(
+            ToolMode::User => crate::prompt::build_turn_request_with_agents(
                 &active_items,
                 None,
                 input_host.is_some(),
@@ -1588,8 +1667,9 @@ fn run_tool_turn_body(
                 tool_search_definition.as_ref(),
                 mcp_definitions,
                 orch_declared,
+                agents_declared,
             ),
-            ToolMode::UserWithMemory { .. } => crate::prompt::build_turn_request_with_orchestration(
+            ToolMode::UserWithMemory { .. } => crate::prompt::build_turn_request_with_agents(
                 &active_items,
                 memory_context.as_deref(),
                 input_host.is_some(),
@@ -1602,6 +1682,7 @@ fn run_tool_turn_body(
                 tool_search_definition.as_ref(),
                 mcp_definitions,
                 orch_declared,
+                agents_declared,
             ),
             ToolMode::MemoryMerge { system, .. } => build_turn_request_with(
                 &active_items,
@@ -1750,6 +1831,22 @@ fn run_tool_turn_body(
                 );
             }
         }
+        // 035 §1.4：wait_agent 只允许出现在批内最后一条——任何非批末等待
+        //（含 [wait_agent, spawn, wait_agent]、双 wait）都在入史/执行前整批
+        // 拒绝，避免先执行依赖未知观察结果的后续动作（同 wait_for_user_input
+        // 前缀切片写法，018-B 审计教训）。
+        if agent_runtime.is_some()
+            && calls[..calls.len().saturating_sub(1)]
+                .iter()
+                .any(|c| c.name == crate::agents::WAIT_TOOL_NAME)
+        {
+            close_orch!();
+            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
+            close_pending_on_model_error(history, on_record, notify, &mut pending_async);
+            return Err(
+                "协议错误：wait_agent 必须是批内最后一条调用，整批拒绝".to_string(),
+            );
+        }
         // 034 §1.5：exec/wait 独占批＋活动 cell 门（入史/执行前整批校验）。
         if orch_extras.is_some() {
             let is_control = |name: &str| {
@@ -1812,6 +1909,66 @@ fn run_tool_turn_body(
                 return Err(format!(
                     "模型已给出最终回复，但编排 cell {cell_id} 的结果尚未取回：cell 已按收尾关闭（已发生的真实副作用不回滚）；请在本轮内用 wait 取回结果后再结束"
                 ));
+            }
+            // 035 §1.5 终文封口门：原子检查邮箱与活动任务——已有未交付报告先
+            // 保留终文正文再交付（与接续输入同序：回复在前、新事实在后），
+            // 根在剩余额度内再判断（无剩余额度时由循环顶的既有上限出口
+            // 终止）；仍有活动子任务却直接结束＝关闭整组并返回未收尾错误，
+            // 不把未完成子工作报告为完成；两者皆无才接受根终文。
+            if let Some(runtime) = agent_runtime {
+                if runtime.pending_updates() > 0 {
+                    history.push(with_native(HistoryItem::Text(HistoryMessage {
+                        images: None,
+                        text_elements: Vec::new(),
+                        role: HistoryRole::Assistant,
+                        content: reply.clone(),
+                        user_input_event: None,
+                    }), &native_state));
+                    on_record(history);
+                    runtime.deliver_root_updates(history, on_record);
+                    for event in runtime.take_committed_events() {
+                        history.push(event);
+                    }
+                    on_record(history);
+                    // 已交付事实随下一请求让模型再判断（额度耗尽由循环顶报告）。
+                    continue;
+                }
+                for event in runtime.take_committed_events() {
+                    history.push(event);
+                }
+                on_record(history);
+                if runtime.has_active() {
+                    runtime.close_for_turn_exit(
+                        history,
+                        on_record,
+                        "root_final_with_active_children",
+                    );
+                    close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_TASK_COMPLETED);
+                    close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_TASK_COMPLETED);
+                    return Err(
+                        "模型已给出最终回复，但仍有活动子 Agent 任务未收尾：整组已按收尾关闭（已发生事实与真实副作用保留，不回滚，未完成子工作不报告为完成）"
+                            .into(),
+                    );
+                }
+                // 审查 N1：终态发布可能恰在 pending 检查与 has_active 检查之间
+                // 落入（两次独立加锁）——接受终文前复查一次，微窗口内已受理的
+                // 终态报告不丢失。
+                if runtime.pending_updates() > 0 {
+                    history.push(with_native(HistoryItem::Text(HistoryMessage {
+                        images: None,
+                        text_elements: Vec::new(),
+                        role: HistoryRole::Assistant,
+                        content: reply.clone(),
+                        user_input_event: None,
+                    }), &native_state));
+                    on_record(history);
+                    runtime.deliver_root_updates(history, on_record);
+                    for event in runtime.take_committed_events() {
+                        history.push(event);
+                    }
+                    on_record(history);
+                    continue;
+                }
             }
             // 021 终文竞态（§2.3-5）：seal 原子判定——通道内已有受理输入则保留
             // 该正文继续当前轮（先正文入史，再接入输入），不提前宣告任务完成；
@@ -2284,6 +2441,41 @@ fn run_tool_turn_body(
                     }
                 };
                 (content, None, None)
+            } else if agent_runtime.is_some()
+                && crate::agents::runtime::is_agent_tool(&call.name)
+            {
+                // 035：六控制工具（声明与执行同门；未装配时伪造调用落入未知
+                // 工具通用错误）。spawn 上下文按当前请求作用域冻结：活动前缀
+                // （fork 源）、已声明动态集合、MCP 快照、图片能力、可信
+                // system（含根轮记忆摘要）与冻结环境上下文。
+                let content = {
+                    let runtime = agent_runtime.as_ref().expect("已确认存在");
+                    let agents_extras = extras.agents.expect("运行时存在则 extras 装配");
+                    let mut system = crate::prompt::sent_instructions();
+                    crate::prompt::append_memory_context(&mut system, memory_context.as_deref());
+                    let spawn_ctx = crate::agents::runtime::SpawnContext {
+                        active_items: &active_items,
+                        context_id: crate::context_window::current_context_id(history),
+                        preamble: agents_extras.context_message.clone(),
+                        system,
+                        view_image: image_input,
+                        mcp: agents_extras.mcp.clone(),
+                        declared_dynamic: declared_dynamic.clone(),
+                        sender_factory: agents_extras.sender_factory,
+                    };
+                    let steer_hint = |steer: &Option<&mut dyn SteerChannel>| {
+                        steer.as_ref().is_some_and(|c| c.pending_hint())
+                    };
+                    crate::agents::runtime::execute_control_tool(
+                        runtime,
+                        &call.name,
+                        &call.arguments,
+                        history,
+                        &spawn_ctx,
+                        &|| steer_hint(&steer),
+                    )
+                };
+                (content, None, None)
             } else {
                 let (content, display) =
                     execute_tool(call, cancel, &mode, procs, permission_state.as_mut());
@@ -2360,6 +2552,19 @@ fn run_tool_turn_body(
             };
             for input in pending_inputs {
                 ingest_steer_input(history, on_record, input, image_input, cancel, notify);
+            }
+        }
+        // 035 §1.4：同一外层批末持久化交付 Agent 已收事实——消息/终态报告
+        // 投影为带来源标注的普通 user 输入（下一请求可见，重复 wait 不重复
+        // 插入）；已提交控制事件推入内存历史；宿主通知转发。
+        if let Some(runtime) = agent_runtime {
+            runtime.deliver_root_updates(history, on_record);
+            for event in runtime.take_committed_events() {
+                history.push(event);
+            }
+            on_record(history);
+            for line in runtime.take_notices() {
+                notify(TurnNotify::Info(line));
             }
         }
         // 032 §1.5 批末屏障（提交与取消按先后裁决）：回执前取消→候选不提交；

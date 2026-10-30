@@ -1,7 +1,7 @@
 # 规格：多 Agent
 
-- 状态：待实现
-- 更新时间：2026-10-27
+- 状态：已实施待验收（2026-10-29 实施完成，见[实施记录](../logs/035-multi-agent/2026-10-29-implementation.md)；性能基线 C18 已冻结数值（[c18-baseline](../logs/035-multi-agent/c18-baseline.md)，未设通过线）、bwrap 并发矩阵与逐协议端到端为已登记缺口，见 §3.3 已知边界——最终验收由用户确认）
+- 更新时间：2026-10-29
 - 来源：原[工具对照表](../records/2026-10-21-codex-tools-comparison.md)「多 Agent」一行，统一覆盖 `spawn_agent`、`send_message`、`followup_task`、`wait_agent`、`interrupt_agent`、`list_agents`，不按工具另拆任务。
 - 依据与检查：[调研记录](../logs/035-multi-agent/2026-10-26-spec-research.md)。本轮仅建立规格和实施计划，没有启动子 Agent、调用模型或修改程序行为。
 - 本项是原表最后一行；六项规格与计划现已建立，规划结束不等于功能已经实施或验收，开始哪一项实施仍由用户决定。
@@ -173,11 +173,11 @@ spawn示例：
 |---|---|---|
 | M0 前置与基线 | 核对工作区、032 V3实际交付、033入口与共享dev部署、030/031待实现边界；记录普通/沙箱测试原有状态。最小原型验证拥有型模型快照、3个固定子槽、有界调度泵、取消后传输排空，以及真实bwrap下owner/宿主PGID/工作区锚点；冻结§1.8性能/资源夹具与阈值 | 前置缺失不启用生产开关、不顺带实现其他行；同步网络的取消局限、线程与磁盘开销有实证，033已有验收不替代多Agent并发收尾验证 |
 | M1 输入与状态机 | 新增 `src/app/src/agents/`（args/registry/mailbox/budget），lib.rs导出；先写非法输入/准入竞态红例，再实现六工具DTO、路径和原子预留/去重/消息门；新增tests/multi_agent.rs | 六接口含本地适配可判定；所有容量边界、send/followup区别、消息终文竞态可用屏障复现，无空跑Mock核心状态 |
-| M2 子轮与共享分派 | turn.rs增加明确子轮模式；从main.rs/tui_host.rs抽最小拥有型sender工厂；复用普通函数编码、真实业务分派及033命令/MCPstdio/补丁包装，固定子模型/目录/上下文fork及独立取消，不改全局cwd | 根与3子真实本地模型服务并行；同一子不重入，不跨Agent复用opaque；禁止工具和旧工具集合零执行；策略锚点稳定，根现有调用兼容 |
-| M3 进程归属与收尾 | proc_session.rs增加可信逻辑owner及按owner回收/句柄校验，旧根入口明确映射Root而非绕过校验，owner不来自模型参数或Unix UID；共用全局64容量；保留033命名空间并按宿主PGID回收；agents运行时实现任务/根轮出口、期限、传输排空占槽；MCP只取消当前调用 | 真实bwrap下管道/PTY子进程只回收自己，根/兄弟不受影响；不恢复跨UID补杀、不混用内外PID；晚到tool_calls零执行，反复中断/续派不泄线程/槽，根预算保留 |
-| M4 V3证据与模型交付 | 基于032扩展prompt.rs/session.rs的AgentEvent/引用/严格装载/提交回执；主写者调度泵与有界事件通道；模型投影与memory/rollout_input.rs过滤、来源及根唯一登记 | start/消息保存后才执行或accepted；落盘失败、超大事件、旧group回调、错误ID/签名/坏引用有反证；根/子消息各自批末恰一次，恢复不执行 |
+| M2 子轮与共享分派 | turn.rs增加明确子轮模式；从main.rs/tui_host.rs抽最小拥有型sender工厂；拆分整轮history锁，MCP连接仅短暂持锁取得调用能力，网络等待不阻塞根调度泵落盘；复用普通函数编码、真实业务分派及033命令/MCPstdio/补丁包装，固定子模型/目录/上下文fork及独立取消，不改全局cwd | 根与3子真实本地模型服务并行，根阻塞时子事件仍可提交；同一子不重入，不跨Agent复用opaque；禁止工具和旧工具集合零执行；策略锚点稳定，根现有调用兼容 |
+| M3 进程归属与收尾 | proc_session.rs增加可信逻辑owner及按owner回收/句柄校验，旧根入口明确映射Root而非绕过校验，owner不来自模型参数或Unix UID；共用全局64容量；保留033命名空间并按宿主PGID回收；停止门与创建队列交接，取消先赢时不再创建/发送，已受理创建须归属并可回收；agents运行时实现任务/根轮出口、期限、传输排空占槽；MCP只取消当前调用 | 屏障覆盖等待MCP连接锁、进程创建队列时取消；真实bwrap下管道/PTY子进程只回收自己，根/兄弟不受影响；不恢复跨UID补杀、不混用内外PID；晚到tool_calls零执行，反复中断/续派不泄线程/槽，根预算保留 |
+| M4 V3证据与模型交付 | 基于032扩展prompt.rs/session.rs的AgentEvent/引用/严格装载/提交回执；主写者调度泵与有界事件通道；模型投影与memory/rollout_input.rs过滤、来源及根唯一登记；沿013既有读取计费后过滤口径，子事件洪泛或预算耗尽导致根事实未提取时记录降级，不改8 MiB/1 MiB限制 | start/消息保存后才执行或accepted；落盘失败、超大事件、旧group回调、错误ID/签名/坏引用有反证；根/子消息各自批末恰一次，恢复不执行；洪泛夹具证明过滤、来源与预算耗尽报告一致，不承诺窗外事实入选 |
 | M5 能力、展示与五协议 | catalog.rs/prompt.rs六项opt-in，main/tui_host传运行时与通知；TUI复用工具/聊天投影按路径归组；扩充prompt_assembly/native_model_apis/session/session_cli/e2e_acceptance | 五协议真实根spawn→子工具→消息/终态→根回复全链；CLI/PTY保存恢复一致、ANSI安全；关闭态兼容；实测并发、p95/RSS和磁盘/请求数 |
-| M6 加固、安全与独立审查 | TDD后依次comprehensive-testing、Security Testing、code-review，安全按现有Security-Testing-Gate，审查读取rules/REVIEW.md；独立只读审查子代理找问题 | 越权、033路径/策略锚点、owner与同UID命名空间下取消、资源、邮箱/终文竞态、重放重点覆盖；关键测试用修复前后/临时破坏证明能检错，问题用diagnosing-bugs定位复验 |
+| M6 加固、安全与独立审查 | ce-work承接实施并按TDD推进；之后依次comprehensive-testing、Security Testing、ce-code-review，安全按现有Security-Testing-Gate，审查读取rules/REVIEW.md；独立只读审查子代理找问题 | 越权、033路径/策略锚点、owner与同UID命名空间下取消、资源、邮箱/终文竞态、重放重点覆盖；关键测试用修复前后/临时破坏证明能检错，问题用ce-debug定位复验 |
 | M7 全量验证与交付 | 修复后运行最终全量验证，同步受影响016/022/024/032接入说明、对照表与经验；证据统一本项logs | 报告通过/失败/忽略/未运行数量，适用CI存在则通过；功能/性能/资源证据齐全后最多待验收，最终状态由验收人判定 |
 
 M0定向基线（工作目录 `/workspace`，不替代交付回归）：
@@ -187,6 +187,36 @@ env -u TCHAT_SANDBOX cargo test --locked --test tool_loop --test prompt_assembly
 ```
 
 实现轮另跑普通模式 `env -u TCHAT_SANDBOX cargo test --test e2e_acceptance`；最终普通回归为 `env -u TCHAT_SANDBOX cargo check && env -u TCHAT_SANDBOX cargo test --workspace --no-fail-fast`。共享dev默认注入开关，普通基线须清除；专用沙箱用例在隔离进程内自控开关，另须用真实bwrap验证子任务并发、owner、句柄拒绝及命名空间下回收，不以普通回归或已有033用例代替。在工作区副本跑Cargo必须显式 `--target-dir`。本次纯文档工作不运行这些命令，不用文档检查代替代码、性能或安全验证。
+
+### 3.3 实施同步（2026-10-29）
+
+M1–M5 已按 §3.2 交付（模块/接入点/测试见[实施记录](../logs/035-multi-agent/2026-10-29-implementation.md)）。两点本地适配如实登记：
+
+- **调度泵形态**：§1.7「事件通过有界通道交根调度泵顺序提交」以 **writer 互斥串行提交**实现——子线程与根线程经 `writer 锁 → session 锁` 单一锁链提交（全组单追加写者、根阻塞期间持续落盘、seq＝文件顺序不变）；未引入独立泵线程与通道。可观察契约（C 用例）不变。
+- **子轮独立循环**：§3.1 M2「turn.rs 增加明确子轮模式」落地为 `agents::runtime::child_loop`（白名单声明面＝业务四工具＋按能力 view_image＋023 资源＋冻结动态 MCP＋仅向根 send_message）；请求编码与业务分派复用既有函数（含 033 包装与 031 基线快照、016 owner 归属）。
+
+M6/M7 门禁结论与全量数字见实施记录 §3.3/§3.4。
+
+**已知边界（2026-10-29 登记；问题＋影响面＋处理方式）**
+
+- C16 逐协议端到端：anthropic-messages/google 两族的原生投影过滤已在适配器
+  代码层接入（与 openai 同一过滤臂），但未逐协议跑根→子→回链的端到端用例
+  ——影响面＝协议分支的运行时缺陷理论上可漏测；处理＝以 c16（openai 形态）
+  ＋投影过滤单测兜底，逐协议 E2E 留待后续。
+- C17 PTY 级 E2E：035 未改 REPL 基本行为，真实 CLI＋PTY 的六工具全链未扩充
+  ——影响面＝CLI/TUI 装配层与展示行的实机差异可漏测；处理＝以集成层
+  （run_user_turn_with_context_and_caps 全链）＋CLI/TUI 装配代码审查兜底。
+- C13 剩余形态：PTY 子进程、64 总容量并发压满、共享 MCP 并发请求下的按
+  owner 回收未单独覆盖——影响面＝极端并发下的回收边界；处理＝bwrap 矩阵
+  已覆盖管道形态主链，剩余形态沿用 033 既有验收口径合并追踪。
+- C18 未覆盖分项：fork all/none 分形、消息/续派/中断/清理分项计时、1 千/
+  10 万历史事件追加、CPU 利用率与客户端/服务器分离开销、真实模型请求数/
+  usage 与费用——影响面＝真实部署的性能与成本不可外推；处理＝基线文档
+  已注明口径，联测另立项。
+
+### 3.4 计划前调研复核（2026-10-28）
+
+结论：补充 M2–M4 的锁边界、取消与创建队列交接、记忆预算降级验证，功能、容量与验收条件不变；未进行实现或功能验证。调研见[汇总](../think-tank/2026-10-28-035-multi-agent.md)，原始输出见[调度专家](../think-tank/raw/2026-10-28-035-multi-agent-systems.md)、[存储专家](../think-tank/raw/2026-10-28-035-multi-agent-storage.md)、[安全专家](../think-tank/raw/2026-10-28-035-multi-agent-security.md)、[侦察兵](../think-tank/raw/2026-10-28-035-multi-agent-scout.md)。最终全量验证后按现行 AGENTS 使用 ce-compound，将有复用价值的结论统一沉淀到 rules/project-lessons.md。
 
 ## 4. 踩过的坑，怎样解决
 
@@ -210,11 +240,11 @@ env -u TCHAT_SANDBOX cargo test --locked --test tool_loop --test prompt_assembly
 | C10 | 超长消息/终文、队列洪泛、子2 MiB事件/64 MiB组负载：预留生效、终态不饿死，超大结果不续坏上下文 | 待测 |
 | C11 | 子猜父/兄弟进程、禁止工具/MCP/临时grant、模型/角色覆盖或改变workdir：零越权；owner由宿主确定，业务经过033实际包装且策略锚点不变 | 待测 |
 | C12 | interrupt抢在工具受理/完成前后、重复interrupt、模型迟到：门关闭后零新动作，排空仍占槽 | 待测 |
-| C13 | 真实033沙箱下子exec管道/PTY结束/中断、64总容量、共享MCP有并发请求：按宿主PGID只回收自己的进程与等待，不损根/兄弟，不混用沙箱内PID | 待测 |
+| C13 | 真实033沙箱下子exec管道/PTY结束/中断、64总容量、共享MCP有并发请求：按宿主PGID只回收自己的进程与等待，不损根/兄弟，不混用沙箱内PID | bwrap 矩阵已验（2026-10-29，`multi_agent::c13_bwrap_owner_reap_matrix`：真实 bwrap 下子 exec 进入 PID ns（ns 内 pid=1）、运行中句柄按 assignment 登记、终态按宿主 PGID 回收且 /proc 扫描无残留；无 bwrap 环境输出 skip 原因跳过）。PTY 形态、64 总容量并发压满、共享 MCP 并发请求下的回收未单独覆盖（登记为已知边界） |
 | C14 | 根终文/额度/失败/cancel/切会话/退出与同名新group：不遗留可执行旧Agent，旧回调不污染新组 | 待测 |
 | C15 | 创建/消息/结果落盘故障、孤立start/坏V3/坏fork引用：未存不执行或accepted，恢复显示未知不重放 | 待测 |
-| C16 | 五协议完整根子流程及相同call_id的不同Agent：结果/签名各归其主，根只收已交付报告 | 待测 |
-| C17 | CLI/TUI/PTY、保存/resume、子计划/终端控制字符、记忆触发：投影归属一致，恢复只展示，记忆只登记根 | 待测 |
-| C18 | 冻结并发/串行性能、RSS/磁盘/大历史追加和真实调用计数；关键反证及全量检查：阈值满足、费用未测如实 | 待测 |
+| C16 | 五协议完整根子流程及相同call_id的不同Agent：结果/签名各归其主，根只收已交付报告 | 已实施，缺口已登记（native 留子链＋根投影过滤已验，`multi_agent::c16`；anthropic/gemini/native 三适配器投影过滤代码层覆盖——逐协议端到端未做，见 §3.3 已知边界 C16） |
+| C17 | CLI/TUI/PTY、保存/resume、子计划/终端控制字符、记忆触发：投影归属一致，恢复只展示，记忆只登记根 | 已实施，缺口已登记（记忆过滤 c17、保存/装载不重放 c15、CLI 摘要行与 TUI 投影行代码已接；PTY 级 E2E 未扩充，见 §3.3 已知边界 C17） |
+| C18 | 冻结并发/串行性能、RSS/磁盘/大历史追加和真实调用计数；关键反证及全量检查：阈值满足、费用未测如实 | 基线已冻结（2026-10-29，A1/A2/A3 三场景 p50/p95/RSS/磁盘/请求数，数值与复现命令见 [c18-baseline](../logs/035-multi-agent/c18-baseline.md)）；未设通过线，fork 分形/分项计时/大历史追加/真实模型联测未覆盖——最终验收待用户确认 |
 
 实现证据统一写 `docs/logs/035-multi-agent/`，保留实际命令、工作目录、退出码、脱敏原始输出及必要PTY渲染结果。验收人按冻结规格、证据和可运行产物独立核验，不读实现源码；未测试/未定资源阈值不能通过，实现方不得自行改为已通过或为过关删用例、放宽预算。

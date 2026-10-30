@@ -693,6 +693,7 @@ fn s17_send_message_declaration_follows_capability_snapshot() {
 
 // ---------- 030 M2：搜索开关与首次声明 ----------
 
+use terminal_chat::prompt::build_turn_request_with_agents;
 use terminal_chat::prompt::build_turn_request_with_tool_search;
 
 #[test]
@@ -747,4 +748,62 @@ fn s30_off_mode_appends_mcp_defs_without_injecting_search() {
         !mcp_tools.iter().any(|t| t["function"]["name"] == json!("tool_search")),
         "关闭模式不得注入 tool_search"
     );
+}
+
+/// 035 C01/M5：六控制工具整组声明（agents 开关）＋关闭路径逐字节一致；
+/// Agent 控制事件不进入模型 messages 投影。
+#[test]
+fn s20_multi_agent_tool_declaration_and_event_projection_filter() {
+    use terminal_chat::agents::events::agent_event;
+    use terminal_chat::prompt::{AgentEventKind, AgentEventPayload};
+    let history = [msg(HistoryRole::User, "任务")];
+    let baseline = build_turn_request_with_agents(
+        &history, None, false, false, false, false, false, false, false, None, &[], false, false,
+    );
+    let with_agents = build_turn_request_with_agents(
+        &history, None, false, false, false, false, false, false, false, None, &[], false, true,
+    );
+    assert_eq!(with_agents["messages"], baseline["messages"], "messages 不变");
+    let base_tools = baseline["tools"].as_array().unwrap().clone();
+    let agent_tools = with_agents["tools"].as_array().unwrap().clone();
+    assert_eq!(agent_tools.len(), base_tools.len() + 6, "六工具追加");
+    for (i, name) in [
+        "spawn_agent",
+        "send_message",
+        "followup_task",
+        "wait_agent",
+        "interrupt_agent",
+        "list_agents",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(
+            agent_tools[base_tools.len() + i]["function"]["name"],
+            json!(name),
+            "第 {} 个控制工具原位：{name}",
+            base_tools.len() + i
+        );
+    }
+    // 控制事件不进 messages 投影
+    let event = agent_event(
+        AgentEventKind::AgentCreated,
+        1,
+        1,
+        Some("pa"),
+        Some(1),
+        AgentEventPayload::Fork {
+            context_id: 0,
+            prefix_end: 0,
+            fork: "none".into(),
+            task: "t".into(),
+        },
+    );
+    let with_event = build_turn_request_with_agents(
+        &[event.clone()],
+        None, false, false, false, false, false, false, false, None, &[], false, false,
+    );
+    let msgs = serde_json::to_string(&with_event["messages"]).unwrap();
+    assert!(!msgs.contains("agent_created"), "事件不进投影：{msgs}");
+    assert_eq!(with_event["messages"].as_array().unwrap().len(), 1, "仅 system");
 }

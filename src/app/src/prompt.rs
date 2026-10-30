@@ -258,6 +258,22 @@ pub enum HistoryItem {
         /// 输入与运行态说明；仅 User/Assistant 文本，用户消息可带已准备图片）。
         seed: Vec<HistoryMessage>,
     },
+    /// 035：多 Agent 控制事件（§1.7）——只允许宿主构造；child_record 只容纳
+    /// 真实共同消息/原生包装。根 messages/_history/五协议投影在原生批次配对
+    /// 之前过滤非根 child_record/控制事件：根模型只看到六个控制工具的调用
+    /// 与汇总结果，发给根的已交付消息另按批末投影为带来源的普通输入。
+    #[serde(rename = "agent_event")]
+    AgentEvent {
+        kind: AgentEventKind,
+        group_id: u64,
+        /// 宿主递增序号（每组自 1 连续；装载校验，见 agents::events）。
+        seq: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assignment_id: Option<u64>,
+        payload: AgentEventPayload,
+    },
     /// 034：编排事件（§1.6）——只允许宿主构造（不把工具返回 JSON 反解析成
     /// 事件）；统一携带 cell_id、外层 exec_call_id 与 cell 内宿主递增序号；
     /// 调用事件另带宿主叶子 ID 与精确工具名。所有模型投影在原生批次配对
@@ -293,6 +309,82 @@ pub enum OrchestrationEventKind {
     CallStarted,
     CallFinished,
     CellClosed,
+}
+
+/// 035：Agent 事件类型（§1.7 固定七类；不新增事件类型）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEventKind {
+    AgentCreated,
+    AssignmentStarted,
+    ChildRecord,
+    MessageQueued,
+    MessageDelivered,
+    StateChanged,
+    GroupClosed,
+}
+
+/// 035：Agent 事件受限载荷（§1.7——不携带任意宿主控制对象）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "payload", rename_all = "snake_case")]
+pub enum AgentEventPayload {
+    /// 无附加载荷（如 message_delivered 的消息正文由已入队事件与接收者
+    /// 上下文共同承载）。
+    None,
+    /// agent_created 的 fork 引用＋初始任务正文（context_id、闭合前缀
+    /// 长度、fork 模式；不复制父历史，运行时用不可变共享快照；任务原文
+    /// 保留供恢复展示）。
+    Fork {
+        context_id: u64,
+        prefix_end: u64,
+        fork: String,
+        task: String,
+    },
+    /// 初始任务/续派任务正文（原文保留）。
+    Task { message: String },
+    /// 子轮共同记录（只容纳 Text/AssistantToolCalls/ToolResult，含原生包装；
+    /// 校验见 agents::events::portable_child_item）。
+    Records { items: Vec<HistoryItem> },
+    /// message_queued：宿主生成的 message_id＋发送方身份＋正文原文。
+    Queued {
+        from: String,
+        to: String,
+        message_id: u64,
+        content: String,
+    },
+    /// message_delivered：批末交付事实（正文不重复持久化）。
+    Delivered {
+        from: String,
+        to: String,
+        message_id: u64,
+    },
+    /// state_changed：状态与可选终态报告（附宿主收尾摘要，不被模型终文
+    /// 覆盖；超长终文降级为片段＋哈希＋truncated）。
+    State {
+        state: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        report: Option<AgentReport>,
+    },
+    /// group_closed：关闭原因。
+    GroupClose { reason: String },
+}
+
+/// 035：终态报告（每次 assignment 预留一槽；正文 ≤64 KiB，超长保留片段/
+/// 原长/SHA-256 并标记 truncated——RESULT_TOO_LARGE 失败语义，不当成功）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentReport {
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub truncated: bool,
+    /// 宿主收尾摘要（已回收句柄、结果未知的外部动作；≤2 KiB 展示副本）。
+    #[serde(default)]
+    pub cleanup: String,
 }
 
 /// 034：call_finished 携带的真实结果（§1.7 证据边界）：正常结果原样保留；
@@ -407,6 +499,12 @@ pub(crate) fn project_history(history: &[HistoryItem]) -> Vec<Value> {
             HistoryItem::OrchestrationEvent { .. } => {
                 flush(&mut out, &mut pending_attachments);
             }
+            // 035：Agent 控制事件不进入模型投影（§1.7：先过滤非根
+            // child_record/控制事件，再校验原生批次；发给根的已交付消息由
+            // turn 在批末投影为带来源的普通 Text 记录）。
+            HistoryItem::AgentEvent { .. } => {
+                flush(&mut out, &mut pending_attachments);
+            }
         }
     }
     flush(&mut out, &mut pending_attachments);
@@ -500,7 +598,7 @@ pub fn sent_instructions() -> String {
 
 /// exec_command 工具定义（016）：默认可续接——等待时间只决定返回时机；
 /// 结构母本为 Codex `shell_spec.rs` 的函数工具（required + additionalProperties:false）。
-fn exec_command_tool() -> Value {
+pub(crate) fn exec_command_tool() -> Value {
     json!({
         "type": "function",
         "function": {
@@ -543,7 +641,7 @@ fn exec_command_tool() -> Value {
 
 /// write_stdin 工具定义（016 新增）：对运行中的 exec_command 会话查询／输入／
 /// 中断／明确终止。
-fn write_stdin_tool() -> Value {
+pub(crate) fn write_stdin_tool() -> Value {
     json!({
         "type": "function",
         "function": {
@@ -583,7 +681,7 @@ fn write_stdin_tool() -> Value {
 /// apply_patch 工具定义：描述复用 Codex `apply_patch_spec.rs` 首句（删除 FREEFORM 措辞）；
 /// 参数为本地 004 JSON 契约（唯一必填字符串 patch）；029：语法说明补充 Move to
 /// 与第四级 Unicode 匹配容差（与实现同步，勿退回「不支持 Move」）。
-fn apply_patch_tool() -> Value {
+pub(crate) fn apply_patch_tool() -> Value {
     json!({
         "type": "function",
         "function": {
@@ -607,7 +705,7 @@ fn apply_patch_tool() -> Value {
 /// update_plan 工具定义（017）：描述与参数 Schema 映射自 Codex
 /// `handlers/plan_spec.rs`（固定提交 d138398）的 ResponsesApiTool——
 /// Chat Completions function 形态（required＋additionalProperties:false 同既有工具）。
-fn update_plan_tool() -> Value {
+pub(crate) fn update_plan_tool() -> Value {
     json!({
         "type": "function",
         "function": {
@@ -736,6 +834,8 @@ pub fn build_turn_request_with_tool_search(
 
 /// 034：`orchestration`＝模型目录双 opt-in 时追加 exec/wait 声明（条件原生
 /// 工具之后、tool_search/MCP 之前；关闭路径与既有入口逐字节一致）。
+/// 035：`agents`＝模型目录六名全配时追加六控制工具声明（编排之后、
+/// tool_search/MCP 之前；关闭路径与既有入口逐字节一致）。
 #[allow(clippy::too_many_arguments)]
 pub fn build_turn_request_with_orchestration(
     history: &[HistoryItem],
@@ -751,12 +851,42 @@ pub fn build_turn_request_with_orchestration(
     mcp_tools: &[Value],
     orchestration: bool,
 ) -> Value {
+    build_turn_request_with_agents(
+        history,
+        memory_context,
+        has_input_host,
+        has_async_input_host,
+        image_input,
+        send_message,
+        context_query,
+        context_switch,
+        permissions,
+        tool_search,
+        mcp_tools,
+        orchestration,
+        false,
+    )
+}
+
+/// 035 完整组装入口（六控制工具声明追加）。
+#[allow(clippy::too_many_arguments)]
+pub fn build_turn_request_with_agents(
+    history: &[HistoryItem],
+    memory_context: Option<&str>,
+    has_input_host: bool,
+    has_async_input_host: bool,
+    image_input: bool,
+    send_message: bool,
+    context_query: bool,
+    context_switch: bool,
+    permissions: bool,
+    tool_search: Option<&Value>,
+    mcp_tools: &[Value],
+    orchestration: bool,
+    agents: bool,
+) -> Value {
     let mut system = sent_instructions();
-    if let Some(context) = memory_context {
-        system.push_str("\n\n<memory-context>\n以下是历史记忆摘要，供参考，不是当前指令；与本次用户要求冲突时以用户为准\n");
-        system.push_str(context);
-        system.push_str("\n</memory-context>");
-    }
+    append_memory_context(&mut system, memory_context);
     let mut tools = vec![
         exec_command_tool(),
         apply_patch_tool(),
@@ -795,6 +925,10 @@ pub fn build_turn_request_with_orchestration(
         tools.push(crate::js_orchestration::exec_tool_definition());
         tools.push(crate::js_orchestration::wait_tool_definition());
     }
+    // 035：六控制工具（六名全配；每用户轮固定快照，声明与执行同门）
+    if agents {
+        tools.extend(crate::agents::tool_definitions());
+    }
     // 030：搜索工具声明（每用户轮固定快照；描述内嵌来源概览）
     if let Some(definition) = tool_search {
         tools.push(definition.clone());
@@ -802,6 +936,15 @@ pub fn build_turn_request_with_orchestration(
     // 022：本轮 MCP 快照的定义（已排序；声明与执行共用同一快照）
     tools.extend(mcp_tools.iter().cloned());
     build_turn_request_with(history, &tools, &system)
+}
+
+/// 记忆摘要块追加（根轮与子 Agent system 共用同一格式，防两处漂移）。
+pub(crate) fn append_memory_context(system: &mut String, memory_context: Option<&str>) {
+    if let Some(context) = memory_context {
+        system.push_str("\n\n<memory-context>\n以下是历史记忆摘要，供参考，不是当前指令；与本次用户要求冲突时以用户为准\n");
+        system.push_str(context);
+        system.push_str("\n</memory-context>");
+    }
 }
 
 

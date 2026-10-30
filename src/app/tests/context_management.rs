@@ -396,6 +396,7 @@ fn m2_turn_executes_query_with_fixed_fields() {
             }),
             permissions: None,
             orchestration: None,
+            agents: None,
         },
     )
     .expect("查询轮应成功");
@@ -494,6 +495,7 @@ fn m2_unregistered_query_call_rejected_and_not_declared() {
             }),
             permissions: None,
             orchestration: None,
+            agents: None,
         },
     )
     .expect("轮仍成功（错误作为结果回传）");
@@ -580,6 +582,7 @@ fn m2_query_images_unknown_and_bad_args_error() {
             }),
             permissions: None,
             orchestration: None,
+            agents: None,
         },
     )
     .unwrap();
@@ -687,7 +690,7 @@ fn m2_context_id_and_active_view_with_handmade_checkpoint() {
                     query_declared: true,
                     switch_declared: false,
                     checkpoints: None,
-                }), permissions: None, orchestration: None },
+                }), permissions: None, orchestration: None , agents: None },
         );
         if expect_error {
             // 审查修复 #12 后：链级校验（代数连续）在装载/提交点执行——内存中
@@ -1079,7 +1082,7 @@ fn run_ctx_turn(
                 query_declared: true,
                 switch_declared: true,
                 checkpoints: Some(&mut host),
-            }), permissions: None, orchestration: None },
+            }), permissions: None, orchestration: None , agents: None },
     );
     (outcome, bodies, infos, host)
 }
@@ -1343,7 +1346,7 @@ fn m4_cancel_after_scheduled_before_receipt_drops_candidate() {
                 query_declared: true,
                 switch_declared: true,
                 checkpoints: Some(&mut host),
-            }), permissions: None, orchestration: None },
+            }), permissions: None, orchestration: None , agents: None },
     );
     let err = outcome.expect_err("取消应结束本轮");
     assert!(err.contains("未提交"), "{err}");
@@ -1571,7 +1574,7 @@ fn m4_unanswered_async_blocks_switch_and_answer_enters_seed() {
                 query_declared: true,
                 switch_declared: true,
                 checkpoints: Some(&mut host),
-            }), permissions: None, orchestration: None },
+            }), permissions: None, orchestration: None , agents: None },
     );
     assert_eq!(outcome.unwrap(), "done");
     // 第一次切换被未答问询阻止
@@ -1890,7 +1893,7 @@ fn ct_steer_inputs_before_and_after_barrier() {
                 query_declared: true,
                 switch_declared: true,
                 checkpoints: Some(&mut host),
-            }), permissions: None, orchestration: None },
+            }), permissions: None, orchestration: None , agents: None },
     );
     // 轮以终文结束；批末前受理的输入已进入 seed
     assert_eq!(outcome.unwrap(), "done");
@@ -1970,7 +1973,7 @@ fn ct_switch_rejected_when_budget_insufficient() {
                 query_declared: false,
                 switch_declared: true,
                 checkpoints: Some(&mut host),
-            }), permissions: None, orchestration: None },
+            }), permissions: None, orchestration: None , agents: None },
     )
     .unwrap();
     assert!(host.committed.is_empty(), "预算不足不提交");
@@ -2102,6 +2105,7 @@ fn ct_query_snapshot_includes_prior_batch_results() {
             }),
             permissions: None,
             orchestration: None,
+            agents: None,
         },
     )
     .unwrap();
@@ -2213,7 +2217,7 @@ fn sec_memory_merge_cannot_use_context_tools() {
                 query_declared: true,
                 switch_declared: true,
                 checkpoints: Some(&mut host),
-            }), permissions: None, orchestration: None },
+            }), permissions: None, orchestration: None , agents: None },
     );
     // 合并轮首条注入被跳过；请求不声明两工具
     let tools: Vec<&str> = bodies[0]["tools"]
@@ -2332,7 +2336,7 @@ fn sec_no_credential_leakage_in_metering_and_checkpoint() {
                 query_declared: true,
                 switch_declared: true,
                 checkpoints: Some(&mut host),
-            }), permissions: None, orchestration: None },
+            }), permissions: None, orchestration: None , agents: None },
     )
     .unwrap();
     // 查询结果 JSON 无密钥
@@ -2499,6 +2503,7 @@ fn fix_no_checkpoint_host_new_context_not_declared_and_rejected() {
             }),
             permissions: None,
             orchestration: None,
+            agents: None,
         },
     );
     assert_eq!(outcome.unwrap(), "继续");
@@ -2646,6 +2651,7 @@ fn fix_native_opaque_history_query_unknown() {
             }),
             permissions: None,
             orchestration: None,
+            agents: None,
         },
     )
     .unwrap();
@@ -2833,7 +2839,7 @@ fn fix_batch_end_revalidation_failure_keeps_old_view() {
                 query_declared: false,
                 switch_declared: true,
                 checkpoints: Some(&mut host),
-            }), permissions: None, orchestration: None },
+            }), permissions: None, orchestration: None , agents: None },
     );
     // 结果二选一皆合法：调用点即拒（预算在排定时已不足）或批末复验拒——
     // 关键断言：零提交、无检查点、轮未崩溃、失败可见（模型记录或结果内原因）

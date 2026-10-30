@@ -37,7 +37,10 @@ pub(super) fn build_body(
                 return Err("原生状态缺失或来源已改变，不能续接此调用链".into())
             }
             // 032：检查点标记不进入原生内容块（防御性跳过，同 project_history）。
-            HistoryItem::ContextCheckpoint { .. } | HistoryItem::OrchestrationEvent { .. } => {}
+            // 035：Agent 控制事件同过滤。
+            HistoryItem::ContextCheckpoint { .. }
+            | HistoryItem::OrchestrationEvent { .. }
+            | HistoryItem::AgentEvent { .. } => {}
             HistoryItem::Text(m) => push_message(
                 &mut messages,
                 m.role.as_str(),

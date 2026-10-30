@@ -277,6 +277,11 @@ pub fn serialize_filtered_history_items(items: &[HistoryItem]) -> Result<String,
             HistoryItem::ToolResult { tool_call_id, .. } if control_ids.contains(tool_call_id) => {
                 None
             }
+            // 035：Agent 控制事件（含 child_record 的 fork 复制与子轮记录）
+            // 不进提炼输入——记忆只登记根 durable 会话，只从根实际收取的
+            // 消息/事实提取（已交付 Agent 消息在根历史中已是带来源 Text，
+            // 保留下游 sanitize 的来源标注，§1.7）。
+            HistoryItem::AgentEvent { .. } => None,
             _ => sanitize_history_item_for_memories(item),
         })
         .collect();

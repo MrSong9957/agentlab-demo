@@ -23,6 +23,7 @@ pub mod tui_host;
 pub mod tool_search;  // 030：tool_search 本地目录搜索
 pub mod view_image;
 pub mod js_orchestration;  // 034：JavaScript 工具编排（exec/wait；worker 子进程＋宿主 cell 运行时）
+pub mod agents;  // 035：多 Agent（六工具控制面＋子轮运行时＋V3 AgentEvent）
 
 /// 串行化使用进程级环境变量的测试（TCHAT_* 为进程全局；catalog 与 tui_host 的
 /// env 测试共用此锁，避免跨模块并发改写）。

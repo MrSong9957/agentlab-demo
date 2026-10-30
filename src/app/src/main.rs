@@ -153,7 +153,11 @@ fn main() {
     let mut rl = DefaultEditor::new().expect("初始化行编辑器失败");
     // 006：会话历史（内存态）；007：默认自动追加落盘，/resume 恢复继续
     let mut history: Vec<HistoryItem> = Vec::new();
-    let mut autosave = session::Session::new(session::sessions_dir());
+    // 035：会话保存器共享化（子 Agent 事件的调度提交与根线程写入经同一
+    // 互斥串行——全组单追加写者；tui_host 既有形态同款）
+    let autosave = std::sync::Arc::new(std::sync::Mutex::new(session::Session::new(
+        session::sessions_dir(),
+    )));
     // 020：-i/--image 启动图片路径（正式提交时读取——首条可提交输入后作废）
     let mut pending_images: Vec<std::path::PathBuf> = startup_images;
     // 016：进程会话管理器（当前对话；/resume 成功切换后重置）
@@ -162,6 +166,10 @@ fn main() {
     let mut registrar = terminal_chat::memory::runner::ThreadRegistrar::default();
     // 022：MCP 管理器（跨轮保留连接；退出显式关闭——不依赖 Drop）
     let mcp = terminal_chat::mcp::manager::McpManager::new();
+    // 035：多 Agent 管理器（跨根用户轮持有组注册表；每轮 begin_turn 新组）
+    let agents_mgr = std::sync::Arc::new(
+        terminal_chat::agents::runtime::AgentManager::new(),
+    );
 
     loop {
         match rl.readline("你> ") {
@@ -186,11 +194,12 @@ fn main() {
                         &mut rl,
                         input,
                         &mut history,
-                        &mut autosave,
+                        &autosave,
                         &mut registrar,
                         &procs,
                         &mut pending_images,
                         &mcp,
+                        &agents_mgr,
                     );
                     if quit {
                         break;
@@ -207,11 +216,12 @@ fn main() {
                         &mut rl,
                         "",
                         &mut history,
-                        &mut autosave,
+                        &autosave,
                         &mut registrar,
                         &procs,
                         &mut pending_images,
                         &mcp,
+                        &agents_mgr,
                     );
                 }
                 break;
@@ -226,7 +236,11 @@ fn main() {
     // 022：退出显式关闭全部 MCP 连接（stdio 有界 3 秒＋进程组回收）。
     mcp.close();
     // 007：退出排空——主循环退出后、进程结束前补写一次；成功静默，失败明确报错
-    if let Err(e) = autosave.flush_final(&history) {
+    if let Err(e) = autosave
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .flush_final(&history)
+    {
         say(&format!("错误：会话退出排空失败：{e}"));
     }
     // 结束提示:exit / Ctrl+C / Ctrl+D 都会走到这里
@@ -527,11 +541,12 @@ fn handle_input(
     rl: &mut DefaultEditor,
     input: &str,
     history: &mut Vec<HistoryItem>,
-    autosave: &mut session::Session,
+    autosave: &std::sync::Arc<std::sync::Mutex<session::Session>>,
     registrar: &mut terminal_chat::memory::runner::ThreadRegistrar,
     procs: &ProcessManager,
     startup_images: &mut Vec<std::path::PathBuf>,
     mcp: &terminal_chat::mcp::manager::McpManager,
+    agents_mgr: &std::sync::Arc<terminal_chat::agents::runtime::AgentManager>,
 ) -> bool {
     if let Some(rest) = input.strip_prefix('/') {
         if let Some(arg) = rest.strip_prefix("save") {
@@ -574,7 +589,7 @@ fn handle_input(
         }
         return false;
     }
-    cmd_chat(agent, rl, input, history, autosave, registrar, procs, startup_images, mcp)
+    cmd_chat(agent, rl, input, history, autosave, registrar, procs, startup_images, mcp, agents_mgr)
 }
 
 /// 022：`/mcp` 状态显示与 `/mcp reload`（行式宿主主循环天然串行＝空闲时执行）。
@@ -632,7 +647,7 @@ fn cmd_resume(
     rl: &mut DefaultEditor,
     arg: &str,
     history: &mut Vec<HistoryItem>,
-    autosave: &mut session::Session,
+    autosave: &std::sync::Arc<std::sync::Mutex<session::Session>>,
     procs: &ProcessManager,
 ) {
     let name = arg.trim();
@@ -649,12 +664,22 @@ fn cmd_resume(
         }
         // 丢弃前排空旧会话待写段：落盘记录集合须与内存历史一致（§1）；
         // 排空失败中止恢复，旧记录保留在内存等待补写，不静默丢失
-        if let Err(e) = autosave.flush_final(history) {
+        if let Err(e) = autosave
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .flush_final(history)
+        {
             say(&format!("错误：切换会话前旧会话排空失败，已中止恢复：{e}"));
             return;
         }
     }
-    match autosave.resume(target) {
+    // 035：037 会话切换＝组边界——同轮旧组不可续用（begin_turn 于下一轮
+    // 顶替；此处显式关闭旧组防残留）。
+    let outcome = autosave
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .resume(target);
+    match outcome {
         Ok(info) => {
             if info.degraded {
                 say("该会话正被另一进程编辑，已只读装载；本运行的新记录将写入新的自动会话文件");
@@ -695,11 +720,12 @@ fn cmd_chat(
     rl: &mut DefaultEditor,
     input: &str,
     history: &mut Vec<HistoryItem>,
-    autosave: &mut session::Session,
+    autosave: &std::sync::Arc<std::sync::Mutex<session::Session>>,
     registrar: &mut terminal_chat::memory::runner::ThreadRegistrar,
     procs: &ProcessManager,
     startup_images: &mut Vec<std::path::PathBuf>,
     mcp: &terminal_chat::mcp::manager::McpManager,
+    agents_mgr: &std::sync::Arc<terminal_chat::agents::runtime::AgentManager>,
 ) -> bool {
     // 020：启动图片一次机会——进入聊天轮即作废（无论成败）；命令/退出不进此处
     let startup_paths: Vec<std::path::PathBuf> = std::mem::take(startup_images);
@@ -758,23 +784,32 @@ fn cmd_chat(
                     // 013-M7：记忆配置每轮装载（manual 段；无段＝默认关闭）。
                     let mem_config = terminal_chat::memory::runner::load_memories_config();
                     let user_dir = catalog::user_dir();
+                    // 035：子 Agent 模型发送快照（与记忆管线同款拥有型结构；
+                    // 继承根用户轮的可信连接与推理设置，不提供模型覆盖）。
+                    let agent_sender = terminal_chat::memory::runner::ModelSend {
+                        provider_id: prov.provider_id.clone(),
+                        conn: prov.conn.clone(),
+                        key: cred.value.clone(),
+                        model: model.clone(),
+                        agent: agent.clone(),
+                    };
                     // 013-M7 D2：带输入新轮已通过 route/origin 门＝成功启动，触发一次
                     // 后台管线（enabled gate 在 runner 内——关闭态零副作用）。主轮成败
                     // 不影响已启动的管线；进程退出不等待（批准边界）。
                     terminal_chat::memory::runner::spawn_memory_pipeline(
                         &user_dir,
                         &mem_config,
-                        autosave.current_target_stem(),
-                        terminal_chat::memory::runner::ModelSend {
-                            provider_id:prov.provider_id.clone(),
-                            conn: prov.conn.clone(),
-                            key: cred.value.clone(),
-                            model: model.clone(),
-                            agent: agent.clone(),
-                        },
+                        autosave
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .current_target_stem(),
+                        agent_sender.clone(),
                     );
                     // 006：工具调用循环——组装→请求→串行执行→结果回传→再请求
-                    autosave.prepare_native_model(&prov.conn.protocol);
+                    autosave
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .prepare_native_model(&prov.conn.protocol);
                     // N2b：仅工具轮期间接管 SIGINT（只置取消标志），轮结束恢复默认——
                     // 001 的动画/输入提示符 Ctrl+C 语义保持不变
                     let conn = &prov.conn;
@@ -869,6 +904,11 @@ fn cmd_chat(
                                     say(&terminal_chat::plan::cli_failure_line(&err));
                                 }
                             }
+                            // 035：六控制工具结果摘要行（受理/观察/列表；正文
+                            // 经 say 终端过滤）
+                            if terminal_chat::agents::runtime::is_agent_tool(&name) {
+                                say(&terminal_chat::agents::cli_display_line(&name, &result));
+                            }
                             // 034：编排 cell 生命周期状态行（cell 句柄与输出增量
                             // 数；终态字段由结果 JSON 本身承载）
                             if name == terminal_chat::js_orchestration::EXEC_TOOL_NAME
@@ -960,14 +1000,13 @@ fn cmd_chat(
                             return exit_host;
                         }
                     };
-                    // 032：会话保存器经 RefCell 共享——on_record（普通追加）与
-                    // 检查点提交宿主（可失败回执）顺序借用同一保存器；提交失败
-                    // 候选不进内存历史（不复活）。
-                    let autosave_cell = std::cell::RefCell::new(autosave);
-                    let mut checkpoint_sink = session::SessionCellSink(&autosave_cell);
+                    // 032：会话保存器共享（Arc<Mutex>）——on_record（普通追加）、
+                    // 检查点/编排提交宿主（可失败回执）与 035 子 Agent 调度提交
+                    // 经同一互斥串行；提交失败候选不进内存历史（不复活）。
+                    let mut checkpoint_sink = session::SessionCellSink(autosave.clone());
                     // 034：编排宿主（V3 事件经共享保存器的可失败回执；双 opt-in
                     // 核对在 extras 装配处）。部分配置（只配一个）给一次提示。
-                    let mut orch_sink = session::SessionOrchestrationSink(&autosave_cell);
+                    let mut orch_sink = session::SessionOrchestrationSink(autosave.clone());
                     // §1.5：轮 128 叶子额度跨本用户轮全部 cell 共享。
                     let turn_leaf_budget = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(
                         terminal_chat::js_orchestration::runtime::TURN_LEAF_QUOTA,
@@ -992,6 +1031,46 @@ fn cmd_chat(
                             ));
                         }
                     }
+                    // 035：多 Agent 宿主——目录六名全配才装配（部分配置整组关闭
+                    // 并提示一次）。子 Agent 继承本快照（模型/提供方/连接/推理
+                    // 设置不覆盖）；环境上下文按轮冻结进子上下文。
+                    let agents_ready = terminal_chat::catalog::supports_multi_agent(&model);
+                    if !agents_ready {
+                        let missing = terminal_chat::catalog::multi_agent_missing(&model);
+                        if !missing.is_empty() {
+                            static AGENTS_PARTIAL_NOTICED: std::sync::OnceLock<()> =
+                                std::sync::OnceLock::new();
+                            if AGENTS_PARTIAL_NOTICED.set(()).is_ok() {
+                                say(&format!(
+                                    "提示：experimental_supported_tools 的多 Agent 工具只配置了部分（缺 {}），整组关闭；六名全配后才开放",
+                                    missing.join("、")
+                                ));
+                            }
+                        }
+                    }
+                    let context_sources_for_agents =
+                        terminal_chat::context::ContextSources::from_env();
+                    let agents_context_message =
+                        terminal_chat::context::build_context_message(&context_sources_for_agents)
+                            .message;
+                    let agents_sender = agent_sender.clone();
+                    let agent_factory =
+                        move || -> Box<dyn terminal_chat::agents::runtime::ChildModelSender> {
+                            Box::new(terminal_chat::agents::runtime::ApiModelSend(
+                                agents_sender.clone(),
+                            ))
+                        };
+                    let agents_extras = if agents_ready {
+                        Some(terminal_chat::agents::runtime::AgentExtras {
+                            manager: agents_mgr,
+                            session: autosave.clone(),
+                            sender_factory: &agent_factory,
+                            context_message: agents_context_message,
+                            mcp: mcp_snapshot.clone(),
+                        })
+                    } else {
+                        None
+                    };
                     // 015：用户轮上下文来源（每轮解析：全局规则目录、cwd、SHELL、时钟）
                     let context_sources = terminal_chat::context::ContextSources::from_env();
                     // 轮内行编辑器共享单元：问询宿主与 031 权限宿主都读终端，
@@ -1035,7 +1114,9 @@ fn cmd_chat(
                         Some(&TOOL_CANCEL),
                         // 007：每个入史点同步进入待写段并立即尝试提交（失败只提示一次）
                         &mut |h: &[HistoryItem]| {
-                            let mut session = autosave_cell.borrow_mut();
+                            let mut session = autosave
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
                             if let Some(msg) = session.on_history(h) {
                                 say(&msg);
                             }
@@ -1091,6 +1172,8 @@ fn cmd_chat(
                                     mcp: mcp.clone(),
                                     turn_budget: turn_leaf_budget.clone(),
                                 }),
+                            // 035：多 Agent 宿主（目录六名全配＋共享会话快照齐备才装配）
+                            agents: agents_extras.as_ref(),
                         },
                     );
                     unsafe {

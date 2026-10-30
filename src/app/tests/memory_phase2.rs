@@ -1872,6 +1872,7 @@ fn merge_mode_ignores_tool_search_flag() {
             context: None,
             permissions: None,
             orchestration: None,
+            agents: None,
         },
     )
     .unwrap();

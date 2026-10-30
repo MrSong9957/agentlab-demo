@@ -56,11 +56,13 @@ enum SteerSlot {
 struct TurnSteerChannel {
     slot: Arc<Mutex<SteerSlot>>,
     rx: std_mpsc::Receiver<turn::SteerInput>,
+    /// 035：pending_hint 预取缓存（探测不消费——先回填缓存，drain 先取缓存）。
+    peeked: std::cell::RefCell<Vec<turn::SteerInput>>,
 }
 
 impl TurnSteerChannel {
     fn drain_rx(&self) -> Vec<turn::SteerInput> {
-        let mut out = Vec::new();
+        let mut out = std::mem::take(&mut *self.peeked.borrow_mut());
         while let Ok(input) = self.rx.try_recv() {
             out.push(input);
         }
@@ -71,6 +73,20 @@ impl TurnSteerChannel {
 impl turn::SteerChannel for TurnSteerChannel {
     fn drain(&mut self) -> Vec<turn::SteerInput> {
         self.drain_rx()
+    }
+    /// 035：非消费性探测（wait_agent 的 steer 唤醒判定）——接收端非空即可
+    /// 见；预取进缓存（drain 先取缓存），不改变受理侧状态。
+    fn pending_hint(&self) -> bool {
+        if !self.peeked.borrow().is_empty() {
+            return true;
+        }
+        match self.rx.try_recv() {
+            Ok(input) => {
+                self.peeked.borrow_mut().push(input);
+                true
+            }
+            Err(_) => false,
+        }
     }
     fn seal(&mut self) -> turn::SteerSeal {
         let mut guard = self.slot.lock().unwrap_or_else(|e| e.into_inner());
@@ -119,6 +135,8 @@ pub struct TuiHost {
 
     /// 016：进程会话管理器（当前对话；跨轮保留进程，TUI Ctrl+C 退出时关闭）。
     procs: ProcessManager,
+    /// 035：多 Agent 管理器（跨根用户轮；每轮 begin_turn 新组，旧组路径失效）。
+    agents: std::sync::Arc<crate::agents::runtime::AgentManager>,
     /// 021：当前轮接续通道受理资格（spawn 同步置 Open；seal/close 置 Closed）。
     steer_slot: Arc<Mutex<SteerSlot>>,
     /// 021：接续提交标识发生器（宿主生成；回执按 id 恰一次关联）。
@@ -247,6 +265,7 @@ impl TuiHost {
                 crate::memory::runner::ThreadRegistrar::default(),
             )),
             procs: ProcessManager::new(),
+            agents: std::sync::Arc::new(crate::agents::runtime::AgentManager::new()),
             steer_slot: Arc::new(Mutex::new(SteerSlot::Closed)),
             steer_seq: std::sync::atomic::AtomicU64::new(0),
             mcp: crate::mcp::manager::McpManager::new(),
@@ -345,6 +364,8 @@ impl TuiHost {
         let steer_slot = self.steer_slot.clone();
         // 022：MCP 管理器句柄（线程内准备快照；不捕获 &self）
         let mcp = self.mcp.clone();
+        // 035：多 Agent 管理器句柄（线程内装配 extras；不捕获 &self）
+        let agents_manager_arc = self.agents.clone();
         let tx_panic = tx.clone();
         std::thread::spawn(move || {
             // 008：线程异常终止（如毒锁 panic）不得静默——回推 Failed 让驱动恢复
@@ -428,7 +449,7 @@ impl TuiHost {
                 },
             );
             autosave.lock().unwrap().prepare_native_model(&prov.conn.protocol);
-            let provider_id = prov.provider_id;
+            let provider_id = prov.provider_id.clone();
             let conn = prov.conn;
             let key = cred.value;
             // 010 定点轮＋收尾轮（J10 契约②）：Ctrl+C 取消＝**停止本地等待**——
@@ -628,7 +649,11 @@ impl TuiHost {
                     Ok(crate::user_input_async::AsyncReplyChannel { receiver, live })
                 };
             // 021：本轮接续通道实现（rx 由本线程持有；受理资格经短锁与提交侧互斥）
-            let mut steer_channel = TurnSteerChannel { slot: steer_slot, rx: steer_rx };
+            let mut steer_channel = TurnSteerChannel {
+                slot: steer_slot,
+                rx: steer_rx,
+                peeked: std::cell::RefCell::new(Vec::new()),
+            };
             // 022：MCP 快照在普通用户轮准备时取得（首次触发配置加载与连接；
             // 取消＝结束本轮、不发模型请求；已就绪连接保留、候选回收）。
             let mcp_snapshot = match mcp.prepare_for_turn(&HOST_CANCEL) {
@@ -664,6 +689,50 @@ impl TuiHost {
             let turn_leaf_budget = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(
                 crate::js_orchestration::runtime::TURN_LEAF_QUOTA,
             ));
+            // 035：多 Agent 宿主——目录六名全配才装配（部分配置整组关闭并经
+            // Info 提示一次，§1.2）。子 Agent 模型快照继承本根用户轮 route 结果。
+            let agents_ready = crate::catalog::supports_multi_agent(&model);
+            if !agents_ready {
+                let missing = crate::catalog::multi_agent_missing(&model);
+                if !missing.is_empty() {
+                    static AGENTS_PARTIAL_NOTICED: std::sync::OnceLock<()> =
+                        std::sync::OnceLock::new();
+                    if AGENTS_PARTIAL_NOTICED.set(()).is_ok() {
+                        let _ = tx.send(DriverEvent::Info(format!(
+                            "提示：experimental_supported_tools 的多 Agent 工具只配置了部分（缺 {}），整组关闭；六名全配后才开放",
+                            missing.join("、")
+                        )));
+                    }
+                }
+            }
+            let agent_sender_snapshot = crate::memory::runner::ModelSend {
+                provider_id: prov.provider_id.clone(),
+                conn: conn.clone(),
+                key: key.clone(),
+                model: model.clone(),
+                agent: agent.clone(),
+            };
+            let agent_factory =
+                move || -> Box<dyn crate::agents::runtime::ChildModelSender> {
+                    Box::new(crate::agents::runtime::ApiModelSend(
+                        agent_sender_snapshot.clone(),
+                    ))
+                };
+            let agents_context_message = crate::context::build_context_message(
+                &crate::context::ContextSources::from_env(),
+            )
+            .message;
+            let agents_extras = if agents_ready {
+                Some(crate::agents::runtime::AgentExtras {
+                    manager: agents_manager_arc.as_ref(),
+                    session: autosave.clone(),
+                    sender_factory: &agent_factory,
+                    context_message: agents_context_message,
+                    mcp: mcp_snapshot.clone(),
+                })
+            } else {
+                None
+            };
             let extras = turn::TurnExtras {
                 // 022：声明与分派共用同一快照（合并轮由 turn 层强制忽略）
                 mcp: mcp_snapshot.as_deref(),
@@ -697,6 +766,8 @@ impl TuiHost {
                 } else {
                     None
                 },
+                // 035：多 Agent 宿主（目录六名全配；共享会话与发送快照同上）
+                agents: agents_extras.as_ref(),
             };
             // 审查 #2（§1.7-7）：收尾失败门——拒绝开始新用户轮直到回收成功。
             if let Some(gate) = procs.extra_reap_gate() {
@@ -1101,6 +1172,23 @@ fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
         let item = item.portable();
         match item {
             HistoryItem::NativeAssistant { .. } => {}, // portable 已解包，不展示原生块
+            // 035：Agent 控制事件按来源归组展示一行状态（child_record 批量
+            // 记录不逐条重画——子轮细节由事件行承载，恢复时经同一投影可见；
+            // 展示副本经 sanitize 与截断，不执行 ANSI）。
+            HistoryItem::AgentEvent { kind, group_id, agent_name, payload, .. } => {
+                if let crate::prompt::AgentEventKind::ChildRecord = kind {
+                    // 子轮记录不重复展示（避免把 fork 历史当第二份对话重画）
+                } else if let Some(line) = crate::agents::events::event_display_line(item) {
+                    let _ = (group_id, agent_name, payload);
+                    out.push(HostHistoryItem::Text {
+                        assistant: false,
+                        content: crate::display::truncate_chars(
+                            &crate::display::sanitize_for_terminal(&line),
+                            400,
+                        ),
+                    });
+                }
+            }
             // 032：检查点边界——归档前缀与活动视图的分界（完整 transcript 含
             // 归档内容可回看；seed 的用户输入已作为真实记录在前缀中展示，
             // 不经 seed 复制重画；摘要随边界呈现，M5 细化展示形态）。
@@ -2486,7 +2574,7 @@ mod tests {
     fn steer_channel_seal_close_atomicity() {
         let slot = Arc::new(Mutex::new(SteerSlot::Closed));
         let (tx, rx) = std_mpsc::channel();
-        let mut channel = TurnSteerChannel { slot: slot.clone(), rx };
+        let mut channel = TurnSteerChannel { slot: slot.clone(), rx, peeked: std::cell::RefCell::new(Vec::new()) };
         // 封口态 seal＝Closed；close 幂等
         assert!(matches!(channel.seal(), turn::SteerSeal::Closed));
         assert!(channel.close().is_empty());

@@ -71,6 +71,7 @@ fn run_resource_turn(
             steer: None, context: None,
             permissions: None,
             orchestration: None,
+            agents: None,
         },
     );
     (reply, history, bodies)
@@ -476,6 +477,7 @@ fn m2_memory_merge_turn_never_executes_resource_tools() {
             steer: None, context: None,
             permissions: None,
             orchestration: None,
+            agents: None,
         },
     );
     assert!(reply.is_ok(), "{reply:?}");
@@ -903,6 +905,7 @@ fn m4_cancel_before_dispatch_skips_request() {
             steer: None, context: None,
             permissions: None,
             orchestration: None,
+            agents: None,
         },
     );
     // 006 取消语义：本轮以取消 Err 结束（已执行结果保留、剩余调用未执行）。
@@ -988,6 +991,7 @@ fn m4_cancel_during_aggregate_fails_wholesale_and_keeps_batch_pairing() {
             steer: None, context: None,
             permissions: None,
             orchestration: None,
+            agents: None,
         },
     );
     assert!(reply.is_ok(), "{reply:?}");
@@ -1344,6 +1348,7 @@ fn m6_cancel_outranks_partial_failure_with_collected_data() {
             steer: None, context: None,
             permissions: None,
             orchestration: None,
+            agents: None,
         },
     );
     assert!(reply.is_ok(), "{reply:?}");
