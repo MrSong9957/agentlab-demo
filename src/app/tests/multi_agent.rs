@@ -2109,17 +2109,27 @@ fn c13_bwrap_child_mode() {
             _ => None,
         })
         .unwrap_or_default();
-    // 残留扫描：按唯一 argv 串扫 /proc（宿主侧；033 教训——不用沙箱内 PID）
-    let mut leftover = false;
-    if let Ok(procs) = std::fs::read_dir("/proc") {
-        for p in procs.flatten() {
-            if let Ok(cmd) = std::fs::read_to_string(p.path().join("cmdline")) {
-                if cmd.contains("c13-NEVER-TOUCHED") {
-                    leftover = true;
+    // 残留扫描：按唯一 argv 串扫 /proc（宿主侧；033 教训——不用沙箱内 PID）。
+    // 038-CI：回收→进程消亡在慢 CI 上超过单次扫描窗口——按项目时序约定改
+    // poll＋截止，15s 仍有残留则按原断言失败（回收未生效）。
+    let leftover_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let leftover = loop {
+        let mut found = false;
+        if let Ok(procs) = std::fs::read_dir("/proc") {
+            for p in procs.flatten() {
+                if let Ok(cmd) = std::fs::read_to_string(p.path().join("cmdline")) {
+                    if cmd.contains("c13-NEVER-TOUCHED") {
+                        found = true;
+                        break;
+                    }
                 }
             }
         }
-    }
+        if !found || std::time::Instant::now() >= leftover_deadline {
+            break found;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
     let marker_pid = std::fs::read_to_string(&marker)
         .map(|s| s.trim().to_string())
         .unwrap_or_default();

@@ -599,10 +599,15 @@ fn spawn_worker(exe: &std::path::Path) -> Result<std::process::Child, String> {
                 // 纪律继续，不因卫生失败阻断启动。系统调用号 436 在
                 // x86_64/aarch64/riscv64 通用表一致；其他架构跳过（依赖
                 // CLOEXEC 纪律）。libc 0.2.189 未导出 SYS_close_range 常量。
-                #[cfg(any(
-                    target_arch = "x86_64",
-                    target_arch = "aarch64",
-                    target_arch = "riscv64"
+                // 038-CI：close_range(436) 为 Linux 专属 syscall——macOS 等其他
+                // unix 上 436 号语义不同，必须一并跳过（同 CLOEXEC 纪律理由）。
+                #[cfg(all(
+                    target_os = "linux",
+                    any(
+                        target_arch = "x86_64",
+                        target_arch = "aarch64",
+                        target_arch = "riscv64"
+                    )
                 ))]
                 {
                     // best-effort：失败（ENOSYS/EINVAL）不阻断 worker 启动

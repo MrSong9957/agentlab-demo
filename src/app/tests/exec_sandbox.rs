@@ -15,7 +15,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use terminal_chat::exec::{ExecArgs, ExecResult, ExecStatus};
@@ -176,8 +176,17 @@ fn sandbox_mode_pty_timeout_semantics_preserved() {
     assert_eq!(r.status, ExecStatus::Timeout, "{r:?}");
     let s1 = log_size(&log);
     assert!(s1 > 0, "写入循环确实运行过");
-    thread::sleep(Duration::from_millis(400));
-    assert_eq!(s1, log_size(&log), "超时后写循环应被组杀停止");
+    // 038-CI：组杀→文件停写的落定时长随机器变化（慢 CI 超过固定 400ms）——按
+    // 项目时序约定改 poll＋截止：连续两次采样不变即判停写，15s 不稳定＝组杀
+    // 未生效，按原断言失败。
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let (mut prev, mut cur) = (s1, log_size(&log));
+    while prev != cur && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(200));
+        prev = cur;
+        cur = log_size(&log);
+    }
+    assert_eq!(prev, cur, "超时后写循环应被组杀停止（15s 内未稳定）");
 
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&dir2);

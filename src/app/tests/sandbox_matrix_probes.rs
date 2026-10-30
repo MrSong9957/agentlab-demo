@@ -97,10 +97,23 @@ fn exec_probe(spec: &Value) -> Value {
         Err(msg) => ExecResult::error(msg),
     };
     std::thread::sleep(Duration::from_millis(600)); // 终止/回收异步落定
-    let before = scan_marker(marker);
+    // 038-CI：组杀→进程消亡在慢 CI 上超过固定等待——按项目时序约定改 poll＋
+    // 截止（取消场景期望进程仍在运行，不适用 poll-until-empty）。
+    let mut before = scan_marker(marker);
+    if spec["cancel_after_ms"].is_null() {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !before.is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
+            before = scan_marker(marker);
+        }
+    }
     mgr.close();
-    std::thread::sleep(Duration::from_millis(200));
-    let after = scan_marker(marker);
+    let mut after = scan_marker(marker);
+    let after_deadline = Instant::now() + Duration::from_secs(15);
+    while !after.is_empty() && Instant::now() < after_deadline {
+        std::thread::sleep(Duration::from_millis(200));
+        after = scan_marker(marker);
+    }
     json!({"result": result, "before_close": before, "after_close": after, "fd": fd})
 }
 

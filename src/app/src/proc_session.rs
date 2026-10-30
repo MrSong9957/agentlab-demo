@@ -1587,7 +1587,9 @@ fn spawn_pty(
             }
             // fd 0 已是从设备（std 先 dup2 再跑 pre_exec）：挂为控制终端，
             // 终端产生的信号才能送达前台进程组。
-            if libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
+            // 038-CI：apple ioctl 的 request 形参为 c_ulong（libc crate bsd 签名），
+            // TIOCSCTTY 常量类型更窄，显式提升——Linux 上为无操作。
+            if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
@@ -1601,6 +1603,10 @@ fn spawn_pty(
     let master = Arc::new(master);
     Ok(Spawned { child, master: Some(master), stdout: None, stderr: None })
 }
+
+/// 038-CI：macOS ptsname 静态缓冲的串行化锁（见 open_pty 内注释）。
+#[cfg(target_os = "macos")]
+static PTY_NAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 打开一对伪终端（master 带 O_CLOEXEC，从设备以 O_CLOEXEC 打开）。
 fn open_pty() -> std::io::Result<(File, File)> {
@@ -1618,20 +1624,37 @@ fn open_pty() -> std::io::Result<(File, File)> {
             libc::close(master_fd);
             return Err(e);
         }
-        let mut name = [0u8; 256];
-        if libc::ptsname_r(
-            master_fd,
-            name.as_mut_ptr().cast(),
-            name.len(),
-        ) != 0
-        {
-            let e = std::io::Error::last_os_error();
-            libc::close(master_fd);
-            return Err(e);
-        }
-        let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
-        let c_path = std::ffi::CString::new(&name[..len])
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        // 038-CI：libc crate 在 apple 目标不提供 ptsname_r（ptsname 返回进程级
+        // 静态缓冲、非线程安全）——分支内经 PTY_NAME_LOCK 串行化并立即拷贝，
+        // 消除并行 spawn 的缓冲竞态；Linux 的 ptsname_r 语义不变。
+        #[cfg(not(target_os = "macos"))]
+        let c_path = {
+            let mut name = [0u8; 256];
+            if libc::ptsname_r(
+                master_fd,
+                name.as_mut_ptr().cast(),
+                name.len(),
+            ) != 0
+            {
+                let e = std::io::Error::last_os_error();
+                libc::close(master_fd);
+                return Err(e);
+            }
+            let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+            std::ffi::CString::new(&name[..len])
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
+        };
+        #[cfg(target_os = "macos")]
+        let c_path = {
+            let _guard = PTY_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let ptr = libc::ptsname(master_fd);
+            if ptr.is_null() {
+                let e = std::io::Error::last_os_error();
+                libc::close(master_fd);
+                return Err(e);
+            }
+            std::ffi::CStr::from_ptr(ptr).to_owned()
+        };
         let slave_fd = libc::open(
             c_path.as_ptr(),
             libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,

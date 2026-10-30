@@ -23,6 +23,10 @@ use tchat_tui::test_backend::VT100Backend;
 pub(crate) const PTY_COLS: u16 = 200;
 pub(crate) const PTY_ROWS: u16 = 50;
 
+/// 038-CI：macOS ptsname 静态缓冲的串行化锁（并行测试线程共用，见 spawn_inner）。
+#[cfg(target_os = "macos")]
+static PTY_NAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub struct PtyCli {
     master: fs::File,
     pub child: Child,
@@ -43,15 +47,28 @@ impl PtyCli {
             assert!(master_fd >= 0, "posix_openpt 失败：{}", std::io::Error::last_os_error());
             assert_eq!(libc::grantpt(master_fd), 0, "grantpt 失败");
             assert_eq!(libc::unlockpt(master_fd), 0, "unlockpt 失败");
-            let mut name = [0u8; 256];
-            assert_eq!(
-                libc::ptsname_r(master_fd, name.as_mut_ptr().cast(), name.len()),
-                0,
-                "ptsname_r 失败"
-            );
-            let len = name.iter().position(|&b| b == 0).unwrap();
-            let slave = std::ffi::OsString::from_vec(name[..len].to_vec());
-            let c_path = std::ffi::CString::new(slave.as_encoded_bytes()).unwrap();
+            // 038-CI：libc crate 在 apple 目标不提供 ptsname_r（ptsname 返回进程级
+            // 静态缓冲、非线程安全）——经 PTY_NAME_LOCK 串行化并立即拷贝；Linux
+            // 的 ptsname_r 语义不变。
+            #[cfg(not(target_os = "macos"))]
+            let c_path = {
+                let mut name = [0u8; 256];
+                assert_eq!(
+                    libc::ptsname_r(master_fd, name.as_mut_ptr().cast(), name.len()),
+                    0,
+                    "ptsname_r 失败"
+                );
+                let len = name.iter().position(|&b| b == 0).unwrap();
+                let slave = std::ffi::OsString::from_vec(name[..len].to_vec());
+                std::ffi::CString::new(slave.as_encoded_bytes()).unwrap()
+            };
+            #[cfg(target_os = "macos")]
+            let c_path = {
+                let _guard = PTY_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                let ptr = libc::ptsname(master_fd);
+                assert!(!ptr.is_null(), "ptsname 失败：{}", std::io::Error::last_os_error());
+                std::ffi::CStr::from_ptr(ptr).to_owned()
+            };
             let fd0 = libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
             assert!(fd0 >= 0, "打开 PTY 从设备失败：{}", std::io::Error::last_os_error());
             let fd1 = libc::dup(fd0);
@@ -60,11 +77,12 @@ impl PtyCli {
             let ws = libc::winsize { ws_row: PTY_ROWS, ws_col: PTY_COLS, ws_xpixel: 0, ws_ypixel: 0 };
             libc::ioctl(master_fd, libc::TIOCSWINSZ, &ws);
             // 成为会话组长并把 PTY 挂为控制终端：终端产生的 SIGINT 才能送达前台进程组
+            // 038-CI：同 proc_session——apple ioctl request 形参为 c_ulong，显式提升。
             cmd.pre_exec(|| {
                 if libc::setsid() == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
-                if libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
+                if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())

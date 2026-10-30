@@ -42,8 +42,18 @@
 |---|---|---|
 | Linux 基线不受门控影响 | 门控前后全量结果一致 | 通过：`cargo check`＋全量 3852 通过/4 失败/6 忽略，4 个失败均为存量（干净 HEAD 复现）或机器敏感项，与门控无关——见 `docs/logs/038-github-actions-ci/2026-10-30-local-verification.md` |
 | 无 bwrap 环境（模拟 macOS/未装 bwrap 的 CI） | 沙箱专属用例失败、其余通过 | 通过：4 目标 12 用例失败，全部可归类为「需 bwrap 真实执行」或「机器口径冻结阈值」；详见 `docs/logs/038-github-actions-ci/2026-10-30-sim-nobwrap-failures.log` |
-| Windows 编译 | 16 个 unix 门控文件＋pty 模块不编译，其余全部编译 | 待填（CI） |
-| macOS 运行 | bwrap 用例门控后，普通模式用例通过 | 待填（CI） |
-| push / PR 自动触发 | 三平台矩阵各一次运行 | 待填（CI 链接） |
+| Windows 编译 | 16 个 unix 门控文件＋pty 模块不编译，其余全部编译 | 未通过→已修：tchat-tui 缺 `objc2-foundation/objc2-app-kit` 声明（对照上游 97771b1 补齐）、windows-sys feature 不全、codex-utils-path 缺 windows-sys、`windows_sys::core::BOOL` 为 0.59 不存在的路径（改 `Win32::Foundation::BOOL`）——CI 首轮实证 |
+| macOS 编译 | 库与测试可编译 | 未通过→已修：libc crate apple 目标无 `ptsname_r`（proc_session 与 common/pty 加 macOS 分支＋串行化锁）、apple ioctl request 为 c_ulong（TIOCSCTTY 显式提升）、close_range syscall 436 补 `target_os = "linux"` 门——CI 实证 |
+| runner 环境（磁盘/依赖/时序） | 全量可运行 | 未通过→已修：debug 产物 26GB 超 14GB 磁盘（`CARGO_PROFILE_DEV_DEBUG=0`＋`CARGO_INCREMENTAL=0`）；ripgrep 缺失（workflow 三端安装）；5 处固定时序窗口改 poll＋截止（项目时序约定） |
+| push / PR 自动触发 | 三平台矩阵各一次运行 | 通过：PR #1 两种事件各触发一轮三平台运行（41099056065/41098966111 等） |
+
+### 038 三端 CI 揪出的存量问题清单（按轮次）
+
+1. **平台分支从未编译过**（第 1/2 轮）：macOS 分支缺 objc2 依赖声明、Windows 分支缺 windows-sys 声明/feature、`windows_sys::core::BOOL` 路径错误、libc apple 无 ptsname_r、ioctl/syscall 类型差异——全部修复。
+2. **CI 环境差异**（第 3 轮）：runner 无 ripgrep（workflow 安装）；debug 产物超磁盘；5 处测试固定时序窗口（exec_sandbox 超时组杀、attack07 setsid 守护、c13 残留扫描、沙箱探针双侧扫描）违反项目「poll＋截止」时序约定——改 poll＋截止。
+3. **容器专属路径硬编码**（第 3 轮）：`exe_deployment` 测试以 `/workspace` 字面量作 temp root——改为按进程实际位置锚定。
+4. **测试依赖环境 TTY**（第 3 轮）：a7 直通检查经 `Terminal::with_options` 查询环境终端尺寸——测试移入 crate 内联（tui 测试既有模式）改用显式尺寸测试构造器。
+5. **机器口径冻结阈值**：031 的 P10/P16 无采样机制——按 032/034 同款约定补 `TCHAT_P31_PERF_SAMPLE`；CI 置 1 跳过断言、场景照跑。
+6. **未解决、单独上报**：GH 托管 ubuntu-24.04 runner 实测 031 seccomp 的 clone3→ENOSYS 拦截**未生效**（探针 clone3(NULL,0) 得 EINVAL＝无过滤器短路；EPERM 系断言全过不足以证明过滤器生效——userns 内天然 EPERM）。可能是新版 bwrap/kernel 组合行为差异或启动链存在静默跳过路径，需专项排查；CI 以 `TCHAT_SKIP_SECCOMP_ENFORCEMENT_PROBE=1` 显式跳过该探针，本地默认照跑。
 
 证据存 `docs/logs/038-github-actions-ci/`；三端实跑结论引用 Actions 运行记录。

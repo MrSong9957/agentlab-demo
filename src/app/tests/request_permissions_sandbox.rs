@@ -22,6 +22,14 @@ use terminal_chat::permissions::{self, Access, DenyContext};
 use terminal_chat::proc_session::ProcessManager;
 use terminal_chat::sandbox::{self, PolicySnapshot};
 
+/// 038-CI：031 性能冻结阈值（P10/P16）为校准机器口径（同 032/034 冻结约定
+/// ——机器或构建变化须重新冻结）。CI 托管机器临时且不可比，置
+/// `TCHAT_P31_PERF_SAMPLE=1` 按同款采样约定跳过冻结断言（场景照跑、样本照
+/// 输出）；本地默认断言，行为零变化。
+fn perf_sample_mode() -> bool {
+    std::env::var("TCHAT_P31_PERF_SAMPLE").is_ok()
+}
+
 fn root_dir(name: &str) -> PathBuf {
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
@@ -658,15 +666,20 @@ fn p16_launch_check_perf_and_budget_freeze() {
     // 冻结阈值（余量断言）：端到端组装 p95 中位轮 < 50ms（阈值＝观测值数十
     // 倍量级，容纳更大 deny 树）；1000 项遍历 < 100ms（对应 20000 项 ≈ 2s 内、
     // 2000ms 超时预算与 20000 条目预算在实测速率下有 ≥10× 余量——见证据记录
-    // 的冻结说明）。
-    assert!(
-        median_p95_us < 50_000,
-        "启动检查 p95 中位轮 {median_p95_us}µs 超过 50ms 冻结上限"
-    );
-    assert!(
-        walk_1000_us < 100_000,
-        "1000 项遍历 {walk_1000_us}µs 超过 100ms 上限"
-    );
+    // 的冻结说明）。038-CI：两项均为校准机器口径（同 032/034 冻结约定），
+    // CI 置 TCHAT_P31_PERF_SAMPLE=1 按同款采样约定跳过断言；本地默认断言。
+    if perf_sample_mode() {
+        eprintln!("P10 采样：median_p95={median_p95_us}µs walk_1000={walk_1000_us}µs（跳过冻结断言）");
+    } else {
+        assert!(
+            median_p95_us < 50_000,
+            "启动检查 p95 中位轮 {median_p95_us}µs 超过 50ms 冻结上限"
+        );
+        assert!(
+            walk_1000_us < 100_000,
+            "1000 项遍历 {walk_1000_us}µs 超过 100ms 上限"
+        );
+    }
     fs::remove_dir_all(&f.root).ok();
 }
 
@@ -903,10 +916,14 @@ fn p16_full_launch_faces_and_peak_rss() {
         let (pty_p95, pty_rounds) = time_rounds(|_i| {
             run_payload_pty(&base, &f.anchor).unwrap();
         });
-        assert!(
-            pty_p95 < 30_000,
-            "PTY 完整启动 p95 中位轮 {pty_p95}µs 超过 30ms 冻结上限"
-        );
+        if perf_sample_mode() {
+            eprintln!("p16 PTY 启动采样：{pty_p95}µs（三轮 {pty_rounds:?}，跳过冻结断言）");
+        } else {
+            assert!(
+                pty_p95 < 30_000,
+                "PTY 完整启动 p95 中位轮 {pty_p95}µs 超过 30ms 冻结上限"
+            );
+        }
         eprintln!("p16 full-launch PTY p95 中位轮＝{pty_p95}µs（三轮 {pty_rounds:?}）");
     }
 
@@ -979,9 +996,9 @@ fn p16_full_launch_faces_and_peak_rss() {
     // p95 中位轮 30ms（实测 ~4–5ms）；载荷二进制面（补丁/图片）250ms（实测
     // p95 中位轮 ~65–75ms，含 debug 二进制启动 ~60ms 与偶发 ~155ms 尖峰）；
     // 峰值 RSS 上界 128MiB（实测 ~13.7MB）。超限＝性能回归，阻断交付。
-    assert!(pipes_p95 < 30_000, "pipes 完整启动 p95 中位轮 {pipes_p95}µs 超过 30ms 冻结上限");
-    assert!(patch_p95 < 250_000, "补丁完整启动 p95 中位轮 {patch_p95}µs 超过 250ms 冻结上限");
-    assert!(image_p95 < 250_000, "图片完整启动 p95 中位轮 {image_p95}µs 超过 250ms 冻结上限");
+    assert!(pipes_p95 < 30_000 || perf_sample_mode(), "pipes 完整启动 p95 中位轮 {pipes_p95}µs 超过 30ms 冻结上限");
+    assert!(patch_p95 < 250_000 || perf_sample_mode(), "补丁完整启动 p95 中位轮 {patch_p95}µs 超过 250ms 冻结上限");
+    assert!(image_p95 < 250_000 || perf_sample_mode(), "图片完整启动 p95 中位轮 {image_p95}µs 超过 250ms 冻结上限");
     assert!(
         peak_rss_kb < 128 * 1024,
         "沙箱启动子进程峰值 RSS {peak_rss_kb}KB 超过 128MiB 冻结上限"
