@@ -140,16 +140,16 @@
 
 ### 3.2 根据规格制定的实施计划
 
-以下步骤均属于原表「文件补丁」同一项任务。M1–M5 按依赖顺序逐步 TDD；M6 的门禁按仓库规定顺序执行。本轮只制定计划，不执行实现。
+以下保留原表「文件补丁」同一项任务的 M0–M6 计划；M1–M5 按依赖顺序逐步 TDD，M6 按门禁顺序执行。当前交付状态及已有实测见本文开头和 §5；2026-10-28 倒序调研只补后续复核事项，不重新启动全部实现。
 
 | 步骤 | 修改落点与工作 | 验证与退出条件 |
 |---|---|---|
 | M0 固定基线 | 记录现有工作区改动和相关测试原有结果；冻结移动与 Unicode 匹配两部分的输入、优先级、结果和失败语义，核对 033 统一入口、部署记录及固定策略 | 已有失败与新增失败可区分；普通模式与真实 bwrap 分支分别有基线；规格争议先交用户裁决，不自行改验收要求 |
 | M1 语法 | `src/app/src/apply_patch.rs` 的 `Hunk::Update`、完整解析与空块检查增加可选移动目标；先补纯移动、移动并修改、重复/错位/空 Move 测试 | 新正例在旧实现失败，支持后通过；非法语法始终不触文件；旧的空 Update/空 @@ 规则保留 |
-| M2 文件操作与部分成功 | 同文件中的 `run/apply_hunk` 接通有界源读取、内容计算、排他创建目标、完整写入、复核并删除源；复用现有 fd 判型与 Add 创建策略；按实际完成步骤累积多条变更及展示 | 真实文件系统核对成功、目标竞争、半写、删源失败和源替换；每条记录均对应实际完成操作；源在写目标失败时完整保留 |
-| M3 Unicode 匹配 | `src/app/src/apply_patch.rs` 的 `seek_sequence` 移植上游最后一轮映射；沿用 `compute_replacements` 和原上下文行保留逻辑；先补所有映射组、匹配优先级、start/EOF、原文不改写和未映射字符的用例 | Unicode 正例在旧实现失败后通过；原三级优先级及边界不变；普通 Update 和 Move 并修改均正确，匹配失败不产生文件变更 |
+| M2 文件操作与部分成功 | 同文件中的 `run/apply_hunk` 接通有界源读取、内容计算、排他创建目标、完整写入、复核并删除源；复用现有 fd 判型与 Add 创建策略；按实际完成步骤累积多条变更及展示；后续补验缺失父目录创建后目标被抢占的组合边界 | 真实文件系统核对成功、目标竞争、半写、删源失败和源替换；每条记录均对应实际完成操作；源在写目标失败时完整保留；组合边界用屏障核源/竞争目标、目录副作用与 state_known，当前静态疑点未运行 |
+| M3 Unicode 匹配 | `src/app/src/apply_patch.rs` 的 `seek_sequence` 移植上游最后一轮映射；沿用 `compute_replacements` 和原上下文行保留逻辑；先补所有映射组、匹配优先级、start/EOF、原文不改写和未映射字符的用例；后续补验删1增2、删2增0后接 Unicode 上下文的新旧索引边界 | Unicode 正例在旧实现失败后通过；原三级优先级及边界不变；普通 Update 和 Move 并修改均正确，匹配失败不产生文件变更；增删不等夹具逐字节核对无丢行/重复/崩溃，当前静态疑点未运行 |
 | M4 声明与调用链 | `src/app/src/prompt.rs` 的工具描述补充 Move 位置、纯移动及最后一级匹配容差；在 `src/app/tests/prompt_assembly.rs`、`tool_loop.rs` 验证声明、真实分派和下一次模型请求中的结果 | 工具名、JSON Schema、请求次数与调用 id/name 契约不变；结果四字段且有序；不引入新 API 原生工具类型 |
-| M5 保存、展示与隔离 | 在 `src/app/tests/apply_patch.rs`、`apply_patch_sandbox.rs`、`session.rs` 和 `e2e_acceptance.rs` 补移动、普通 Unicode 更新及两者组合的行为用例；复用 `tui_host.rs` 与 `src/tui/src/chat_driver.rs` 的 Add/Delete 投影，仅在证明有缺口时修改投影代码 | 真实 CLI/PTY 经本地 mock 调用本项两类行为；移动显示两路径，Unicode 更新显示真实未归一化内容，部分成功正确；恢复不重放；真实 bwrap 下路径拒绝与正例、包装不可用时零执行均有证据，不能只用 UID 或 argv 断言 |
+| M5 保存、展示与隔离 | 在 `src/app/tests/apply_patch.rs`、`apply_patch_sandbox.rs`、`session.rs` 和 `e2e_acceptance.rs` 补移动、普通 Unicode 更新及两者组合的行为用例；复用 `tui_host.rs` 与 `src/tui/src/chat_driver.rs` 的 Add/Delete 投影，仅在证明有缺口时修改投影代码 | 真实 CLI/PTY 经本地 mock 调用本项两类行为；移动显示两路径，Unicode 更新显示真实未归一化内容，部分成功正确；恢复不重放；真实 bwrap 下路径拒绝与正例、包装不可用时零执行均有证据，不能只用 UID 或 argv 断言；保留 A11 原日志，后续复验捕获成功回包及实际文件，排除不可用分支 |
 | M6 加固与交付 | TDD 后依次使用 comprehensive-testing、Security Testing、code-review，再全量验证和修复；同步 004 中 Move/匹配限制及测试说明、对照表和实际受影响注释 | 安全重点为目标抢占/链接、源替换、真实权限、半写、隔离及宽松匹配误改文本；按 `rules/REVIEW.md` 由未参与实现的只读子代理审查；最终报告适用检查结果和缺口 |
 
 M0 定向基线命令（工作目录均为 `/workspace`）：
@@ -160,9 +160,17 @@ env -u TCHAT_SANDBOX cargo test --locked --test apply_patch --test apply_patch_s
 
 M1–M5 可按测试名称排查；M5 另运行 `env -u TCHAT_SANDBOX cargo test --locked --test e2e_acceptance` 并保存 PTY 屏幕文本。M6 最终全量命令为 `env -u TCHAT_SANDBOX cargo check && env -u TCHAT_SANDBOX cargo test --workspace --no-fail-fast`。清除继承开关用于复现普通回归基线；专用沙箱测试自行设置开关，在真实 bwrap 环境验证本项新增行为，不能以不可用分支替代。共享 dev 已默认注入开关，口径见[部署记录](../logs/033-tool-sandbox/2026-10-27-dev-deploy.md)。lint/格式检查按实施时核实的工具链能力运行并如实报告。独立副本必须指定专用 `--target-dir`，不能污染共享 target。任一阶段发现错误时先用 diagnosing-bugs 定位根因，修复后复验受影响检查，最后完成全量验证。
 
+### 3.3 计划前调研复核（2026-10-28）
+
+倒序第 6/6 项的[汇总报告](../think-tank/2026-10-28-029-file-patch.md)及完整原始输出：[文件系统原子性专家](../think-tank/raw/2026-10-28-029-file-patch-systems.md)、[补丁语法与匹配专家](../think-tank/raw/2026-10-28-029-file-patch-storage.md)、[调用链与沙箱证据专家](../think-tank/raw/2026-10-28-029-file-patch-security.md)、[侦察兵](../think-tank/raw/2026-10-28-029-file-patch-scout.md)。
+
+轮到本项时其他工作已更新为待验收，保留当前状态、实现和已有实测；§1、§2、§5 不变。M2/M3 补入父目录副作用状态与增删不等后接上下文的静态疑点复验，M5 明确后续真实成功分支证据。本轮未运行这些夹具，不能视为已确认缺陷或验收结论。
+
+若后续复验触发代码调整，按现行 AGENTS 用 ce-debug 定位，ce-work 承接实施并保持 TDD，依次完成 comprehensive-testing、Security Testing、ce-code-review、全量验证和修复，再用 ce-compound 将复用经验写入 `rules/project-lessons.md`；不改写已经发生的门禁日志。
+
 ## 4. 踩过的坑，怎样解决
 
-实施期已发生的真实失败与修复：M6 安全攻防发现 lone-CR 绕过行数上限（F-1）与 procfs 伪文件物化（F-2），均已修复并附红绿回归（[安全报告](../security/reports/2026-10-28-029-apply-patch-move-security.md)、[修复日志](../logs/029-file-patch/2026-10-28-m6-security-fixes.log)）；独立代码审查另确认并发截断短读缺口（修复轮 `!=` 收口）。任务分项约定见 [项目经验 §7](../../rules/project-lessons.md#7-实现取舍与问题根因)。已确认的现状与方案依据见[本轮核对记录](../logs/029-file-patch/2026-10-26-spec-research.md)。实际问题出现后记录根因与处理；有复用价值的结论提炼到 `rules/project-lessons.md`，此处只留引用。
+实施期已发生的真实失败与修复：M6 安全攻防发现 lone-CR 绕过行数上限（F-1）与 procfs 伪文件物化（F-2），均已修复并附红绿回归（[安全报告](../security/reports/2026-10-28-029-apply-patch-move-security.md)、修复日志）；独立代码审查另确认并发截断短读缺口（修复轮 `!=` 收口）。任务分项约定见 [项目经验 §7](../../rules/project-lessons.md#7-实现取舍与问题根因)。已确认的现状与方案依据见[本轮核对记录](../logs/029-file-patch/2026-10-26-spec-research.md)。实际问题出现后记录根因与处理；有复用价值的结论提炼到 `rules/project-lessons.md`，此处只留引用。
 
 ## 5. 先预测，再实测，最后确认是否合格
 
@@ -178,7 +186,7 @@ M1–M5 可按测试名称排查；M5 另运行 `env -u TCHAT_SANDBOX cargo test
 | A8 | A→B→C 的有序块，再加入失败块；另重复同一移动补丁 | 清单反映每次真实操作且不去重；失败停止、无回滚；重提不改已成功目标 | ✅ 已测（move_chain_and_repeat_patch），2026-10-28，待验收 |
 | A9 | 构造达到和超过补丁/文件字节与行数上限的固定数据 → Move | 适用上限内成功；超限在当前块写入前拒绝，源与目标不变 | ✅ 已测（move_respects_size_limits（字节/行数/生成内容）），2026-10-28，待验收 |
 | A10 | 本地 HTTP mock 返回 Move 调用 → 真实 CLI 与 PTY 执行 → 保存并恢复 | 下一次请求含正确结果；终端显示两条真实变更；恢复一致且不重放，旧会话仍可读 | ✅ 已测（tool_loop t2b（循环回传）＋e2e s29b（PTY/保存/恢复）＋session 往返），2026-10-28，待验收 |
-| A11 | 临时工作区、假 .env、工作区及系统临时目录以外的目标 → 走 033 真实沙箱入口；另制造包装不可用 | 允许范围内成功；假凭据正文不可得，越界创建/删除拒绝；换 workdir 不转移策略锚点；包装失败零执行，无主进程代办；返回值、磁盘状态和展示相符 | ✅ 已测（apply_patch_sandbox：sandbox_move_roundtrip_with_unicode_context / _out_of_writable_root_rejected / _masked_env_source_rejected / _wrapper_unavailable_zero_execution），2026-10-28，待验收；整目标运行记录见[补正日志](../logs/029-file-patch/2026-10-28-m5-sandbox-full.log)（bwrap 0.9.0 正例分支 7/7） |
+| A11 | 临时工作区、假 .env、工作区及系统临时目录以外的目标 → 走 033 真实沙箱入口；另制造包装不可用 | 允许范围内成功；假凭据正文不可得，越界创建/删除拒绝；换 workdir 不转移策略锚点；包装失败零执行，无主进程代办；返回值、磁盘状态和展示相符 | ✅ 已测（apply_patch_sandbox：sandbox_move_roundtrip_with_unicode_context / _out_of_writable_root_rejected / _masked_env_source_rejected / _wrapper_unavailable_zero_execution），2026-10-28，待验收；整目标运行记录见补正日志（bwrap 0.9.0 正例分支 7/7） |
 | A12 | 关键用例断言不变 → 对照旧实现或临时破坏行为 → 恢复实现 | A1/A2 在旧实现失败；绕过目标排他创建、写前删源、丢弃块内部分成功分别被 A5/A6/A7 捕获；恢复后通过 | ✅ 已测（2026-10-28-m2-mutations.log（排他创建绕过/写前删源/丢弃部分成功均被捕获）），2026-10-28，待验收 |
 | B1 | 在行内位置覆盖全部 28 个码点与对应 ASCII 的固定双向/同组数据（防止被 trim 先行消除） → 普通 Update | `@@` 定位与旧行匹配均成功；只允许指定映射，目标字节与预期一致 | ✅ 已测（seek_level4_maps_all_unicode_punct_to_ascii＋update_level4_matches_all_groups_inline），2026-10-28，待验收 |
 | B2 | 在同一文件设置较早宽松候选、较晚精确候选，并覆盖 start、多块和 EOF → 更新 | 四级按完整搜索范围依次尝试，较严格结果优先；同级最早；不得越过 start/EOF | ✅ 已测（seek_level4_priority_start_and_eof），2026-10-28，待验收 |
