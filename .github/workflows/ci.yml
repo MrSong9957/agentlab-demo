@@ -23,8 +23,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    # 本地全量约 12–20 分钟；CI 冷缓存构建翻倍，上限防挂起运行。
-    timeout-minutes: 90
+    # 上限防挂起运行：macOS 冷缓存构建＋全量实测约 95 分钟（第 7 轮 90 分钟被截断），放宽到 150。
+    timeout-minutes: 150
     # Windows：lib 的 POSIX 进程语义层（killpg 组杀/pid_t/进程组整批回收/pre_exec）
     # 尚无 Windows 等价实现——016 组杀契约（含孙进程）依赖进程组，Windows 需
     # Job Objects 级重设计，62 处编译缺口（第 4 轮实证）超出 CI 配置范畴。
