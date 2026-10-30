@@ -1,14 +1,14 @@
 # M7 供应商补验核心证据
 
-M7 代码接线及约定补验证据已交付。本目录保留便于直接审阅的原始捕获；完整过程材料、历史源码和原始 manifest 位于 Git 快照 `9e32a63`。所有迁移文件保持原字节，位置及 SHA-256 见[逐文件留存清单](../curation-manifest.json)，取回方法见[统一索引](../../../records/evidence-index.md#m7-originals)。
+M7 代码接线及约定补验证据已交付。本目录的原始捕获文件已于 2026-10-30 归档精简时从工作树移除，可经 Git 历史按原路径取回；完整过程材料、历史源码和原始 manifest 位于 Git 快照 `9e32a63`。所有迁移文件保持原字节，位置及 SHA-256 见逐文件留存清单，取回方法见[统一索引](../../../records/evidence-index.md#m7-originals)。
 
 | 位置 | 内容 |
 |---|---|
-| [final/summary.json](final/summary.json) | 最终三批各自结果、实际请求及原始 usage 汇总 |
-| [final/control/execution-summary.json](final/control/execution-summary.json) | 一次执行的串行计数、退出、67,487 ms 整体计时及封批结果 |
+| final/summary.json | 最终三批各自结果、实际请求及原始 usage 汇总 |
+| final/control/execution-summary.json | 一次执行的串行计数、退出、67,487 ms 整体计时及封批结果 |
 | `final/batches/` | 三个独立根的身份、封闭账本、全部8次真实请求／响应、工具事件、产物、SQL及合成会话 |
-| [final/audit/runtime-results.json](final/audit/runtime-results.json) | 非空字段、三工具7次成功、SQL／Git基线及注入不入史核验 |
-| [authorization-package.json](authorization-package.json) | 当时授权范围、1／8／1与累计10限制、已审源码指纹 |
+| final/audit/runtime-results.json | 非空字段、三工具7次成功、SQL／Git基线及注入不入史核验 |
+| authorization-package.json | 当时授权范围、1／8／1与累计10限制、已审源码指纹 |
 | `historical/` | 0次失败、1次合法空、三批未执行的原始判定与各自封闭台账 |
 | `validation/` | 最终离线检查、变异证明及关键失败／修复依据 |
 

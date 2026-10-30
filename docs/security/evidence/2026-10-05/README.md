@@ -1,10 +1,10 @@
 # 2026-10-05 安全验证证据
 
-保留原始结构化结果和修复前后捕获，文件字节不变。完整原目录、历史攻防脚本`attack.py`及空捕获占位由Git快照`9e32a63`保存；见[原件索引](../../../records/evidence-index.md#security-originals)和[逐文件清单](../../../testing/evidence/curation-manifest.json)。历史脚本不是当前测试入口。
+保留原始结构化结果和修复前后捕获，文件字节不变；工作树副本已于 2026-10-30 归档精简时移除，可经 Git 历史按原路径取回。完整原目录、历史攻防脚本`attack.py`及空捕获占位由Git快照`9e32a63`保存；见[原件索引](../../../records/evidence-index.md#security-originals)和逐文件清单。历史脚本不是当前测试入口。
 
-- [results.json](results.json)：最终修复后38条，权威结果；`leak_check`为空。
-- [results-prefix-fix.json](results-prefix-fix.json)：按原样保存的定点结果，不单独代表整轮覆盖。
-- [v1-prefix-evidence/results-final-check.json](v1-prefix-evidence/results-final-check.json)：历史捕获中的结构化检查。
+- results.json：最终修复后38条，权威结果；`leak_check`为空。
+- results-prefix-fix.json：按原样保存的定点结果，不单独代表整轮覆盖。
+- v1-prefix-evidence/results-final-check.json：历史捕获中的结构化检查。
 - [security-test-log.md](security-test-log.md)：原始设计依据、失败与修订记录，保持原文。
 - 其余`.txt`：请求、拒绝／放行及修复前后实际输出，保留各自来源上下文，不能仅因内容相同就视为同一次执行。
 

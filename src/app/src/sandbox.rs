@@ -23,7 +23,7 @@
 //! 的挂载布局（每个 bind 实例后逐别名遮蔽，含 /proc/self/mountinfo 同设备
 //! bind 投影）、启动前 deny 边界递归 nlink 检查（fail-closed＋遍历预算）、
 //! 网络开关（--unshare-net）与应用层 seccomp（cBPF，AUDIT_ARCH 门）。
-//! M0 原型证据：docs/logs/031-request-permissions/2026-10-28-m0-*.log。
+//! M0 原型证据：docs/logs/031-request-permissions/2026-10-28-m0-bwrap-prototype.md。
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;

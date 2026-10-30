@@ -1,1 +1,0 @@
-{"scenario": "steady_snapshot", "tools": 64, "schema": 4096, "n": 20, "wall_s": 1.31, "main_peak_kib": 8772, "child_peak_kib": 12708, "timed_out": false, "rc": 0, "stderr_tail": ""}

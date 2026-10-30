@@ -17,7 +17,7 @@
 
 1. **测试未使用独立临时目录。** `src/app/tests/user_input_async.rs:515` 使用 `/tmp/018b-waitorder-<pid>` 并直接删除该路径，不符合 AGENTS.md §3 对独立临时目录与清理的要求。应复用已有临时目录夹具，避免路径碰撞和断言失败后的残留；本轮未修改。
 
-2. **变异证据的恢复哈希不自洽。** [018b-mutations.json](../testing/evidence/018b-mutations.json) 的 M3、M6 中，`original_sha256` 与 `restored_sha256` 不同，却标记 `restored_ok:true`；与其“按原始字节恢复并核对 SHA-256”的方法说明不符。记录注明审查修复后重录，应明确区分候选或补充当次真实原始哈希，不能猜测后改写历史证据。当前源码哈希与恢复哈希一致，不能据此认定源码仍被破坏。
+2. **变异证据的恢复哈希不自洽。** 018b-mutations.json 的 M3、M6 中，`original_sha256` 与 `restored_sha256` 不同，却标记 `restored_ok:true`；与其“按原始字节恢复并核对 SHA-256”的方法说明不符。记录注明审查修复后重录，应明确区分候选或补充当次真实原始哈希，不能猜测后改写历史证据。当前源码哈希与恢复哈希一致，不能据此认定源码仍被破坏。
 
 规范轴共 2 项，最严重的是测试隔离不符合项目要求；规格轴共 3 项，最高优先级为等待批次校验绕过。未发现值得新增重构的明确代码味道。
 
@@ -64,7 +64,7 @@
 | Standards 1 测试隔离 | `wait_with_trailing_call…` 改用 `common::TempDir` 独立临时目录（pid＋纳秒防碰撞，Drop 自动清理），删除固定 `/tmp` 路径与手动删除 | `tests/user_input_async.rs` |
 | Standards 2 变异证据 | git 核实：M3/M6 重录时恢复哈希（`ea5003f0`/`3def01dc`）＝任务提交 `49060bf` 起的真实源码，恢复动作本身正确；声称的 `original_sha256`（`97f70ab8`/`046d5a46`）为审查修复前未提交中间态，git 不可取证。处置：该字段修正为重录时真实原始哈希并加 note 注明历史，原始摘录一字未改；另在修复候选上重放全部受影响变异（见下） | `docs/testing/evidence/018b-mutations.json` |
 
-**新增回归**（默认全集）：`wait_before_batch_end_rejects_whole_batch_before_dependent_execution`（两批次变体＋probe 副作用断言）、`protocol_error_preserves_already_accepted_answer`（有/无答案两分支）、`later_batch_wait_for_recorded_answer_returns_ready`（含跨轮拒绝断言）。变异有效性以可逆回退证明（A1-A3＝逐项回退修复，M1-M6＝原六项在候选上复验），**九项全部断言失败（101，非编译失败）检出、恢复后哈希与候选一致（turn.rs `924d86d2…`、tui_host.rs `3def01dc…`）、复绿**；明细与哈希见 [018b-mutations.json](../testing/evidence/018b-mutations.json) `audit_fix_replay` 节。
+**新增回归**（默认全集）：`wait_before_batch_end_rejects_whole_batch_before_dependent_execution`（两批次变体＋probe 副作用断言）、`protocol_error_preserves_already_accepted_answer`（有/无答案两分支）、`later_batch_wait_for_recorded_answer_returns_ready`（含跨轮拒绝断言）。变异有效性以可逆回退证明（A1-A3＝逐项回退修复，M1-M6＝原六项在候选上复验），**九项全部断言失败（101，非编译失败）检出、恢复后哈希与候选一致（turn.rs `924d86d2…`、tui_host.rs `3def01dc…`）、复绿**；明细与哈希见 018b-mutations.json `audit_fix_replay` 节。
 
 审查双轴复核后三处调整：wait 就绪判断改用 `Vec::contains`；删除新测试中不可达的探针清理行；补跨轮 ID 拒绝断言（守护 `recorded_answer_ids` 不跨轮泄漏）。历史证据摘录恢复原文，仅 M3/M6 的 `original_sha256` 与 note 按核实数据修正。
 

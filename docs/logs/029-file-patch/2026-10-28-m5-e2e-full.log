@@ -1,6 +1,0 @@
-# 029 M5：全量 e2e_acceptance（规格要求）
-# date: 2026-10-28T14:27:20+00:00
-# cwd: /workspace
-# cmd: env -u TCHAT_SANDBOX cargo test --locked --test e2e_acceptance
-test result: ok. 145 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 30.52s
-exit=0

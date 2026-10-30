@@ -1,8 +1,0 @@
-==============================
-  欢迎使用 Terminal Chat!
-  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出
-==============================
-已将 /tmp/tchat-sec-cfg-ouyheefz/manual.json 权限收紧为 0600
-警告：上级目录 /tmp 对其他用户可写，config 可能被整体替换；未自动修改，建议手动收紧
-错误：网络错误：https://127.0.0.1:44985/chat/completions: Connection Failed: tls connection init failed: unexpected end of file
-再见!

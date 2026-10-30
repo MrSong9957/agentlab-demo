@@ -14,9 +14,9 @@
 | ce-code-review（十人独立审查） | 10 审查者＋merge/验证批（8/8 confirmed）＋report 叶 | **Ready with fixes**：13 项 actionable（1×P1/7×P2/5×P3） |
 | 修复轮 | 13/13 全部修复＋回归（含顺带补缺 4 项） | 定向套件全绿；[修复记录](2026-10-29-review-fixes.md) |
 | C17/S18 性能门禁 | `cargo test --locked --test tool_search_perf` | 通过（真实模块路径；RSS 阈值修订见冻结日志；测量子进程失败即失败） |
-| S17 上下文效果 | ts30_context_effect_bytes…（--nocapture 落盘） | 通过；[实测记录](2026-10-29-s17-context-effect.txt)（首次 tools 5,402B vs 25,966B；最终请求 28.1–28.4 KB vs 44.9–47.8 KB，五协议均小于对照） |
+| S17 上下文效果 | ts30_context_effect_bytes…（--nocapture 落盘） | 通过；实测记录（首次 tools 5,402B vs 25,966B；最终请求 28.1–28.4 KB vs 44.9–47.8 KB，五协议均小于对照） |
 | e2e PTY | s30_pty_search_display_call_save_resume | 通过（真实 CLI/PTY：搜索展示→加载→真实调用→保存→恢复不重放→新轮空集→V1 格式） |
-| 全量验证 | `cargo check --locked && env -u TCHAT_SANDBOX cargo test --workspace --no-fail-fast` | check exit 0；测试 **3666 通过 / 1 失败 / 3 忽略**（75 目标）；[完整日志](2026-10-29-m6-final-full.log) |
+| 全量验证 | `cargo check --locked && env -u TCHAT_SANDBOX cargo test --workspace --no-fail-fast` | check exit 0；测试 **3666 通过 / 1 失败 / 3 忽略**（75 目标）；完整日志 |
 
 ## 唯一失败的处理（不自动豁免，证据链判定）
 
@@ -59,7 +59,7 @@
 - 口径（两次一致）：单并发；96/2048/空目录三档；建索引＝每轮 10 次中位×3 轮中位；查询＝预热 5＋正式 1000 取 p95×3 轮中位轮；RSS＝独立子进程 VmHWM 差（已加载目录基线 vs 建索引后）；同机 debug 构建。
 - **判定：属规格授权范围内的基线校准，非放宽验收标准。** 依据：规格 §1.6 规定阈值由「M0 基线×2–3 倍余量确定……并更新本节」——契约是**推导规则与余量纪律**，绝对数值从未经用户逐项确认；M0 原型漏建模规格自身要求的成本项（§1.3 搜索结果须返回完整定义；§1.6 目录计量形状本身含 `definition` 字段——条目存储是规格内建数据面，非实现膨胀）；修订发生在实施期内、待验收标记前，双份样本与修订段齐备，余量 2.1–2.4× 维持在规格区间，且实现零改动以迁就阈值。
 - 验收人如不认可此判定，可将 2048 档 RSS 视为待决定项——其后果仅为该档阈值回退 5,000 kB 并要求实现改为借用式存储（可行性未评估），不影响其余全部门禁。
-- 证据：[冻结日志（含修订段）](2026-10-28-m0-perf-freeze.md)、[原型样本](2026-10-28-m0-perf-samples.txt)、[真实模块样本](2026-10-28-m0-perf-samples-real.txt)、`tests/tool_search_perf.rs`（常量＋口径注释）。
+- 证据：[冻结日志（含修订段）](2026-10-28-m0-perf-freeze.md)、原型样本、真实模块样本、`tests/tool_search_perf.rs`（常量＋口径注释）。
 
 ### ② S10／S13 覆盖的等价性核对
 

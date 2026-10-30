@@ -77,7 +77,7 @@
 1. `review_execution…` 断言放宽（「不含未知或未启用＋含 MCP 客户端错误」）：变异证明仍识别原缺陷（见 §3 第 8 处变异）；放宽仅放弃具体传输错误子形态（未发送/状态未知/连接关闭，时序竞态下均合法），规格「执行共用快照、不静默剔除」语义由断言 1 完整守住——**未削弱规格要求**。
 2. `TestCtx::Drop` 兜底：`manager.close()` 幂等（连接已被 take 后二次调用为空操作，显式 close 后 Drop 无副作用）；有界（stdin EOF→最多 3 s grace→SIGKILL 进程组＋wait 回收，另有 `StdioProcess::Drop` 组杀后备）；锁均带 poisoned 恢复无死锁；`Drop::drop` 先于 `_env` 释放执行，无跨测试干扰；TestCtx 仅 mcp_stdio/mcp_resources 使用，屏障线程/调用线程均不依赖其存活——**无阻塞、无他测影响**。全量负载下无夹具进程残留（`mcp_stdio_server.py` 存活数 0）。
 
-**最终门禁（候选冻结后，两命令各自完整日志见 [docs/logs/023-mcp-resources/](../logs/023-mcp-resources/)）**：
+**最终门禁（候选冻结后，两命令各自完整日志见 docs/logs/023-mcp-resources/）**：
 
 | 命令（容器 `/workspace`，2026-10-25） | 退出码 | 结果 |
 |---|---|---|

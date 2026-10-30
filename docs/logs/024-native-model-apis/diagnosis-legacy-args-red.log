@@ -1,5 +1,0 @@
-   Compiling terminal-chat v0.1.0 (/workspace/.worktrees/024-native-model-apis/src/app)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.21s
-test unexpressible_legacy_arguments_become_marked_history_text_not_a_block ... FAILED
-thread 'unexpressible_legacy_arguments_become_marked_history_text_not_a_block' (85591) panicked at src/app/tests/native_model_apis.rs:2075:10:
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 27 filtered out; finished in 0.11s

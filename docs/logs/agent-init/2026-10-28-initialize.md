@@ -36,16 +36,16 @@
 
 | 验证 | 结论 | 原始证据 |
 |---|---|---|
-| 两个官方来源的安装 | 两步安装与 marketplace 注册均退出 0 | [安装日志](2026-10-28-install.log) |
-| 原生插件状态 | 已安装且启用，版本 3.33.1 | [配置检查](2026-10-28-config-check.log) |
-| 技能和新会话加载 | `skills/list` 无解析错误；last30days 为 `scope=user` 且启用；`plugin/read` 返回 CE 36 个启用技能；新建临时会话实际加载两层规则 | [运行时发现日志](2026-10-28-runtime-discovery.log) |
-| CE 设置前后 | 设置前缺配置示例；设置后 `Project config healthy`，退出 0 | [设置前](2026-10-28-ce-health-before.log)、[设置后](2026-10-28-ce-health-after.log) |
-| last30days 配置解析 | Python 版本符合要求；隔离配置中没有付费供应商密钥，浏览器读取关闭 | [来源诊断](2026-10-28-last30days-diagnose.log) |
-| last30days 调研 | 39.8 秒，退出 0，取得 Reddit 1 条和 YouTube 1 个结果，并输出来源链接 | [真实调研日志](2026-10-28-last30days-research.log)、[原始报告留存副本](2026-10-28-last30days-raw.md)、[查询计划](2026-10-28-query-plan.json) |
-| 文件、格式、链接与内容核对 | 24 项通过、0 项失败；数量仅指本次初始化检查 | [最终检查](2026-10-28-final-check.log) |
-| 任务相关文件状态 | 已有修改与新增文件分别保留 | [文件状态](2026-10-28-final-files.log) |
+| 两个官方来源的安装 | 两步安装与 marketplace 注册均退出 0 | 安装日志 |
+| 原生插件状态 | 已安装且启用，版本 3.33.1 | 配置检查 |
+| 技能和新会话加载 | `skills/list` 无解析错误；last30days 为 `scope=user` 且启用；`plugin/read` 返回 CE 36 个启用技能；新建临时会话实际加载两层规则 | 运行时发现日志 |
+| CE 设置前后 | 设置前缺配置示例；设置后 `Project config healthy`，退出 0 | 设置前、设置后 |
+| last30days 配置解析 | Python 版本符合要求；隔离配置中没有付费供应商密钥，浏览器读取关闭 | 来源诊断 |
+| last30days 调研 | 39.8 秒，退出 0，取得 Reddit 1 条和 YouTube 1 个结果，并输出来源链接 | 真实调研日志、[原始报告留存副本](2026-10-28-last30days-raw.md)、查询计划 |
+| 文件、格式、链接与内容核对 | 24 项通过、0 项失败；数量仅指本次初始化检查 | 最终检查 |
+| 任务相关文件状态 | 已有修改与新增文件分别保留 | 文件状态 |
 
-加载检查只使用 app-server 元数据接口及 `thread/start(ephemeral=true)`，没有向模型发送 `turn/start`。调研所用查询、参数和命令均可在日志中查看；核验脚本原文以证据快照保存：[命令记录器](2026-10-28-agent-init-run.py.txt)、[加载核验](2026-10-28-agent-init-rpc.py.txt)、[调研隔离启动器](2026-10-28-agent-init-last30days.py.txt)、[最终核验](2026-10-28-agent-init-verify.py.txt)及其[前置哈希](2026-10-28-before-hashes.json)。
+加载检查只使用 app-server 元数据接口及 `thread/start(ephemeral=true)`，没有向模型发送 `turn/start`。调研所用查询、参数和命令均可在日志中查看；核验脚本原文以证据快照保存：命令记录器、加载核验、调研隔离启动器、最终核验及其前置哈希。
 
 首次 app-server 检查受全局目录只读限制，转为已授权的用户级运行后启动成功。随后发现核验脚本误把独立技能与插件技能放在同一接口检查，并使用未加命名空间的 CE 名称。按实际协议改为 `plugin/read` 和完整名称后，最终严格断言全部通过；未用重复安装或修改插件绕过问题。失败输出和最终通过输出保留于同一日志。
 
@@ -58,7 +58,7 @@
 - GitHub 项目模式提示没有可用 token，未取得条目。隔离验证没有借用真实 `gh` 凭证；不能把缓存中的 `no-results` 解释为该仓库没有讨论。
 - 本轮 quick 运行未覆盖 Hacker News、Polymarket 和 dev.to；`--diagnose` 的可用来源清单不等于逐个来源的实时通过证明。
 - X/Twitter、TikTok、Instagram 等未纳入本次无付费密钥、无浏览器读取的验证，不影响基础安装。
-- `doctor --postmortem --json` 退出 0，但返回 `present=false`，未读出此次缓存。本次来源判断直接依据真实终端日志与 `last30days-report-cache/v2` 中的状态，见[诊断输出](2026-10-28-last30days-postmortem.log)与[状态摘录](2026-10-28-last30days-source-status.json)；未修补上游引擎。
+- `doctor --postmortem --json` 退出 0，但返回 `present=false`，未读出此次缓存。本次来源判断直接依据真实终端日志与 `last30days-report-cache/v2` 中的状态，见诊断输出与状态摘录；未修补上游引擎。
 - CE 的 `agent-browser`、`ast-grep`、`ffmpeg`、Node/npx 属可选能力，本机健康检查为 **2/6 可用**（gh、jq）。未批量安装可选依赖。
 - 未启用可选的跨模型缓存预热、自动经验沉淀和文风指令；本项目继续使用既有 `rules/project-lessons.md`、`docs/specs/` 与 `docs/logs/`。未创建本机覆盖配置或写入 `.context/compound-engineering/`，因此没有为可选临时目录修改 `.gitignore`。
 

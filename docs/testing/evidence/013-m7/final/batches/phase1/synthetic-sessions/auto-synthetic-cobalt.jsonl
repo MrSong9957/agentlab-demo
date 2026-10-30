@@ -1,5 +1,0 @@
-{"v":1}
-{"type":"text","role":"user","content":"以下为本次测试构造的合成会话。合成项目 cobalt-demo 的稳定偏好：用中文交流；验收报告必须先列失败项再列通过项。虚构故障 SYNTH-E17 的固定处理规则是先核对 verify-cobalt 清单，不重复盲目重试。请记住这些偏好用于这个合成项目。"}
-{"type":"text","role":"assistant","content":"合成任务记录：SYNTH-E17 的虚构排查已按 verify-cobalt 清单定位为过期路由设置；先核对该清单比重复执行更有效。已按要求在合成报告中先列失败项再列通过项。没有执行真实命令。"}
-{"type":"text","role":"user","content":"再次确认：cobalt-demo 一律中文，报告先失败后通过；以后出现 SYNTH-E17，先核对 verify-cobalt 清单。以上是重复确认的长期偏好与可复用经验，全为合成内容。"}
-{"type":"text","role":"assistant","content":"已确认上述合成偏好与故障处理经验；合成任务正常结束。"}

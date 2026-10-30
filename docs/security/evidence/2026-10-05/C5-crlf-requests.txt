@@ -1,1 +1,0 @@
-GET /models HTTP/1.1

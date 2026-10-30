@@ -324,7 +324,7 @@ Rust 官方 [`Path::starts_with`](https://doc.rust-lang.org/std/path/struct.Path
 - 绑定脚本实际布局：当前可执行文件恰位于该根的 `target/debug/`，cwd 恰为 `run/<phase>`；阶段目录为空、启动标记／账本为常规文件、无关闭标记、当前阶段未尝试、阶段及累计账本有效。其他同名规则的临时根也不能借用本进程进入。错误输入在 origin 授权、数据库创建、凭据解析和发送之前退出 2。
 - 控制脚本仅提取共用 `phase_command`，实际发送 argv 保持原样。新增 `--dry-run` 复用真实参数解析与同一 `validate_scope`，通过后打印 `send-preparation-allowed` 即返回，不进入 `run_phase`。测试构建另外用 **`m7-offline-only` 编译掉真实凭据加载与 LiveWire 网络 continuation**；驱动先确认该构建标记才执行 CLI。即使误走 live 分支也只会拒绝，不能外发。仓库默认 Cargo target 不包含 harness，默认 `cargo test` 不执行真实请求。
 
-**RED → GREEN 与边界证据**：先复跑冻结版本原有 6 项离线测试，**6/0/0、exit 0**，确认原测试缺口。随后仅加入离线检查点／拒绝发送构建，保留错误的路径条件；通过真实监督脚本的参数构造、cwd、环境与 `supervise` 调用实际 CLI，`legal_cli_phase1` 仍 **CLI exit 2／测试 exit 1**，stderr 与原失败一致、前后文件快照不变。RED 源码另存 [red-harness.rs（原件快照）](<evidence-index.md#archive-e4739075b6f520e3>)，指纹及命令见 [red-result.json](<../testing/evidence/013-m7/validation/path-prefix-red-result.json>)。修复路径条件后不改通过断言，三项合法 CLI 均 **exit 0** 到达离线检查点，明确 `credential_loaded=false`、`origin_granted=false`、`database_created=false`、`HTTP_attempts=0`。
+**RED → GREEN 与边界证据**：先复跑冻结版本原有 6 项离线测试，**6/0/0、exit 0**，确认原测试缺口。随后仅加入离线检查点／拒绝发送构建，保留错误的路径条件；通过真实监督脚本的参数构造、cwd、环境与 `supervise` 调用实际 CLI，`legal_cli_phase1` 仍 **CLI exit 2／测试 exit 1**，stderr 与原失败一致、前后文件快照不变。RED 源码另存 [red-harness.rs（原件快照）](<evidence-index.md#archive-e4739075b6f520e3>)，指纹及命令见 red-result.json。修复路径条件后不改通过断言，三项合法 CLI 均 **exit 0** 到达离线检查点，明确 `credential_loaded=false`、`origin_granted=false`、`database_created=false`、`HTTP_attempts=0`。
 
 统一离线复核命令（`/workspace`，非交互、固定锁版本、独立临时源码／target，运行后清理）：
 
@@ -332,9 +332,9 @@ Rust 官方 [`Path::starts_with`](https://doc.rust-lang.org/std/path/struct.Path
 python3 docs/records/013-m7-provider-check/offline_cli_checks.py --verify-all
 ```
 
-本次实际运行另以 `--result /tmp/013-m7-harness-fix-799fbb9/evidence/verify-all.json` 保存结果，命令 **exit 0，42 通过／0 失败／0 跳过**：7 项 Rust、31 项实际 CLI、4 项监督脚本；编译及不带离线 feature 的 `cargo check` 均 **exit 0**。各条实际命令与退出码见 [verification.json](<../testing/evidence/013-m7/validation/path-prefix-verification.json>)。**正常发送构建仅类型检查，未执行。** 未机械重跑 workspace 门禁；§10 的 2975/0/3 仍是既有交付证据，不冒充本轮结果；未安装／运行 rustfmt、clippy，不声称其通过。
+本次实际运行另以 `--result /tmp/013-m7-harness-fix-799fbb9/evidence/verify-all.json` 保存结果，命令 **exit 0，42 通过／0 失败／0 跳过**：7 项 Rust、31 项实际 CLI、4 项监督脚本；编译及不带离线 feature 的 `cargo check` 均 **exit 0**。各条实际命令与退出码见 verification.json。**正常发送构建仅类型检查，未执行。** 未机械重跑 workspace 门禁；§10 的 2975/0/3 仍是既有交付证据，不冒充本轮结果；未安装／运行 rustfmt、clippy，不声称其通过。
 
-31 项 CLI 覆盖：三项合法入口；相似前缀、空／错误后缀、任意 `/tmp` 根；父目录跳转、相对／嵌套根、另一新临时根与不存在根；根、run、阶段、target、debug、标记、账本链接；缺标记、关闭状态、错误活动阶段、已尝试阶段、已有内容／user 链接、错误 cwd、非私有根、错误阶段／令牌／多余参数。拒绝用例均检查 **exit 2＋原样 stderr＋完整夹具文件快照无变化**。另在独立临时源码中分别故意移除后缀检查及可执行文件根绑定，保持断言不变，两项均 **测试 exit 1** 检出非法 CLI 错误通过；正式候选指纹始终未变，见 [boundary-mutations.json](<../testing/evidence/013-m7/validation/path-prefix-mutations.json>)。
+31 项 CLI 覆盖：三项合法入口；相似前缀、空／错误后缀、任意 `/tmp` 根；父目录跳转、相对／嵌套根、另一新临时根与不存在根；根、run、阶段、target、debug、标记、账本链接；缺标记、关闭状态、错误活动阶段、已尝试阶段、已有内容／user 链接、错误 cwd、非私有根、错误阶段／令牌／多余参数。拒绝用例均检查 **exit 2＋原样 stderr＋完整夹具文件快照无变化**。另在独立临时源码中分别故意移除后缀检查及可执行文件根绑定，保持断言不变，两项均 **测试 exit 1** 检出非法 CLI 错误通过；正式候选指纹始终未变，见 boundary-mutations.json。
 
 **原发送护栏复核**：与失败版本的[源码差异（原件快照）](<evidence-index.md#archive-3f1049d27ce43c67>)确认实际发送分支的接口／model／参数／来源检查、1＋8＋1／总 10 次发送前持久化扣减、失败停批、零重试／池容量 0／不跟随重定向、大小与时限均未放宽。7 项 Rust 中保留原六项断言，并增加离线构建拒绝凭据／网络 continuation 的检查；三阶段合成演练新增核对临时授权文件恰一条指定 origin＋合成凭据指纹。4 项监督脚本继续验证实际 watchdog 强停、失败停止后项、顺序执行一次与排他启动标记。离线模拟的计数不是供应商请求；**本轮真实 HTTP 尝试与后台额外触发均为 0**，无供应商 usage／费用观测。
 
@@ -366,7 +366,7 @@ python3 docs/records/013-m7-provider-check/offline_cli_checks.py --verify-all
 
 **最新状态：M7 代码接线已交付；本批真实供应商补验部分观察、未通过预定验收，已封闭，待审阅。** 用户已明确授权本次新批次，不再请求该授权。§11.7 的「待授权」保留为申请时历史；本次只执行该一个新批次，未修正续跑、未重开、未追加试验。M8/M9 未实施，V1 不标完成。
 
-**批次身份与发送前复核**：`m7-deepseek-new-367qctgq`，全新私有根 `/tmp/013-m7-provider-367qctgq`，与旧 `/tmp/013-m7-provider-dxei6mir` 无关；身份、源码／二进制指纹、实际 argv／cwd 与独立 `ledger.json` 关联见 [BATCH_IDENTITY.json](<../testing/evidence/013-m7/historical/batch-367qctgq/BATCH_IDENTITY.json>)。分支／HEAD 符合预期，暂存区空、stash 0、唯一工作树；修复 manifest 的三份源码、原失败快照、离线修复附件及两份既有文档摘要全部一致。未修改已批准 harness／启动脚本或断言，直接复制它们到新根，`git archive HEAD` 仅取锁版本源码／清单，独立 target 离线编译 **exit 0**（40,006 ms）。正常构建 `--offline-build-info` 及实际路径／参数绑定核对通过；沿用精确源码已有 **42/0/0** 离线证据，未机械重跑。监督脚本仍是 `run_batch.py --execute-authorized-batch M7-ONE-BATCH-2026-10-19`，**实际仅调用一次、最终 exit 1**，见 [编译与准备证据](<../testing/evidence/013-m7/historical/batch-367qctgq/readiness-summary.json>)、[执行记录](<../testing/evidence/013-m7/historical/batch-367qctgq/execution.json>)。
+**批次身份与发送前复核**：`m7-deepseek-new-367qctgq`，全新私有根 `/tmp/013-m7-provider-367qctgq`，与旧 `/tmp/013-m7-provider-dxei6mir` 无关；身份、源码／二进制指纹、实际 argv／cwd 与独立 `ledger.json` 关联见 BATCH_IDENTITY.json。分支／HEAD 符合预期，暂存区空、stash 0、唯一工作树；修复 manifest 的三份源码、原失败快照、离线修复附件及两份既有文档摘要全部一致。未修改已批准 harness／启动脚本或断言，直接复制它们到新根，`git archive HEAD` 仅取锁版本源码／清单，独立 target 离线编译 **exit 0**（40,006 ms）。正常构建 `--offline-build-info` 及实际路径／参数绑定核对通过；沿用精确源码已有 **42/0/0** 离线证据，未机械重跑。监督脚本仍是 `run_batch.py --execute-authorized-batch M7-ONE-BATCH-2026-10-19`，**实际仅调用一次、最终 exit 1**，见 编译与准备证据、执行记录。
 
 **实际目标与隔离**：请求及供应商响应的 model 均为 **`deepseek-flash`**，provider **`deepseek`**、协议 **`openai-chat`**，唯一模型端点 **`https://api.deepseek.com/chat/completions`**，`request_params={}`。最终请求仅 `messages`／`model` 两字段，未加 `response_format` 或输出 token 参数。只有 phase1 实际创建本批临时 user／sessions／数据库／记忆根／cwd，来源为 **1,062 字节 V1 合成会话**及既有内置模板；临时授权文件恰 **1** 条指定 origin，绑定本批所用凭据。phase2 与注入阶段只保留预建空目录，未初始化业务状态。未访问真实会话／记忆或打开真实数据库，不改真实配置或全局 origin 策略，不启动交互应用及后台管线；本批额外后台触发 **0**。
 
@@ -376,11 +376,11 @@ python3 docs/records/013-m7-provider-check/offline_cli_checks.py --verify-all
 | phase2 | **0／1** | **未执行**：三项 `mem_list`／`mem_read`／`mem_write` 的真实调用／成功、有效两产物、摘要首行 `v1`、正常终文、SQL 成功提交和 Git 收尾均未验证；不能据离线演练或手工产物宣称通过 |
 | 注入用户轮 | **0／1** | **未执行**：供应商对唯一 system 尾段的接受度、`COBALT-17` 实际回复及正常结束仍待验证；无 system/developer 语义等价结论 |
 
-**空态与存储实证**：供应商 content 原样为 `{"rollout_summary":"","rollout_slug":"","raw_memory":""}`，字段齐全、值全空；不是 JSON 解析失败、HTTP 失败或三态 `Failed`。阶段记录为 `passed=false/outcome=SucceededNoOutput/stage1_output=null`；job **done**、`last_error=null`、`retry_at=null`，输入及最后成功水位均 **1,699,974,800**。仅对本批临时 SQLite 以只读方式交叉核查：threads **1**、jobs **1**、stage1_outputs **0**，未生成 MEMORY／摘要文件，见 [阶段结果](<../testing/evidence/013-m7/historical/batch-367qctgq/phase1/result.json>)、[临时库与隔离核查](<../testing/evidence/013-m7/historical/batch-367qctgq/local-verification.json>)。这证明此样本的合法空态处理，不证明有内容路径或完整三态全部分支。未因结果为空改模板、改合同或重发。
+**空态与存储实证**：供应商 content 原样为 `{"rollout_summary":"","rollout_slug":"","raw_memory":""}`，字段齐全、值全空；不是 JSON 解析失败、HTTP 失败或三态 `Failed`。阶段记录为 `passed=false/outcome=SucceededNoOutput/stage1_output=null`；job **done**、`last_error=null`、`retry_at=null`，输入及最后成功水位均 **1,699,974,800**。仅对本批临时 SQLite 以只读方式交叉核查：threads **1**、jobs **1**、stage1_outputs **0**，未生成 MEMORY／摘要文件，见 阶段结果、临时库与隔离核查。这证明此样本的合法空态处理，不证明有内容路径或完整三态全部分支。未因结果为空改模板、改合同或重发。
 
-**计数、usage 与封闭状态**：真实 HTTP 发送尝试 **1/10**、收到响应 **1**、内部 HTTP 重试 **0**；phase1／phase2／注入分别 **1／0／0**，无 `/models`、探测或其他调用。供应商原始 usage：prompt **6,634**、completion **287**、total **6,921 tokens**；其中 reasoning **267**、缓存命中 **0**（按返回字段记录），完整 usage 见 [事件](<../testing/evidence/013-m7/historical/batch-367qctgq/phase1/events.jsonl>)与[原始脱敏响应](<../testing/evidence/013-m7/historical/batch-367qctgq/phase1/response-01.json>)。费用未知，不由 tokens 推算金额。
+**计数、usage 与封闭状态**：真实 HTTP 发送尝试 **1/10**、收到响应 **1**、内部 HTTP 重试 **0**；phase1／phase2／注入分别 **1／0／0**，无 `/models`、探测或其他调用。供应商原始 usage：prompt **6,634**、completion **287**、total **6,921 tokens**；其中 reasoning **267**、缓存命中 **0**（按返回字段记录），完整 usage 见 事件与原始脱敏响应。费用未知，不由 tokens 推算金额。
 
-未用 **9** 次已随本批封存，`closed=true`、`authorization_consumed=true`、`further_batch_permitted=false`、`all_passed=false`，不转移或追加使用，见[新批次账本](<../testing/evidence/013-m7/historical/batch-367qctgq/ledger.json>)及[批次汇总](<../testing/evidence/013-m7/historical/batch-367qctgq/batch-summary.json>)。阶段结果内 `attempts_at_end.closed=false` 是主程序根据 `passed=false` 执行关闭之前的快照；最终账本和 `BATCH_CLOSED` 才是封闭状态依据。旧失败批次仍为 **0/10、未用 10 次独立封存**，旧标记／账本／附件未改。
+未用 **9** 次已随本批封存，`closed=true`、`authorization_consumed=true`、`further_batch_permitted=false`、`all_passed=false`，不转移或追加使用，见新批次账本及批次汇总。阶段结果内 `attempts_at_end.closed=false` 是主程序根据 `passed=false` 执行关闭之前的快照；最终账本和 `BATCH_CLOSED` 才是封闭状态依据。旧失败批次仍为 **0/10、未用 10 次独立封存**，旧标记／账本／附件未改。
 
 **限制实际生效情况与边界**：发送沿用同一 `LiveWire` 扣减后 continuation、固定 endpoint／model／参数／合成来源检查、每次新 Agent／池容量 0／redirects=0。请求 **256 KiB**、API 读取 **10 MiB**、宿主接受 JSON **64 KiB**；连接 **10s**、请求 **180s**；监督脚本阶段 **240／1800／240s** 与不重置的整批 **2280s** 机制均未改且本次已使用。实际仅首项请求返回，未触及大小／超时／预算极限，不把此前离线边界检查宣称为真实极限观测。服务端默认生成上限和金额仍未知，没有计费 token／金额硬预算。
 
@@ -394,7 +394,7 @@ python3 docs/records/013-m7-provider-check/offline_cli_checks.py --verify-all
 
 **事实登记（沿用原证据，不改判）**：已观察——HTTP 200、`finish_reason=stop`、严格三键解析成功、`SucceededNoOutput`、job done（`retry_remaining=3`、`last_error=null`）、输入与成功水位均 1,699,974,800；未达到——有内容成功入库（`stage1_outputs=0`）；未执行——phase2 与注入用户轮（独立夹具、0 请求）。单次合法空结果不推出供应商不兼容或生产缺陷。
 
-**输入组装链离线重放（14/14 通过）**：新增 [offline_replay_review.py（原件快照）](<evidence-index.md#archive-2b1698c3cc7e45e8>)（只读证据与生产模板，无网络），结果 [offline-replay-result.json](<../testing/evidence/013-m7/validation/legal-empty-review.json>)。要点：①夹具四条（`harness.rs fixture()`）→ 会话文件字节复算 **1,062**＝`result.json source_bytes`，≤8 KiB 限额；②请求 system 与生产 `src/app/src/memory/templates/stage_one_system.md` **逐字节一致**；③请求 user 与 `stage_one_input.md` 占位符渲染＋夹具投影重放**逐字节一致**——角色序（user/assistant/user/assistant）、四条内容逐项相等，`sanitize_history_item_for_memories` 零剔除（夹具不匹配 AGENTS.md/skill 注入标记）、`redact_secrets` 零替换（无秘密模式）、无截断标记（远低于 150,000 token 回退预算）；④请求形状恰 `messages`＋`model` 两键、角色序 system→user。**结论：模型看到了完整夹具，无内容在装载、过滤、序列化、渲染或预算环节丢失。**
+**输入组装链离线重放（14/14 通过）**：新增 [offline_replay_review.py（原件快照）](<evidence-index.md#archive-2b1698c3cc7e45e8>)（只读证据与生产模板，无网络），结果 offline-replay-result.json。要点：①夹具四条（`harness.rs fixture()`）→ 会话文件字节复算 **1,062**＝`result.json source_bytes`，≤8 KiB 限额；②请求 system 与生产 `src/app/src/memory/templates/stage_one_system.md` **逐字节一致**；③请求 user 与 `stage_one_input.md` 占位符渲染＋夹具投影重放**逐字节一致**——角色序（user/assistant/user/assistant）、四条内容逐项相等，`sanitize_history_item_for_memories` 零剔除（夹具不匹配 AGENTS.md/skill 注入标记）、`redact_secrets` 零替换（无秘密模式）、无截断标记（远低于 150,000 token 回退预算）；④请求形状恰 `messages`＋`model` 两键、角色序 system→user。**结论：模型看到了完整夹具，无内容在装载、过滤、序列化、渲染或预算环节丢失。**
 
 **空结果判定链离线重放**：实际响应 content `{"rollout_summary":"","rollout_slug":"","raw_memory":""}`——三合同字段全部为字符串、键集合恰为三键（`deny_unknown_fields` 通过）、**去空白长度均为 0**；生产分派条件（`phase1.rs:160-165`：`raw_memory` 为 `Some("")` 或 `rollout_summary` 为空）重放结果 `SucceededNoOutput`，与记录 outcome 一致。字段提取无错：`api::reply_text` 只取 `choices/0/message/content`，本响应 content 非空提取成功；deepseek 将 267 token 推理置于 `reasoning_content`、最终 JSON 置于 `content`，与生产提取路径精确匹配（若推理混入 content 导致 JSON 缺失，严格解析会失败——本次未发生）。存储副作用符合空结果契约：`mark_stage1_job_succeeded_no_output` 仅 UPDATE jobs（done／水位推进／清错），无 stage1_outputs INSERT——与临时库只读核查（threads 1、jobs 1、stage1_outputs 0）一致。
 
@@ -415,7 +415,7 @@ python3 docs/records/013-m7-provider-check/offline_cli_checks.py --verify-all
 
 **范围与计数**：按审阅后指令只做离线准备——定稿 phase1 v2 夹具、完成最小离线检查、提交可一次批准的三批授权包。本轮真实 HTTP **0**、后台管线触发 **0**、未访问真实会话／数据库／记忆目录；原 0/10（`dxei6mir`）与 1/10（`367qctgq`）两批继续独立封存、不改判、不解封；§11.8／§11.9 结论与全部既有证据（含上轮审阅 14/14 重放结果）原样保留。
 
-**v2 夹具定稿**：修改 `harness.rs fixture()` 第一条 user 消息，仅将自我否定证据资格的首句「以下全部是虚构的合成回放，不能当作真实项目或真实执行证据。」替换为指定文本「**以下为本次测试构造的合成会话。**」，其后 114 字符及第 2–4 条（含原有「合成」「虚构故障」标注）逐字不变；角色与顺序不变；未加入任何「必须非空」要求，未改生产提示／解析合同／空结果语义。v1 完整冻结于 [harness-v1-frozen.rs（原件快照）](<evidence-index.md#archive-64e3933085480a38>)（sha256 `a971b2fa…`＝367qctgq 批 manifest 记录的执行版指纹），精确差异见 [harness-v1-to-v2.diff](<../testing/evidence/013-m7/validation/fixture-v1-to-v2.diff>)（仅一行）。v2 harness sha256 `14862629…`（完整指纹见 [manifest.json（原件快照）](<evidence-index.md#archive-720b5c4b318a4e29>)）。**v2 状态＝待实测：如实标注合成来源，但不保证模型一定选择非空**；本轮起 `approved_harness_unchanged` 保护断言不再适用于 `harness.rs`（该修改属本轮授权范围，此登记即为变更记录），`run_batch.py`／`offline_cli_checks.py` 未改。
+**v2 夹具定稿**：修改 `harness.rs fixture()` 第一条 user 消息，仅将自我否定证据资格的首句「以下全部是虚构的合成回放，不能当作真实项目或真实执行证据。」替换为指定文本「**以下为本次测试构造的合成会话。**」，其后 114 字符及第 2–4 条（含原有「合成」「虚构故障」标注）逐字不变；角色与顺序不变；未加入任何「必须非空」要求，未改生产提示／解析合同／空结果语义。v1 完整冻结于 [harness-v1-frozen.rs（原件快照）](<evidence-index.md#archive-64e3933085480a38>)（sha256 `a971b2fa…`＝367qctgq 批 manifest 记录的执行版指纹），精确差异见 harness-v1-to-v2.diff（仅一行）。v2 harness sha256 `14862629…`（完整指纹见 [manifest.json（原件快照）](<evidence-index.md#archive-720b5c4b318a4e29>)）。**v2 状态＝待实测：如实标注合成来源，但不保证模型一定选择非空**；本轮起 `approved_harness_unchanged` 保护断言不再适用于 `harness.rs`（该修改属本轮授权范围，此登记即为变更记录），`run_batch.py`／`offline_cli_checks.py` 未改。
 
 **离线检查（全部实际运行，共 7＋3＋11＝21 项通过、0 失败）**：
 
@@ -451,7 +451,7 @@ python3 docs/records/013-m7-provider-check/offline_cli_checks.py --verify-all
 
 **发送前已核实**：分支 `test/013-memory-m7-provider-check`、HEAD `799fbb972c7c4b500cd01d3f20ee99055a01ac6b` 符合预期；暂存区空、stash 0、单工作树。当前 v2 manifest 的八个文件及上节明确未改的两份脚本指纹 **10/10 匹配**；以 v2 harness 完整 SHA-256 `148626298729769ad4e0461503a03ec951d6dff66916533d5ac3af803d21f82b` 为依据，未拿 offline-fix 中的 v1 指纹作当前期望。配置仍为 `deepseek / deepseek-flash`、`openai-chat`、唯一端点 `https://api.deepseek.com/chat/completions`、`request_params={}`；当前凭据引用 `env:DEEPSEEK_API_KEY`，选中值来自项目 `.env`，仅在本地内存确认存在，未输出或留存明文。无 `/models`、连通性探测、真实 CLI/TUI 或后台入口。
 
-**本地失败及责任范围**：为将已审宿主按三个私有根分别分发而新增的控制层 `/tmp/013-m7-plan-a-20261019.py`，在唯一一次 `prepare-offline` 调用中执行到 `baseline()`→`save(preflight.json)` 时退出 **1**，错误为 `TypeError: Path.open() got an unexpected keyword argument 'opener'`。这是本 Agent 新增控制层把内置 `open` 的参数误用于 `Path.open` 的实现错误；语法编译通过不能证明该调用可运行。已审 v2 harness、两份原脚本与生产代码均未改；没有把错误归为供应商拒绝。准确进程耗时未捕获，记未知，不从工具轮询时间推算。完整退出证据与原样失败源码见 [共用预检失败](<../testing/evidence/013-m7/historical/plan-a-2026-10-19-stopped/shared-preflight-failure.json>)、[失败控制层（原件快照）](<evidence-index.md#archive-76dcb5cf3d06c9df>)。
+**本地失败及责任范围**：为将已审宿主按三个私有根分别分发而新增的控制层 `/tmp/013-m7-plan-a-20261019.py`，在唯一一次 `prepare-offline` 调用中执行到 `baseline()`→`save(preflight.json)` 时退出 **1**，错误为 `TypeError: Path.open() got an unexpected keyword argument 'opener'`。这是本 Agent 新增控制层把内置 `open` 的参数误用于 `Path.open` 的实现错误；语法编译通过不能证明该调用可运行。已审 v2 harness、两份原脚本与生产代码均未改；没有把错误归为供应商拒绝。准确进程耗时未捕获，记未知，不从工具轮询时间推算。完整退出证据与原样失败源码见 共用预检失败、[失败控制层（原件快照）](<evidence-index.md#archive-76dcb5cf3d06c9df>)。
 
 失败时临时准备目录只有两份既有文档的备份；尚未落盘 `preflight.json`，尚未归档源码、构建禁发或 live 二进制、调用任何 harness、创建三个运行根、授予临时 origin、建立阶段数据库或生成最终模型请求。计划的 **59 项禁发检查全部未运行**（Rust 7、CLI 31、监督 4、v2 专项 11、新根检查 6），不得借用 §11.10 的既有 21 项或更早 42 项结果冒充本轮通过。按用户边界未机械重跑 workspace 全量门禁、typecheck 或 lint；本轮不报告全量通过。
 
@@ -461,7 +461,7 @@ python3 docs/records/013-m7-provider-check/offline_cli_checks.py --verify-all
 | `M7-P2-2026-10-19` | **0 / 0** | **未执行、已封闭**；未观察三工具、产物、`v1`、正常终文、SQL 或 Git 基线收尾 | **8，封存** |
 | `M7-INJ-2026-10-19` | **0 / 0** | **未执行、已封闭**；未观察供应商接受、`COBALT-17` 回复或不入史行为 | **1，封存** |
 
-三项各自的 [身份、账本与结果](<../testing/evidence/013-m7/historical/plan-a-2026-10-19-stopped/summary.json>)分别留存。失败后只在原计划的三个全新私有根 `/tmp/013-m7-provider-m7a1v201`、`m7a2v201`、`m7a3v201` 建立 **0700 已封闭标记目录**，各仅含身份、零账本与 `BATCH_CLOSED`；不是运行根，没有 `BATCH_STARTED`、`LIVE_STARTED`、阶段数据或可执行文件。额度不互借，不复用旧目录，不自动重新开启。
+三项各自的 身份、账本与结果分别留存。失败后只在原计划的三个全新私有根 `/tmp/013-m7-provider-m7a1v201`、`m7a2v201`、`m7a3v201` 建立 **0700 已封闭标记目录**，各仅含身份、零账本与 `BATCH_CLOSED`；不是运行根，没有 `BATCH_STARTED`、`LIVE_STARTED`、阶段数据或可执行文件。额度不互借，不复用旧目录，不自动重新开启。
 
 **计量与验证边界**：本轮合计 **0 次发送、0 个响应**；HTTP 状态及 `finish_reason` 不适用，各批耗时无观测；usage **未知（无供应商响应）**、费用未知，不写成服务端 usage=0。内部重试 0、后台额外触发 0；整体真实执行计时未启动。三项独立夹具均未实例化或发送，不能构成同一数据链端到端通过，更不证明 system/developer 语义等价。旧 `dxei6mir` 的 0/10 与 `367qctgq` 的 1/10 原判定及未用额度继续封存，历史请求不并入本轮计数。
 
@@ -471,11 +471,11 @@ python3 docs/records/013-m7-provider-check/offline_cli_checks.py --verify-all
 
 **结果**：控制层已离线修复，实际 CLI 的完整预检、构建、三阶段启动、独立计数与封批路径均已排练。最终回归 **74 个具名验证项通过／0 失败／0 跳过**，原计划 59 项此次实际执行，不能回填成 §11.11 当时已运行。普通编译分支离线类型检查 exit 0；真实请求与后台额外触发均 **0**。只处理控制脚本、禁发适配、检查及文档，未重跑 workspace 全量门禁，未声称 clippy／rustfmt 通过。M8/M9 未实施、V1 未完成；非空提炼、phase2 工具链、注入用户轮的真实供应商证据仍待新授权。
 
-**RED→GREEN 与范围**：原 [失败源码（原件快照）](<evidence-index.md#archive-76dcb5cf3d06c9df>)不改。用原 `python3 /tmp/013-m7-plan-a-20261019.py prepare-offline` 实际入口，在全新临时目录、固定合成凭据覆盖环境及隔离 Git 配置下重现同一 `Path.open(opener=...)` 异常，exit 1；[RED 证据](<../testing/evidence/013-m7/validation/red-entry.json>)保留完整 stderr 与耗时。首次复现监督断言失败且未留存子进程输出，未算作成功复现；随后实证才计入。最小修复＝改用内置 `open(temp, ..., opener=...)`，保留 0600 opener、flush／fsync、临时文件＋原子替换及路径校验，见 [单独修复差异](<../testing/evidence/013-m7/validation/minimal-open-fix.diff>)。
+**RED→GREEN 与范围**：原 [失败源码（原件快照）](<evidence-index.md#archive-76dcb5cf3d06c9df>)不改。用原 `python3 /tmp/013-m7-plan-a-20261019.py prepare-offline` 实际入口，在全新临时目录、固定合成凭据覆盖环境及隔离 Git 配置下重现同一 `Path.open(opener=...)` 异常，exit 1；RED 证据保留完整 stderr 与耗时。首次复现监督断言失败且未留存子进程输出，未算作成功复现；随后实证才计入。最小修复＝改用内置 `open(temp, ..., opener=...)`，保留 0600 opener、flush／fsync、临时文件＋原子替换及路径校验，见 单独修复差异。
 
-完整入口首轮还发现原 `shutil.copyfile` 不保留执行位，阶段二进制为不可执行文件，实际启动报 `PermissionError`；当时已运行原计划中的 53 项及新增 1 项，六个新根检查未完成，不冒称 59 全过。该轮[源码、退出日志、检查与封闭模拟账本](<../testing/evidence/013-m7/validation/permission-failure.stderr>)保留，复制后显式设 **0700** 的[修复差异](<../testing/evidence/013-m7/validation/copy-permission-fix.diff>)另存。之后在新根从同一 `prepare-offline`／分批执行入口成功通过。
+完整入口首轮还发现原 `shutil.copyfile` 不保留执行位，阶段二进制为不可执行文件，实际启动报 `PermissionError`；当时已运行原计划中的 53 项及新增 1 项，六个新根检查未完成，不冒称 59 全过。该轮源码、退出日志、检查与封闭模拟账本保留，复制后显式设 **0700** 的修复差异另存。之后在新根从同一 `prepare-offline`／分批执行入口成功通过。
 
-候选 [plan_a.py（原件快照）](<evidence-index.md#archive-3418de07b7baf583>)复用原 `run_batch.py` 的 `phase_command`、`supervise`、`verify_preflight`，不删除路径／指纹门；增加新私有根参数、明确 offline 模式、一次启动／封批及完整初始预检失败收口。原 v2 harness 全文、夹具与两份支持脚本保留；候选 [harness.rs（原件快照）](<evidence-index.md#archive-f20e28736a0010bb>)只增加编译期 `m7-offline-only` 才可用的执行适配、合成失败／耗尽响应及独立全局上限测试。`fixture()` 字节、供应商／端点／大小限制、生产模板和既定通过标准不变；差异见 [控制层完整 diff（原件快照）](<evidence-index.md#archive-203296b693c3f7f5>)、[禁发适配 diff](<../testing/evidence/013-m7/validation/harness-offline-adapter.diff>)。生产源码、配置与 Cargo 清单／锁文件未改。
+候选 [plan_a.py（原件快照）](<evidence-index.md#archive-3418de07b7baf583>)复用原 `run_batch.py` 的 `phase_command`、`supervise`、`verify_preflight`，不删除路径／指纹门；增加新私有根参数、明确 offline 模式、一次启动／封批及完整初始预检失败收口。原 v2 harness 全文、夹具与两份支持脚本保留；候选 [harness.rs（原件快照）](<evidence-index.md#archive-f20e28736a0010bb>)只增加编译期 `m7-offline-only` 才可用的执行适配、合成失败／耗尽响应及独立全局上限测试。`fixture()` 字节、供应商／端点／大小限制、生产模板和既定通过标准不变；差异见 [控制层完整 diff（原件快照）](<evidence-index.md#archive-203296b693c3f7f5>)、禁发适配 diff。生产源码、配置与 Cargo 清单／锁文件未改。
 
 **一条离线命令（仓库根 `/workspace`，默认执行全部；可选留存附件）**：
 
@@ -483,9 +483,9 @@ python3 docs/records/013-m7-provider-check/offline_cli_checks.py --verify-all
 python3 docs/records/013-m7-provider-check/controller-fix/verify_controller.py --artifacts /tmp/013-m7-cfix-final-artifacts
 ```
 
-命令实际 exit **0**，每个子命令 argv、exit、耗时及完整入口 stdout／stderr 见 [verification.json](<../testing/evidence/013-m7/validation/controller-verification.json>)和同目录日志。再次执行应省略 `--artifacts` 或选择不存在的新附件目录；验证器自行创建新临时根，结束清理模拟运行数据，所有测试只用标准库和锁定 Rust 依赖。构建均 `--offline --locked --features m7-offline-only`、显式独立 `--target-dir`；后续故障场景仅复用校验过的同份禁发二进制，不重复编译或冒称重跑单元测试。普通分支仅执行 `cargo check --offline --locked ... --bin m7-provider-harness --target-dir /tmp/013-m7-cfix-normal-check-target`，[exit 0](<../testing/evidence/013-m7/validation/normal-typecheck.json>)，没有运行 live 宿主。编译有既有 TUI 等告警，完整输出留存，不据此声称 lint 通过。
+命令实际 exit **0**，每个子命令 argv、exit、耗时及完整入口 stdout／stderr 见 verification.json和同目录日志。再次执行应省略 `--artifacts` 或选择不存在的新附件目录；验证器自行创建新临时根，结束清理模拟运行数据，所有测试只用标准库和锁定 Rust 依赖。构建均 `--offline --locked --features m7-offline-only`、显式独立 `--target-dir`；后续故障场景仅复用校验过的同份禁发二进制，不重复编译或冒称重跑单元测试。普通分支仅执行 `cargo check --offline --locked ... --bin m7-provider-harness --target-dir /tmp/013-m7-cfix-normal-check-target`，exit 0，没有运行 live 宿主。编译有既有 TUI 等告警，完整输出留存，不据此声称 lint 通过。
 
-**计数**：原 59＝Rust 原 7＋实际 CLI 31＋监督 4＋v2 专项 11＋三个新根的六个 dry-run；新增独立全局预留上限测试 1，合计基础检查 **60**。再加完整控制场景 **6**、默认／缺新授权／优化解释器拒绝入口 **3**、质量证明 **5**，共 **74**。完整命令共执行 48 次新根 dry-run（八次准备各六项）及 16 个离线阶段进程（六场景 13＋两项变异 3）；均有检查点与事件证据。辅助脚本随后仅校正子进程 HOME／TMPDIR 归属以统一清理，控制层及 harness 未变，五项质量证明[定点复验 5/0](<../testing/evidence/013-m7/validation/quality-proofs.json>)，未机械重复其余已通过检查。
+**计数**：原 59＝Rust 原 7＋实际 CLI 31＋监督 4＋v2 专项 11＋三个新根的六个 dry-run；新增独立全局预留上限测试 1，合计基础检查 **60**。再加完整控制场景 **6**、默认／缺新授权／优化解释器拒绝入口 **3**、质量证明 **5**，共 **74**。完整命令共执行 48 次新根 dry-run（八次准备各六项）及 16 个离线阶段进程（六场景 13＋两项变异 3）；均有检查点与事件证据。辅助脚本随后仅校正子进程 HOME／TMPDIR 归属以统一清理，控制层及 harness 未变，五项质量证明定点复验 5/0，未机械重复其余已通过检查。
 
 | 完整入口场景 | phase1／phase2／注入模拟尝试 | 实际检查结果 |
 |---|---|---|
@@ -496,13 +496,13 @@ python3 docs/records/013-m7-provider-check/controller-fix/verify_controller.py -
 | phase2 用尽 | 1／8／1 | phase2 第八次后失败封闭，无第九次；注入继续，总数恰 10 |
 | 首批零尝试且 phase2 用尽 | 0／8／1 | 首批剩余 1 次封存；phase2 仍最多 8 次，不能借用，累计 9 |
 
-每次实际中间件预留同时检查本批 cap 与累计 10，下一独立账本只携带已封闭前批的计数快照，不携带其数据或额度。正常及故障流程均从真实控制 CLI 启动编译期禁发二进制，三个合法阶段的 `send-preparation-allowed`／`offline-phase-start` 检查点、临时授权合成指纹、模拟请求／响应、工具、SQL、Git 结果及各自封批账本均在 [verification/](<../testing/evidence/013-m7/validation/controller-verification.json>) 分目录留存；`ledger_kind=offline_simulation`，不与任何历史真实批次混用。原接口日志中的 `HTTP_attempts` 是模拟预留数，须结合 `offline_simulation`／`offline_stub` 及 `real_HTTP_attempts=0` 读取；`live-build-info` 等兼容字段在本轮记录 `offline_only_build=true`，不是运行了 live 构建。模拟 usage 也不当作供应商计费数据。
+每次实际中间件预留同时检查本批 cap 与累计 10，下一独立账本只携带已封闭前批的计数快照，不携带其数据或额度。正常及故障流程均从真实控制 CLI 启动编译期禁发二进制，三个合法阶段的 `send-preparation-allowed`／`offline-phase-start` 检查点、临时授权合成指纹、模拟请求／响应、工具、SQL、Git 结果及各自封批账本均在 verification/ 分目录留存；`ledger_kind=offline_simulation`，不与任何历史真实批次混用。原接口日志中的 `HTTP_attempts` 是模拟预留数，须结合 `offline_simulation`／`offline_stub` 及 `real_HTTP_attempts=0` 读取；`live-build-info` 等兼容字段在本轮记录 `offline_only_build=true`，不是运行了 live 构建。模拟 usage 也不当作供应商计费数据。
 
-**错误检测证明**：除原接口异常 RED→GREEN、执行位失败→成功外，保持场景断言不变，在独立临时源码分别故意把“单批失败”改为“全停”、去掉累计 seed，两个错误均被实际控制入口的原断言检出；正确候选六场景全绿。另验证优化 Python 不可绕过 assert 门、0600 打开在 umask=0 时仍成立且原子替换、不允许复开已封闭模拟批、v2 夹具及参数不变。变异源码、差异、命令、退出及检测结果见 [质量证明](<../testing/evidence/013-m7/validation/quality-proofs.json>)。
+**错误检测证明**：除原接口异常 RED→GREEN、执行位失败→成功外，保持场景断言不变，在独立临时源码分别故意把“单批失败”改为“全停”、去掉累计 seed，两个错误均被实际控制入口的原断言检出；正确候选六场景全绿。另验证优化 Python 不可绕过 assert 门、0600 打开在 umask=0 时仍成立且原子替换、不允许复开已封闭模拟批、v2 夹具及参数不变。变异源码、差异、命令、退出及检测结果见 质量证明。
 
 **隔离与历史保护**：选中凭据仅为固定合成值；禁发构建编译掉真实凭据加载与网络 continuation，guard 测试实际拒绝两条路径。原 `.env` 只参与既有保护哈希，不按真实凭据解析／使用；不访问真实会话、数据库内容或记忆目录。保留 §11.11 的原 79 项文件／6 项元数据证据，并在本轮重新核对，旧 0/10、1/10 及三个 0/1、0/8、0/1 批的封存状态与字节均不变。收尾保护、清理、文档前缀与 Git 差异见 [preservation.json（原件快照）](<evidence-index.md#archive-bb4b1bee4382eb65>)，当前附件指纹见 [manifest（原件快照）](<evidence-index.md#archive-50cd14d331bfa370>)。本轮没有真实 HTTP 状态、finish_reason 或供应商 usage，费用未知；后台额外触发 0，不把独立夹具写成同一数据链真实端到端通过，不证明 system/developer 语义等价。
 
-**新的三批授权包（仅待批准，未执行）**：机器可读的 [authorization-package.json](<../testing/evidence/013-m7/authorization-package.json>)绑定本轮实测版本：
+**新的三批授权包（仅待批准，未执行）**：机器可读的 authorization-package.json绑定本轮实测版本：
 
 | 当前执行候选 | 完整 SHA-256 |
 |---|---|
@@ -525,11 +525,11 @@ python3 docs/records/013-m7-provider-check/controller-fix/verify_controller.py -
 
 ### 11.13 CFIX 三批独立真实补验结果
 
-**2026-10-19 结果：三个独立样本均达到各自目标，证据候选待审阅。** 用户已明确授权 [CFIX 授权包](<../testing/evidence/013-m7/authorization-package.json>)，§11.12 及该包中的「待授权」保留为准备轮历史。本轮严格使用已排练的 `prepare-authorized`／`execute-authorized-three-batches` 入口各一次，没有修改控制层、harness、夹具或生产逻辑。真实发送 **1＋6＋1＝8/10**，控制入口 exit **0**，共同停止原因为空；三个账本均已封闭，phase2 未用 **2** 次封存，不追加探索。旧批次的判定、账本及封存额度保持原样。本轮总览见 [summary.json](<../testing/evidence/013-m7/final/summary.json>)。
+**2026-10-19 结果：三个独立样本均达到各自目标，证据候选待审阅。** 用户已明确授权 CFIX 授权包，§11.12 及该包中的「待授权」保留为准备轮历史。本轮严格使用已排练的 `prepare-authorized`／`execute-authorized-three-batches` 入口各一次，没有修改控制层、harness、夹具或生产逻辑。真实发送 **1＋6＋1＝8/10**，控制入口 exit **0**，共同停止原因为空；三个账本均已封闭，phase2 未用 **2** 次封存，不追加探索。旧批次的判定、账本及封存额度保持原样。本轮总览见 summary.json。
 
-**发送前复核与构建**：分支 `test/013-memory-m7-provider-check`、HEAD `799fbb972c7c4b500cd01d3f20ee99055a01ac6b` 符合预期，暂存区空、stash 0、单工作树。授权包四项源码、两份支持脚本、冻结 v2 完整指纹及原 475 项候选 manifest 均匹配；与离线保护起点比对的 106 项文件／6 项元数据也匹配。当前控制层／适配 harness 分别沿用 §11.12 的 `e5f0d968…c4b3f89`／`932e8ed1…a2b41c` 完整指纹；没有把冻结 v2 或历史二进制指纹作为新构建的期望值。完整 SHA、三个新根与绑定见 [发送前审计（原件快照）](<evidence-index.md#archive-f91f83ba9d45722e>)、[READY 复核](<../testing/evidence/013-m7/final/audit/readiness-after-prepare.json>)。
+**发送前复核与构建**：分支 `test/013-memory-m7-provider-check`、HEAD `799fbb972c7c4b500cd01d3f20ee99055a01ac6b` 符合预期，暂存区空、stash 0、单工作树。授权包四项源码、两份支持脚本、冻结 v2 完整指纹及原 475 项候选 manifest 均匹配；与离线保护起点比对的 106 项文件／6 项元数据也匹配。当前控制层／适配 harness 分别沿用 §11.12 的 `e5f0d968…c4b3f89`／`932e8ed1…a2b41c` 完整指纹；没有把冻结 v2 或历史二进制指纹作为新构建的期望值。完整 SHA、三个新根与绑定见 [发送前审计（原件快照）](<evidence-index.md#archive-f91f83ba9d45722e>)、READY 复核。
 
-本轮实际禁发预检 **60 通过／0 失败／0 跳过**：Rust 8、CLI 31、监督 4、v2 专项 11、三个新根 dry-run 6。禁发二进制 `offline_only_build=true`，同份已审源码的 live 构建 `offline_only_build=false`；均从 HEAD 的隔离副本 `--offline --locked` 构建，使用本轮独立 target，阶段执行文件 0700，argv／cwd／新账本绑定检查通过。构建指纹如下；[控制步骤、退出码与完整日志](<../testing/evidence/013-m7/final/control/READY.json>)分别保留，不把 §11.12 的 74 项历史结果算成本轮重跑。
+本轮实际禁发预检 **60 通过／0 失败／0 跳过**：Rust 8、CLI 31、监督 4、v2 专项 11、三个新根 dry-run 6。禁发二进制 `offline_only_build=true`，同份已审源码的 live 构建 `offline_only_build=false`；均从 HEAD 的隔离副本 `--offline --locked` 构建，使用本轮独立 target，阶段执行文件 0700，argv／cwd／新账本绑定检查通过。构建指纹如下；控制步骤、退出码与完整日志分别保留，不把 §11.12 的 74 项历史结果算成本轮重跑。
 
 | 本轮二进制 | 完整 SHA-256 |
 |---|---|
@@ -546,9 +546,9 @@ python3 docs/records/013-m7-provider-check/controller-fix/verify_controller.py -
 | `M7-P2-CFIX-2026-10-19`／`92b37a5e` | **6／7** | 六次 HTTP 200，五次 `tool_calls` 后 `stop`；**通过** | 20,459 ms／0 | 已封闭，**2 次封存** |
 | `M7-INJ-CFIX-2026-10-19`／`e9f9808b` | **1／8** | HTTP 200、`stop`；**通过** | 1,145 ms／0 | 已封闭，0 |
 
-- **phase1-v2**：源会话 **1,020 bytes**，首句为「以下为本次测试构造的合成会话。」，其余内容与角色顺序沿用定稿 v2。既有 `StageOneOutput::parse` 严格解析为 `SucceededWithOutput`；临时 SQL 的 `stage1_outputs` **恰 1 行**，`raw_memory`／`rollout_summary`／`rollout_slug` 非空，stage1 job `done`，输入与成功水位均为 **1699974800**，`quick_check=ok`。据此新增**该合成样本的非空提炼覆盖**，不改判旧合法空样本。见 [实际结果](<../testing/evidence/013-m7/final/batches/phase1/evidence/phase1/result.json>)、[SQL 证据](<../testing/evidence/013-m7/final/batches/phase1/evidence/local-verification.json>)。
-- **phase2**：使用既有独立 seed，没有消费本轮 phase1 输出。模型实际发起且工具层成功执行 **7 次**：`mem_list` **2**、`mem_read` **3**、`mem_write` **2**；未手工补调用或产物。`MEMORY.md` **2,591 bytes**、`memory_summary.md` **2,288 bytes**，两产物校验通过，摘要首行恰为 **`v1`**；正常终文，`Succeeded { sql_committed: true }`，全局 job `done`、成功水位 **1699974800**、选中来源快照已提交。既有 `memory_workspace_diff` 的 Git 基线合同通过，四个被跟踪文件逐字节等于临时 Git HEAD，临时 diff 文件已删除；原始 `git status` 为 `?? memories.sqlite`，该运行库按既定合同排除，未把原始 porcelain 说成全空。见 [实际结果](<../testing/evidence/013-m7/final/batches/phase2/evidence/phase2/result.json>)、[工具事件](<../testing/evidence/013-m7/final/batches/phase2/evidence/phase2/events.jsonl>)、[产物](<../testing/evidence/013-m7/final/batches/phase2/artifacts/MEMORY.md>)、[SQL／Git 证据](<../testing/evidence/013-m7/final/audit/runtime-results.json>)。
-- **注入用户轮**：独立合成摘要进入唯一 system 消息的尾段，`<memory-context>` 恰一次；正常回复为 **「环境代号：COBALT-17」**。内存历史 **2 条**，实际自动会话 **3 行**（含 meta），flush 成功、持久化错误为空，自动 memory-context 未入历史或落盘会话。仅证明这个固定请求样本被该供应商接受，**不证明 system/developer 语义等价**。见 [实际结果](<../testing/evidence/013-m7/final/batches/injection/evidence/injection/result.json>)、[实际会话](<../testing/evidence/013-m7/final/batches/injection/synthetic-sessions/auto-20261019T093758-1700.jsonl>)。
+- **phase1-v2**：源会话 **1,020 bytes**，首句为「以下为本次测试构造的合成会话。」，其余内容与角色顺序沿用定稿 v2。既有 `StageOneOutput::parse` 严格解析为 `SucceededWithOutput`；临时 SQL 的 `stage1_outputs` **恰 1 行**，`raw_memory`／`rollout_summary`／`rollout_slug` 非空，stage1 job `done`，输入与成功水位均为 **1699974800**，`quick_check=ok`。据此新增**该合成样本的非空提炼覆盖**，不改判旧合法空样本。见 实际结果、SQL 证据。
+- **phase2**：使用既有独立 seed，没有消费本轮 phase1 输出。模型实际发起且工具层成功执行 **7 次**：`mem_list` **2**、`mem_read` **3**、`mem_write` **2**；未手工补调用或产物。`MEMORY.md` **2,591 bytes**、`memory_summary.md` **2,288 bytes**，两产物校验通过，摘要首行恰为 **`v1`**；正常终文，`Succeeded { sql_committed: true }`，全局 job `done`、成功水位 **1699974800**、选中来源快照已提交。既有 `memory_workspace_diff` 的 Git 基线合同通过，四个被跟踪文件逐字节等于临时 Git HEAD，临时 diff 文件已删除；原始 `git status` 为 `?? memories.sqlite`，该运行库按既定合同排除，未把原始 porcelain 说成全空。见 实际结果、工具事件、产物、SQL／Git 证据。
+- **注入用户轮**：独立合成摘要进入唯一 system 消息的尾段，`<memory-context>` 恰一次；正常回复为 **「环境代号：COBALT-17」**。内存历史 **2 条**，实际自动会话 **3 行**（含 meta），flush 成功、持久化错误为空，自动 memory-context 未入历史或落盘会话。仅证明这个固定请求样本被该供应商接受，**不证明 system/developer 语义等价**。见 实际结果、实际会话。
 
 **逐请求真实响应**（耗时为发送入口至响应 JSON 接受；不是控制进程总耗时）：
 
@@ -563,12 +563,12 @@ python3 docs/records/013-m7-provider-check/controller-fix/verify_controller.py -
 | phase2 #6 | 200 | 3,629 | stop | 16,015 | 685 | 16,700 |
 | injection #1 | 200 | 1,105 | stop | 5,949 | 115 | 6,064 |
 
-phase1 usage 合计 **6,621＋2,585＝9,206**；phase2 **85,090＋3,420＝88,510**；注入 **5,949＋115＝6,064**。八个响应均提供 usage，本轮合计 **97,660 输入＋6,120 输出＝103,780 tokens**；原始字段还报告 cache hit **77,440**、cache miss **20,220**、输出 reasoning **2,238**，这些是 usage 子项，不再额外相加。完整原始 usage、response ID、请求／响应及事件按批保存，见 [计量汇总](<../testing/evidence/013-m7/final/summary.json>)。**费用未知**，无计费 token／金额硬预算，未据 usage 估价；远端输出 token 上限仍未知。
+phase1 usage 合计 **6,621＋2,585＝9,206**；phase2 **85,090＋3,420＝88,510**；注入 **5,949＋115＝6,064**。八个响应均提供 usage，本轮合计 **97,660 输入＋6,120 输出＝103,780 tokens**；原始字段还报告 cache hit **77,440**、cache miss **20,220**、输出 reasoning **2,238**，这些是 usage 子项，不再额外相加。完整原始 usage、response ID、请求／响应及事件按批保存，见 计量汇总。**费用未知**，无计费 token／金额硬预算，未据 usage 估价；远端输出 token 上限仍未知。
 
 **限制与停止**：实际发送入口同时检查各批 1／8／1 与累计 10，内部 HTTP 重试 **0**；最终累计账本 **1／7／8**，各批最终封闭账本分别保留。源≤8 KiB、请求≤256 KiB、响应读取≤10 MiB、接受 JSON≤64 KiB；观测最大请求 **65,708 bytes**，最大接受响应 JSON **12,298 bytes**。连接10秒／单请求180秒、阶段240／1800／240秒；统一执行计时 **67,487 ms**，整体上限2280秒，切批未重置。三项均正常结束，无超时或失败发送；单批失败与共同失败的停止分支仅引用既有离线排练，不冒充本轮真实触发。三份夹具分别独立，**不能写成同一数据链端到端通过**；其他供应商、模型、参数、平台及未执行分支仍未验证。
 
-**证据、清理与 Git**：本轮先校验并归档 100 份必要附件，再清理临时运行数据；另新增汇总、核对、清理与 manifest 等审阅附件。请求响应、工具结果、产物、SQL 查询结果、Git 快照、真实退出码、构建版本及独立身份／封闭账本均留存；没有保存认证头、凭据、临时授权文件或原始 SQLite 库。对保留附件检查当前凭据及其 JSON 转义形式均不存在。三个临时 origin 授权随各自运行目录删除；临时会话／数据库／记忆、可执行文件、构建副本与 target 已清理，仅保留封批身份、账本、摘要及不可续跑标记。清理前本轮可执行进程存活数为0，见 [cleanup.json](<../testing/evidence/013-m7/final/audit/cleanup.json>)。
+**证据、清理与 Git**：本轮先校验并归档 100 份必要附件，再清理临时运行数据；另新增汇总、核对、清理与 manifest 等审阅附件。请求响应、工具结果、产物、SQL 查询结果、Git 快照、真实退出码、构建版本及独立身份／封闭账本均留存；没有保存认证头、凭据、临时授权文件或原始 SQLite 库。对保留附件检查当前凭据及其 JSON 转义形式均不存在。三个临时 origin 授权随各自运行目录删除；临时会话／数据库／记忆、可执行文件、构建副本与 target 已清理，仅保留封批身份、账本、摘要及不可续跑标记。清理前本轮可执行进程存活数为0，见 cleanup.json。
 
-结果落盘前 **582 项既有保护文件／6 项元数据全部匹配**，既有两文档及完整 Git status 与发送前一致，见 [执行后保护复核](<../testing/evidence/013-m7/final/audit/postexecution-before-results.json>)。本轮新增候选仅 `cfix-live-2026-10-19/` 与本节／规格必要状态；实施记录原文至 §11.12 完整保留为前缀，历史证据与并发保护项未覆盖。最终摘要指纹、文档差异与保护复核见 [manifest（原件快照）](<evidence-index.md#archive-a50e34a735b2ce5f>)、[preservation](<../testing/evidence/013-m7/final/audit/preservation.json>)。没有暂存、提交、合并、推送或删除分支，HEAD／main／stash／工作树保持起点；工作区仍保留待审文档及附件差异。生产代码未改，按本次明确边界**未重跑 workspace 全量、独立 typecheck 或 lint**，不声称这些门禁本轮通过。**M8/M9 未实施、V1 未完成；全部授权项目已结束，到此停止，等待结果审阅与证据交付批准。**
+结果落盘前 **582 项既有保护文件／6 项元数据全部匹配**，既有两文档及完整 Git status 与发送前一致，见 执行后保护复核。本轮新增候选仅 `cfix-live-2026-10-19/` 与本节／规格必要状态；实施记录原文至 §11.12 完整保留为前缀，历史证据与并发保护项未覆盖。最终摘要指纹、文档差异与保护复核见 [manifest（原件快照）](<evidence-index.md#archive-a50e34a735b2ce5f>)、preservation。没有暂存、提交、合并、推送或删除分支，HEAD／main／stash／工作树保持起点；工作区仍保留待审文档及附件差异。生产代码未改，按本次明确边界**未重跑 workspace 全量、独立 typecheck 或 lint**，不声称这些门禁本轮通过。**M8/M9 未实施、V1 未完成；全部授权项目已结束，到此停止，等待结果审阅与证据交付批准。**
 
 **2026-10-19 证据交付（用户批准后执行）**：上段「等待结果审阅与证据交付批准」为归档前状态；用户已批准提交、快进合并与删除验证分支。交付核验：分支 `test/013-memory-m7-provider-check`、基线 HEAD `799fbb972c7c4b500cd01d3f20ee99055a01ac6b` 与预期一致，暂存区空、stash 0；656 个批准路径（本文件＋规格＋`013-m7-provider-check/` 内 654 份附件）自 /tmp 生成清单逐文件显式暂存，未用目录级或全量暂存；暂存集合与批准清单精确一致（654 新增＋2 修改），[cfix-live manifest（原件快照）](<evidence-index.md#archive-a50e34a735b2ce5f>) 105 项与两文档 `document_sha256` 暂存 blob 全部匹配，保护项零进入。`git diff --cached --check` 仅在归档原始附件（捕获 diff／stdout／批次标记）内报 27 行尾随空白／EOF 空行——属已审阅原样字节，为保持 manifest 指纹不作改写；两份文档零警告。归档提交 **`9e32a6347ae96d9ac2ff14d2655bdaf784d92fd9`**（`test(013): 归档 M7 供应商补验证据`，656 files，+71096/−3）在验证分支创建后 `git merge --ff-only` 快进合并 main，合并后 main 文件树与该提交逐字节一致（`git diff` 为空）、包含关系经 `merge-base --is-ancestor` 证实。本段与规格状态翻转构成第二笔文档提交（`docs(013): M7 供应商补验证据标记为已交付`），其后以 `git branch -d` 安全删除验证分支（其提交已包含于 main）。历史 manifest 及其中 `document_sha256` 保持归档提交时的原值，对应 `9e32a63` 中的文档快照，不因交付状态更新而倒改。本轮结论维持 §11.13 边界：仅覆盖既定三个独立合成样本（三批实际 8/10 次、剩余 2 次封存、内部重试 0、后台额外触发 0），不推广为同链端到端、角色语义等价、其他供应商或 Windows；未推送、未发布、未操作远程、未追加真实请求。**M8/M9 未实施、V1 未完成。**

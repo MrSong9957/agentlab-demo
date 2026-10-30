@@ -1,7 +1,0 @@
-SAMPLE[cold-js] p95s=[130483, 160535, 196236] median=160535
-SAMPLE[leaf1] p95s=[116288, 153335, 157955] median=153335
-SAMPLE[leaf4-concurrent] p95s=[131433, 148573, 151706] median=148573
-SAMPLE[leaf31] p95s=[103954, 155757, 175407] median=155757
-SAMPLE[yield-wait] p95s=[115085, 168513, 172310] median=168513
-SAMPLE[terminate] p95s=[2790, 2960, 3544] median=2960
-SAMPLE[append-100k] p95s=[195, 215, 223] median=215

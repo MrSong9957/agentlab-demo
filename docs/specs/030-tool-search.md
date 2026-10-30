@@ -4,7 +4,7 @@
 - 更新时间：2026-10-29
 - 对应原表项目：[工具能力对照表](../records/2026-10-21-codex-tools-comparison.md)的「工具搜索与按需加载」。一行作为一项任务，本项同时交付规格文档与实施计划。
 - 关联契约：[006 工具调用循环](006-tool-call-loop.md)、[007 会话保存](007-session-persistence.md)、[021 模型工具能力开关](021-send-message-to-user-async.md)、[022 MCP 工具](022-mcp-tools.md)、[023 MCP 资源](023-mcp-resources.md)、[024 五协议适配](024-native-model-apis.md)、[025 凭证脱敏](025-credential-redaction.md)。
-- 本轮交付：完整实现（2026-10-29）：本地 BM25 搜索、按需声明、请求级执行集合门与容量边界。证据：[M0 基线](../logs/030-tool-search/2026-10-28-m0-baseline.md)、[性能冻结](../logs/030-tool-search/2026-10-28-m0-perf-freeze.md)、[变异反证](../logs/030-tool-search/2026-10-29-mutation-evidence.md)、[S17 上下文效果](../logs/030-tool-search/2026-10-29-s17-context-effect.txt)、[安全报告](../security/reports/2026-10-29-030-tool-search-security.md)。
+- 本轮交付：完整实现（2026-10-29）：本地 BM25 搜索、按需声明、请求级执行集合门与容量边界。证据：[M0 基线](../logs/030-tool-search/2026-10-28-m0-baseline.md)、[性能冻结](../logs/030-tool-search/2026-10-28-m0-perf-freeze.md)、[变异反证](../logs/030-tool-search/2026-10-29-mutation-evidence.md)、S17 上下文效果、[安全报告](../security/reports/2026-10-29-030-tool-search-security.md)。
 
 ## 1. 要做什么，有哪些要求
 
@@ -200,7 +200,7 @@ M0/M1 补充同分候选跨 limit 时先排序后截断的实施与验证；M2�
 | S14 | 搜索提交前取消、批内取消、超限批或断流响应、第 8 次响应才搜索 | 未提交不加载；未执行逐项配对；结构失败整批零执行；不产生第 9 次模型请求 | 通过：ts30_cancel_backfill_three_field（三字段回填）＋ts30_eighth_response_search_no_ninth_request；批结构/断流沿 006 既有路径 |
 | S15 | 带本轮 MCP 快照/能力标记 → 内部 MemoryMerge／提炼轮 | 不声明、不搜索、不加载、不执行外部工具；仍只允许内部 mem 工具 | 通过：memory_phase2 dispatch_rejects…（含伪造 tool_search 的未知工具契约）＋merge_mode_ignores_tool_search_flag（开关误传组合） |
 | S16 | 真实 CLI 与 PTY 搜索成功/失败，保存并 /resume，再发新用户输入 | 屏幕含 query、命中名称和失败原因；恢复不重放；旧定义历史不能激活当前工具；转义只影响显示 | 通过：e2e s30_pty_search_display_call_save_resume（展示行/恢复不重放/新轮空集/V1 格式不升级）＋display_line_truncates_long_hit_lists＋display_line_shows_query_hits_and_failure_reason（单测） |
-| S17 | 固定 96 工具夹具，开关前后完成同一仅需 2 工具的任务 → 比较五协议请求 | 动态声明数量 96→0→2；首次 tools 及完成调用后的最终完整请求字节均小于关闭对照；分项计入搜索历史，不把字节节省宣称为 token/实付费用或缓存收益 | 通过：ts30_context_effect_bytes_search_vs_full_declaration——首次 tools 5,402B vs 25,966B；最终完整请求 28,117–28,354B vs 44,937–47,853B（五协议均小于对照，含搜索历史）；实测记录 [2026-10-29-s17-context-effect.txt](../logs/030-tool-search/2026-10-29-s17-context-effect.txt) |
+| S17 | 固定 96 工具夹具，开关前后完成同一仅需 2 工具的任务 → 比较五协议请求 | 动态声明数量 96→0→2；首次 tools 及完成调用后的最终完整请求字节均小于关闭对照；分项计入搜索历史，不把字节节省宣称为 token/实付费用或缓存收益 | 通过：ts30_context_effect_bytes_search_vs_full_declaration——首次 tools 5,402B vs 25,966B；最终完整请求 28,117–28,354B vs 44,937–47,853B（五协议均小于对照，含搜索历史）；实测记录 2026-10-29-s17-context-effect.txt |
 | S18 | §1.6 冻结后的原型、96/2048 目录与正式实现 → 三轮性能测量 | 测法和样本一致，p95/RSS 不越 M0 冻结阈值；原始样本、环境、总量边界齐全 | 通过：tool_search_perf 门禁（真实模块路径；修复轮后复测绿；RSS 子进程失败即失败，审查 #3）；原型/真实模块样本与 RSS 修订见 [冻结日志](../logs/030-tool-search/2026-10-28-m0-perf-freeze.md) |
 | S19 | 关键用例断言不变 → 旧实现对照/临时破坏行为 → 恢复 | S02/S05 在旧实现失败；只凭目录执行、同批立即开放、Schema 裁剪、恢复激活旧定义分别被 S06/S09/S16 捕获；恢复后通过 | 通过：4/4 变异红→还原绿（执行集合门/同分先截断/128 预算/目录容量短路），[变异记录](../logs/030-tool-search/2026-10-29-mutation-evidence.md) |
 

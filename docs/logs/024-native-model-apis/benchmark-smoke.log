@@ -1,3 +1,0 @@
-openai-chat/text/json: p95=3290.8 us, peak=21828 KiB
-google-interactions/calls32/sse: p95=12068.4 us, peak=23156 KiB
-google-generate-content/image/sse: p95=3371.9 us, peak=22512 KiB

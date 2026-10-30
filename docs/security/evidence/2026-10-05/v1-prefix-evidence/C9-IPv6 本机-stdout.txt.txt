@@ -1,6 +1,0 @@
-==============================
-  欢迎使用 Terminal Chat!
-  请输入消息,按回车发送,输入 exit 或 Ctrl+D 退出
-==============================
-错误：网络错误：http://[::1]:32837/chat/completions: Connection Failed: Connect error: Connection refused (os error 111)
-再见!

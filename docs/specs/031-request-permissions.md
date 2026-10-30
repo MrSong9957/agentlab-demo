@@ -1,6 +1,6 @@
 # 规格：权限申请
 
-- 状态：**已交付**（2026-10-29 用户批准交付。M1–M7 全部完成：comprehensive-testing/Security Testing/ce-code-review 门禁完成并修复审查发现（含 #15 嵌套授权遮蔽）；最终全量验证 3745 通过/1 基线既有失败/3 忽略（[final-verify3](../logs/031-request-permissions/2026-10-29-final-verify3.log)）；安装 deny 方案 A 与 P02 契约核对已裁决收口。**保持真实标注的未竟项**：真实环境部署矩阵（跨内核/发行版/bwrap 版本）、P07 typed 回执伪造完整面、P12 SIGKILL 父死亡路径自动化、P14 五协议全矩阵仍待测；#7 文件拆分延期——见 [实施验证记录](../logs/031-request-permissions/2026-10-29-m1-m5-implementation.md)）
+- 状态：**已交付**（2026-10-29 用户批准交付。M1–M7 全部完成：comprehensive-testing/Security Testing/ce-code-review 门禁完成并修复审查发现（含 #15 嵌套授权遮蔽）；最终全量验证 3745 通过/1 基线既有失败/3 忽略（final-verify3）；安装 deny 方案 A 与 P02 契约核对已裁决收口。**保持真实标注的未竟项**：真实环境部署矩阵（跨内核/发行版/bwrap 版本）、P07 typed 回执伪造完整面、P12 SIGKILL 父死亡路径自动化、P14 五协议全矩阵仍待测；#7 文件拆分延期——见 [实施验证记录](../logs/031-request-permissions/2026-10-29-m1-m5-implementation.md)）
 - 更新时间：2026-10-29
 - 对应原表项目：[工具能力对照表](../records/2026-10-21-codex-tools-comparison.md)的「权限申请」，工具为 `request_permissions`。一行作为一项任务，本项同时包含规格文档与实施计划。
 - 关联契约：[003 执行参数](003-exec-command.md)、[004 补丁结果](004-apply-patch.md)、[006 工具循环](006-tool-call-loop.md)、[007 会话](007-session-persistence.md)、[016 进程会话](016-process-sessions-plan.md)、[018 专用回答通道](018-user-input.md)、[019 看图](019-view-image.md)、[022 MCP](022-mcp-tools.md)、[024 五协议](024-native-model-apis.md)、[027 凭证边界历史与保留修复](027-credential-access-boundary.md)、[033 当前工具沙箱](033-tool-sandbox.md)。
@@ -166,8 +166,8 @@
 - 现有 128 工具声明、10 MiB 实际模型请求、补丁/图片/进程输出及会话限额继续适用；沙箱附加 IPC 必须复用相应结果的有界读取，不能把内部入口当作无限数据通道。
 - 人的等待不设置自动允许时限。M0 记录当前机器/内核、应用与策略后端、bwrap、宿主 UID 和挂载；用假文件/假凭证、本地网络服务与固定时钟/屏障测试，不触真实凭证、真实用户配置或外网业务。
 - 性能未测，不填虚构延迟/RSS 或零费用。M0 用固定策略后端原型，单并发、预热 5 次、100 次无交互启动、3 轮取 p95 中位轮，同时保存原始样本和峰值 RSS；pipes/PTY、补丁、图片分别测，排除人的答复时间。按实测基线留 2–3 倍余量冻结阈值，未冻结且未复测不能标待验收。授权与收尾次数/资源边界以实际运行结果为准。
-- 2026-10-29 冻结（含递归检查的真实启动路径实测，样本与依据见[证据](../logs/031-request-permissions/2026-10-29-p16-launch-check-samples.txt)）：deny 边界遍历预算＝**20000 项／2000ms**（实测 ≈1.08µs/项，20000 项预计 ≈22ms，超时余量 ≈93×）；启动前检查回归阈值＝**50ms**（生产形态 p95 中位轮实测 531µs，终验重跑 521µs，同形态波动 ≈2%；覆盖预算内最大合法 deny 树＋数倍余量）；单并发口径不变。
-- 2026-10-29 补冻结（完整启动与峰值 RSS 为独立验收对象，样本与依据见[证据](../logs/031-request-permissions/2026-10-29-p16-full-launch-rss-samples.txt)）：完整启动（组装＋spawn＋bwrap execve＋载荷退出）p95 中位轮阈值＝**exec pipes/PTY 30ms**（实测 ≈4–5ms）、**apply_patch/view_image 250ms**（实测并行负载 ≈118–130ms、独跑 ≈65–75ms；载荷为 debug 二进制副本，其进程启动占主导）；沙箱启动子进程峰值 RSS 上界＝**128 MiB**（实测 ≈13.5 MiB，RUSAGE_CHILDREN 跨面上界口径）。faces 分别计量且成功断言防空跑（快速失败样本不得充当性能基线）。
+- 2026-10-29 冻结（含递归检查的真实启动路径实测，样本与依据见证据）：deny 边界遍历预算＝**20000 项／2000ms**（实测 ≈1.08µs/项，20000 项预计 ≈22ms，超时余量 ≈93×）；启动前检查回归阈值＝**50ms**（生产形态 p95 中位轮实测 531µs，终验重跑 521µs，同形态波动 ≈2%；覆盖预算内最大合法 deny 树＋数倍余量）；单并发口径不变。
+- 2026-10-29 补冻结（完整启动与峰值 RSS 为独立验收对象，样本与依据见证据）：完整启动（组装＋spawn＋bwrap execve＋载荷退出）p95 中位轮阈值＝**exec pipes/PTY 30ms**（实测 ≈4–5ms）、**apply_patch/view_image 250ms**（实测并行负载 ≈118–130ms、独跑 ≈65–75ms；载荷为 debug 二进制副本，其进程启动占主导）；沙箱启动子进程峰值 RSS 上界＝**128 MiB**（实测 ≈13.5 MiB，RUSAGE_CHILDREN 跨面上界口径）。faces 分别计量且成功断言防空跑（快速失败样本不得充当性能基线）。
 
 ## 2. 哪些情况容易出错
 
@@ -253,9 +253,9 @@ env -u TCHAT_SANDBOX cargo test --locked --test proc_session --test exec_command
 
 - 本轮仅文档检查；P01–P17 全部保持待测。实际命令、工作目录、退出码及脱敏原始输出统一存 `docs/logs/031-request-permissions/`，入口为[核对与文档检查记录](../logs/031-request-permissions/2026-10-26-spec-research.md)。
 - 2026-10-29 实施轮：P01（分派拒绝）、P03/P04（参数与路径边界）、P05（拒绝→允许→执行链）、P06（含反例变体 A 闭合与运行期链接）、P08（覆盖/64 上限/拒绝不清旧授权）、P09（旧 shell 不升级）、P10（exec/apply_patch/view_image 面）、P11（到期回收）、P13（PID ns/部署前提）已有自动化证据（用例名与输出见[实施验证记录](../logs/031-request-permissions/2026-10-29-m1-m5-implementation.md)与[安全报告](../../docs/security/reports/2026-10-29-031-request-permissions-security.md)）；实测栏仍由验收人判定后回填，实现方不自行写「已通过」。P02（真实环境部署矩阵）、P07 typed 回执伪造的完整面、P12（SIGKILL 应用后的父死亡路径自动化）、P14（五协议全矩阵）、P15（/resume 恢复面）、P16 峰值 RSS 项未全部覆盖，保持待测。
-- 2026-10-29 第三轮补齐：P15（/resume 恢复面，e2e S142：历史结果 JSON 呈现路径/access/turn、恢复后同路径申请重新弹确认、旧 granted 不授权新执行、proof2 不产生——变异证据 covers()→true 时用例失败）与 P16 完整启动/峰值 RSS（faces 分别计量＋冻结阈值回归门禁，见 §1.8 与[完整启动样本](../logs/031-request-permissions/2026-10-29-p16-full-launch-rss-samples.txt)）已有自动化证据；P02 补沙箱后端部署前提启动检查（缺 bwrap/后端位于模型可写面→拒绝启用 031，§1.3），真实环境部署矩阵（内核不支持 userns、发行版差异、bwrap 版本矩阵）仍受单容器环境限制保持待测，未自行降级。审查 #15（read 嵌套于 write 之下被 ro-bind 遮蔽已批准写面）按 §1.4/§1.6 判定为规格内缺陷并修复：快照把 write 祖先之下的冗余 read 化简（read 授权单调累加、非只读 carve-out；收窄原语只有 deny），含真实 bwrap 回归与变异证据。实测栏仍由验收人判定。
+- 2026-10-29 第三轮补齐：P15（/resume 恢复面，e2e S142：历史结果 JSON 呈现路径/access/turn、恢复后同路径申请重新弹确认、旧 granted 不授权新执行、proof2 不产生——变异证据 covers()→true 时用例失败）与 P16 完整启动/峰值 RSS（faces 分别计量＋冻结阈值回归门禁，见 §1.8 与完整启动样本）已有自动化证据；P02 补沙箱后端部署前提启动检查（缺 bwrap/后端位于模型可写面→拒绝启用 031，§1.3），真实环境部署矩阵（内核不支持 userns、发行版差异、bwrap 版本矩阵）仍受单容器环境限制保持待测，未自行降级。审查 #15（read 嵌套于 write 之下被 ro-bind 遮蔽已批准写面）按 §1.4/§1.6 判定为规格内缺陷并修复：快照把 write 祖先之下的冗余 read 化简（read 授权单调累加、非只读 carve-out；收窄原语只有 deny），含真实 bwrap 回归与变异证据。实测栏仍由验收人判定。
 - 实施证据须含可信应用/bwrap/策略后端和实际宿主UID清单、假文件字节/别名探针与本地服务请求次数、PTY最终屏幕、进程树及权限到期后的反向探针、性能原样本。安全报告遵守安全代理保存规则并从本目录链接。
-- 2026-10-29 交付裁决：用户批准按[候选清单](../logs/031-request-permissions/2026-10-29-candidate-manifest.txt)交付。已确认验收范围＝P01、P03–P06、P08–P11、P13、P15、P16 及 P02 的运行时校验部分（环境矩阵除外）；保持待测＝P02 跨环境矩阵、P07 typed 回执伪造完整面、P12 SIGKILL 父死亡路径自动化、P14 五协议全矩阵（上文各轮记录不变）。验收结论覆盖的实际环境：WSL2 容器（内核 6.18.33.2）、Ubuntu bubblewrap 0.9.0-1ubuntu0.3、同宿主 UID 1000、userns 可用、debug 载荷口径（性能/RSS）。
+- 2026-10-29 交付裁决：用户批准按候选清单交付。已确认验收范围＝P01、P03–P06、P08–P11、P13、P15、P16 及 P02 的运行时校验部分（环境矩阵除外）；保持待测＝P02 跨环境矩阵、P07 typed 回执伪造完整面、P12 SIGKILL 父死亡路径自动化、P14 五协议全矩阵（上文各轮记录不变）。验收结论覆盖的实际环境：WSL2 容器（内核 6.18.33.2）、Ubuntu bubblewrap 0.9.0-1ubuntu0.3、同宿主 UID 1000、userns 可用、debug 载荷口径（性能/RSS）。
 - 完成条件：031动态后端、可信部署和同UID永久边界有证据，M0阈值冻结，P01–P17及规定门禁/全量验证完成且无本项阻塞问题，普通/默认033/031模式可运行材料齐全。实现方最多写「待验收」；管理员部署未完成或平台缺口必须保留，最终验收由验收人依据规格、证据和产物判定，不自行写「已通过」。
 
 ### 3.4 审查与门禁收口（2026-10-29 第二轮）

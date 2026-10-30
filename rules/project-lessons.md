@@ -104,7 +104,7 @@
 
 ## 9. 环境注意事项
 
-- last30days 调研覆盖核验（2026-10-28）：本机 3.31.0 的 quick 深度只执行第一个子查询、最多两个来源；参数列出更多来源不代表全部运行。先核实际 query plan/source outcomes，按需显式选源或补轮；403、空结果和无关命中分别记录，不能拼成社区共识。源码摘录、真实运行与日期资格见[倒序调研索引](../docs/think-tank/2026-10-28-plan-preresearch-index.md)及[quick 限制证据](../docs/logs/plan-preresearch/2026-10-28-035/quick-source-limit.txt)。
+- last30days 调研覆盖核验（2026-10-28）：本机 3.31.0 的 quick 深度只执行第一个子查询、最多两个来源；参数列出更多来源不代表全部运行。先核实际 query plan/source outcomes，按需显式选源或补轮；403、空结果和无关命中分别记录，不能拼成社区共识。源码摘录、真实运行与日期资格见[倒序调研索引](../docs/think-tank/2026-10-28-plan-preresearch-index.md)；quick 限制的原始输出报告留存于 `docs/logs/plan-preresearch/2026-10-28-035/engine-hn-github-raw-v3.md`。
 - 进入容器：宿主机项目根目录 `docker compose -f .devcontainer/compose.yaml exec -u dev -w /workspace dev bash`（原 AGENTS.md 第 7 节命令表「进入容器」行，精简时移出）。其余环境注意事项（CARGO_TARGET_DIR、clippy/rustfmt 安装）已在 AGENTS.md 第 7 节命令表，不重复。
 - Agent 初始化按实际运行工具确认用户级目录；Codex 可用 `skills/list` 的 `scope=user` 和新会话 `thread/start.instructionSources` 验证技能及双层规则，避免只凭目录示例或模型自述判断。当前容器的 shell 沙箱故障会阻止技能按需读取依赖；通过原生技能输入同时选择依赖可验证显式调用路径，但不能据此宣称单独调用已恢复。具体安装、上游文档差异与验证边界见 [Codex 初始化记录](../docs/records/2026-10-02-install-mattpocock-skills.md#2026-10-20codex-用户级初始化v29-个)。
 - Codex 原生插件验收补充（2026-10-28）：`skills/list` 与 `plugin/read` 分别核验独立技能和插件技能；CE 插件技能的实际名称带 `compound-engineering:` 前缀，不能用未加前缀的名称作断言，也不能仅凭独立技能列表判断插件缺失。本项目的知识沉淀继续遵循既有路径，不另加一套 CE 自动沉淀规则。安装方式、临时新会话的两层规则加载证据及来源限制见 [五步初始化记录](../docs/logs/agent-init/2026-10-28-initialize.md)。

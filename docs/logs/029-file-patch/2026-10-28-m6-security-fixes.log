@@ -1,8 +1,0 @@
-# 029 M6 安全修复 F-1/F-2 红绿证据
-# date: 2026-10-28T15:06:05+00:00
-# 报告：docs/security/reports/2026-10-28-029-apply-patch-move-security.md
-# cmd: env -u TCHAT_SANDBOX cargo test --locked --test apply_patch
-test move_rejects_procfs_pseudo_file_source ... ok
-test move_and_update_reject_lone_cr_line_limit_bypass ... ok
-test result: ok. 53 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
-exit=0

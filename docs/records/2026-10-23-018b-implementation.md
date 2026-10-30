@@ -42,7 +42,7 @@
 | 兼容性 | V1/A 序列化形状不变（全量 `session_cli`/`prompt_assembly` 通过）；阶段 A 用例原样通过 |
 | 额度 | `eighth_request_rejects…`（第 8 批不发布/不阻塞、request_limit 关闭、已到回答保存、无第 9 次）；32/33 沿用既有 N3 |
 | 能力与权限 | `tool_counts_and_forged_calls…`（7/5/4/3、伪造名执行层拒绝、MemoryMerge 强制无宿主）；安全门禁 §4 |
-| 回归有效性 | 六项可逆变异全部断言失败（101）检出并复绿：[018b-mutations.json](../testing/evidence/018b-mutations.json)（M3/M6 在审查修复改变锚点后重录，仍检出） |
+| 回归有效性 | 六项可逆变异全部断言失败（101）检出并复绿：018b-mutations.json（M3/M6 在审查修复改变锚点后重录，仍检出） |
 
 ## 4. 安全门禁（新增 3 项，合计 9/9 通过）
 
@@ -93,7 +93,7 @@
 
 以下记录已经发生的提交、合并、核验与清理：
 
-- 任务提交：`49060bf4992496179bd4d253655a25ebd50d8eac`，`feat: 018 异步问询最小接入（阶段 B）`；父提交为 `dc7a4f1747b9670ed048aa37f63f5a8ddefc3e23`，范围恰为 31 个核定文件（27 修改＋4 新增：`src/app/src/user_input_async.rs`、`src/app/tests/user_input_async.rs`、本记录、[变异证据](../testing/evidence/018b-mutations.json)）。统计核对轮后仅文档变化，源码/测试/依赖与最终验证候选逐字节一致（提交前 `cargo check --workspace --lib --bins --tests` 通过，沿用 §8 终验 3171/0/3，不重复全量）。
+- 任务提交：`49060bf4992496179bd4d253655a25ebd50d8eac`，`feat: 018 异步问询最小接入（阶段 B）`；父提交为 `dc7a4f1747b9670ed048aa37f63f5a8ddefc3e23`，范围恰为 31 个核定文件（27 修改＋4 新增：`src/app/src/user_input_async.rs`、`src/app/tests/user_input_async.rs`、本记录、变异证据）。统计核对轮后仅文档变化，源码/测试/依赖与最终验证候选逐字节一致（提交前 `cargo check --workspace --lib --bins --tests` 通过，沿用 §8 终验 3171/0/3，不重复全量）。
 - 暂存采用明确文件白名单逐文件 `git add`；暂存内容与工作树逐字节一致（无未暂存的已跟踪差异）、`git diff --cached --check` 通过；变异证据 JSON 补末尾换行后入提交；三份无关未跟踪记录未暂存。
 - 执行 `git switch main`、`git merge --ff-only feat/018-user-input-async`，**Fast-forward** 成功；合并完成时 `main` 与任务提交 SHA 均为 `49060bf4992496179bd4d253655a25ebd50d8eac`，树均为 `c56b47e272f90449484fa5789cceb941b8d9951b`。
 - 核验（均在删除分支前执行）：`git merge-base --is-ancestor 49060bf main` 通过；`git diff --exit-code 49060bf main` 退出 0（main 与批准候选树一致）；`git diff --check dc7a4f1 main` 通过；`git diff --name-only dc7a4f1 main` 恰 31 项与白名单一致；工作树无已跟踪差异；三份无关未跟踪记录保持未跟踪原样。

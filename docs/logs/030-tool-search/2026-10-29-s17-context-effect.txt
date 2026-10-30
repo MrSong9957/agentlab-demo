@@ -1,6 +1,0 @@
-TS30-S17 first_tools off=25966B on=5402B
-TS30-S17 final_request openai-chat off=47743B on=28393B
-TS30-S17 final_request openai-responses off=47853B on=28273B
-TS30-S17 final_request anthropic-messages off=44937B on=28317B
-TS30-S17 final_request google-interactions off=46494B on=28354B
-TS30-S17 final_request google-generate-content off=45616B on=28117B

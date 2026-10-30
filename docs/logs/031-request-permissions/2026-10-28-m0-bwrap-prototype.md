@@ -8,7 +8,7 @@
 - 复现：全部探针脚本与夹具生成器在 `/tmp/m0-031/bin/`（ephemeral；log 内 set -x 行即
   完整命令）。
 
-## 环境基线（2026-10-28T13:20Z 实测，[2026-10-28-m0-env.log](2026-10-28-m0-env.log)）
+## 环境基线（2026-10-28T13:20Z 实测，2026-10-28-m0-env.log）
 
 - 内核 `6.18.33.2-microsoft-standard-WSL2`（Ubuntu 24.04.5 容器，host b2f35f825d62）；
   宿主 UID `1000(dev)`；`TCHAT_SANDBOX=1`（compose 注入态在场）。
