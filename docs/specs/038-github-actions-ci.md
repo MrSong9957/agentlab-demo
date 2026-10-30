@@ -54,6 +54,9 @@
 3. **容器专属路径硬编码**（第 3 轮）：`exe_deployment` 测试以 `/workspace` 字面量作 temp root——改为按进程实际位置锚定。
 4. **测试依赖环境 TTY**（第 3 轮）：a7 直通检查经 `Terminal::with_options` 查询环境终端尺寸——测试移入 crate 内联（tui 测试既有模式）改用显式尺寸测试构造器。
 5. **机器口径冻结阈值**：031 的 P10/P16 无采样机制——按 032/034 同款约定补 `TCHAT_P31_PERF_SAMPLE`；CI 置 1 跳过断言、场景照跑。
-6. **未解决、单独上报**：GH 托管 ubuntu-24.04 runner 实测 031 seccomp 的 clone3→ENOSYS 拦截**未生效**（探针 clone3(NULL,0) 得 EINVAL＝无过滤器短路；EPERM 系断言全过不足以证明过滤器生效——userns 内天然 EPERM）。可能是新版 bwrap/kernel 组合行为差异或启动链存在静默跳过路径，需专项排查；CI 以 `TCHAT_SKIP_SECCOMP_ENFORCEMENT_PROBE=1` 显式跳过该探针，本地默认照跑。
+6. **未解决、单独上报（seccomp 生效性）**：GH 托管 ubuntu-24.04 runner 实测 031 seccomp 的 clone3→ENOSYS 拦截**未生效**（探针 clone3(NULL,0) 得 EINVAL＝无过滤器短路；EPERM 系断言全过不足以证明过滤器生效——userns 内天然 EPERM）。可能是新版内核/组合行为差异或启动链存在静默跳过路径，需专项排查；CI 以 `TCHAT_SKIP_SECCOMP_ENFORCEMENT_PROBE=1` 显式跳过该探针，本地默认照跑。
+7. **未解决、单独上报（runner 沙箱行为族）**：同版本 bubblewrap（0.9.0）＋同发行版（ubuntu 24.04）下，runner 仍与本地容器行为不同——①assignment 回收后含 marker 的沙箱进程树存活超 15s poll（c13）；②close() 组杀后孙进程链存活超 15s poll（e_reaping）；③沙箱内 python3 MCP 服务器超时未应答工具发现（b2_mcp tools=0）。差异在内核（WSL2 6.18 vs runner 6.14）或运行环境嵌套层，需宿主侧专项排查；CI 以 `TCHAT_SKIP_RUNNER_TIMING_PROBES=1` 显式跳过该族，本地默认照跑。
+8. **测试时序前提缺陷（待重设计）**：sec7 洪泛用例的前提是第 2 批到达时第 1 批尚未交付完（容量语义为「未交付」上限）——runner 交付节奏不同即前提失效（34 条全受理），非容量契约失效；需按确定性到达重设计，CI 同样以 `TCHAT_SKIP_RUNNER_TIMING_PROBES=1` 跳过。
+9. **Windows 为产品级移植项（超出 CI 配置范畴）**：lib 的 POSIX 进程语义层（killpg 组杀/pid_t/进程组整批回收/pre_exec——016 组杀契约含孙进程回收依赖进程组）无 Windows 等价实现，62 处编译缺口（第 4 轮实证）；Windows 任务标 `continue-on-error`（可见、不阻塞 Linux/macOS 信号），移植属产品级后续工作。
 
 证据存 `docs/logs/038-github-actions-ci/`；三端实跑结论引用 Actions 运行记录。
