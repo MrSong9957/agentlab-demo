@@ -77,6 +77,9 @@ fn exec_probe(spec: &Value) -> Value {
     }
     let mut fd = Value::Null;
     let mut input = spec["input"].clone();
+    // 038：假凭据 fd 注入为 unix 设施探针（fcntl CLOEXEC 语义），Windows
+    // 不执行（fd_path 场景仅由 unix 门控的探针使用）。
+    #[cfg(unix)]
     if let Some(path) = spec["fd_path"].as_str() {
         use std::os::fd::AsRawFd;
         let f = fs::File::open(path).expect("打开假凭据 fd");
@@ -90,6 +93,8 @@ fn exec_probe(spec: &Value) -> Value {
         }
         fd = json!(n);
     }
+    #[cfg(windows)]
+    let _ = &mut input;
     let marker = spec["scan_marker"].as_str().unwrap_or("");
     let mgr = ProcessManager::new();
     let result = match ExecArgs::from_value(&input) {
@@ -131,6 +136,8 @@ fn apply_patch_probe(spec: &Value) -> Value {
 /// launcher 角色无 CLOEXEC 假凭据 fd（B2 的 MCP 面专项）。
 fn mcp_probe(spec: &Value) -> Value {
     // B2：launcher 角色 fd——清除 CLOEXEC 并跨 spawn 保持（子进程退出即关闭）。
+    // 038：unix 设施探针（fcntl 语义），Windows 不执行。
+    #[cfg(unix)]
     if let Some(path) = spec["fd_path"].as_str() {
         use std::os::fd::AsRawFd;
         let f = fs::File::open(path).expect("打开假凭据 fd");
