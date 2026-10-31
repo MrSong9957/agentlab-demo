@@ -686,9 +686,13 @@ pub struct SandboxLaunch {
 
 /// seccomp 过滤器的 memfd 守卫：非 CLOEXEC（须穿越 execve 交给 bwrap），
 /// Drop 关闭。spawn 后（Command::spawn 返回即可）即可 drop。
+/// unix：包装 RawFd；Windows：031 不可用（build_seccomp_fd 恒 Err），
+/// 空壳仅为 SandboxLaunch 字段类型的三端一致。
+#[cfg(unix)]
 #[derive(Debug)]
 pub struct SeccompFd(std::os::fd::RawFd);
 
+#[cfg(unix)]
 impl SeccompFd {
     pub fn raw(&self) -> std::os::fd::RawFd {
         self.0
@@ -701,6 +705,17 @@ impl Drop for SeccompFd {
         unsafe {
             libc::close(self.0);
         }
+    }
+}
+
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct SeccompFd;
+
+#[cfg(windows)]
+impl SeccompFd {
+    pub fn raw(&self) -> i32 {
+        unreachable!("031 seccomp 仅 unix（build_seccomp_fd 恒 Err，本壳不构造）")
     }
 }
 
@@ -1321,12 +1336,15 @@ pub fn verify_child_pid_namespace(child_pid: u32) -> std::io::Result<()> {
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    // 隔离未建立：整组终止＋回收，再报错。
-    let pid = child_pid as libc::pid_t;
-    unsafe {
-        libc::killpg(pid, libc::SIGKILL);
-        let mut status = 0;
-        libc::waitpid(pid, &mut status, 0);
+    #[cfg(unix)]
+    {
+        // 隔离未建立：整组终止＋回收，再报错。
+        let pid = child_pid as libc::pid_t;
+        unsafe {
+            libc::killpg(pid, libc::SIGKILL);
+            let mut status = 0;
+            libc::waitpid(pid, &mut status, 0);
+        }
     }
     Err(std::io::Error::other(format!(
         "031 沙箱子进程 {child_pid} 的载荷不在独立 PID 命名空间：隔离创建失败，\

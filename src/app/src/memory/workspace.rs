@@ -31,6 +31,7 @@
 //! `rev-list --count`＝1 测试固化），不将 amend 泛称为任意仓库重建的等价
 //! 实现（上游 reset 为破坏性删除 `.git` 重建，语义差异见 013 §3 G8 行）。
 
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -189,7 +190,12 @@ fn run_git_env(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // 独立进程组：超时/取消终止整个进程组（003 同款；unix only 与项目一致）
+    // 独立进程组：超时/取消终止整个进程组（003 同款）。Windows：std 1.87 起
+    // process_group 同样可用（CREATE_NEW_PROCESS_GROUP）——终止经 kill_process_group
+    // 的平台实现；进程组语义两端等价。
+    // 038：std 的 process_group 为 unix-only API——Windows 直接终止子进程
+    //（git 链路无树派生，见 kill_process_group 平台注释）。
+    #[cfg(unix)]
     command.process_group(0);
 
     let timeout_ms = effective_timeout_ms();
@@ -245,6 +251,13 @@ fn kill_process_group(child: &mut Child) {
     unsafe {
         libc::killpg(pgid, libc::SIGKILL);
     }
+}
+
+/// Windows 版：git 子进程无嵌套派生（reset/amend 均单进程），直接终止；
+/// 若未来引入树派生，需迁移至 Job 对象（与 proc_session 同机制）。
+#[cfg(windows)]
+fn kill_process_group(child: &mut Child) {
+    let _ = child.kill();
 }
 
 /// 管道读取线程句柄：完成信号通道供收尾宽限判定（003 同构）。
@@ -855,6 +868,7 @@ mod tests {
     /// ②**进程组清理**——直接子进程（sh）与其后代（sleep）经 SIGKILL 组杀
     ///   全部终止（/proc 实证消失，轮询 ≤5s）；
     /// ③**失败契约**——Err 上抛（不伪报成功）、基线未建立（`.git` 不存在，
+    #[cfg(unix)] // 038：POSIX 权限/符号链接语义用例（Windows 无等价设施），见 specs/038 §5
     ///   无成功副作用）。
     #[test]
     fn git_timeout_kills_process_group_with_descendants() {
@@ -948,6 +962,7 @@ mod tests {
 
     /// 027 B⑤：私有仓库钩子一律不执行（E6 证实固定 argv 不防已植入钩子）。
     /// 假 pre-commit 仅 `touch` 标记文件（无副作用面）；断言提交成功且标记
+    #[cfg(unix)] // 038：POSIX 权限/符号链接语义用例（Windows 无等价设施），见 specs/038 §5
     /// 不出现＝hooksPath 覆盖生效，钩子（及其宿主）未被信任。
     #[test]
     fn commit_does_not_execute_planted_hooks() {

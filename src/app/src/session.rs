@@ -787,6 +787,7 @@ enum LockOutcome {
 
 /// 对数据文件本身的 `flock(LOCK_EX|LOCK_NB)`：进程退出/崩溃自动释放，
 /// 无需母本的锁文件与协调锁清理。
+#[cfg(unix)]
 fn try_flock(file: &File) -> LockOutcome {
     let r = unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(file), libc::LOCK_EX | libc::LOCK_NB) };
     if r == 0 {
@@ -797,6 +798,36 @@ fn try_flock(file: &File) -> LockOutcome {
         // Linux 上 EWOULDBLOCK 与 EAGAIN 同值；两条都列以覆盖值不同的平台
         Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN => LockOutcome::Busy,
         _ => LockOutcome::Failed(err.to_string()),
+    }
+}
+
+/// Windows 版：LockFileEx 独占＋立即失败（flock 语义对应物——句柄关闭即
+/// 释放，无需协调清理；占用＝ERROR_LOCK_VIOLATION）。
+#[cfg(windows)]
+fn try_flock(file: &File) -> LockOutcome {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+    };
+    let mut ov: windows_sys::Win32::System::IO::OVERLAPPED = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        LockFileEx(
+            file.as_raw_handle() as _,
+            (LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY) as u32,
+            0,
+            1,
+            0,
+            &mut ov,
+        )
+    };
+    if ok != 0 {
+        LockOutcome::Acquired
+    } else {
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(33) => LockOutcome::Busy, // ERROR_LOCK_VIOLATION
+            _ => LockOutcome::Failed(err.to_string()),
+        }
     }
 }
 
@@ -1693,18 +1724,21 @@ mod tests {
     /// 触发"检查点写失败→截回失败→停用＋明确报错"。验证：失败回执（不 Ok）、
     /// 停用后普通追加不再尝试、检查点未提交（游标不越界）。
     #[test]
+    // 038：夹具已跨平台化（只读句柄失败注入），三端执行。
     fn checkpoint_write_failure_reports_and_disables_via_real_device() {
         let dir = temp_dir("cpdev");
-        let dev = std::fs::OpenOptions::new()
-            .append(true)
-            .read(true)
-            .open("/dev/full")
-            .expect("本测试需要 /dev/full（Linux 标准字符设备）");
+        // 038：跨平台失败注入——原 /dev/full 为 Linux 字符设备（macOS 无对应物）。
+        // 等价夹具＝Writing 态持只读句柄：产品写路径经同一真实 fd 写入失败
+        // （unix EBADF／Windows ERROR_ACCESS_DENIED），截回同步失败，停用路径
+        // 与设备版一致；断言原文不变。名字保留 device 以对齐原验收记录。
+        let ro_source = dir.join("ro-fixture.bin");
+        std::fs::write(&ro_source, b"").unwrap();
+        let dev = std::fs::File::open(&ro_source).expect("只读夹具句柄");
         let mut session = Session {
             version: 3,
             native_seen: 0,
             dir: dir.clone(),
-            state: State::Writing { _path: PathBuf::from("/dev/full"), file: dev },
+            state: State::Writing { _path: ro_source, file: dev },
             persisted_upto: 1,
             durable_len: 64,
             error_reported: false,
@@ -1762,19 +1796,19 @@ mod tests {
     /// 非状态预设或替身）。验证：明确报错、停用后不再尝试追加、内存对话
     /// 继续、停用留下的半行残档可被装载器按坏行处理。
     #[test]
+    // 038：夹具已跨平台化（只读句柄失败注入），三端执行。
     fn truncate_failure_disables_autosave_via_real_device() {
         let dir = temp_dir("dev");
-        // Writing 态指向 /dev/full：前两条视为已提交（游标＝2）
-        let dev = std::fs::OpenOptions::new()
-            .append(true)
-            .read(true)
-            .open("/dev/full")
-            .expect("本测试需要 /dev/full（Linux 标准字符设备）");
+        // 038：跨平台失败注入（同 checkpoint 版注释）——只读句柄替代 /dev/full：
+        // 写入 EBADF → 截回 EBADF → 停用＋明确报错，路径与设备版一致。
+        let ro_source = dir.join("ro-fixture.bin");
+        std::fs::write(&ro_source, b"").unwrap();
+        let dev = std::fs::File::open(&ro_source).expect("只读夹具句柄");
         let mut session = Session {
             version: 1,
             native_seen: 0,
             dir: dir.clone(),
-            state: State::Writing { _path: PathBuf::from("/dev/full"), file: dev },
+            state: State::Writing { _path: ro_source, file: dev },
             persisted_upto: 2,
             durable_len: 1234,
             error_reported: false,

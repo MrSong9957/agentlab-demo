@@ -12,6 +12,8 @@
 //! 只读区写入拒绝）；D 哨兵 env 白名单、HOME/PATH、沙箱外哨兵进程的
 //! environ/cwd/root/信号面；G 网络边界（本地监听器实测，按实际策略记录）。
 //! 全程假凭据（唯一标记），不触真实 .env 正文；只对本轮创建的进程发信号。
+#![cfg(unix)]
+// 038-CI：本文件依赖 POSIX 语义（PTY/Unix fd/文件权限位），Windows 不编译；
 
 mod common;
 
@@ -463,6 +465,8 @@ echo "DEL_GONE=$( [ ! -e del-target.txt ] && echo yes || echo no )""#,
 /// CLOEXEC)` 把继承 fd ≥3 标记为 execve 时关闭——`/proc/self/fd/N` 不再可读
 /// （且 `PID=1` 链路证据仍在＝工具确实经 bwrap 执行）；普通对照分支保持可读
 /// （普通模式行为零变化）。
+#[cfg(target_os = "linux")]
+// 038-CI：本用例要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn b2_real_cli_fd_chain_full_path() {
     for sandbox in [true, false] {

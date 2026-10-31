@@ -11,6 +11,8 @@
 //! 环境口径：双分支读取 ambient `TCHAT_SANDBOX`（不 set/remove，部署注入态与
 //! env -u 全量同一套用例）；用例集需在两种口径下各跑一遍。全部真实 CLI/TUI＋
 //! 本地 mock；假凭据；收尾清理本轮创建的进程与目录。
+#![cfg(unix)]
+// 038-CI：本文件依赖 POSIX 语义（PTY/Unix fd/文件权限位），Windows 不编译；
 
 mod common;
 

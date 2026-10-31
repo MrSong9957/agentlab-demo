@@ -2109,17 +2109,27 @@ fn c13_bwrap_child_mode() {
             _ => None,
         })
         .unwrap_or_default();
-    // 残留扫描：按唯一 argv 串扫 /proc（宿主侧；033 教训——不用沙箱内 PID）
-    let mut leftover = false;
-    if let Ok(procs) = std::fs::read_dir("/proc") {
-        for p in procs.flatten() {
-            if let Ok(cmd) = std::fs::read_to_string(p.path().join("cmdline")) {
-                if cmd.contains("c13-NEVER-TOUCHED") {
-                    leftover = true;
+    // 残留扫描：按唯一 argv 串扫 /proc（宿主侧；033 教训——不用沙箱内 PID）。
+    // 038-CI：回收→进程消亡在慢 CI 上超过单次扫描窗口——按项目时序约定改
+    // poll＋截止，15s 仍有残留则按原断言失败（回收未生效）。
+    let leftover_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let leftover = loop {
+        let mut found = false;
+        if let Ok(procs) = std::fs::read_dir("/proc") {
+            for p in procs.flatten() {
+                if let Ok(cmd) = std::fs::read_to_string(p.path().join("cmdline")) {
+                    if cmd.contains("c13-NEVER-TOUCHED") {
+                        found = true;
+                        break;
+                    }
                 }
             }
         }
-    }
+        if !found || std::time::Instant::now() >= leftover_deadline {
+            break found;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
     let marker_pid = std::fs::read_to_string(&marker)
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
@@ -2138,6 +2148,11 @@ fn c13_bwrap_child_mode() {
 /// 输出 skip 原因跳过。
 #[test]
 fn c13_bwrap_owner_reap_matrix() {
+    // 038 恢复真实检查（2026-10-31）：本地含 bwrap 0.11.1（runner 同版本）均通过。
+    // GH runner 实测的进程树回收差异（回收后 marker 进程存活超 poll 窗口）根因
+    // 待 runner 侧 strace 诊断（见 docs/logs/038-github-actions-ci/
+    // 2026-10-31-runner-diagnosis-plan.md）；该用例不再提前 return——runner 上
+    // 若复现即如实失败，为诊断提供信号。
     if !terminal_chat::sandbox::probe_available() {
         eprintln!(
             "skip：当前环境无可用 bwrap（probe_available=false），C13 沙箱矩阵不运行；\

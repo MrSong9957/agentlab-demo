@@ -1,6 +1,8 @@
 //! 033：MCP stdio 沙箱模式。**独立测试文件＝独立测试进程**：TCHAT_SANDBOX 是
 //! 进程级环境变量，沙箱用例与 mcp_stdio.rs 的普通模式用例必须分进程运行
 //!（同进程并发读 env 的污染由进程边界消除）。全程 canary 假值，不触真实凭据。
+#![cfg(unix)]
+// 038-CI：本文件依赖 POSIX 语义（fd 继承/pre_exec），Windows 不编译；沙箱用例自带可用性分支（无 bwrap＝显式失败断言），macOS 照常运行。
 
 mod common;
 

@@ -386,6 +386,9 @@ fn ask_cli(
         }
         // Rustyline 18 的 unsupported TERM 路径使用 Stdin::read_line，遇 SIGINT
         // 会继续阻塞。仅在这个退化路径复用同一主线程的可取消行读取。
+        // 038：dumb 终端退化路径依赖 fcntl 非阻塞行读（unix）；Windows 的
+        // rustyline 原生走控制台 API，无需退化路径。
+        #[cfg(unix)]
         if std::env::var("TERM")
             .is_ok_and(|term| matches!(term.to_ascii_lowercase().as_str(), "dumb" | "cons25" | "emacs"))
         {
@@ -470,6 +473,9 @@ fn ask_cli(
 
 /// 不支持行编辑的终端仍使用内核行规程（回显/退格）；主线程 poll 后非阻塞读取。
 /// O_NONBLOCK 防止 poll 就绪后恰逢 Ctrl+C 清空输入造成再次阻塞；退出恢复原标志。
+/// 038：内核行规程依赖 fcntl/O_NONBLOCK（unix API）——Windows 的控制台
+/// 输入经由 ConPTY/控制台 API，非阻塞标志不可用，该路径标记 unix。
+#[cfg(unix)]
 fn read_question_line(prompt: &str) -> Result<String, terminal_chat::user_input::InputError> {
     use terminal_chat::user_input::InputError;
     struct RestoreFlags(libc::c_int);

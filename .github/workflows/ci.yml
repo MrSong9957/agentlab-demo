@@ -1,0 +1,82 @@
+# 038：三平台 CI——复用仓库既有全量验证入口（AGENTS.md §8「全量验证」）：
+#   cargo check && cargo test --workspace --no-fail-fast
+# 按 §6 可复现性规则补 --locked（锁定 Cargo.lock，不改测试集合）。
+# 平台差异处理：
+#   - Linux 安装 bubblewrap，沙箱族测试（031/033）可真实执行；
+#   - Windows/macOS 无 bubblewrap（Linux 专属技术）、PTY 测试经 posix_openpt 实现
+#     （POSIX 语义），相关用例在源码以 cfg 门控排除——排除清单与原因见
+#     docs/specs/038-github-actions-ci.md；除门控外不删减、不改写任何测试。
+name: CI
+
+# 触发去重（同一验证目标只跑一次）：push 仅主分支（分支上的推送由该分支的
+# PR synchronize 事件覆盖，避免 push＋PR 双跑）；PR 与手动触发各自生效。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: cargo test (${{ matrix.os }})
+    strategy:
+      # 一端失败不取消其余平台，保证三端结果完整可见。
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    # 上限防挂起运行：macOS 冷缓存构建＋全量实测约 95 分钟（第 7 轮 90 分钟被截断），放宽到 150。
+    timeout-minutes: 150
+    # Windows/macOS：均为产品级移植项，非 CI 配置问题——
+    #   Windows：lib 的 POSIX 进程语义层（killpg 组杀/pid_t/进程组整批回收/
+    #   pre_exec）无 Windows 等价实现（016 组杀契约依赖进程组），62 处编译缺口
+    #   （第 4 轮实证），需 Job Objects 级重设计；
+    #   macOS：可编译且大部分通过，但 /proc/self/fd 写回（internal-apply）、
+    #   AGENTS.md 链发现、符号链接竞态语义、e2e PTY 卡死为产品级缺口
+    #   （第 8 轮实证，45 处失败＋1 处卡死）。
+    # 标记 continue-on-error：结果可见、不阻塞 ubuntu 信号；移植属产品级后续
+    # 工作（见 docs/specs/038-github-actions-ci.md §5）。
+    continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
+    env:
+      # 采样开关＝项目既有机器口径机制（032/034 原生、031 按同款约定补齐）：
+      # CI 托管机器不可重新冻结，按模块设计跳过冻结阈值断言、场景照跑；
+      # 各预算的实际通过环境记录于 docs/specs/038-github-actions-ci.md §8。
+      JS34_PERF_SAMPLE: "1"
+      TCHAT_CM32_PERF_SAMPLE: "1"
+      TCHAT_P31_PERF_SAMPLE: "1"
+      # runner 磁盘 14GB：debug 产物含全量 debuginfo 本地实测 26GB，链接期
+      # SIGBUS（首轮 ubuntu 实证）——CI 去 debuginfo（panic 位置信息来自宏，
+      # 不受影响）并关闭增量缓存（rust-cache 官方建议）。
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      # Windows 检出保持 LF（仓库 .gitattributes 为 * text=auto；runner 默认
+      # autocrlf 行为不作依赖），避免行结尾差异污染文本断言。
+      - name: Windows 检出行结尾归一（LF）
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # 沙箱探测按 PATH 查找 bwrap 并真实干跑（sandbox::probe_bwrap）；GitHub
+      # 托管 Ubuntu 镜像未预装二者——bubblewrap 覆盖沙箱族测试，ripgrep 为
+      # 记忆检索（013-M6）的生产依赖，缺失时 memory_inject/memory_lifecycle
+      # 的 M6 验收按设计失败。
+      - name: 安装 bubblewrap 与 ripgrep（Linux）
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap ripgrep
+      # macOS 镜像可能自带 ripgrep，显式安装保证确定性（已装则秒回）。
+      - name: 安装 ripgrep（macOS）
+        if: runner.os == 'macOS'
+        run: brew install ripgrep
+      - name: 安装 ripgrep（Windows）
+        if: runner.os == 'Windows'
+        run: choco install ripgrep -y --no-progress
+      - name: cargo check
+        run: cargo check --locked
+      - name: cargo test（全量：单元＋集成＋回归＋E2E）
+        run: cargo test --workspace --no-fail-fast --locked

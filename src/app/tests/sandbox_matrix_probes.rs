@@ -77,6 +77,9 @@ fn exec_probe(spec: &Value) -> Value {
     }
     let mut fd = Value::Null;
     let mut input = spec["input"].clone();
+    // 038：假凭据 fd 注入为 unix 设施探针（fcntl CLOEXEC 语义），Windows
+    // 不执行（fd_path 场景仅由 unix 门控的探针使用）。
+    #[cfg(unix)]
     if let Some(path) = spec["fd_path"].as_str() {
         use std::os::fd::AsRawFd;
         let f = fs::File::open(path).expect("打开假凭据 fd");
@@ -90,6 +93,8 @@ fn exec_probe(spec: &Value) -> Value {
         }
         fd = json!(n);
     }
+    #[cfg(windows)]
+    let _ = &mut input;
     let marker = spec["scan_marker"].as_str().unwrap_or("");
     let mgr = ProcessManager::new();
     let result = match ExecArgs::from_value(&input) {
@@ -97,10 +102,23 @@ fn exec_probe(spec: &Value) -> Value {
         Err(msg) => ExecResult::error(msg),
     };
     std::thread::sleep(Duration::from_millis(600)); // 终止/回收异步落定
-    let before = scan_marker(marker);
+    // 038-CI：组杀→进程消亡在慢 CI 上超过固定等待——按项目时序约定改 poll＋
+    // 截止（取消场景期望进程仍在运行，不适用 poll-until-empty）。
+    let mut before = scan_marker(marker);
+    if spec["cancel_after_ms"].is_null() {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !before.is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
+            before = scan_marker(marker);
+        }
+    }
     mgr.close();
-    std::thread::sleep(Duration::from_millis(200));
-    let after = scan_marker(marker);
+    let mut after = scan_marker(marker);
+    let after_deadline = Instant::now() + Duration::from_secs(15);
+    while !after.is_empty() && Instant::now() < after_deadline {
+        std::thread::sleep(Duration::from_millis(200));
+        after = scan_marker(marker);
+    }
     json!({"result": result, "before_close": before, "after_close": after, "fd": fd})
 }
 
@@ -118,6 +136,8 @@ fn apply_patch_probe(spec: &Value) -> Value {
 /// launcher 角色无 CLOEXEC 假凭据 fd（B2 的 MCP 面专项）。
 fn mcp_probe(spec: &Value) -> Value {
     // B2：launcher 角色 fd——清除 CLOEXEC 并跨 spawn 保持（子进程退出即关闭）。
+    // 038：unix 设施探针（fcntl 语义），Windows 不执行。
+    #[cfg(unix)]
     if let Some(path) = spec["fd_path"].as_str() {
         use std::os::fd::AsRawFd;
         let f = fs::File::open(path).expect("打开假凭据 fd");
@@ -196,6 +216,8 @@ fn sandbox_env(work: &Path) -> Box<dyn FnOnce(&mut Command) + '_> {
 /// （外部先证可读）；mcp.json 显式 env 保留；HOME＝锚定根、TERM 传递、污染 env
 /// 不进入（env_clear）；载荷＝新 PID ns 的 pid 1。普通模式对照：.env 可读、
 /// HOME＝主进程值、pid≠1——差异证明来自沙箱。
+#[cfg(target_os = "linux")]
+// 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn c_mcp_face_masks_env_and_keeps_explicit_env() {
     for sandbox in [true, false] {
@@ -333,6 +355,8 @@ fn c_apply_patch_face_cannot_touch_env() {
 ///（错误指向硬链接）、无执行副作用、不回退普通模式；单链接控制组照常运行且
 /// 遮蔽有效。只处理检查时已存在的硬链接——检查到挂载之间及运行期的并发变化
 /// 仍是边界（如实声明，见 B1/B2 核实记录）。
+#[cfg(target_os = "linux")]
+// 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn b1_hardlinked_deny_refused_on_all_three_faces() {
     // ── 多链接：三面拒绝 ──
@@ -431,6 +455,8 @@ fn b1_hardlinked_deny_refused_on_all_three_faces() {
 /// 夹具未变。真实 CLI 固定策略下该夹具先命中可写符号链接 fail-closed 分支
 ///（错误含 "writable symlink"）；元数据错误三分类的单元证据见 sandbox::tests
 ///（ELOOP rootless／父目录 EACCES 两个稳定夹具＋ENOTDIR 控制组）。
+#[cfg(target_os = "linux")]
+// 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn b1_unverifiable_deny_target_refused_before_launch() {
     let work = TempDir::new("033b1-loop");
@@ -469,6 +495,8 @@ fn b1_unverifiable_deny_target_refused_before_launch() {
 /// `close_range(CLOSE_RANGE_CLOEXEC)` 于 execve 时关闭（`/proc/self/fd/N`
 /// 不再可读）；普通对照分支继承行为不变（零变化承诺）。动态 fd 编号（避免与
 /// 并发用例的 PTY/套接字 fd 互踩）。
+#[cfg(target_os = "linux")]
+// 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn d_fd_inheritance_sandbox_closed_normal_unchanged() {
     for sandbox in [true, false] {
@@ -516,6 +544,9 @@ fn d_fd_inheritance_sandbox_closed_normal_unchanged() {
 ///     spawn 失败信道（Linux 为 SOCK_SEQPACKET socketpair，fd≥3、自带
 ///     CLOEXEC）不被破坏；若误用真 close，execve 失败会被误报为 spawn 成功
 ///     （子进程静默 exit 1）——本探针即该风险的回归防线。
+// 038-CI：直接调用 libc::close_range（Linux 专属 syscall，apple libc 无绑定）
+// ——macOS/Windows 不编译，排除原因见 docs/specs/038-github-actions-ci.md。
+#[cfg(target_os = "linux")]
 #[test]
 fn b2_fix_feasibility_preexec_close_fds_keeps_stdio() {
     use std::os::unix::process::CommandExt;
@@ -641,8 +672,14 @@ fn b2_fix_feasibility_preexec_close_fds_keeps_stdio() {
 ///（零变化）。exec 面由 d_fd/b2_real 覆盖（管道＋真实 CLI 全链路）；PTY 与
 /// exec 共用 build_tool_command 注入位；apply_patch 面共用同一助手，其子进程
 ///（--internal-apply）无 fd 观测面，由共用机制＋代码审查覆盖（记录注明）。
+#[cfg(target_os = "linux")]
+// 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn b2_mcp_face_fd_closed() {
+    // 038 恢复真实检查（2026-10-31）：本地含 bwrap 0.11.1（runner 同版本）均通过。
+    // GH runner 实测的沙箱内 MCP 服务器未应答差异（tools=0）根因待 runner 侧
+    // 诊断（见 docs/logs/038-github-actions-ci/2026-10-31-runner-diagnosis-plan.md）；
+    // 该用例不再提前 return——runner 上若复现即如实失败，为诊断提供信号。
     for sandbox in [true, false] {
         let work = TempDir::new("033b2m-work");
         let user = TempDir::new("033b2m-user");
@@ -712,8 +749,15 @@ fn b2_mcp_face_fd_closed() {
 /// E：四组合（管道/PTY × 取消/超时）各重复 3 次＋正常完成两型＋纯短命令两型。
 /// 回收证据＝双侧扫描（子进程 close 前后＋父进程在子进程退出后）皆无 marker
 /// 进程；沙箱下正常完成的后台子/孙进程随 PID ns 回收（pid 1 退出→内核 SIGKILL）。
+#[cfg(target_os = "linux")]
+// 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn e_reaping_cancel_timeout_completion_pipe_and_pty() {
+    // 038 恢复真实检查（2026-10-31）：本地含 bwrap 0.11.1（runner 同版本）均通过。
+    // GH runner 实测的组杀后孙进程存活差异（close 后 3 进程超 15s poll）根因待
+    // runner 侧诊断（见 docs/logs/038-github-actions-ci/
+    // 2026-10-31-runner-diagnosis-plan.md）；该用例不再提前 return——runner 上
+    // 若复现即如实失败，为诊断提供信号。
     let mk_cmd = |tag: &str, fg: &str| {
         // 两个后台子进程（其一再派生孙进程）＋前台长命令；marker 进各进程 cmdline。
         format!("sh -c 'sleep 299' {t} & sh -c 'exec sh -c \"sleep 299\" {t}' {t} & {fg}", t = tag)
@@ -828,6 +872,8 @@ fn e_reaping_cancel_timeout_completion_pipe_and_pty() {
 
 /// 建造假 bwrap 目录：mode 0644＝不可执行文件；0755＋exit 1＝探测干跑失败；
 /// 0755＋仅探测参数通过＝探测成功但真实启动失败。
+// 038：假 bwrap 构造依赖 unix 权限位（chmod 语义）与 bwrap 探针——unix 门控。
+#[cfg(unix)]
 fn fake_bwrap_dir(kind: &str) -> TempDir {
     use std::os::unix::fs::PermissionsExt;
     let dir = TempDir::new(&format!("033f-{kind}"));
@@ -848,6 +894,7 @@ fn fake_bwrap_dir(kind: &str) -> TempDir {
 
 /// F：四场景 × 三工具面——沙箱启用时必须显式失败，执行标记不得出现，绝不静默
 /// 回退为无沙箱执行。全程不触碰 /usr/bin/bwrap（仅隔离子进程 PATH 替换）。
+#[cfg(unix)] // 038：F 探针依赖 fake_bwrap（unix 权限位＋bwrap 语义）
 #[test]
 fn f_fail_closed_without_fallback() {
     let scenarios: [(&str, &str); 4] = [

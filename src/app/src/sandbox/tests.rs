@@ -103,18 +103,30 @@ fn wsl_interop_mask_follows_dir_presence_flag() {
 /// T1b 生产策略（policy_for）包含 temp 可写根（对齐 Claude Code 默认写面），
 /// 且可写根按深度排序——宽根（/tmp）先 bind、深根（工作区）后 bind 重开。
 #[test]
+// 038：纯快照构造（不依赖 bwrap//proc），三端执行。macOS 上 temp_dir
+// （/var/folders/…）经产品侧 canonicalize 落在 /private/var/…——断言对齐
+// 产品自身的规范化（见 sandbox.rs policy_for 的可写根构造注释）。
 fn policy_for_includes_temp_writable_root() {
     let ws = tmp_ws("policy-temp");
     let policy = policy_for(&ws);
+    let temp_canon =
+        std::env::temp_dir().canonicalize().unwrap_or_else(|_| std::env::temp_dir());
     assert!(
-        policy.writable_roots.iter().any(|p| p == &std::env::temp_dir()),
+        policy.writable_roots.iter().any(|p| p == &temp_canon),
         "temp 目录应在可写根内"
     );
     let args =
         create_bwrap_command_args(vec!["sh".into()], &policy, &ws, false).unwrap();
-    let tmp_bind = args
-        .windows(3)
-        .any(|w| w == ["--bind", "/tmp", "/tmp"]);
+    // 038：产品侧对可写根做 canonicalize（macOS temp_dir 落在 /var→/private/var
+    // 符号链接后）——断言用同源规范化后的 temp 路径比较。
+    let temp_canon =
+        std::env::temp_dir().canonicalize().unwrap_or_else(|_| std::env::temp_dir());
+    let tmp_expected = [
+        "--bind".to_string(),
+        temp_canon.to_string_lossy().into_owned(),
+        temp_canon.to_string_lossy().into_owned(),
+    ];
+    let tmp_bind = args.windows(3).any(|w| w == tmp_expected);
     assert!(tmp_bind, "argv 应包含 temp 可写根 bind：{args:?}");
     fs::remove_dir_all(&ws).ok();
 }
@@ -389,6 +401,7 @@ fn deny_target_metadata_error_fails_closed() {
 /// B1 收口：deny 目标父目录不可穿越（权限 000，EACCES）＝同样显式拒绝。
 /// 符号链接遍历遇 lstat 错误按上游语义 break 跳过（不构成拦截），非 NotFound
 /// 分类必须由 metadata 检查兜底。夹具目录在工作区之外，锚定根不受影响；
+    #[cfg(unix)] // 038：POSIX 权限/符号链接语义用例（Windows 无等价设施），见 specs/038 §5
 /// 断言后先恢复权限再清理（否则自身 remove_dir_all 也失败）。
 #[test]
 fn deny_target_parent_permission_error_fails_closed() {
@@ -661,6 +674,8 @@ fn deny_traversal_budget_timeout_refuses() {
 ///（不能仅靠 st_dev 变化检测）。以本进程真实 /proc/self/mountinfo 验证：
 /// 任一路径至少映射出自身（identity 投影）。
 #[test]
+#[cfg(target_os = "linux")]
+// 038-CI：依赖 bwrap//proc/mountinfo（Linux 专属），见 docs/specs/038 §5。
 fn deny_aliases_identity_projection() {
     let mounts = parse_mountinfo();
     assert!(!mounts.is_empty(), "mountinfo 应可解析");
@@ -679,6 +694,8 @@ fn mountinfo_unescapes_octal() {
 
 /// dev 分解与 mountinfo 第 3 列同构（真实根路径上验证）。
 #[test]
+#[cfg(target_os = "linux")]
+// 038-CI：依赖 bwrap//proc/mountinfo（Linux 专属），见 docs/specs/038 §5。
 fn path_dev_matches_mountinfo_format() {
     let mounts = parse_mountinfo();
     let root = PathBuf::from("/");

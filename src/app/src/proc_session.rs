@@ -549,7 +549,10 @@ impl ProcessManager {
         // 后台线程：监控（退出回收／时限终止）＋ 读取（持续收集输出）。
         #[cfg(windows)]
         {
-            win::assign_child_to_job(sp.child.id(), &sp.child)?;
+            // 作业挂接失败＝失去树终止能力（016 契约）——显式 panic，不静默。
+            if let Err(e) = win::assign_child_to_job(sp.child.id(), &sp.child) {
+                panic!("作业对象挂接失败（Windows 树终止不可用）：{e}");
+            }
         }
         let monitor_session = session.clone();
         std::thread::spawn(move || {
@@ -1546,6 +1549,7 @@ fn build_tool_command(
         // 本分支不可达），cfg 门控仅为可编译性。
         #[cfg(unix)]
         match launch.seccomp.as_ref() {
+            #[cfg(unix)]
             Some(guard) => {
                 let fd = guard.raw();
                 unsafe {
@@ -1554,10 +1558,15 @@ fn build_tool_command(
                     });
                 }
             }
+            #[cfg(unix)]
             None => unsafe {
                 c.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
             },
+            #[cfg(windows)]
+            _ => unreachable!("031 沙箱仅 unix"),
         }
+        #[cfg(windows)]
+        let _ = &launch;
         #[cfg(windows)]
         let _ = &launch;
         c.env_clear();
@@ -1575,9 +1584,13 @@ fn build_tool_command(
                 // 033-B2：继承 fd ≥3 标记 CLOEXEC（execve 时关闭）——launcher 遗留的
                 // 非 CLOEXEC fd 不再进入沙箱载荷；仅沙箱分支（普通模式零变化）。
                 // 闭包为无捕获 fn 项，pre_exec 异步信号安全（单个 syscall）。
+                // 038：pre_exec 为 unix API（Windows 无沙箱路径，本分支不可达）。
+                #[cfg(unix)]
                 unsafe {
                     c.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
                 }
+                #[cfg(windows)]
+                let _ = &c;
                 c.env_clear();
                 c.envs(child_env);
                 Ok((c, None))
@@ -1604,10 +1617,12 @@ fn spawn_piped(
     c.current_dir(workdir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0); // 组长即本子进程：终止时覆盖其全部后代
-    let mut child = c.spawn()?;
+        .stderr(Stdio::piped());
+    // 组长即本子进程：终止时覆盖其全部后代（std process_group 为 unix-only API；
+    // Windows 树终止经作业对象，见 win 模块）。
     #[cfg(unix)]
+    c.process_group(0);
+    let mut child = c.spawn()?;
     #[cfg(unix)]
     if policy.is_some() {
         crate::sandbox::verify_child_pid_namespace(child.id())?;
@@ -1658,7 +1673,8 @@ fn spawn_pty(
             }
             // fd 0 已是从设备（std 先 dup2 再跑 pre_exec）：挂为控制终端，
             // 终端产生的信号才能送达前台进程组。
-            if libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
+            // 038：apple ioctl request 形参为 c_ulong，显式提升（Linux 无操作）。
+            if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
@@ -1673,10 +1689,11 @@ fn spawn_pty(
     Ok(Spawned { child, master: Some(master), stdout: None, stderr: None })
 }
 
-/// 打开一对伪终端（master 带 O_CLOEXEC，从设备以 O_CLOEXEC 打开）。
-#[cfg(windows)]
-fn open_pty_win_placeholder() {}
+/// 038：macOS ptsname 静态缓冲的串行化锁（见 open_pty 内注释）。
+#[cfg(target_os = "macos")]
+static PTY_NAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// 打开一对伪终端（master 带 O_CLOEXEC，从设备以 O_CLOEXEC 打开）。
 #[cfg(unix)]
 fn open_pty() -> std::io::Result<(File, File)> {
     unsafe {
@@ -1685,7 +1702,6 @@ fn open_pty() -> std::io::Result<(File, File)> {
             return Err(std::io::Error::last_os_error());
         }
         let mut ok = libc::grantpt(master_fd) == 0 && libc::unlockpt(master_fd) == 0;
-        // 非 Linux 平台无 ptsname_r 时早退（首版仅承诺 Linux）
         ok = ok
             && libc::fcntl(master_fd, libc::F_SETFD, libc::FD_CLOEXEC) == 0;
         if !ok {
@@ -1693,20 +1709,37 @@ fn open_pty() -> std::io::Result<(File, File)> {
             libc::close(master_fd);
             return Err(e);
         }
-        let mut name = [0u8; 256];
-        if libc::ptsname_r(
-            master_fd,
-            name.as_mut_ptr().cast(),
-            name.len(),
-        ) != 0
-        {
-            let e = std::io::Error::last_os_error();
-            libc::close(master_fd);
-            return Err(e);
-        }
-        let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
-        let c_path = std::ffi::CString::new(&name[..len])
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        // 038：libc crate 在 apple 目标不提供 ptsname_r（ptsname 返回进程级
+        // 静态缓冲、非线程安全）——分支内经 PTY_NAME_LOCK 串行化并立即拷贝；
+        // Linux 的 ptsname_r 语义不变。
+        #[cfg(not(target_os = "macos"))]
+        let c_path = {
+            let mut name = [0u8; 256];
+            if libc::ptsname_r(
+                master_fd,
+                name.as_mut_ptr().cast(),
+                name.len(),
+            ) != 0
+            {
+                let e = std::io::Error::last_os_error();
+                libc::close(master_fd);
+                return Err(e);
+            }
+            let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+            std::ffi::CString::new(&name[..len])
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
+        };
+        #[cfg(target_os = "macos")]
+        let c_path = {
+            let _guard = PTY_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let ptr = libc::ptsname(master_fd);
+            if ptr.is_null() {
+                let e = std::io::Error::last_os_error();
+                libc::close(master_fd);
+                return Err(e);
+            }
+            std::ffi::CStr::from_ptr(ptr).to_owned()
+        };
         let slave_fd = libc::open(
             c_path.as_ptr(),
             libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
@@ -1820,11 +1853,15 @@ fn spawn_reader<R: Read + Send + 'static>(session: Arc<Session>, mut pipe: R) {
             match pipe.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    let mut st = session.lock();
-                    st.pending.push(&buf[..n]);
-                    drop(st);
-                    session.cv.notify_all();
-                    if st.readers_may_stop {
+                    let stop = {
+                        let mut st = session.lock();
+                        st.pending.push(&buf[..n]);
+                        let stop = st.readers_may_stop;
+                        drop(st);
+                        session.cv.notify_all();
+                        stop
+                    };
+                    if stop {
                         break;
                     }
                 }
@@ -1997,12 +2034,14 @@ impl Drop for KillpgFailGuard {
 }
 
 /// 对指定进程组注入 killpg 失败；返回守卫，drop(guard) 或离开作用域即解除。
+#[cfg(unix)]
 fn arm_killpg_fail(pgid: libc::pid_t) -> KillpgFailGuard {
     TEST_KILLPG_FAIL_PGD.store(pgid as i64, Ordering::SeqCst);
     KillpgFailGuard
 }
 
 /// 取指定会话的进程组 id（仅测试：注入 killpg 失败需精确限定目标）。
+#[cfg(unix)]
 fn session_pgid(mgr: &ProcessManager, id: &str) -> libc::pid_t {
     let pgid = {
         let st = mgr.lock_mgr();
@@ -2086,6 +2125,7 @@ fn seam_deadline_injection_rejects_execution() {
 
 /// 接缝③：终止失败注入——未确认清理成功不得返回“已终止”；进程保留可查询；
 /// 不误伤其他会话；解除注入后重试 terminate 成功。
+    #[cfg(unix)] // 038：killpg 注入为 unix 设施测试
 #[test]
 fn seam_killpg_injection_terminate_reports_failure_keeps_session() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2146,6 +2186,7 @@ fn seam_killpg_injection_terminate_reports_failure_keeps_session() {
 
 /// 接缝④：时限到期的终止失败——不得伪装成“已终止回收”的 timeout；
 /// 进程保留、如实说明，解除注入后可终止。
+    #[cfg(unix)] // 038：killpg 注入为 unix 设施测试
 #[test]
 fn seam_killpg_injection_deadline_not_fake_timeout() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());

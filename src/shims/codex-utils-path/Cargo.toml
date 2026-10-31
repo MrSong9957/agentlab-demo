@@ -15,6 +15,11 @@ doctest = false
 [dependencies]
 dunce = "1"
 
+# 038-CI：system_commands.rs 的 cfg(windows) 分支（SHGetKnownFolderPath 已知
+# 目录解析＋CoTaskMemFree 释放）依赖此前未声明，Windows 首次编译即失败——补齐。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Com", "Win32_UI_Shell"] }
+
 [dev-dependencies]
 pretty_assertions = "1.4"
 tempfile = "3"

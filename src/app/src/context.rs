@@ -85,6 +85,32 @@ fn skip_notice(path: &Path, reason: &str) -> String {
 /// 有界读取并解码：至多 `read_limit` 字节（调用方给剩余预算＋3，用于多字节
 /// 边界判定）。文件长于读取上限且缓冲尾是不完整多字节序列时按字符边界收尾
 /// （读取边界，非文件损坏）；文件本身非法 UTF-8 或读取失败则跳过并记原因。
+/// macOS：/var、/tmp、/etc 为系统级符号链接（root 所有，指向 /private/*），
+/// std::env::temp_dir()（/var/folders/…）落在 /var 前缀——027 B⑥ 逐组件检查
+/// 与 O_NOFOLLOW 打开链会把系统前缀误判为注入通道（macOS 首跑实证：临时目录
+/// 下全部来源被拒）。此处仅对这三个**不可被非 root 伪造**的系统前缀做前缀级
+/// 重解（组件级匹配，/varfoo 不受影响）；重解后 B⑥ 逐组件检查与 O_NOFOLLOW
+/// 打开链对真实组件全量生效——用户可控组件中的符号链接仍被逐项拒绝，安全
+/// 语义不降级。
+#[cfg(target_os = "macos")]
+fn resolve_darwin_system_prefix(path: &Path) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    const SYSTEM_LINKS: &[(&str, &str)] = &[
+        ("/var/", "/private/var/"),
+        ("/tmp/", "/private/tmp/"),
+        ("/etc/", "/private/etc/"),
+    ];
+    let bytes = path.as_os_str().as_bytes();
+    for (from, to) in SYSTEM_LINKS {
+        if bytes.starts_with(from.as_bytes()) {
+            let mut out = to.as_bytes().to_vec();
+            out.extend_from_slice(&bytes[from.len()..]);
+            return PathBuf::from(std::ffi::OsStr::from_bytes(&out));
+        }
+    }
+    path.to_path_buf()
+}
+
 fn load_source_text(
     path: &Path,
     file_size: u64,
@@ -94,6 +120,10 @@ fn load_source_text(
     // 027 B⑥+F1：目录组件（含 global_dir/项目链目录本身）为符号链接时同样
     // 拒绝——静态布置的目录链是免竞速的注入通道；末组件竞态由 O_NOFOLLOW 兜底。
     // （安全职责由打开本体承担，本检查仅先行给出准确提示。）
+    #[cfg(target_os = "macos")]
+    let __rebased = resolve_darwin_system_prefix(path);
+    #[cfg(target_os = "macos")]
+    let path: &Path = &__rebased;
     #[cfg(unix)]
     if any_component_symlink(path) {
         notices.push(skip_notice(path, "符号链接"));
@@ -225,6 +255,13 @@ fn open_nofollow_chain(path: &Path) -> std::io::Result<std::fs::File> {
 
 /// io::Error 的原始 errno（无原始码时返回不可能匹配的值）。
 #[cfg(unix)]
+fn raw_errno(e: &std::io::Error) -> i32 {
+    e.raw_os_error().unwrap_or(-1)
+}
+
+/// Windows 版：std 打开路径无 O_NOFOLLOW 链（无 ELOOP 语义），恒返回
+/// 不可能匹配的值——ELOOP 提示分支不触发，统一走「读取失败」提示。
+#[cfg(windows)]
 fn raw_errno(e: &std::io::Error) -> i32 {
     e.raw_os_error().unwrap_or(-1)
 }
@@ -465,6 +502,8 @@ mod tests {
     /// 打开路径必须拒链——替换目标正文（伪凭据标记）不得进入上下文。
     /// 接缝（TCHAT_CTX_RACE_SEAM，仅测试构建）提供确定性替换时机。
     #[test]
+    #[cfg(target_os = "linux")]
+    // 038-CI：/proc/self/fd 等机制为 Linux 专属（macOS 显式 fail-closed 或语义差异），见 docs/specs/038 §5。
     fn race_symlink_swap_between_probe_and_open_is_not_read() {
         let _serial = RACE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         struct SeamGuard;
@@ -533,6 +572,7 @@ mod tests {
     /// 027 B⑥+F1（安全攻防）：目录组件符号链接——global_dir 或其任意中间目录
     /// 组件为符号链接时，AGENTS.md 正文会以应用身份被读入上下文（静态布置即
     /// 可、无需竞速）。逐前缀 symlink_metadata 检查＋末组件 O_NOFOLLOW 双层：
+    #[cfg(unix)] // 038：POSIX 权限/符号链接语义用例（Windows 无等价设施），见 specs/038 §5
     /// 静态链被逐级拒绝，末组件竞态由 O_NOFOLLOW 兜底。
     #[test]
     fn symlinked_directory_component_source_is_rejected() {
@@ -574,6 +614,8 @@ mod tests {
     /// 来源目录整体替换（rename swap→symlink 指向含假敏感标记的另一目录）。
     /// 打开本体必须不跟随被替换的目录组件；标记不得进入读取结果。
     #[test]
+    #[cfg(target_os = "linux")]
+    // 038-CI：/proc/self/fd 等机制为 Linux 专属（macOS 显式 fail-closed 或语义差异），见 docs/specs/038 §5。
     fn parent_directory_swap_between_checks_and_open_is_not_followed() {
         let _serial = RACE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let nanos = std::time::SystemTime::now()

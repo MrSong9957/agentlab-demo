@@ -1,6 +1,8 @@
 //! 015 规格验收：用户轮上下文注入（项目规则 AGENTS.md 链＋环境上下文）。
 //! 全部使用独立临时目录＋固定时钟/来源，不依赖真实用户目录或真实时间；
 //! 预期上下文文本一律由测试侧按规格 §1 字节级形态**独立重建**，不调用生产组装函数。
+#![cfg(unix)]
+// 038-CI：本文件依赖 POSIX 语义（PTY/Unix fd/文件权限位），Windows 不编译；
 
 use serde_json::{json, Value};
 use terminal_chat::proc_session::ProcessManager;

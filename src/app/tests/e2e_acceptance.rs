@@ -8,6 +8,9 @@
 //! - S5（EFBIG 半写）与 F2 同步屏障不在本文件：复用既有用例，验收记录单独列示。
 //! - 时序约定：所有等待均为 poll＋截止时间（看门狗），无固定延迟猜测关键时序；
 //!   子进程异常时杀死并回收，不留孤儿。
+#![cfg(unix)]
+// 038：POSIX 语义（PTY/Unix fd/文件权限位），Windows 不编译；macOS 恢复执行——
+// 写侧已有界化（卡死转为证据化 panic，下次 CI 运行定位具体用例）
 
 mod common;
 
@@ -1075,6 +1078,10 @@ struct PtySession {
     query_responder: QueryResponder,
 }
 
+/// 038-CI：macOS ptsname 静态缓冲的串行化锁（见 PtySession::spawn 内注释）。
+#[cfg(target_os = "macos")]
+static PTY_NAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 impl PtySession {
     fn spawn(mut cmd: Command) -> PtySession {
         unsafe {
@@ -1082,16 +1089,29 @@ impl PtySession {
             assert!(master_fd >= 0, "posix_openpt 失败：{}", std::io::Error::last_os_error());
             assert_eq!(libc::grantpt(master_fd), 0, "grantpt 失败");
             assert_eq!(libc::unlockpt(master_fd), 0, "unlockpt 失败");
-            let mut name = [0u8; 256];
-            assert_eq!(
-                libc::ptsname_r(master_fd, name.as_mut_ptr().cast(), name.len()),
-                0,
-                "ptsname_r 失败"
-            );
-            let len = name.iter().position(|&b| b == 0).unwrap();
-            let slave_path =
-                PathBuf::from(std::ffi::OsString::from_vec(name[..len].to_vec()));
-            let c_path = std::ffi::CString::new(slave_path.as_os_str().as_bytes()).unwrap();
+            // 038-CI：libc crate 在 apple 目标不提供 ptsname_r（ptsname 返回进程级
+            // 静态缓冲、非线程安全）——经 PTY_NAME_LOCK 串行化并立即拷贝；Linux
+            // 的 ptsname_r 语义不变。
+            #[cfg(not(target_os = "macos"))]
+            let c_path = {
+                let mut name = [0u8; 256];
+                assert_eq!(
+                    libc::ptsname_r(master_fd, name.as_mut_ptr().cast(), name.len()),
+                    0,
+                    "ptsname_r 失败"
+                );
+                let len = name.iter().position(|&b| b == 0).unwrap();
+                let slave_path =
+                    PathBuf::from(std::ffi::OsString::from_vec(name[..len].to_vec()));
+                std::ffi::CString::new(slave_path.as_os_str().as_bytes()).unwrap()
+            };
+            #[cfg(target_os = "macos")]
+            let c_path = {
+                let _guard = PTY_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                let ptr = libc::ptsname(master_fd);
+                assert!(!ptr.is_null(), "ptsname 失败：{}", std::io::Error::last_os_error());
+                std::ffi::CStr::from_ptr(ptr).to_owned()
+            };
             let fd0 = libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
             assert!(fd0 >= 0, "打开 PTY 从设备失败：{}", std::io::Error::last_os_error());
             let fd1 = libc::dup(fd0);
@@ -1106,7 +1126,8 @@ impl PtySession {
                     if libc::setsid() == -1 {
                         return Err(std::io::Error::last_os_error());
                     }
-                    if libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
+                    // 038-CI：apple ioctl request 形参为 c_ulong，显式提升（Linux 无操作）。
+                    if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) == -1 {
                         return Err(std::io::Error::last_os_error());
                     }
                     Ok(())
@@ -1116,6 +1137,11 @@ impl PtySession {
             cmd.stdout(Stdio::from(File::from_raw_fd(fd1)));
             cmd.stderr(Stdio::from(File::from_raw_fd(fd2)));
             let child = cmd.spawn().expect("PTY 子进程启动失败");
+            // 038：master 非阻塞（写侧 poll＋看门狗配套，卡死转为证据化 panic）；
+            // 注意只作用于 master——从设备 fd0/1/2 是子进程 stdio，保持阻塞语义。
+            let fl = libc::fcntl(master_fd, libc::F_GETFL);
+            assert!(fl >= 0, "F_GETFL 失败");
+            assert_eq!(libc::fcntl(master_fd, libc::F_SETFL, fl | libc::O_NONBLOCK), 0);
             PtySession {
                 master: File::from_raw_fd(master_fd),
                 child,
@@ -1212,9 +1238,46 @@ impl PtySession {
         Ok(())
     }
 
+    /// 038：非阻塞 master 上的有界写——子进程停读输入时不再无限阻塞，
+    /// 超时转储子进程状态与已捕获输出（macOS 卡死诊断 instrumentation）。
+    fn write_bounded(&mut self, mut data: &[u8]) {
+        let deadline = Instant::now() + WATCHDOG;
+        while !data.is_empty() {
+            if Instant::now() > deadline {
+                let state = self.child.try_wait();
+                panic!(
+                    "PTY 写入超时（子进程未读输入？state={state:?}）：\n{}",
+                    String::from_utf8_lossy(&self.captured)
+                );
+            }
+            let mut pfd = libc::pollfd {
+                fd: self.master.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            let r = unsafe { libc::poll(&mut pfd, 1, 100) };
+            if r > 0 && pfd.revents & (libc::POLLOUT | libc::POLLHUP | libc::POLLERR) != 0 {
+                let n = unsafe {
+                    libc::write(self.master.as_raw_fd(), data.as_ptr().cast(), data.len())
+                };
+                if n > 0 {
+                    data = &data[n as usize..];
+                } else if n < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() != std::io::ErrorKind::WouldBlock {
+                        panic!(
+                            "PTY write 失败：{err}\n{}",
+                            String::from_utf8_lossy(&self.captured)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// 发送原始字节（如 Ctrl+C 的 0x03，不附加换行）。
     fn send_raw(&mut self, bytes: &[u8]) {
-        self.master.write_all(bytes).expect("PTY 写入失败");
+        self.write_bounded(bytes);
     }
 
     /// 017：真实缩放＋测试侧屏幕同步——在既有 [`PtySession::resize`]（TIOCSWINSZ
@@ -1256,9 +1319,9 @@ impl PtySession {
     /// - TUI composer 的 paste-burst 启发式（≥3 个 ASCII 字符连打→120ms 内的
     ///   Enter 被并入草稿）要求分隔发送，模拟真人键入节奏。
     fn send_line(&mut self, line: &str) {
-        self.master.write_all(line.as_bytes()).expect("PTY 写入失败");
+        self.write_bounded(line.as_bytes());
         std::thread::sleep(Duration::from_millis(150));
-        self.master.write_all(b"\r").expect("PTY 写入失败");
+        self.write_bounded(b"\r");
     }
 
     fn output(&self) -> String {
@@ -10672,6 +10735,8 @@ fn write_manual_permission_capable(dir: &Path, base_url: &str, key_ref: &str) {
 /// 规范化路径（默认拒绝）→ 用户 y 允许 → granted 回传 → **同轮后续 exec 在
 /// 批准面真实写入成功**；工作区 .env（自动敏感边界）正文不可得；拒绝路径
 /// （第二次申请另一目录）保持 denied 不扩大。
+#[cfg(target_os = "linux")]
+// 038-CI：本场景要求 bwrap 真实执行（031 权限沙箱后端），macOS/Windows 不编译。
 #[test]
 fn s140_request_permissions_cli_grant_and_enforce() {
     let cfg = TempDir::new("s140-cfg");
@@ -10819,6 +10884,8 @@ fn s140_request_permissions_cli_grant_and_enforce() {
 /// S141：TUI 权限确认全链路——专用事件＋问答视图构件：申请详情入转录、
 /// 弹窗默认拒绝、j+Enter 允许、Enter 直接拒绝、批准面真实可用、被拒面不可
 /// 用、授权随轮结束回收（下一轮未批面再次不可用）。
+#[cfg(target_os = "linux")]
+// 038-CI：本场景要求 bwrap 真实执行（031 权限沙箱后端），macOS/Windows 不编译。
 #[test]
 fn s141_tui_permission_prompt_allow_and_deny() {
     let cfg = TempDir::new("s141-cfg");
@@ -10961,6 +11028,8 @@ fn s141_tui_permission_prompt_allow_and_deny() {
 /// S142（031 P15）：真实 TUI 确认并保存后 `/resume`——历史申请可见（路径与
 /// 访问级别入转录）、恢复后无活动授权（同路径申请重新弹确认，不因历史
 /// granted 静默放行）、旧 granted JSON 不能授权新执行（exec 落回基线拒绝）。
+#[cfg(target_os = "linux")]
+// 038-CI：本场景要求 bwrap 真实执行（031 权限沙箱后端），macOS/Windows 不编译。
 #[test]
 fn s142_resume_shows_permission_history_and_requires_new_confirmation() {
     let cfg = TempDir::new("s142-cfg");

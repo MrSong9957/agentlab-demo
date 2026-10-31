@@ -22,8 +22,11 @@
 //! - 按引用语法 `add_line+` 要求 Add 块至少一行 `+` 内容（Codex 解析器未强制）。
 
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
+#[cfg(unix)]
 use std::os::unix::io::{AsRawFd, FromRawFd};
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 
 // ---- JSON 工具边界 ----
@@ -1032,6 +1035,14 @@ fn resolve_target(base: &Path, p: &Path) -> PathBuf {
 /// 统一打开样板（审查 #3 收敛）：`O_RDONLY|O_NONBLOCK|O_CLOEXEC|extra_flags`。
 /// FIFO/设备打开本身不阻塞；打开成功即持有实际读写的 inode，随后对该 fd
 /// fstat 判型，类型验证与 I/O 绑定同一对象（安全报告 F2 收口）。
+/// 打开目标（只读）。
+/// - unix：O_NONBLOCK（FIFO/设备打开不阻塞，非常规目标随后 fstat 判型拒绝）
+///   ＋O_CLOEXEC；`extra_flags` 供 Move 源加 O_NOFOLLOW（ELOOP 交调用方识别）。
+/// - Windows：std 只读打开（句柄默认不可继承；`extra_flags` 无对应物——
+///   O_NONBLOCK 的 FIFO 语义与 O_NOFOLLOW 的打开时拒绝在 Windows 侧由
+///   [`open_source_nofollow`] 的 symlink_metadata 预检替代，TOCTOU 残差由
+///   后续句柄级判型与句柄绑定写入兜住）。
+#[cfg(unix)]
 fn open_path(target: &Path, extra_flags: libc::c_int) -> std::io::Result<std::fs::File> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(target.as_os_str().as_bytes())?;
@@ -1048,9 +1059,20 @@ fn open_path(target: &Path, extra_flags: libc::c_int) -> std::io::Result<std::fs
     }
 }
 
+#[cfg(windows)]
+fn open_path(target: &Path, _extra_flags: ()) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(target)
+}
+
 /// Update 读入（跟随符号链接的既有语义）。
 fn open_validated_regular(target: &Path) -> std::io::Result<std::fs::File> {
-    open_path(target, 0)
+    open_path(
+        target,
+        #[cfg(unix)]
+        0,
+        #[cfg(windows)]
+        (),
+    )
 }
 
 /// 有界源读入核心（Update/Move 共用，审查 #7 收敛）：fd 级 fstat 预检＋take
@@ -1070,10 +1092,11 @@ enum BoundedReadError {
 }
 
 fn read_bounded(file: &std::fs::File) -> Result<(Vec<u8>, u64), BoundedReadError> {
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    unsafe { libc::fstat(file.as_raw_fd(), &mut st) };
-    if st.st_size as u64 > MAX_FILE_BYTES as u64 {
-        return Err(BoundedReadError::OversizeSize(st.st_size as u64));
+    // fstat 等价：句柄级元数据（Windows 为 GetFileInformationByHandle 路径，
+    // 与 unix fstat 同为"绑定已打开对象"的尺寸来源，不受路径替换影响）。
+    let st_size = file.metadata().map_err(BoundedReadError::Io)?.len();
+    if st_size > MAX_FILE_BYTES as u64 {
+        return Err(BoundedReadError::OversizeSize(st_size));
     }
     // 审查 #8 截断回归的确定性屏障位：fstat 之后、读取之前（未启用时零开销）
     #[cfg(test)]
@@ -1084,13 +1107,13 @@ fn read_bounded(file: &std::fs::File) -> Result<(Vec<u8>, u64), BoundedReadError
     if bytes.len() > MAX_FILE_BYTES {
         return Err(BoundedReadError::TooManyBytes);
     }
-    if bytes.len() as u64 != st.st_size as u64 {
+    if bytes.len() as u64 != st_size {
         return Err(BoundedReadError::Inconsistent {
             got: bytes.len(),
-            want: st.st_size as u64,
+            want: st_size,
         });
     }
-    Ok((bytes, st.st_size as u64))
+    Ok((bytes, st_size))
 }
 
 /// UTF-8 解码＋行数门（Update/Move 共用）。`label` 已含完整对象描述与路径。
@@ -1123,12 +1146,14 @@ fn check_generated_limits(new_content: &str, label: &str) -> Result<(), String> 
 }
 
 /// fd 指向的对象是否常规文件（fstat 绑定打开的 inode，不受路径替换影响）。
+#[cfg(unix)]
 fn fd_is_regular(f: &std::fs::File) -> bool {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     unsafe { libc::fstat(f.as_raw_fd(), &mut st) == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFREG }
 }
 
 /// fd 指向对象的 (st_dev, st_ino)——用于确认两个句柄确为同一 inode。
+#[cfg(unix)]
 fn fd_inode(f: &std::fs::File) -> Option<(u64, u64)> {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstat(f.as_raw_fd(), &mut st) } != 0 {
@@ -1137,25 +1162,133 @@ fn fd_inode(f: &std::fs::File) -> Option<(u64, u64)> {
     Some((st.st_dev as u64, st.st_ino as u64))
 }
 
-/// 写入绑定读入时已判型的 inode：经 `/proc/self/fd/<fd>` 重开同一文件
-/// （O_TRUNC 只作用于该 inode），重开后二次 fstat 确认仍为常规文件。
-/// 路径被替换为 FIFO 时本写入不打开路径，既不阻塞也不会截断占位对象。
-fn write_via_validated_fd(read_fd: &std::fs::File, data: &[u8]) -> std::io::Result<()> {
-    let path = std::ffi::CString::new(format!("/proc/self/fd/{}", read_fd.as_raw_fd()))?;
-    let wfd =
-        unsafe { libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_TRUNC | libc::O_CLOEXEC) };
-    if wfd < 0 {
-        let e = std::io::Error::last_os_error();
-        if e.kind() == std::io::ErrorKind::NotFound {
+/// Windows 等价：句柄级元数据（GetFileInformationByHandle 路径，绑定已打开
+/// 文件对象，不受路径替换影响）。is_file＝目录位不置位（S_IFREG 对应）。
+#[cfg(windows)]
+fn fd_is_regular(f: &std::fs::File) -> bool {
+    f.metadata().map(|m| m.is_file()).unwrap_or(false)
+}
+
+/// Windows 等价：(卷序列号, 64 位文件索引)＝(st_dev, st_ino) 对应物。
+/// NTFS 下索引恒有效；ReFS 的 128 位 FileId 属已登记残差（见规格 §3.1）。
+#[cfg(windows)]
+fn fd_inode(f: &std::fs::File) -> Option<(u64, u64)> {
+    use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle;
+    unsafe {
+        let mut info: windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION =
+            std::mem::zeroed();
+        if GetFileInformationByHandle(f.as_raw_handle() as _, &mut info) == 0 {
+            return None;
+        }
+        Some((
+            info.dwVolumeSerialNumber as u64,
+            ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+        ))
+    }
+}
+
+/// 写入绑定读入时已判型的 inode：经 fd 路径重开同一文件（O_TRUNC 只作用于
+/// 该 inode），重开后二次判型确认仍为常规文件且身份一致。路径被替换为 FIFO
+/// 时本写入不打开路径，既不阻塞也不会截断占位对象。
+/// - Linux：`/proc/self/fd/<fd>`（重开为独立描述，偏移 0）；
+/// - macOS：`/dev/fd/<fd>`（fdescfs 对常规文件的 open 语义在"共享描述符/dup"
+///   与"同 vnode 新描述"两种实现间存在歧义——O_TRUNC 后共享偏移仍指旧 EOF，
+///   直接写会产生前导空洞；显式 seek(0) 对两种语义都正确：共享时仅移动已读
+///   完的读句柄偏移，独立时为无害操作）；
+/// - Windows：`ReOpenFile` 以写权限重开同一文件对象（语义对应：绑定对象、
+///   路径替换不影响；std 打开的共享模式 FILE_SHARE_READ|WRITE|DELETE 与
+///   新句柄 GENERIC_WRITE 兼容），写前同样 seek(0)。
+#[cfg(unix)]
+fn write_via_validated_fd(
+    read_fd: &std::fs::File,
+    target: &Path,
+    data: &[u8],
+) -> std::io::Result<()> {
+    // Linux：/proc/self/fd/<fd> 重开＝同 inode 新句柄（写访问独立于只读原
+    // 句柄；O_TRUNC 只作用于该 inode；路径替换不影响——最严格的绑定语义，
+    // F2 屏障测试实证：路径被替换为 FIFO 时本重开不触路径、不阻塞）。
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = target;
+        let fd_path = format!("/proc/self/fd/{}", read_fd.as_raw_fd());
+        let path = std::ffi::CString::new(fd_path)?;
+        let wfd = unsafe {
+            libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_TRUNC | libc::O_CLOEXEC)
+        };
+        if wfd < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::NotFound {
+                return Err(std::io::Error::new(
+                    e.kind(),
+                    format!("{e}（写入经 /proc/self/fd 绑定原对象，需要 /proc 已挂载）"),
+                ));
+            }
+            return Err(e);
+        }
+        let mut w = unsafe { std::fs::File::from_raw_fd(wfd) };
+        if fd_inode(&w) != fd_inode(read_fd) || !fd_is_regular(&w) {
             return Err(std::io::Error::new(
-                e.kind(),
-                format!("{e}（写入经 /proc/self/fd 绑定原对象，需要 /proc 已挂载）"),
+                std::io::ErrorKind::InvalidInput,
+                "写入句柄与已判型对象不一致",
             ));
         }
-        return Err(e);
+        w.write_all(data)
     }
-    let mut w = unsafe { std::fs::File::from_raw_fd(wfd) };
-    // 纵深防御：写句柄须与读入句柄为同一 inode 且仍为常规文件
+    // macOS：/dev/fd/<fd> 写打开返回 EACCES（fdescfs 按原句柄访问模式检查，
+    // 实测）且无 /proc——等价安全序：路径打开但**无 O_TRUNC**＋O_NONBLOCK
+    // （路径被替换为 FIFO 时立即失败而非阻塞；绝不截断占位对象）→ fstat
+    // 核验与读句柄同 inode 且常规 → 截断＋写入（核验先于任何截断）。
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut w = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(target)?;
+        if fd_inode(&w) != fd_inode(read_fd) || !fd_is_regular(&w) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "写入句柄与已判型对象不一致",
+            ));
+        }
+        let fd = w.as_raw_fd();
+        let fl = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if fl >= 0 {
+            unsafe { libc::fcntl(fd, libc::F_SETFL, fl & !libc::O_NONBLOCK) };
+        }
+        w.set_len(0)?;
+        w.seek(std::io::SeekFrom::Start(0))?;
+        w.write_all(data)
+    }
+}
+
+/// Windows 版（见 unix 版函数头注释）：ReOpenFile 同一文件对象以写权限重开。
+#[cfg(windows)]
+fn write_via_validated_fd(
+    read_fd: &std::fs::File,
+    _target: &Path,
+    data: &[u8],
+) -> std::io::Result<()> {
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use windows_sys::Win32::Foundation::{GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, ReOpenFile,
+    };
+    let wh = unsafe {
+        ReOpenFile(
+            read_fd.as_raw_handle() as _,
+            GENERIC_WRITE,
+            (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE) as u32,
+            FILE_ATTRIBUTE_NORMAL,
+        )
+    };
+    if wh == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut w = unsafe { std::fs::File::from_raw_handle(wh) };
+    // 同一文件对象共享 CurrentByteOffset（读后位于 EOF）；写前归零。
+    w.seek(std::io::SeekFrom::Start(0))?;
+    // 纵深防御：写句柄须与读入句柄为同一文件对象（身份一致）且仍为常规文件。
     if fd_inode(&w) != fd_inode(read_fd) || !fd_is_regular(&w) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -1389,7 +1522,7 @@ fn apply_hunk(hunk: &Hunk, base: &Path, log: &mut ChangeLog) -> Result<(), Failu
                 .map_err(Failure::validation)?;
             #[cfg(test)]
             f2_seam::before_write();
-            match write_via_validated_fd(&file, new_content.as_bytes()) {
+            match write_via_validated_fd(&file, &target, new_content.as_bytes()) {
                 Ok(()) => {
                     // 012：展示差异＝对真实前后缓冲生成的统一 diff（不从补丁文本反推）
                     let diff = diffy::create_patch(&original, &new_content).to_string();
@@ -1450,7 +1583,7 @@ fn apply_move(
     // 2. 源打开＋判型：O_NOFOLLOW——末端符号链接（含悬空，ELOOP）不跟随，
     //    避免"复制链接所指内容后删除链接本体"（普通 Update 跟随语义不变）
     let file = match open_source_nofollow(&src) {
-        Ok(f) => f,
+        Ok(Some(f)) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(Failure::validation(format!(
                 "移动源不存在（目标 {}）：{}",
@@ -1458,7 +1591,7 @@ fn apply_move(
                 src.display()
             )));
         }
-        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+        Ok(None) => {
             return Err(Failure::validation(ctx("移动源是符号链接（含悬空），拒绝移动")));
         }
         Err(e) => return Err(Failure::validation(both("打开移动源失败", &e))),
@@ -1550,7 +1683,12 @@ fn apply_move(
     #[cfg(test)]
     move_seam::barrier("before_unlink");
     let verify = match open_source_nofollow(&src) {
-        Ok(f) => f,
+        Ok(Some(f)) => f,
+        Ok(None) => {
+            return Err(Failure::mutating(
+                "删除前复核移动源失败：源是符号链接（含悬空），拒绝移动".into(),
+            ));
+        }
         Err(e) => return Err(Failure::mutating(both("删除前复核移动源失败", &e))),
     };
     if fd_inode(&verify) != fd_inode(&file) {
@@ -1579,9 +1717,29 @@ fn apply_move(
 
 /// Move 源打开：加 `O_NOFOLLOW`——末端符号链接（含悬空）一律 ELOOP 拒绝、
 /// 不跟随（普通 Update 的 [`open_validated_regular`] 保持跟随语义不变）。
-fn open_source_nofollow(target: &Path) -> std::io::Result<std::fs::File> {
-    open_path(target, libc::O_NOFOLLOW)
+#[cfg(unix)]
+fn open_source_nofollow(target: &Path) -> std::io::Result<Option<std::fs::File>> {
+    match open_path(target, libc::O_NOFOLLOW) {
+        Ok(f) => Ok(Some(f)),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
+
+/// Windows 版：无 O_NOFOLLOW 对应物——symlink_metadata 预检拒绝末端链接
+///（含悬空：悬空链接的 symlink_metadata 仍可读出 reparse 属性）；检查与打开
+/// 之间的 TOCTOU 残差由后续句柄级判型＋句柄绑定写入兜住。
+#[cfg(windows)]
+fn open_source_nofollow(target: &Path) -> std::io::Result<Option<std::fs::File>> {
+    let ft = std::fs::symlink_metadata(target)?.file_type();
+    if ft.is_symlink() {
+        return Ok(None);
+    }
+    std::fs::File::open(target).map(Some)
+}
+
+/// 末端符号链接拒绝的错误判定（unix＝ELOOP；Windows＝本模块 FilesystemLoop
+/// 哨兵，见 [`open_source_nofollow`]）。
 
 /// 词法归一（消 `.`/`..`）比较两路径是否同一目标——用于移动的自路径拒绝；
 /// 不触文件系统（符号链接别名等价由 `create_new` 排他创建兜底）。
@@ -1648,6 +1806,9 @@ fn path_label(target: &Path) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    // 038：FIFO 用例（mkfifo/is_fifo，unix 设施）专用；Windows 无此设施且
+    // 相关用例已 cfg(unix) 门控——导入随之门控避免 unix 路径在 Windows 编译。
+    #[cfg(unix)]
     use std::os::unix::fs::FileTypeExt;
 
     // ---- ApplyPatchArgs::from_value：参数校验 ----
@@ -2135,6 +2296,8 @@ mod tests {
     /// 清单与 state_known 正确。若实现回退为按路径重开，写打开 FIFO 将阻塞，
     /// 由看门狗捕获（专用副本变异已证）。
     #[test]
+    #[cfg(unix)]
+    // 038：写路径已平台化（macOS /dev/fd），接缝 mkfifo 为 unix 设施故仍排除 Windows。
     fn f2_swap_barrier_binds_write_to_validated_inode() {
         use std::process::{Command, Stdio};
         // —— 子进程模式：启用接缝，经真实 apply_patch 入口执行补丁 ——
@@ -2508,6 +2671,8 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    // 038：写路径已平台化（macOS /dev/fd），macOS 恢复执行。
     fn display_changes_capture_add_update_delete_real_content() {
         let dir = disp_dir("aud");
         let added = dir.join("new.txt");

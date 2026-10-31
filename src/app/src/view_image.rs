@@ -954,6 +954,7 @@ mod tests {
         assert!(v["path"].as_str().unwrap().contains("中文 图.png"));
         assert!(outcome.image.is_some());
     }
+    #[cfg(unix)] // 038：POSIX 权限/符号链接语义用例（Windows 无等价设施），见 specs/038 §5
 
     #[test]
     fn execute_symlink_to_regular_file_accepted() {

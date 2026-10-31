@@ -87,6 +87,13 @@ pub mod vim_search;
 pub mod width;
 pub mod wrapping;
 
+// 038-CI：A7 安全测试自 tests/ 移入 crate 内联（本 crate 其余测试同款模式）——
+// 原集成测试经 Terminal::with_options 查询环境终端尺寸，CI 无 TTY 环境失败；
+// crate 内联后可使用显式尺寸的测试构造器，断言本体不变。
+#[cfg(test)]
+#[path = "security_untrusted_text_tests.rs"]
+mod security_untrusted_text_tests;
+
 // 母本 lib.rs:103 `pub(crate) use codex_app_server_client::legacy_core;`
 // ——保留文件经 `crate::legacy_core::…` 消费 config 类型（008 §3-J5 shim）。
 pub use codex_app_server_client::legacy_core;

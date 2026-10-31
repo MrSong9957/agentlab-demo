@@ -680,8 +680,10 @@ fn exe_deployment_prerequisite_refuses_workspace_and_temp() {
     let exe_dir = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
     let err = permissions::verify_exe_deployment(&exe_dir, Path::new("/nonexistent-tmp")).unwrap_err();
     assert!(err.contains("工作区"), "工作区产物应拒绝：{err}");
-    // temp 之下 → 拒绝（temp root 指到覆盖二进制的 /workspace）
-    let err = permissions::verify_exe_deployment(Path::new("/nonexistent-anchor"), Path::new("/workspace")).unwrap_err();
+    // temp 之下 → 拒绝（temp root 覆盖二进制的实际位置。038-CI：原为容器专属
+    // 字面量 /workspace——GH runner 的二进制在 /home/runner 下，两个拒绝分支
+    // 均不命中；改为按进程实际位置锚定，三端等价）
+    let err = permissions::verify_exe_deployment(Path::new("/nonexistent-anchor"), &exe_dir).unwrap_err();
     assert!(err.contains("临时目录"), "临时目录应拒绝：{err}");
 }
 

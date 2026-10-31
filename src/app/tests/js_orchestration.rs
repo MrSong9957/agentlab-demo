@@ -365,6 +365,7 @@ fn stack_overflow_fails_cell() {
     assert_eq!(observation.status, CellStatus::Failed, "{observation:?}");
 }
 
+#[cfg(unix)] // 038：SIGKILL 强杀注入为 unix 信号语义（Windows 由 terminate 路径覆盖）
 #[test]
 fn worker_killed_ipc_dead_fails_cell() {
     // worker 被 SIGKILL（外部故障面）→ 读线程 ReaderDead → cell failed。

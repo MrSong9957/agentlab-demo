@@ -122,7 +122,6 @@ pub struct SharedWriteGuard {
 
 /// 取得根目录共享锁（写入临界区入口；跨进程有效）。失败返回 None——
 /// 调用方按无法进入临界区处理（中止该次写入）。
-#[cfg(unix)]
 pub fn lock_shared(root: &Path) -> Option<SharedWriteGuard> {
     flock_root(root, false).map(|_file| SharedWriteGuard { _file })
 }
