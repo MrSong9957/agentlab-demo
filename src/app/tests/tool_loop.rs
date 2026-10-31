@@ -772,10 +772,12 @@ fn t18_cancelled_batch_skips_plan_as_two_field_failure() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     std::thread::sleep(std::time::Duration::from_millis(200));
-    unsafe {
-        libc::kill(child.id() as i32, libc::SIGINT);
-    }
-    stdin.write_all(b"exit\n").unwrap();
+            // 038：SIGINT 中断为 unix 信号语义；Windows 由后续 exit 行正常收尾
+            //（无信号等价物），交互序列的其余断言不受影响。
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(child.id() as i32, libc::SIGINT);
+            }    stdin.write_all(b"exit\n").unwrap();
     stdin.flush().unwrap();
     drop(stdin);
     let out = child.wait_with_output().expect("等待 CLI 子进程失败");
