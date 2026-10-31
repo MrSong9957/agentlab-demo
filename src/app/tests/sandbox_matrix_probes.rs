@@ -894,6 +894,7 @@ fn fake_bwrap_dir(kind: &str) -> TempDir {
 
 /// F：四场景 × 三工具面——沙箱启用时必须显式失败，执行标记不得出现，绝不静默
 /// 回退为无沙箱执行。全程不触碰 /usr/bin/bwrap（仅隔离子进程 PATH 替换）。
+#[cfg(unix)] // 038：F 探针依赖 fake_bwrap（unix 权限位＋bwrap 语义）
 #[test]
 fn f_fail_closed_without_fallback() {
     let scenarios: [(&str, &str); 4] = [
