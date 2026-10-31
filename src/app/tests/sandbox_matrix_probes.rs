@@ -872,6 +872,8 @@ fn e_reaping_cancel_timeout_completion_pipe_and_pty() {
 
 /// 建造假 bwrap 目录：mode 0644＝不可执行文件；0755＋exit 1＝探测干跑失败；
 /// 0755＋仅探测参数通过＝探测成功但真实启动失败。
+// 038：假 bwrap 构造依赖 unix 权限位（chmod 语义）与 bwrap 探针——unix 门控。
+#[cfg(unix)]
 fn fake_bwrap_dir(kind: &str) -> TempDir {
     use std::os::unix::fs::PermissionsExt;
     let dir = TempDir::new(&format!("033f-{kind}"));
