@@ -669,15 +669,10 @@ fn b2_fix_feasibility_preexec_close_fds_keeps_stdio() {
 // 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn b2_mcp_face_fd_closed() {
-    // 038-CI：GH 托管 ubuntu-24.04 runner 实证——沙箱内 python3 MCP 服务器
-    //（bwrap ro-bind 全盘）启动后未在既定超时内应答工具发现（tools=0；本地
-    // 容器同用例通过），沙箱内启动耗时/行为在 runner 环境不同，根因待宿主侧
-    // 专项排查；CI 置 TCHAT_SKIP_RUNNER_TIMING_PROBES=1 显式跳过，本地默认
-    // 运行。发现记录：docs/specs/038-github-actions-ci.md §5。
-    if std::env::var("TCHAT_SKIP_RUNNER_TIMING_PROBES").is_ok() {
-        eprintln!("b2_mcp 跳过：runner 沙箱内服务器启动行为差异待专项排查（038 发现）");
-        return;
-    }
+    // 038 恢复真实检查（2026-10-31）：本地含 bwrap 0.11.1（runner 同版本）均通过。
+    // GH runner 实测的沙箱内 MCP 服务器未应答差异（tools=0）根因待 runner 侧
+    // 诊断（见 docs/logs/038-github-actions-ci/2026-10-31-runner-diagnosis-plan.md）；
+    // 该用例不再提前 return——runner 上若复现即如实失败，为诊断提供信号。
     for sandbox in [true, false] {
         let work = TempDir::new("033b2m-work");
         let user = TempDir::new("033b2m-user");
@@ -751,15 +746,11 @@ fn b2_mcp_face_fd_closed() {
 // 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn e_reaping_cancel_timeout_completion_pipe_and_pty() {
-    // 038-CI：GH 托管 ubuntu-24.04 runner 实证——close() 组杀后孙进程
-    // （sleep 299 链）存活超过 15s poll（本地容器同用例通过），016 组杀语义
-    // 在 runner 环境的落定行为不同，根因待宿主侧专项排查；CI 置
-    // TCHAT_SKIP_RUNNER_TIMING_PROBES=1 显式跳过，本地默认运行。
-    // 发现记录：docs/specs/038-github-actions-ci.md §5。
-    if std::env::var("TCHAT_SKIP_RUNNER_TIMING_PROBES").is_ok() {
-        eprintln!("e_reaping 跳过：runner 进程组整批回收行为差异待专项排查（038 发现）");
-        return;
-    }
+    // 038 恢复真实检查（2026-10-31）：本地含 bwrap 0.11.1（runner 同版本）均通过。
+    // GH runner 实测的组杀后孙进程存活差异（close 后 3 进程超 15s poll）根因待
+    // runner 侧诊断（见 docs/logs/038-github-actions-ci/
+    // 2026-10-31-runner-diagnosis-plan.md）；该用例不再提前 return——runner 上
+    // 若复现即如实失败，为诊断提供信号。
     let mk_cmd = |tag: &str, fg: &str| {
         // 两个后台子进程（其一再派生孙进程）＋前台长命令；marker 进各进程 cmdline。
         format!("sh -c 'sleep 299' {t} & sh -c 'exec sh -c \"sleep 299\" {t}' {t} & {fg}", t = tag)

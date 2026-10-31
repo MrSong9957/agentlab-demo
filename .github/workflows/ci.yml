@@ -42,21 +42,12 @@ jobs:
     # 工作（见 docs/specs/038-github-actions-ci.md §5）。
     continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
     env:
-      # 034 冻结阈值为校准机器口径，CI 机器不可比——按模块设计的采样模式
-      # 执行全部场景并跳过阈值断言（阈值门禁仍在本机容器全量验证中生效）。
+      # 采样开关＝项目既有机器口径机制（032/034 原生、031 按同款约定补齐）：
+      # CI 托管机器不可重新冻结，按模块设计跳过冻结阈值断言、场景照跑；
+      # 各预算的实际通过环境记录于 docs/specs/038-github-actions-ci.md §8。
       JS34_PERF_SAMPLE: "1"
-      # 同款采样约定：032（TCHAT_CM32_*）与 031（TCHAT_P31_*）的冻结阈值断言
-      # 在 CI 采样跳过；场景照跑、样本照输出。
       TCHAT_CM32_PERF_SAMPLE: "1"
       TCHAT_P31_PERF_SAMPLE: "1"
-      # 038 发现：GH 托管 ubuntu-24.04 runner 实测 031 seccomp 的 clone3→ENOSYS
-      # 拦截未生效（EPERM 系断言全过不足以证明过滤器生效），根因待专项排查——
-      # CI 显式跳过该探针；本地默认运行。见 docs/specs/038-github-actions-ci.md §5。
-      TCHAT_SKIP_SECCOMP_ENFORCEMENT_PROBE: "1"
-      # 038 发现：runner 环境的沙箱进程组回收、沙箱内服务器启动、未交付窗口
-      # 时序前提与本地容器行为不同（同版本 bwrap 0.9.0，差异待宿主侧专项排查）
-      # ——CI 显式跳过该族探针；本地默认运行。见 docs/specs/038 §5。
-      TCHAT_SKIP_RUNNER_TIMING_PROBES: "1"
       # runner 磁盘 14GB：debug 产物含全量 debuginfo 本地实测 26GB，链接期
       # SIGBUS（首轮 ubuntu 实证）——CI 去 debuginfo（panic 位置信息来自宏，
       # 不受影响）并关闭增量缓存（rust-cache 官方建议）。

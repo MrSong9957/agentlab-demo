@@ -1080,19 +1080,18 @@ fn sec6_report_terminal_escape_and_envelope_integrity() {
 
 #[test]
 fn sec7_mailbox_flood_rejects_before_accept_and_root_name() {
-    // 038-CI：断言前提＝第 2 批（m32/m33）到达时第 1 批尚未交付完（容量语义
-    // 为「未交付」上限 32）——GH 托管 runner 上交付节奏不同，第 1 批先行清空
-    // 后 34 条全部受理（本地通过）。属测试时序前提而非容量契约失效，需按确定
-    // 性到达重设计（单独跟踪）；CI 置 TCHAT_SKIP_RUNNER_TIMING_PROBES=1 跳过。
-    // 发现记录：docs/specs/038-github-actions-ci.md §5。
-    if std::env::var("TCHAT_SKIP_RUNNER_TIMING_PROBES").is_ok() {
-        eprintln!("sec7 跳过：洪泛用例的未交付窗口前提随交付节奏变化，待重设计（038 发现）");
-        return;
-    }
+    // 038 确定性重做：容量语义＝「未交付」32 条/接收者，原实现的前提（第 2 批
+    // 到达时第 1 批未交付完）依赖交付节奏——交付快时第 1 批先行清空、34 条全部
+    // 受理（单跑复现）。现用既有 GateChild 在洪泛期间确定性地阻断子 Agent 的
+    // 模型传输：子轮停在传输中→批末收取不发生→第 1 批 32 条保持未交付，第 2 批
+    // 必然命中 CAPACITY_LIMIT。容量契约断言（32 受理/第 33 条先拒/错误码）原样
+    // 保留；轮级结果相应为「闸门未放行→根终文未收尾错误」（与同文件 GateChild
+    // 用例同模式），放行后子 Agent 迟到终文按既有迟到语义处理。
     let _suite = SUITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let h = Harness::new("sec7");
     let mut history = Vec::new();
-    let child = ScriptChild::new(vec![child_final("完成")]);
+    let child = GateChild::new(vec![child_final("完成")]);
+    let releaser = child.clone();
     let c2 = child.clone();
     // task_name 恰为 "root"（合法名 /root/root）——验证与根路径无混淆；
     // 34 条 send_message 分两批（单批 ≤32 条调用）洪泛同一邮箱
@@ -1115,7 +1114,15 @@ fn sec7_mailbox_flood_rejects_before_accept_and_root_name() {
         assistant_final("完成"),
     ];
     let result = h.run_turn(&mut history, "go", calls, move || Box::new(c2.clone()));
-    assert!(result.is_ok(), "{result:?}");
+    // 闸门未放行：子 Agent 传输中在途 → 根终文报未收尾（确定性轮级结果；
+    // m0–m33 的工具结果在关闭前已逐条落账，历史可断言）。
+    assert!(
+        result.is_err(),
+        "闸门关闭且有活动子任务：根终文应报未收尾错误：{result:?}"
+    );
+    // 先放行被闸门阻塞的子传输，再等子线程退出（顺序不可倒置：
+    // 在途 send 占用子槽，放行前 wait_drained 必然超时）。
+    releaser.release();
     wait_drained();
     let results: Vec<(String, String)> = history
         .iter()

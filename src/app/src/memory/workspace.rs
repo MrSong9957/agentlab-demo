@@ -31,6 +31,7 @@
 //! `rev-list --count`＝1 测试固化），不将 amend 泛称为任意仓库重建的等价
 //! 实现（上游 reset 为破坏性删除 `.git` 重建，语义差异见 013 §3 G8 行）。
 
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -189,7 +190,12 @@ fn run_git_env(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // 独立进程组：超时/取消终止整个进程组（003 同款；unix only 与项目一致）
+    // 独立进程组：超时/取消终止整个进程组（003 同款）。Windows：std 1.87 起
+    // process_group 同样可用（CREATE_NEW_PROCESS_GROUP）——终止经 kill_process_group
+    // 的平台实现；进程组语义两端等价。
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(windows)]
     command.process_group(0);
 
     let timeout_ms = effective_timeout_ms();
@@ -245,6 +251,13 @@ fn kill_process_group(child: &mut Child) {
     unsafe {
         libc::killpg(pgid, libc::SIGKILL);
     }
+}
+
+/// Windows 版：git 子进程无嵌套派生（reset/amend 均单进程），直接终止；
+/// 若未来引入树派生，需迁移至 Job 对象（与 proc_session 同机制）。
+#[cfg(windows)]
+fn kill_process_group(child: &mut Child) {
+    let _ = child.kill();
 }
 
 /// 管道读取线程句柄：完成信号通道供收尾宽限判定（003 同构）。

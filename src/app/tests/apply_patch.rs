@@ -6,8 +6,8 @@
 //! logs/2026-10-08-004-apply-patch.md）：Add 拒绝已有链接；Update 跟随链接；
 //! Delete 删除链接本体；清单路径不 canonicalize；匹配按精确→trim_end→trim
 //! 全文件扫描顺序、同级取最早、EOF 锚定末位；同文件各块顺序重读、清单不去重。
-#![cfg(target_os = "linux")]
-// 038-CI：本文件依赖 POSIX 语义（PTY/Unix fd/文件权限位），Windows 不编译；internal-apply 写经 /proc/self/fd（Linux 专属，macOS 显式 fail-closed，24/55 失败）；
+#![cfg(unix)]
+// 038：POSIX 语义（PTY/Unix fd/文件权限位），Windows 不编译；internal-apply 写已平台化（macOS /dev/fd），macOS 恢复执行；
 
 mod common;
 

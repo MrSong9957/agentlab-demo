@@ -5,7 +5,12 @@
 
 ## 与第 8 轮合并的 macOS 缺口全景（产品级移植项）
 
-1. PTY 驱动测试系统性卡死（2 处实证：e2e_acceptance 第 8 轮、native_model_apis
+1. PTY 驱动测试系统性卡死（2 处实证：e2e_acceptance 第 8 轮整文件 2h13m 零输出、
+   具体用例未定位；native_model_apis 第 10 轮——**在飞用例已定位：
+   tui_native_image_request_carries_anthropic_image_block 与
+   tui_renders_native_tool_reply_and_discards_late_response_after_cancel**，
+   00:54 起 60s 告警后 2h20m 无完成）；
+   PTY 层根因与移植规模待证实
    第 10 轮；两轮卡死点不同＝逐用例门控不可穷尽，需产品级 PTY 层移植）；
 2. /proc/self/fd 写回（internal-apply，macOS fail-closed）：apply_patch 集成＋lib 共 26；
 3. AGENTS.md 链发现缺失：context_injection/context_management 12；

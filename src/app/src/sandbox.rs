@@ -686,9 +686,11 @@ pub struct SandboxLaunch {
 
 /// seccomp 过滤器的 memfd 守卫：非 CLOEXEC（须穿越 execve 交给 bwrap），
 /// Drop 关闭。spawn 后（Command::spawn 返回即可）即可 drop。
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[derive(Debug)]
 pub struct SeccompFd(std::os::fd::RawFd);
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 impl SeccompFd {
     pub fn raw(&self) -> std::os::fd::RawFd {
         self.0

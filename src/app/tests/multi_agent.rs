@@ -2148,15 +2148,11 @@ fn c13_bwrap_child_mode() {
 /// 输出 skip 原因跳过。
 #[test]
 fn c13_bwrap_owner_reap_matrix() {
-    // 038-CI：GH 托管 ubuntu-24.04 runner 实证——assignment 回收后含 marker 的
-    // 沙箱进程树存活超过 15s poll（本地容器 0.9.0 bwrap＋同一用例 2.3s 通过），
-    // 组杀→PID ns 整树销毁的行为在 runner 环境不同，根因待宿主侧专项排查；
-    // CI 置 TCHAT_SKIP_RUNNER_TIMING_PROBES=1 显式跳过，本地默认运行。
-    // 发现记录：docs/specs/038-github-actions-ci.md §5。
-    if std::env::var("TCHAT_SKIP_RUNNER_TIMING_PROBES").is_ok() {
-        eprintln!("c13 跳过：runner 沙箱进程组回收行为差异待专项排查（038 发现）");
-        return;
-    }
+    // 038 恢复真实检查（2026-10-31）：本地含 bwrap 0.11.1（runner 同版本）均通过。
+    // GH runner 实测的进程树回收差异（回收后 marker 进程存活超 poll 窗口）根因
+    // 待 runner 侧 strace 诊断（见 docs/logs/038-github-actions-ci/
+    // 2026-10-31-runner-diagnosis-plan.md）；该用例不再提前 return——runner 上
+    // 若复现即如实失败，为诊断提供信号。
     if !terminal_chat::sandbox::probe_available() {
         eprintln!(
             "skip：当前环境无可用 bwrap（probe_available=false），C13 沙箱矩阵不运行；\

@@ -8,8 +8,9 @@
 //! - S5（EFBIG 半写）与 F2 同步屏障不在本文件：复用既有用例，验收记录单独列示。
 //! - 时序约定：所有等待均为 poll＋截止时间（看门狗），无固定延迟猜测关键时序；
 //!   子进程异常时杀死并回收，不留孤儿。
-#![cfg(all(unix, not(target_os = "macos")))]
-// 038-CI：本文件依赖 POSIX 语义（PTY/Unix fd/文件权限位），Windows 不编译；macOS 上 e2e_acceptance 存在 PTY 链路卡死（2h13m 零输出，待定位），Linux 不变
+#![cfg(unix)]
+// 038：POSIX 语义（PTY/Unix fd/文件权限位），Windows 不编译；macOS 恢复执行——
+// 写侧已有界化（卡死转为证据化 panic，下次 CI 运行定位具体用例）
 
 mod common;
 
@@ -1136,6 +1137,11 @@ impl PtySession {
             cmd.stdout(Stdio::from(File::from_raw_fd(fd1)));
             cmd.stderr(Stdio::from(File::from_raw_fd(fd2)));
             let child = cmd.spawn().expect("PTY 子进程启动失败");
+            // 038：master 非阻塞（写侧 poll＋看门狗配套，卡死转为证据化 panic）；
+            // 注意只作用于 master——从设备 fd0/1/2 是子进程 stdio，保持阻塞语义。
+            let fl = libc::fcntl(master_fd, libc::F_GETFL);
+            assert!(fl >= 0, "F_GETFL 失败");
+            assert_eq!(libc::fcntl(master_fd, libc::F_SETFL, fl | libc::O_NONBLOCK), 0);
             PtySession {
                 master: File::from_raw_fd(master_fd),
                 child,
@@ -1232,9 +1238,46 @@ impl PtySession {
         Ok(())
     }
 
+    /// 038：非阻塞 master 上的有界写——子进程停读输入时不再无限阻塞，
+    /// 超时转储子进程状态与已捕获输出（macOS 卡死诊断 instrumentation）。
+    fn write_bounded(&mut self, mut data: &[u8]) {
+        let deadline = Instant::now() + WATCHDOG;
+        while !data.is_empty() {
+            if Instant::now() > deadline {
+                let state = self.child.try_wait();
+                panic!(
+                    "PTY 写入超时（子进程未读输入？state={state:?}）：\n{}",
+                    String::from_utf8_lossy(&self.captured)
+                );
+            }
+            let mut pfd = libc::pollfd {
+                fd: self.master.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            let r = unsafe { libc::poll(&mut pfd, 1, 100) };
+            if r > 0 && pfd.revents & (libc::POLLOUT | libc::POLLHUP | libc::POLLERR) != 0 {
+                let n = unsafe {
+                    libc::write(self.master.as_raw_fd(), data.as_ptr().cast(), data.len())
+                };
+                if n > 0 {
+                    data = &data[n as usize..];
+                } else if n < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() != std::io::ErrorKind::WouldBlock {
+                        panic!(
+                            "PTY write 失败：{err}\n{}",
+                            String::from_utf8_lossy(&self.captured)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// 发送原始字节（如 Ctrl+C 的 0x03，不附加换行）。
     fn send_raw(&mut self, bytes: &[u8]) {
-        self.master.write_all(bytes).expect("PTY 写入失败");
+        self.write_bounded(bytes);
     }
 
     /// 017：真实缩放＋测试侧屏幕同步——在既有 [`PtySession::resize`]（TIOCSWINSZ
@@ -1276,9 +1319,9 @@ impl PtySession {
     /// - TUI composer 的 paste-burst 启发式（≥3 个 ASCII 字符连打→120ms 内的
     ///   Enter 被并入草稿）要求分隔发送，模拟真人键入节奏。
     fn send_line(&mut self, line: &str) {
-        self.master.write_all(line.as_bytes()).expect("PTY 写入失败");
+        self.write_bounded(line.as_bytes());
         std::thread::sleep(Duration::from_millis(150));
-        self.master.write_all(b"\r").expect("PTY 写入失败");
+        self.write_bounded(b"\r");
     }
 
     fn output(&self) -> String {

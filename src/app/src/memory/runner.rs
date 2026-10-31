@@ -69,8 +69,7 @@ fn write_epoch(root: &Path, v: u64) -> Result<(), String> {
     std::fs::rename(&tmp, &path).map_err(|e| format!("重置代数落位失败：{e}"))
 }
 
-/// 根目录 flock（跨进程互斥；Unix 目录 fd 可 flock）。
-#[cfg(unix)]
+/// 根目录锁（跨进程互斥）。
 fn flock_root(root: &Path, exclusive: bool) -> Option<std::fs::File> {
     use std::os::unix::io::AsRawFd;
     let f = std::fs::File::open(root).ok()?;
@@ -91,34 +90,49 @@ fn flock_root(root: &Path, exclusive: bool) -> Option<std::fs::File> {
     }
 }
 
+/// Windows 版：LockFileEx（共享/独占由 exclusive 决定，立即失败模式）。
+/// 锁随句柄存活——返回的 File 被 SharedWriteGuard 持有至临界区结束，语义
+/// 与 flock 一致（句柄关闭＝释放）。
+#[cfg(windows)]
+fn flock_root(root: &Path, exclusive: bool) -> Option<std::fs::File> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+    };
+    let f = std::fs::File::open(root).ok()?;
+    let mut ov: windows_sys::Win32::System::IO::OVERLAPPED = unsafe { std::mem::zeroed() };
+    let flags = if exclusive {
+        LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY
+    } else {
+        LOCKFILE_FAIL_IMMEDIATELY
+    };
+    let ok = unsafe {
+        LockFileEx(f.as_raw_handle() as _, flags as u32, 0, 1, 0, &mut ov)
+    };
+    if ok != 0 {
+        Some(f)
+    } else {
+        None
+    }
+}
+
 /// 共享写守卫（RAII）：持有期间 reset 的排他清空被互斥——「检查代数＋
 /// 实际修改」由此构成原子域（任务凭据绑定/prepare/同步/Git 收尾共用）。
-#[cfg(unix)]
 pub struct SharedWriteGuard {
     _file: std::fs::File,
 }
 
 /// 取得根目录共享锁（写入临界区入口；跨进程有效）。失败返回 None——
 /// 调用方按无法进入临界区处理（中止该次写入）。
-#[cfg(unix)]
 pub fn lock_shared(root: &Path) -> Option<SharedWriteGuard> {
     flock_root(root, false).map(|_file| SharedWriteGuard { _file })
 }
 
 /// 首次建库守卫：共享锁内「检查代数＋建库」同临界区（防检查-建库窗口内
-/// reset）；代际失配返回 None（调用方中止）。Windows 无 flock——退化为
-/// 仅检查（登记限制，见记录）。
+/// reset）；代际失配返回 None（调用方中止）。
 fn open_store_if_valid(root: &Path, epoch: u64, clock: crate::memory::Clock) -> Option<MemoryStore> {
-    #[cfg(unix)]
     {
         let _lock = flock_root(root, false);
-        if read_epoch(root) != epoch {
-            return None;
-        }
-        MemoryStore::open(root, clock).ok()
-    }
-    #[cfg(not(unix))]
-    {
         if read_epoch(root) != epoch {
             return None;
         }
@@ -557,7 +571,6 @@ pub fn memory_reset(user_dir: &Path, args: &str) -> String {
     }
     // 排他锁内：清空＋代数自增（与一切写入者的共享锁互斥——返回后旧任务
     // 的配对凭据必然失配，写入入口一律拒绝）
-    #[cfg(unix)]
     let _excl = flock_root(&root, true);
     let next_epoch = read_epoch(&root) + 1;
     let mut cleared = 0usize;

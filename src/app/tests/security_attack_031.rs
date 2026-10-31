@@ -799,17 +799,13 @@ fn attack05_grant_limit_atomicity_and_deny_covered_request() {
 
 #[test]
 fn attack06_seccomp_allows_toolchain_blocks_privileged_syscalls() {
-    // 038-CI：clone3→ENOSYS 断言依赖 031 seccomp 过滤器在目标环境真实生效——
-    // GH 托管 ubuntu-24.04 runner 实测 clone3=EINVAL（mount 等 EPERM 系断言全过
-    // 不足以证明过滤器生效：userns 内本就天然 EPERM；clone3 探针传 NULL/0，
-    // 无过滤器时内核本就返回 EINVAL，ENOSYS 只能来自过滤器短路）。根因（bwrap
-    // 0.10/内核组合行为差异，或启动链存在静默跳过路径）待专项排查——CI 显式
-    // 置 TCHAT_SKIP_SECCOMP_ENFORCEMENT_PROBE=1 跳过本探针；本地默认运行，
-    // 行为零变化。发现记录：docs/specs/038-github-actions-ci.md §5。
-    if std::env::var("TCHAT_SKIP_SECCOMP_ENFORCEMENT_PROBE").is_ok() {
-        eprintln!("attack06 跳过：CI 环境未观察到 clone3→ENOSYS（seccomp 生效性待专项排查）");
-        return;
-    }
+    // 038 恢复真实检查（2026-10-31）：clone3→ENOSYS 断言依赖 031 seccomp 过滤
+    // 器真实生效。已排除的变量（本地实证）：bwrap 0.9.0 与 0.11.1（runner 同版
+    // 本）均通过——过滤器程序（arch 门→deny 清单→clone 掩码→ALLOW）无环境敏感
+    // 结构，fd 传递链 fail-closed 无静默路径。GH runner 实测 clone3=EINVAL（=过
+    // 滤器未短路）根因待 runner 侧 strace 诊断（见 docs/logs/038-github-actions-ci/
+    // 2026-10-31-runner-diagnosis-plan.md）；该探针不再提前 return——runner 上
+    // 若复现即如实失败，为诊断提供信号。
     if !bwrap_available() {
         eprintln!("跳过：bwrap 不可用");
         return;

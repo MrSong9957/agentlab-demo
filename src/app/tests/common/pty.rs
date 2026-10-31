@@ -71,6 +71,11 @@ impl PtyCli {
             };
             let fd0 = libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
             assert!(fd0 >= 0, "打开 PTY 从设备失败：{}", std::io::Error::last_os_error());
+            // 038：master 双向均非阻塞——读侧 poll 门控已有；写侧 send 配套
+            // poll＋看门狗（子进程停读输入时 send 不再无限阻塞，超时转储证据）。
+            let fl = libc::fcntl(master_fd, libc::F_GETFL);
+            assert!(fl >= 0, "F_GETFL 失败");
+            assert_eq!(libc::fcntl(master_fd, libc::F_SETFL, fl | libc::O_NONBLOCK), 0);
             let fd1 = libc::dup(fd0);
             let fd2 = libc::dup(fd0);
             // 008-ADAPT：窗口尺寸提为常量（VT100 解析器与 TIOCSWINSZ 同尺寸）
@@ -215,9 +220,51 @@ impl PtyCli {
     ///   ＝120ms）——分隔发送并等窗口过期，模拟真人键入节奏。
     pub fn send(&mut self, line: &str) {
         std::thread::sleep(Duration::from_millis(50));
-        self.master.write_all(line.as_bytes()).expect("PTY 写入失败");
+        self.write_bounded(line.as_bytes());
         std::thread::sleep(Duration::from_millis(150));
-        self.master.write_all(b"\r").expect("PTY 写入失败");
+        self.write_bounded(b"\r");
+    }
+
+    /// 038：非阻塞 master 上的有界写——poll 可写就绪后写一片，EAGAIN 重试；
+    /// 看门狗超时＝子进程长时间不读输入（异常态），转储子进程状态与已捕获
+    /// 输出后 panic（此前该路径 write_all 无限阻塞，为 macOS 卡死嫌疑点）。
+    fn write_bounded(&mut self, mut data: &[u8]) {
+        let deadline = Instant::now() + self.watchdog;
+        while !data.is_empty() {
+            if Instant::now() > deadline {
+                let state = self.child.try_wait();
+                panic!(
+                    "PTY 写入超时（子进程未读输入？state={state:?}）：\n{}",
+                    String::from_utf8_lossy(&self.captured)
+                );
+            }
+            let mut pfd = libc::pollfd {
+                fd: self.master.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            let r = unsafe { libc::poll(&mut pfd, 1, 100) };
+            if r > 0 && pfd.revents & (libc::POLLOUT | libc::POLLHUP | libc::POLLERR) != 0 {
+                let n = unsafe {
+                    libc::write(
+                        self.master.as_raw_fd(),
+                        data.as_ptr().cast(),
+                        data.len(),
+                    )
+                };
+                if n > 0 {
+                    data = &data[n as usize..];
+                } else if n < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() != std::io::ErrorKind::WouldBlock {
+                        panic!(
+                            "PTY write 失败：{err}\n{}",
+                            String::from_utf8_lossy(&self.captured)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// 018-B：原样发送按键字节（不追加 CR）——功能键（F6）、方向键、Tab 与

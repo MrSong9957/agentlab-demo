@@ -103,13 +103,16 @@ fn wsl_interop_mask_follows_dir_presence_flag() {
 /// T1b 生产策略（policy_for）包含 temp 可写根（对齐 Claude Code 默认写面），
 /// 且可写根按深度排序——宽根（/tmp）先 bind、深根（工作区）后 bind 重开。
 #[test]
-#[cfg(target_os = "linux")]
-// 038-CI：依赖 bwrap//proc/mountinfo（Linux 专属），见 docs/specs/038 §5。
+// 038：纯快照构造（不依赖 bwrap//proc），三端执行。macOS 上 temp_dir
+// （/var/folders/…）经产品侧 canonicalize 落在 /private/var/…——断言对齐
+// 产品自身的规范化（见 sandbox.rs policy_for 的可写根构造注释）。
 fn policy_for_includes_temp_writable_root() {
     let ws = tmp_ws("policy-temp");
     let policy = policy_for(&ws);
+    let temp_canon =
+        std::env::temp_dir().canonicalize().unwrap_or_else(|_| std::env::temp_dir());
     assert!(
-        policy.writable_roots.iter().any(|p| p == &std::env::temp_dir()),
+        policy.writable_roots.iter().any(|p| p == &temp_canon),
         "temp 目录应在可写根内"
     );
     let args =
