@@ -1264,7 +1264,11 @@ fn write_via_validated_fd(
 
 /// Windows 版（见 unix 版函数头注释）：ReOpenFile 同一文件对象以写权限重开。
 #[cfg(windows)]
-fn write_via_validated_fd(read_fd: &std::fs::File, data: &[u8]) -> std::io::Result<()> {
+fn write_via_validated_fd(
+    read_fd: &std::fs::File,
+    _target: &Path,
+    data: &[u8],
+) -> std::io::Result<()> {
     use std::os::windows::io::{FromRawHandle, RawHandle};
     use windows_sys::Win32::Foundation::{GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
