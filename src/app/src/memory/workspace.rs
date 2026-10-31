@@ -868,6 +868,7 @@ mod tests {
     /// ②**进程组清理**——直接子进程（sh）与其后代（sleep）经 SIGKILL 组杀
     ///   全部终止（/proc 实证消失，轮询 ≤5s）；
     /// ③**失败契约**——Err 上抛（不伪报成功）、基线未建立（`.git` 不存在，
+    #[cfg(unix)] // 038：POSIX 权限/符号链接语义用例（Windows 无等价设施），见 specs/038 §5
     ///   无成功副作用）。
     #[test]
     fn git_timeout_kills_process_group_with_descendants() {
@@ -961,6 +962,7 @@ mod tests {
 
     /// 027 B⑤：私有仓库钩子一律不执行（E6 证实固定 argv 不防已植入钩子）。
     /// 假 pre-commit 仅 `touch` 标记文件（无副作用面）；断言提交成功且标记
+    #[cfg(unix)] // 038：POSIX 权限/符号链接语义用例（Windows 无等价设施），见 specs/038 §5
     /// 不出现＝hooksPath 覆盖生效，钩子（及其宿主）未被信任。
     #[test]
     fn commit_does_not_execute_planted_hooks() {

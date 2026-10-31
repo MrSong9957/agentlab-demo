@@ -394,6 +394,7 @@ fn deny_target_metadata_error_fails_closed() {
 /// B1 收口：deny 目标父目录不可穿越（权限 000，EACCES）＝同样显式拒绝。
 /// 符号链接遍历遇 lstat 错误按上游语义 break 跳过（不构成拦截），非 NotFound
 /// 分类必须由 metadata 检查兜底。夹具目录在工作区之外，锚定根不受影响；
+    #[cfg(unix)] // 038：POSIX 权限/符号链接语义用例（Windows 无等价设施），见 specs/038 §5
 /// 断言后先恢复权限再清理（否则自身 remove_dir_all 也失败）。
 #[test]
 fn deny_target_parent_permission_error_fails_closed() {

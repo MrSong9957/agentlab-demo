@@ -572,6 +572,7 @@ mod tests {
     /// 027 B⑥+F1（安全攻防）：目录组件符号链接——global_dir 或其任意中间目录
     /// 组件为符号链接时，AGENTS.md 正文会以应用身份被读入上下文（静态布置即
     /// 可、无需竞速）。逐前缀 symlink_metadata 检查＋末组件 O_NOFOLLOW 双层：
+    #[cfg(unix)] // 038：POSIX 权限/符号链接语义用例（Windows 无等价设施），见 specs/038 §5
     /// 静态链被逐级拒绝，末组件竞态由 O_NOFOLLOW 兜底。
     #[test]
     fn symlinked_directory_component_source_is_rejected() {
