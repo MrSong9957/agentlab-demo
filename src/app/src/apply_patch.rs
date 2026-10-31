@@ -1242,7 +1242,7 @@ fn write_via_validated_fd(read_fd: &std::fs::File, data: &[u8]) -> std::io::Resu
     };
     let wh = unsafe {
         ReOpenFile(
-            read_fd.as_raw_handle() as RawHandle as isize,
+            read_fd.as_raw_handle() as _,
             GENERIC_WRITE,
             (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE) as u32,
             FILE_ATTRIBUTE_NORMAL,
@@ -1706,8 +1706,6 @@ fn open_source_nofollow(target: &Path) -> std::io::Result<Option<std::fs::File>>
 
 /// 末端符号链接拒绝的错误判定（unix＝ELOOP；Windows＝本模块 FilesystemLoop
 /// 哨兵，见 [`open_source_nofollow`]）。
-#[cfg(unix)]
-
 
 /// 词法归一（消 `.`/`..`）比较两路径是否同一目标——用于移动的自路径拒绝；
 /// 不触文件系统（符号链接别名等价由 `create_new` 排他创建兜底）。

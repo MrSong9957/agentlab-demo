@@ -1584,9 +1584,13 @@ fn build_tool_command(
                 // 033-B2：继承 fd ≥3 标记 CLOEXEC（execve 时关闭）——launcher 遗留的
                 // 非 CLOEXEC fd 不再进入沙箱载荷；仅沙箱分支（普通模式零变化）。
                 // 闭包为无捕获 fn 项，pre_exec 异步信号安全（单个 syscall）。
+                // 038：pre_exec 为 unix API（Windows 无沙箱路径，本分支不可达）。
+                #[cfg(unix)]
                 unsafe {
                     c.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
                 }
+                #[cfg(windows)]
+                let _ = &c;
                 c.env_clear();
                 c.envs(child_env);
                 Ok((c, None))
@@ -1690,8 +1694,6 @@ fn spawn_pty(
 static PTY_NAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 打开一对伪终端（master 带 O_CLOEXEC，从设备以 O_CLOEXEC 打开）。
-#[cfg(windows)]
-
 #[cfg(unix)]
 fn open_pty() -> std::io::Result<(File, File)> {
     unsafe {
