@@ -1548,8 +1548,6 @@ fn build_tool_command(
         // 038：pre_exec 为 unix API——Windows 无沙箱路径（policy 恒 None，
         // 本分支不可达），cfg 门控仅为可编译性。
         #[cfg(unix)]
-        // 038：pre_exec 为 unix API——Windows 无沙箱路径（policy 恒 None）。
-        #[cfg(unix)]
         match launch.seccomp.as_ref() {
             #[cfg(unix)]
             Some(guard) => {
