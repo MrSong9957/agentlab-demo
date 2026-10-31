@@ -91,9 +91,31 @@ fn flock_root(root: &Path, exclusive: bool) -> Option<std::fs::File> {
     }
 }
 
+/// Windows 版：LockFileEx（共享/独占由 exclusive 决定，立即失败模式）。
+/// 锁随句柄存活（SharedWriteGuard 持有至临界区结束），句柄关闭＝释放。
+#[cfg(windows)]
+fn flock_root(root: &Path, exclusive: bool) -> Option<std::fs::File> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+    };
+    let f = std::fs::File::open(root).ok()?;
+    let mut ov: windows_sys::Win32::System::IO::OVERLAPPED = unsafe { std::mem::zeroed() };
+    let flags = if exclusive {
+        LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY
+    } else {
+        LOCKFILE_FAIL_IMMEDIATELY
+    };
+    let ok = unsafe { LockFileEx(f.as_raw_handle() as _, flags as u32, 0, 1, 0, &mut ov) };
+    if ok != 0 {
+        Some(f)
+    } else {
+        None
+    }
+}
+
 /// 共享写守卫（RAII）：持有期间 reset 的排他清空被互斥——「检查代数＋
 /// 实际修改」由此构成原子域（任务凭据绑定/prepare/同步/Git 收尾共用）。
-#[cfg(unix)]
 pub struct SharedWriteGuard {
     _file: std::fs::File,
 }
