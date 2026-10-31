@@ -1691,7 +1691,6 @@ static PTY_NAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 打开一对伪终端（master 带 O_CLOEXEC，从设备以 O_CLOEXEC 打开）。
 #[cfg(windows)]
-fn open_pty_win_placeholder() {}
 
 #[cfg(unix)]
 fn open_pty() -> std::io::Result<(File, File)> {
