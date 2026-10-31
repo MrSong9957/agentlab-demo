@@ -1549,7 +1549,7 @@ fn apply_move(
     // 2. 源打开＋判型：O_NOFOLLOW——末端符号链接（含悬空，ELOOP）不跟随，
     //    避免"复制链接所指内容后删除链接本体"（普通 Update 跟随语义不变）
     let file = match open_source_nofollow(&src) {
-        Ok(f) => f,
+        Ok(Some(f)) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(Failure::validation(format!(
                 "移动源不存在（目标 {}）：{}",
@@ -1557,7 +1557,7 @@ fn apply_move(
                 src.display()
             )));
         }
-        Err(e) if is_symlink_reject(&e) => {
+        Ok(None) => {
             return Err(Failure::validation(ctx("移动源是符号链接（含悬空），拒绝移动")));
         }
         Err(e) => return Err(Failure::validation(both("打开移动源失败", &e))),
@@ -1649,7 +1649,12 @@ fn apply_move(
     #[cfg(test)]
     move_seam::barrier("before_unlink");
     let verify = match open_source_nofollow(&src) {
-        Ok(f) => f,
+        Ok(Some(f)) => f,
+        Ok(None) => {
+            return Err(Failure::mutating(
+                "删除前复核移动源失败：源是符号链接（含悬空），拒绝移动".into(),
+            ));
+        }
         Err(e) => return Err(Failure::mutating(both("删除前复核移动源失败", &e))),
     };
     if fd_inode(&verify) != fd_inode(&file) {
@@ -1679,36 +1684,30 @@ fn apply_move(
 /// Move 源打开：加 `O_NOFOLLOW`——末端符号链接（含悬空）一律 ELOOP 拒绝、
 /// 不跟随（普通 Update 的 [`open_validated_regular`] 保持跟随语义不变）。
 #[cfg(unix)]
-fn open_source_nofollow(target: &Path) -> std::io::Result<std::fs::File> {
-    open_path(target, libc::O_NOFOLLOW)
+fn open_source_nofollow(target: &Path) -> std::io::Result<Option<std::fs::File>> {
+    match open_path(target, libc::O_NOFOLLOW) {
+        Ok(f) => Ok(Some(f)),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// Windows 版：无 O_NOFOLLOW 对应物——symlink_metadata 预检拒绝末端链接
 ///（含悬空：悬空链接的 symlink_metadata 仍可读出 reparse 属性）；检查与打开
 /// 之间的 TOCTOU 残差由后续句柄级判型＋句柄绑定写入兜住。
 #[cfg(windows)]
-fn open_source_nofollow(target: &Path) -> std::io::Result<std::fs::File> {
+fn open_source_nofollow(target: &Path) -> std::io::Result<Option<std::fs::File>> {
     let ft = std::fs::symlink_metadata(target)?.file_type();
     if ft.is_symlink() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::FilesystemLoop,
-            "移动源是符号链接",
-        ));
+        return Ok(None);
     }
-    std::fs::File::open(target)
+    std::fs::File::open(target).map(Some)
 }
 
 /// 末端符号链接拒绝的错误判定（unix＝ELOOP；Windows＝本模块 FilesystemLoop
 /// 哨兵，见 [`open_source_nofollow`]）。
 #[cfg(unix)]
-fn is_symlink_reject(e: &std::io::Error) -> bool {
-    e.raw_os_error() == Some(libc::ELOOP)
-}
 
-#[cfg(windows)]
-fn is_symlink_reject(e: &std::io::Error) -> bool {
-    e.kind() == std::io::ErrorKind::FilesystemLoop
-}
 
 /// 词法归一（消 `.`/`..`）比较两路径是否同一目标——用于移动的自路径拒绝；
 /// 不触文件系统（符号链接别名等价由 `create_new` 排他创建兜底）。

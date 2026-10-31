@@ -549,7 +549,10 @@ impl ProcessManager {
         // 后台线程：监控（退出回收／时限终止）＋ 读取（持续收集输出）。
         #[cfg(windows)]
         {
-            win::assign_child_to_job(sp.child.id(), &sp.child)?;
+            // 作业挂接失败＝失去树终止能力（016 契约）——显式 panic，不静默。
+            if let Err(e) = win::assign_child_to_job(sp.child.id(), &sp.child) {
+                panic!("作业对象挂接失败（Windows 树终止不可用）：{e}");
+            }
         }
         let monitor_session = session.clone();
         std::thread::spawn(move || {
@@ -1545,6 +1548,8 @@ fn build_tool_command(
         // 038：pre_exec 为 unix API——Windows 无沙箱路径（policy 恒 None，
         // 本分支不可达），cfg 门控仅为可编译性。
         #[cfg(unix)]
+        // 038：pre_exec 为 unix API——Windows 无沙箱路径（policy 恒 None）。
+        #[cfg(unix)]
         match launch.seccomp.as_ref() {
             Some(guard) => {
                 let fd = guard.raw();
@@ -1558,6 +1563,8 @@ fn build_tool_command(
                 c.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
             },
         }
+        #[cfg(windows)]
+        let _ = &launch;
         #[cfg(windows)]
         let _ = &launch;
         c.env_clear();
@@ -1673,6 +1680,10 @@ fn spawn_pty(
     let master = Arc::new(master);
     Ok(Spawned { child, master: Some(master), stdout: None, stderr: None })
 }
+
+/// 038：macOS ptsname 静态缓冲的串行化锁（见 open_pty 内注释）。
+#[cfg(target_os = "macos")]
+static PTY_NAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 打开一对伪终端（master 带 O_CLOEXEC，从设备以 O_CLOEXEC 打开）。
 #[cfg(windows)]
@@ -1837,11 +1848,15 @@ fn spawn_reader<R: Read + Send + 'static>(session: Arc<Session>, mut pipe: R) {
             match pipe.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    let mut st = session.lock();
-                    st.pending.push(&buf[..n]);
-                    drop(st);
-                    session.cv.notify_all();
-                    if st.readers_may_stop {
+                    let stop = {
+                        let mut st = session.lock();
+                        st.pending.push(&buf[..n]);
+                        let stop = st.readers_may_stop;
+                        drop(st);
+                        session.cv.notify_all();
+                        stop
+                    };
+                    if stop {
                         break;
                     }
                 }
