@@ -697,6 +697,7 @@ impl SeccompFd {
     }
 }
 
+#[cfg(unix)]
 impl Drop for SeccompFd {
     fn drop(&mut self) {
         unsafe {

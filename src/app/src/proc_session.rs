@@ -375,9 +375,7 @@ impl ProcessManager {
         }
         for s in &owned {
             if let Phase::Running { pgid } = s.phase() {
-                unsafe {
-                    libc::killpg(pgid, libc::SIGTERM);
-                }
+                request_group_term(pgid);
             }
         }
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -549,6 +547,10 @@ impl ProcessManager {
         };
 
         // 后台线程：监控（退出回收／时限终止）＋ 读取（持续收集输出）。
+        #[cfg(windows)]
+        {
+            win::assign_child_to_job(sp.child.id(), &sp.child)?;
+        }
         let monitor_session = session.clone();
         std::thread::spawn(move || {
             monitor_thread(monitor_session, sp.child, deadline)
@@ -906,40 +908,8 @@ fn test_gate_wait(session: &Session) {
 
 /// 终止进程组的受检入口：返回 Ok（已发信号）／Gone（组已不存在）／Failed
 ///（失败，含 errno）。测试注入仅对 [`TEST_KILLPG_FAIL_PGD`] 匹配的组生效。
-fn kill_group_checked(pgid: GroupId) -> KillOutcome {
-    #[cfg(test)]
-    {
-        if TEST_KILLPG_FAIL_PGD.load(Ordering::SeqCst) == pgid as i64 {
-            return KillOutcome::Failed(libc::EPERM);
-        }
-    }
-    kill_group_sigkill(pgid)
-}
-
-/// Windows：组硬终止＝作业对象整树终止。中断（SIGINT 对应）在 Windows
-/// 无同构等价（GenerateConsoleCtrlEvent 需共享控制台）——以整树终止实现，
-/// 语义差异（无"温和中断"档）登记为平台残差（规格 §3.1）。
-#[cfg(windows)]
-fn kill_group_sigkill(pgid: GroupId) -> KillOutcome {
-    match win::terminate_tree(pgid) {
-        Ok(()) => KillOutcome::Ok,
-        Err(e) if e.to_string().contains("不存在") => KillOutcome::Gone,
-        Err(e) => KillOutcome::Failed(e.raw_os_error().unwrap_or(5)),
-    }
-}
-
-#[cfg(windows)]
-fn request_group_term(pgid: GroupId) {
-    let _ = kill_group_sigkill(pgid); // Windows：温和档＝整树终止（见上注）
-}
-
-#[cfg(windows)]
-fn request_group_interrupt(pgid: GroupId) {
-    let _ = kill_group_sigkill(pgid); // 同上
-}
-
-/// 组硬终止（unix＝killpg(SIGKILL)＋errno 分类；Windows＝作业对象整树终止，
-/// 组不存在＝作业句柄已关闭/未注册）。
+/// 组硬终止（unix＝killpg(SIGKILL)＋errno 分类；Windows＝作业对象整树终止——
+/// 后代默认继承作业，TerminateJobObject 覆盖整树；组不存在＝句柄已关闭）。
 #[cfg(unix)]
 fn kill_group_sigkill(pgid: GroupId) -> KillOutcome {
     let rc = unsafe { libc::killpg(pgid, libc::SIGKILL) };
@@ -954,12 +924,28 @@ fn kill_group_sigkill(pgid: GroupId) -> KillOutcome {
     }
 }
 
-/// 组温和终止（unix＝killpg(SIGTERM)）。
+/// Windows：整树终止。SIGINT 温和中断无同构等价——以整树终止实现（残差登记）。
+#[cfg(windows)]
+fn kill_group_sigkill(pgid: GroupId) -> KillOutcome {
+    match win::terminate_tree(pgid) {
+        Ok(()) => KillOutcome::Ok,
+        Err(e) if e.to_string().contains("不存在") => KillOutcome::Gone,
+        Err(e) => KillOutcome::Failed(e.raw_os_error().unwrap_or(5)),
+    }
+}
+
+/// 组温和终止（unix＝killpg(SIGTERM)——3 秒窗口后硬终止兜底）。
 #[cfg(unix)]
 fn request_group_term(pgid: GroupId) {
     unsafe {
         libc::killpg(pgid, libc::SIGTERM);
     }
+}
+
+/// Windows：温和档无同构等价——以整树终止实现。
+#[cfg(windows)]
+fn request_group_term(pgid: GroupId) {
+    let _ = kill_group_sigkill(pgid);
 }
 
 /// 组中断请求（unix＝killpg(SIGINT)——只请求中断，不保证退出）。
@@ -968,6 +954,22 @@ fn request_group_interrupt(pgid: GroupId) {
     unsafe {
         libc::killpg(pgid, libc::SIGINT);
     }
+}
+
+/// Windows：中断档以整树终止实现（残差登记）。
+#[cfg(windows)]
+fn request_group_interrupt(pgid: GroupId) {
+    let _ = kill_group_sigkill(pgid);
+}
+
+fn kill_group_checked(pgid: GroupId) -> KillOutcome {
+    #[cfg(test)]
+    {
+        if TEST_KILLPG_FAIL_PGD.load(Ordering::SeqCst) == pgid as i64 {
+            return KillOutcome::Failed(libc::EPERM);
+        }
+    }
+    kill_group_sigkill(pgid)
 }
 
 /// killpg 的三种结局。
@@ -1035,8 +1037,7 @@ struct SessionState {
     test_gate: Option<TestGate>,
 }
 
-/// 进程组标识：unix＝pgid（进程组）；Windows＝主子进程 PID（作业对象的
-/// 查找键——共同契约的树终止经作业对象实现，见本文件 win 模块）。
+/// 进程组标识：unix＝pgid；Windows＝主子进程 PID（作业对象查找键）。
 #[cfg(unix)]
 type GroupId = libc::pid_t;
 #[cfg(windows)]
@@ -1169,7 +1170,7 @@ impl Session {
         }
     }
 
-    /// 管道会话的 Ctrl+C：向进程组发送中断（只请求中断，不保证退出）。
+    /// 管道会话的 Ctrl+C：向进程组发送 SIGINT（只请求中断，不保证退出）。
     fn interrupt(&self) {
         let st = self.lock();
         if let Phase::Running { pgid } = st.phase {
@@ -1541,6 +1542,8 @@ fn build_tool_command(
         )?;
         let mut c = Command::new(&launch.program);
         c.args(&launch.args);
+        // 038：pre_exec 为 unix API——Windows 无沙箱路径（policy 恒 None，
+        // 本分支不可达），cfg 门控仅为可编译性。
         #[cfg(unix)]
         match launch.seccomp.as_ref() {
             Some(guard) => {
@@ -1556,7 +1559,7 @@ fn build_tool_command(
             },
         }
         #[cfg(windows)]
-        let _ = &launch; // 031 沙箱在 Windows 不可用（tool_launch_argv=None），策略路径不可达
+        let _ = &launch;
         c.env_clear();
         c.envs(launch.env);
         Ok((c, launch.seccomp))
@@ -1604,6 +1607,8 @@ fn spawn_piped(
         .stderr(Stdio::piped())
         .process_group(0); // 组长即本子进程：终止时覆盖其全部后代
     let mut child = c.spawn()?;
+    #[cfg(unix)]
+    #[cfg(unix)]
     if policy.is_some() {
         crate::sandbox::verify_child_pid_namespace(child.id())?;
     }
@@ -1615,6 +1620,21 @@ fn spawn_piped(
 /// PTY 模式：分配真实伪终端作为控制终端；会话组长自身成组
 ///（pre_exec setsid，不用 process_group——setpgid 后 setsid 会失败）。
 /// 031：同管道模式的 spawn 后 PID 命名空间验证（TTY 组终止路径）。
+/// Windows：交互终端（ConPTY＋CreateProcessW 属性清单）为已登记里程碑
+///（含产品 SHELL 语义的 Windows 决策）——本轮显式 fail-closed，不静默降级。
+
+/// Windows 版：显式 fail-closed（见 unix 版注释）。
+#[cfg(windows)]
+fn spawn_pty(
+    _cmd: &str,
+    _workdir: &std::path::Path,
+    _policy: Option<&crate::sandbox::PolicySnapshot>,
+) -> std::io::Result<Spawned> {
+    Err(std::io::Error::other(
+        "交互终端（ConPTY）实现为 038 已登记后续里程碑：Windows 暂不支持 PTY 会话",
+    ))
+}
+
 #[cfg(unix)]
 fn spawn_pty(
     cmd: &str,
@@ -1638,8 +1658,7 @@ fn spawn_pty(
             }
             // fd 0 已是从设备（std 先 dup2 再跑 pre_exec）：挂为控制终端，
             // 终端产生的信号才能送达前台进程组。
-            // 038-CI：apple ioctl 的 request 形参为 c_ulong（libc crate bsd 签名），
-            // TIOCSCTTY 常量类型更窄，显式提升——Linux 上为无操作。
+            // 038：apple ioctl request 形参为 c_ulong，显式提升（Linux 无操作）。
             if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -1655,29 +1674,9 @@ fn spawn_pty(
     Ok(Spawned { child, master: Some(master), stdout: None, stderr: None })
 }
 
-/// 038-CI：macOS ptsname 静态缓冲的串行化锁（见 open_pty 内注释）。
-#[cfg(target_os = "macos")]
-static PTY_NAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 /// 打开一对伪终端（master 带 O_CLOEXEC，从设备以 O_CLOEXEC 打开）。
-/// Windows 版：交互终端（ConPTY）为已登记的后续里程碑——需要 CreateProcessW
-/// 属性清单挂接 PSEUDOCONSOLE 与产品 SHELL 语义的 Windows 决策（cmd /C），
-/// 本轮显式 fail-closed（错误返回，不静默降级为管道模式）。
 #[cfg(windows)]
-fn spawn_pty(
-    _cmd: &str,
-    _workdir: &std::path::Path,
-    _policy: Option<&crate::sandbox::PolicySnapshot>,
-) -> std::io::Result<Spawned> {
-    Err(std::io::Error::other(
-        "交互终端（ConPTY）实现为 038 已登记后续里程碑：Windows 暂不支持 PTY 会话",
-    ))
-}
-
-#[cfg(windows)]
-fn open_pty() -> std::io::Result<(File, File)> {
-    Err(std::io::Error::other("open_pty 仅 unix（见 spawn_pty windows 注释）"))
-}
+fn open_pty_win_placeholder() {}
 
 #[cfg(unix)]
 fn open_pty() -> std::io::Result<(File, File)> {
@@ -1687,7 +1686,6 @@ fn open_pty() -> std::io::Result<(File, File)> {
             return Err(std::io::Error::last_os_error());
         }
         let mut ok = libc::grantpt(master_fd) == 0 && libc::unlockpt(master_fd) == 0;
-        // 非 Linux 平台无 ptsname_r 时早退（首版仅承诺 Linux）
         ok = ok
             && libc::fcntl(master_fd, libc::F_SETFD, libc::FD_CLOEXEC) == 0;
         if !ok {
@@ -1695,9 +1693,9 @@ fn open_pty() -> std::io::Result<(File, File)> {
             libc::close(master_fd);
             return Err(e);
         }
-        // 038-CI：libc crate 在 apple 目标不提供 ptsname_r（ptsname 返回进程级
-        // 静态缓冲、非线程安全）——分支内经 PTY_NAME_LOCK 串行化并立即拷贝，
-        // 消除并行 spawn 的缓冲竞态；Linux 的 ptsname_r 语义不变。
+        // 038：libc crate 在 apple 目标不提供 ptsname_r（ptsname 返回进程级
+        // 静态缓冲、非线程安全）——分支内经 PTY_NAME_LOCK 串行化并立即拷贝；
+        // Linux 的 ptsname_r 语义不变。
         #[cfg(not(target_os = "macos"))]
         let c_path = {
             let mut name = [0u8; 256];
@@ -1745,7 +1743,7 @@ fn open_pty() -> std::io::Result<(File, File)> {
 /// 监控线程：拥有 `Child`——轮询退出、执行终止请求／时限到期；退出后等
 /// 读取线程收尾（有界），置 collect_done。终态回收（wait）只发生在这里。
 fn monitor_thread(session: Arc<Session>, mut child: Child, deadline: Option<Instant>) {
-    let pgid = child.id() as libc::pid_t;
+    let pgid = child.id() as GroupId;
     let terminal = loop {
         // 收口缝（仅 cfg(test)）：门控停靠点——见 test_gate_wait（不持锁）。
         #[cfg(test)]
@@ -1829,6 +1827,29 @@ fn monitor_thread(session: Arc<Session>, mut child: Child, deadline: Option<Inst
 
 /// 读取线程：poll＋读取一路输出通道直到 EOF；持续推入待取缓存并唤醒等待方。
 /// `readers_may_stop` 置位后退出（宽限已过，通道由后代持有时不无限等待）。
+/// Windows 读取线程：阻塞 Read 直到 EOF（树终止后管道关闭必然 EOF；
+/// 宽限语义由 collect_done 的自然退出覆盖，无需 poll 中断）。
+#[cfg(windows)]
+fn spawn_reader<R: Read + Send + 'static>(session: Arc<Session>, mut pipe: R) {
+    std::thread::spawn(move || {
+        let mut buf = [0u8; READ_BUF];
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let mut st = session.lock();
+                    st.pending.push(&buf[..n]);
+                    drop(st);
+                    session.cv.notify_all();
+                    if st.readers_may_stop {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+}
+
 #[cfg(unix)]
 fn spawn_reader<R: Read + AsRawFd + Send + 'static>(session: Arc<Session>, mut pipe: R) {
     std::thread::spawn(move || {
@@ -2386,9 +2407,8 @@ fn seam_clock_shift_omitted_timeout_has_no_fixed_limit() {
 // ===== Windows 平台层（038）：作业对象＝进程组契约的等价物 =====
 //
 // 树终止契约（016：terminate/timeout/取消整组回收含后代）：子进程 spawn 后
-// 立即 AssignProcessToJobObject；组硬终止＝TerminateJobObject（整树、不可
-// 逃脱——后代默认继承作业，除非显式 breakaway）。作业句柄随注册表存活，
-// 进程退出/终止后由 CloseHandle 释放（KILL_ON_JOB_CLOSE 兜底）。
+// 立即 AssignProcessToJobObject；组硬终止＝TerminateJobObject（整树——后代
+// 默认继承作业）；句柄随注册表存活，KILL_ON_JOB_CLOSE 兜底泄漏防护。
 #[cfg(windows)]
 mod win {
     use std::collections::HashMap;
@@ -2396,15 +2416,22 @@ mod win {
     use std::os::windows::io::AsRawHandle;
     use std::process::Child;
     use std::sync::{Arc, Mutex};
-    use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_WRITE, HANDLE};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
-        JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, TerminateJobObject,
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        SetInformationJobObject, TerminateJobObject,
     };
 
-    /// pid → 作业句柄注册表。会话级互斥由调用方（Session 锁）保证；本表
-    /// 仅管理句柄生命周期（terminate 后移除并关闭）。
+    /// HANDLE（*mut c_void）非 Send——JobHandle newtype 经显式 unsafe impl
+    /// Send 授权跨线程移动（内核句柄天然可跨线程使用；专用于本注册表）。
+    #[derive(Clone, Copy)]
+    struct JobHandle(HANDLE);
+    unsafe impl Send for JobHandle {}
+
+    static JOBS: std::sync::LazyLock<Mutex<HashMap<u32, JobHandle>>> =
+        std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
     pub fn assign_child_to_job(pid: u32, child: &Child) -> io::Result<()> {
         let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if job.is_null() {
@@ -2418,7 +2445,8 @@ mod win {
                 JobObjectExtendedLimitInformation,
                 &limits as *const _ as *const _,
                 std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            ) == 0 {
+            ) == 0
+            {
                 CloseHandle(job);
                 return Err(io::Error::last_os_error());
             }
@@ -2427,7 +2455,10 @@ mod win {
                 return Err(io::Error::last_os_error());
             }
         }
-        JOBS.lock().unwrap_or_else(|e| e.into_inner()).insert(pid, job);
+        JOBS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(pid, JobHandle(job));
         Ok(())
     }
 
@@ -2435,8 +2466,8 @@ mod win {
         let job = JOBS.lock().unwrap_or_else(|e| e.into_inner()).remove(&pid);
         match job {
             Some(job) => unsafe {
-                let ok = TerminateJobObject(job, 1);
-                CloseHandle(job);
+                let ok = TerminateJobObject(job.0, 1);
+                CloseHandle(job.0);
                 if ok == 0 {
                     Err(io::Error::last_os_error())
                 } else {
@@ -2446,7 +2477,4 @@ mod win {
             None => Err(io::Error::other("作业句柄不存在（会话未注册或已终止）")),
         }
     }
-
-    static JOBS: std::sync::LazyLock<Mutex<HashMap<u32, HANDLE>>> =
-        std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 }
