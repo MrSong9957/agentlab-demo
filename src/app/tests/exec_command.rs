@@ -524,11 +524,16 @@ fn exec_p01_huge_timeout_accepted_then_terminate_reaps_group() {
     let kid: i32 = fs::read_to_string(&kid_file).unwrap().trim().parse().unwrap();
     // 取消不杀：组长进程组仍存在
     thread::sleep(Duration::from_millis(200));
-    let errno_after_cancel = unsafe {
-        let rc = libc::killpg(pgid, 0);
-        if rc == 0 { None } else { std::io::Error::last_os_error().raw_os_error() }
-    };
-    assert_eq!(errno_after_cancel, None, "取消当前轮不得终止进程组");
+    // 038：killpg(0) 存活探测为 unix 信号语义——Windows 由下方 child 状态
+    // 断言（Terminated）覆盖同一契约面。
+    #[cfg(unix)]
+    {
+        let errno_after_cancel = unsafe {
+            let rc = libc::killpg(pgid, 0);
+            if rc == 0 { None } else { std::io::Error::last_os_error().raw_os_error() }
+        };
+        assert_eq!(errno_after_cancel, None, "取消当前轮不得终止进程组");
+    }
     // 明确终止：回收整个受管理进程组
     let term = WriteStdinArgs::from_value(&json!({ "session_id": sid, "terminate": true })).unwrap();
     assert_eq!(mgr2.interact(&term, None).result.status, ExecStatus::Terminated);
@@ -537,10 +542,13 @@ fn exec_p01_huge_timeout_accepted_then_terminate_reaps_group() {
     };
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
+        #[cfg(unix)]
         let errno = unsafe {
             let rc = libc::killpg(pgid, 0);
             if rc == 0 { None } else { std::io::Error::last_os_error().raw_os_error() }
         };
+        #[cfg(not(unix))]
+        let errno: Option<i32> = None;
         if errno == Some(libc::ESRCH) || matches!(kid_state(kid), None | Some('Z') | Some('X')) {
             break;
         }
