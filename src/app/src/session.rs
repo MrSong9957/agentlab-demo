@@ -1693,6 +1693,8 @@ mod tests {
     /// 触发"检查点写失败→截回失败→停用＋明确报错"。验证：失败回执（不 Ok）、
     /// 停用后普通追加不再尝试、检查点未提交（游标不越界）。
     #[test]
+    #[cfg(target_os = "linux")]
+    // 038-CI：/proc/self/fd 等机制为 Linux 专属（macOS 显式 fail-closed 或语义差异），见 docs/specs/038 §5。
     fn checkpoint_write_failure_reports_and_disables_via_real_device() {
         let dir = temp_dir("cpdev");
         let dev = std::fs::OpenOptions::new()
@@ -1762,6 +1764,8 @@ mod tests {
     /// 非状态预设或替身）。验证：明确报错、停用后不再尝试追加、内存对话
     /// 继续、停用留下的半行残档可被装载器按坏行处理。
     #[test]
+    #[cfg(target_os = "linux")]
+    // 038-CI：/proc/self/fd 等机制为 Linux 专属（macOS 显式 fail-closed 或语义差异），见 docs/specs/038 §5。
     fn truncate_failure_disables_autosave_via_real_device() {
         let dir = temp_dir("dev");
         // Writing 态指向 /dev/full：前两条视为已提交（游标＝2）

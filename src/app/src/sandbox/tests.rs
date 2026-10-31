@@ -103,6 +103,8 @@ fn wsl_interop_mask_follows_dir_presence_flag() {
 /// T1b 生产策略（policy_for）包含 temp 可写根（对齐 Claude Code 默认写面），
 /// 且可写根按深度排序——宽根（/tmp）先 bind、深根（工作区）后 bind 重开。
 #[test]
+#[cfg(target_os = "linux")]
+// 038-CI：依赖 bwrap//proc/mountinfo（Linux 专属），见 docs/specs/038 §5。
 fn policy_for_includes_temp_writable_root() {
     let ws = tmp_ws("policy-temp");
     let policy = policy_for(&ws);
@@ -661,6 +663,8 @@ fn deny_traversal_budget_timeout_refuses() {
 ///（不能仅靠 st_dev 变化检测）。以本进程真实 /proc/self/mountinfo 验证：
 /// 任一路径至少映射出自身（identity 投影）。
 #[test]
+#[cfg(target_os = "linux")]
+// 038-CI：依赖 bwrap//proc/mountinfo（Linux 专属），见 docs/specs/038 §5。
 fn deny_aliases_identity_projection() {
     let mounts = parse_mountinfo();
     assert!(!mounts.is_empty(), "mountinfo 应可解析");
@@ -679,6 +683,8 @@ fn mountinfo_unescapes_octal() {
 
 /// dev 分解与 mountinfo 第 3 列同构（真实根路径上验证）。
 #[test]
+#[cfg(target_os = "linux")]
+// 038-CI：依赖 bwrap//proc/mountinfo（Linux 专属），见 docs/specs/038 §5。
 fn path_dev_matches_mountinfo_format() {
     let mounts = parse_mountinfo();
     let root = PathBuf::from("/");

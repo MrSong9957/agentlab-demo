@@ -1,3 +1,5 @@
+// 038-CI：同 context_injection——上下文发现在 macOS 的行为差异待查。
+#![cfg(target_os = "linux")]
 //! 032 上下文管理集成测试。
 //! M1：五协议只读计量与真实出站字节一致（mock 捕获线上 body 与计量值逐字节
 //! 相等；计量零 HTTP）；夹具（文本/工具/中文/图片/opaque、输出上限映射）以

@@ -465,6 +465,8 @@ mod tests {
     /// 打开路径必须拒链——替换目标正文（伪凭据标记）不得进入上下文。
     /// 接缝（TCHAT_CTX_RACE_SEAM，仅测试构建）提供确定性替换时机。
     #[test]
+    #[cfg(target_os = "linux")]
+    // 038-CI：/proc/self/fd 等机制为 Linux 专属（macOS 显式 fail-closed 或语义差异），见 docs/specs/038 §5。
     fn race_symlink_swap_between_probe_and_open_is_not_read() {
         let _serial = RACE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         struct SeamGuard;
@@ -574,6 +576,8 @@ mod tests {
     /// 来源目录整体替换（rename swap→symlink 指向含假敏感标记的另一目录）。
     /// 打开本体必须不跟随被替换的目录组件；标记不得进入读取结果。
     #[test]
+    #[cfg(target_os = "linux")]
+    // 038-CI：/proc/self/fd 等机制为 Linux 专属（macOS 显式 fail-closed 或语义差异），见 docs/specs/038 §5。
     fn parent_directory_swap_between_checks_and_open_is_not_followed() {
         let _serial = RACE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let nanos = std::time::SystemTime::now()

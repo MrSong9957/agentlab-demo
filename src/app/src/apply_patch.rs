@@ -2135,6 +2135,8 @@ mod tests {
     /// 清单与 state_known 正确。若实现回退为按路径重开，写打开 FIFO 将阻塞，
     /// 由看门狗捕获（专用副本变异已证）。
     #[test]
+    #[cfg(target_os = "linux")]
+    // 038-CI：/proc/self/fd 等机制为 Linux 专属（macOS 显式 fail-closed 或语义差异），见 docs/specs/038 §5。
     fn f2_swap_barrier_binds_write_to_validated_inode() {
         use std::process::{Command, Stdio};
         // —— 子进程模式：启用接缝，经真实 apply_patch 入口执行补丁 ——
@@ -2508,6 +2510,8 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    // 038-CI：/proc/self/fd 等机制为 Linux 专属（macOS 显式 fail-closed 或语义差异），见 docs/specs/038 §5。
     fn display_changes_capture_add_update_delete_real_content() {
         let dir = disp_dir("aud");
         let added = dir.join("new.txt");

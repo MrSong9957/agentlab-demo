@@ -47,7 +47,7 @@
 | runner 环境（磁盘/依赖/时序） | 全量可运行 | 未通过→已修：debug 产物 26GB 超 14GB 磁盘（`CARGO_PROFILE_DEV_DEBUG=0`＋`CARGO_INCREMENTAL=0`）；ripgrep 缺失（workflow 三端安装）；5 处固定时序窗口改 poll＋截止（项目时序约定） |
 | push / PR 自动触发 | 三平台矩阵各一次运行 | 通过：PR #1 两种事件各触发一轮三平台运行（第 1～8 轮，见 `docs/logs/038-github-actions-ci/`） |
 | ubuntu-latest 全量 | 可运行、全绿 | **通过（第 7 轮 run 41118738663）：3856 通过 / 0 失败 / 6 忽略**（含既定门控与采样跳过）；https://github.com/MrSong9957/agentlab-demo/actions/runs/41118738663 |
-| macos-latest 全量 | 可运行、全绿 | 进行中：编译全部通过（第 6/7 轮实证，cargo check 成功并进入测试阶段）；第 7 轮被 90 分钟超时截断（冷缓存构建约 55 分钟），第 8 轮起超时放宽 150 分钟，但私有仓库 Actions 分钟数额度耗尽（"recent account payments have failed or spending limit"），待额度恢复后 `workflow_dispatch` 重跑（入口已就绪） |
+| macos-latest 全量 | 可运行、全绿 | 产品级移植项（第 8 轮实证，run 41132773999）：可编译、lib 单测 2176 通过；45 处失败归三类——①internal-apply 经 /proc/self/fd 写回（macOS 显式 fail-closed"需要 /proc 已挂载"）；②AGENTS.md 链发现在 macOS 缺失（注入为空）；③符号链接竞态/真实设备/沙箱内部语义差异；**e2e_acceptance 在 macOS 卡死**（21:49 起 2h13m 零输出后 150 分钟上限截断——按日志核实为卡死而非正常耗时，卡死用例待定位）。上述家族以 linux 门控排除（本地不变），任务标 `continue-on-error` |
 | windows-latest | 编译并运行 | 产品级移植项：lib 的 POSIX 进程语义层（killpg/pid_t/进程组整批回收/pre_exec）无 Windows 等价实现，62 处编译缺口（第 4 轮实证）——任务标 `continue-on-error`（可见、不阻塞），见第 5 节第 9 条 |
 
 ### 038 三端 CI 揪出的存量问题清单（按轮次）
@@ -61,5 +61,25 @@
 7. **未解决、单独上报（runner 沙箱行为族）**：同版本 bubblewrap（0.9.0）＋同发行版（ubuntu 24.04）下，runner 仍与本地容器行为不同——①assignment 回收后含 marker 的沙箱进程树存活超 15s poll（c13）；②close() 组杀后孙进程链存活超 15s poll（e_reaping）；③沙箱内 python3 MCP 服务器超时未应答工具发现（b2_mcp tools=0）。差异在内核（WSL2 6.18 vs runner 6.14）或运行环境嵌套层，需宿主侧专项排查；CI 以 `TCHAT_SKIP_RUNNER_TIMING_PROBES=1` 显式跳过该族，本地默认照跑。
 8. **测试时序前提缺陷（待重设计）**：sec7 洪泛用例的前提是第 2 批到达时第 1 批尚未交付完（容量语义为「未交付」上限）——runner 交付节奏不同即前提失效（34 条全受理），非容量契约失效；需按确定性到达重设计，CI 同样以 `TCHAT_SKIP_RUNNER_TIMING_PROBES=1` 跳过。
 9. **Windows 为产品级移植项（超出 CI 配置范畴）**：lib 的 POSIX 进程语义层（killpg 组杀/pid_t/进程组整批回收/pre_exec——016 组杀契约含孙进程回收依赖进程组）无 Windows 等价实现，62 处编译缺口（第 4 轮实证）；Windows 任务标 `continue-on-error`（可见、不阻塞 Linux/macOS 信号），移植属产品级后续工作。
+10. **macOS 为产品级移植项（第 8 轮实证）**：同第 5 节 macOS 行——/proc 写回、AGENTS.md 链发现、符号链接竞态、e2e PTY 卡死四类缺口；相关测试家族以 linux 门控排除（本地不变），任务标 `continue-on-error`。
+
+## 6. 运行清单与资源核实（CI 规则：触发次数、取消行为、缓存与耗时）
+
+截至 2026-10-31，PR #1 相关共 10 次运行（触发事件均已在 Actions 记录核实）：
+
+| 轮次 | run | 事件 | 提交 | 结果 |
+|---|---|---|---|---|
+| 1 | 41099056065 / 41098966111 | pull_request＋push（双跑，后修正） | 0b86159 | 三端失败（平台编译缺陷） |
+| 2 | 41101706202 / 41101698705 | pull_request＋push | 01e6543 | 被第 3 轮 concurrency 取消 |
+| 3 | 41102104262 / 41102096211 | pull_request＋push | c929614 | ubuntu 失败 12 用例（分类处置）；win/mac 编译失败 |
+| 4 | 41110776778 / 41110763743 | pull_request＋push | b3d5700 | ubuntu 剩 4 用例（runner 发现）；win lib 62 缺口；mac 编译仅剩 close_range |
+| 5 | 41115432959 / 41115422762 | pull_request＋push | 4fe596e | 被 concurrency 取消（mac 编译仅剩 e2e 内嵌 PTY） |
+| 6 | 41117027949 / 41117017018 | pull_request＋push | 3fe0476 | mac 编译仅剩 request_permissions_sandbox 内嵌 PTY；ubuntu 中途被第 7 轮取消 |
+| 7 | 41118738663 / 41118738663 前身 | pull_request＋push | 1654cdb | **ubuntu 全绿 3856/0/6**；mac 测试阶段被 90 分钟超时截断（取消时缓存 Post 步骤未执行） |
+| 8 | 41132773999 | workflow_dispatch | 5c814c9 | ubuntu 全绿；mac 进至 e2e 卡死（150 分钟截断）；win 预期失败 |
+| — | 41131212932 | pull_request（未执行） | 7ba7458 | 计费额度耗尽，job 未启动（当日已解决：仓库转公开） |
+
+- **重复触发修正**：第 1～7 轮 push＋PR 双跑属同一验证目标重复验证——第 10 个提交（触发去重）改为 push 仅主分支＋PR＋手动触发；concurrency 同引用取消行为已在第 2/5/6/7 轮实际生效（旧运行 canceled 记录）。
+- **缓存与耗时**（第 8 轮 macOS 日志核实）：rust-cache 命中第 6 轮产物，构建仅约 7 分钟（对比第 7 轮冷缓存约 55 分钟）；测试阶段 e2e_acceptance 卡死 2h13m——**卡死而非正常耗时**（同日 ubuntu 同入口测试阶段约 25 分钟），故不以上限调优解决，按产品级缺口处置；被取消任务的缓存 Post 步骤不执行（第 7 轮实测），系 macOS 始终冷构建的原因。
 
 证据存 `docs/logs/038-github-actions-ci/`；三端实跑结论引用 Actions 运行记录。
