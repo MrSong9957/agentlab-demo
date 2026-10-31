@@ -2034,12 +2034,14 @@ impl Drop for KillpgFailGuard {
 }
 
 /// 对指定进程组注入 killpg 失败；返回守卫，drop(guard) 或离开作用域即解除。
+#[cfg(unix)]
 fn arm_killpg_fail(pgid: libc::pid_t) -> KillpgFailGuard {
     TEST_KILLPG_FAIL_PGD.store(pgid as i64, Ordering::SeqCst);
     KillpgFailGuard
 }
 
 /// 取指定会话的进程组 id（仅测试：注入 killpg 失败需精确限定目标）。
+#[cfg(unix)]
 fn session_pgid(mgr: &ProcessManager, id: &str) -> libc::pid_t {
     let pgid = {
         let st = mgr.lock_mgr();

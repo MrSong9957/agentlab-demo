@@ -1772,7 +1772,6 @@ fn path_label(target: &Path) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::os::unix::fs::FileTypeExt;
 
     // ---- ApplyPatchArgs::from_value：参数校验 ----
 
