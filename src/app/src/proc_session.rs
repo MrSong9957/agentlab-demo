@@ -2125,6 +2125,7 @@ fn seam_deadline_injection_rejects_execution() {
 
 /// 接缝③：终止失败注入——未确认清理成功不得返回“已终止”；进程保留可查询；
 /// 不误伤其他会话；解除注入后重试 terminate 成功。
+    #[cfg(unix)] // 038：killpg 注入为 unix 设施测试
 #[test]
 fn seam_killpg_injection_terminate_reports_failure_keeps_session() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2185,6 +2186,7 @@ fn seam_killpg_injection_terminate_reports_failure_keeps_session() {
 
 /// 接缝④：时限到期的终止失败——不得伪装成“已终止回收”的 timeout；
 /// 进程保留、如实说明，解除注入后可终止。
+    #[cfg(unix)] // 038：killpg 注入为 unix 设施测试
 #[test]
 fn seam_killpg_injection_deadline_not_fake_timeout() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
