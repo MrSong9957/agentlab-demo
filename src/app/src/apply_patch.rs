@@ -1205,23 +1205,61 @@ fn write_via_validated_fd(
     data: &[u8],
 ) -> std::io::Result<()> {
     // Linux：/proc/self/fd/<fd> 重开＝同 inode 新句柄（写访问独立于只读原
-    // 句柄；O_TRUNC 只作用于该 inode；路径替换不影响——最严格的绑定语义）。
-    // macOS：/dev/fd/<fd> 写打开返回 EACCES（fdescfs 按原句柄访问模式检查，
-    // 实测），且无 /proc——等价安全序改为：以**路径**重开（**无 O_TRUNC**，
-    // 路径被替换时绝不截断占位对象）→ fstat 核验与读句柄同 inode 且常规 →
-    // 截断＋写入。核验先于任何截断/写入：路径被替换时在损坏发生前拒绝；
-    // 核验后到截断的微小窗口与 F2 屏障测试的容差一致（同 Linux 上
-    // 检查-打开窗口的既有处理）。
-    let mut w = std::fs::OpenOptions::new().write(true).open(target)?;
-    if fd_inode(&w) != fd_inode(read_fd) || !fd_is_regular(&w) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "写入句柄与已判型对象不一致",
-        ));
+    // 句柄；O_TRUNC 只作用于该 inode；路径替换不影响——最严格的绑定语义，
+    // F2 屏障测试实证：路径被替换为 FIFO 时本重开不触路径、不阻塞）。
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = target;
+        let fd_path = format!("/proc/self/fd/{}", read_fd.as_raw_fd());
+        let path = std::ffi::CString::new(fd_path)?;
+        let wfd = unsafe {
+            libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_TRUNC | libc::O_CLOEXEC)
+        };
+        if wfd < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::NotFound {
+                return Err(std::io::Error::new(
+                    e.kind(),
+                    format!("{e}（写入经 /proc/self/fd 绑定原对象，需要 /proc 已挂载）"),
+                ));
+            }
+            return Err(e);
+        }
+        let mut w = unsafe { std::fs::File::from_raw_fd(wfd) };
+        if fd_inode(&w) != fd_inode(read_fd) || !fd_is_regular(&w) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "写入句柄与已判型对象不一致",
+            ));
+        }
+        w.write_all(data)
     }
-    w.set_len(0)?;
-    w.seek(std::io::SeekFrom::Start(0))?;
-    w.write_all(data)
+    // macOS：/dev/fd/<fd> 写打开返回 EACCES（fdescfs 按原句柄访问模式检查，
+    // 实测）且无 /proc——等价安全序：路径打开但**无 O_TRUNC**＋O_NONBLOCK
+    // （路径被替换为 FIFO 时立即失败而非阻塞；绝不截断占位对象）→ fstat
+    // 核验与读句柄同 inode 且常规 → 截断＋写入（核验先于任何截断）。
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut w = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(target)?;
+        if fd_inode(&w) != fd_inode(read_fd) || !fd_is_regular(&w) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "写入句柄与已判型对象不一致",
+            ));
+        }
+        let fd = w.as_raw_fd();
+        let fl = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if fl >= 0 {
+            unsafe { libc::fcntl(fd, libc::F_SETFL, fl & !libc::O_NONBLOCK) };
+        }
+        w.set_len(0)?;
+        w.seek(std::io::SeekFrom::Start(0))?;
+        w.write_all(data)
+    }
 }
 
 /// Windows 版（见 unix 版函数头注释）：ReOpenFile 同一文件对象以写权限重开。
