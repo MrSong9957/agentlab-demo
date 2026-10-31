@@ -117,9 +117,16 @@ fn policy_for_includes_temp_writable_root() {
     );
     let args =
         create_bwrap_command_args(vec!["sh".into()], &policy, &ws, false).unwrap();
-    let tmp_bind = args
-        .windows(3)
-        .any(|w| w == ["--bind", "/tmp", "/tmp"]);
+    // 038：产品侧对可写根做 canonicalize（macOS temp_dir 落在 /var→/private/var
+    // 符号链接后）——断言用同源规范化后的 temp 路径比较。
+    let temp_canon =
+        std::env::temp_dir().canonicalize().unwrap_or_else(|_| std::env::temp_dir());
+    let tmp_expected = [
+        "--bind".to_string(),
+        temp_canon.to_string_lossy().into_owned(),
+        temp_canon.to_string_lossy().into_owned(),
+    ];
+    let tmp_bind = args.windows(3).any(|w| w == tmp_expected);
     assert!(tmp_bind, "argv 应包含 temp 可写根 bind：{args:?}");
     fs::remove_dir_all(&ws).ok();
 }

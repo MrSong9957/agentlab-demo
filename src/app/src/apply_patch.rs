@@ -1199,36 +1199,28 @@ fn fd_inode(f: &std::fs::File) -> Option<(u64, u64)> {
 ///   路径替换不影响；std 打开的共享模式 FILE_SHARE_READ|WRITE|DELETE 与
 ///   新句柄 GENERIC_WRITE 兼容），写前同样 seek(0)。
 #[cfg(unix)]
-fn write_via_validated_fd(read_fd: &std::fs::File, data: &[u8]) -> std::io::Result<()> {
-    #[cfg(target_os = "macos")]
-    let fd_path = format!("/dev/fd/{}", read_fd.as_raw_fd());
-    #[cfg(not(target_os = "macos"))]
-    let fd_path = format!("/proc/self/fd/{}", read_fd.as_raw_fd());
-    let path = std::ffi::CString::new(fd_path)?;
-    let wfd =
-        unsafe { libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_TRUNC | libc::O_CLOEXEC) };
-    if wfd < 0 {
-        let e = std::io::Error::last_os_error();
-        if e.kind() == std::io::ErrorKind::NotFound {
-            return Err(std::io::Error::new(
-                e.kind(),
-                format!(
-                    "{e}（写入经 fd 路径绑定原对象，需要 /proc（Linux）或 /dev/fd（macOS）可用）"
-                ),
-            ));
-        }
-        return Err(e);
-    }
-    let mut w = unsafe { std::fs::File::from_raw_fd(wfd) };
-    // 语义歧义消除：见函数头注释（macOS fdescfs 偏移共享场景必需）
-    w.seek(std::io::SeekFrom::Start(0))?;
-    // 纵深防御：写句柄须与读入句柄为同一 inode 且仍为常规文件
+fn write_via_validated_fd(
+    read_fd: &std::fs::File,
+    target: &Path,
+    data: &[u8],
+) -> std::io::Result<()> {
+    // Linux：/proc/self/fd/<fd> 重开＝同 inode 新句柄（写访问独立于只读原
+    // 句柄；O_TRUNC 只作用于该 inode；路径替换不影响——最严格的绑定语义）。
+    // macOS：/dev/fd/<fd> 写打开返回 EACCES（fdescfs 按原句柄访问模式检查，
+    // 实测），且无 /proc——等价安全序改为：以**路径**重开（**无 O_TRUNC**，
+    // 路径被替换时绝不截断占位对象）→ fstat 核验与读句柄同 inode 且常规 →
+    // 截断＋写入。核验先于任何截断/写入：路径被替换时在损坏发生前拒绝；
+    // 核验后到截断的微小窗口与 F2 屏障测试的容差一致（同 Linux 上
+    // 检查-打开窗口的既有处理）。
+    let mut w = std::fs::OpenOptions::new().write(true).open(target)?;
     if fd_inode(&w) != fd_inode(read_fd) || !fd_is_regular(&w) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "写入句柄与已判型对象不一致",
         ));
     }
+    w.set_len(0)?;
+    w.seek(std::io::SeekFrom::Start(0))?;
     w.write_all(data)
 }
 
@@ -1488,7 +1480,7 @@ fn apply_hunk(hunk: &Hunk, base: &Path, log: &mut ChangeLog) -> Result<(), Failu
                 .map_err(Failure::validation)?;
             #[cfg(test)]
             f2_seam::before_write();
-            match write_via_validated_fd(&file, new_content.as_bytes()) {
+            match write_via_validated_fd(&file, &target, new_content.as_bytes()) {
                 Ok(()) => {
                     // 012：展示差异＝对真实前后缓冲生成的统一 diff（不从补丁文本反推）
                     let diff = diffy::create_patch(&original, &new_content).to_string();
