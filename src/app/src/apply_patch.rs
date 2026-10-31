@@ -1772,6 +1772,10 @@ fn path_label(target: &Path) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    // 038：FIFO 用例（mkfifo/is_fifo，unix 设施）专用；Windows 无此设施且
+    // 相关用例已 cfg(unix) 门控——导入随之门控避免 unix 路径在 Windows 编译。
+    #[cfg(unix)]
+    use std::os::unix::fs::FileTypeExt;
 
     // ---- ApplyPatchArgs::from_value：参数校验 ----
 
