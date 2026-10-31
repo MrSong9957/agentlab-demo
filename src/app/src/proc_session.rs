@@ -1551,6 +1551,7 @@ fn build_tool_command(
         // 038：pre_exec 为 unix API——Windows 无沙箱路径（policy 恒 None）。
         #[cfg(unix)]
         match launch.seccomp.as_ref() {
+            #[cfg(unix)]
             Some(guard) => {
                 let fd = guard.raw();
                 unsafe {
@@ -1559,9 +1560,12 @@ fn build_tool_command(
                     });
                 }
             }
+            #[cfg(unix)]
             None => unsafe {
                 c.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
             },
+            #[cfg(windows)]
+            _ => unreachable!("031 沙箱仅 unix"),
         }
         #[cfg(windows)]
         let _ = &launch;
@@ -1611,10 +1615,12 @@ fn spawn_piped(
     c.current_dir(workdir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0); // 组长即本子进程：终止时覆盖其全部后代
-    let mut child = c.spawn()?;
+        .stderr(Stdio::piped());
+    // 组长即本子进程：终止时覆盖其全部后代（std process_group 为 unix-only API；
+    // Windows 树终止经作业对象，见 win 模块）。
     #[cfg(unix)]
+    c.process_group(0);
+    let mut child = c.spawn()?;
     #[cfg(unix)]
     if policy.is_some() {
         crate::sandbox::verify_child_pid_namespace(child.id())?;
