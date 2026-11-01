@@ -1083,7 +1083,63 @@ struct PtySession {
 static PTY_NAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl PtySession {
+    /// 038 D-mac 取证插桩（根因定位后移除）：绕过 libtest 输出捕获的直写标记
+    /// ＋进程/线程状态采样线程。挂死形态＝整目标零输出（连看门狗 panic 都没有）
+    /// ——需要不依赖测试框架的证据通道。
+    fn log_direct(msg: &str) {
+        let mut b = msg.as_bytes();
+        while !b.is_empty() {
+            let n = unsafe { libc::write(2, b.as_ptr().cast(), b.len()) };
+            if n <= 0 {
+                break;
+            }
+            b = &b[n as usize..];
+        }
+    }
+
+    fn watchdog_start() {
+        static START: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        START.get_or_init(|| {
+            let started = Instant::now();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(60));
+                let t = started.elapsed().as_secs();
+                let me = std::process::id();
+                let ps_all = Command::new("ps")
+                    .args(["-axo", "pid,ppid,stat,etime,command"])
+                    .output();
+                let filtered = ps_all.map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .filter(|l| {
+                            l.contains("terminal-chat")
+                                || l.contains("e2e_acceptance")
+                                || l.contains("COMMAND")
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                });
+                let threads = Command::new("ps")
+                    .args(["-M", "-p", &me.to_string()])
+                    .output();
+                Self::log_direct(&format!(
+                    "[e2e-watch] t={t}s\n[ps -axo 过滤]\n{}\n[ps -M 自身线程]\n{}\n",
+                    filtered.as_deref().unwrap_or("(ps 失败)"),
+                    threads
+                        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                        .unwrap_or_else(|_| "(ps -M 失败)".into())
+                ));
+            });
+        });
+    }
+
     fn spawn(mut cmd: Command) -> PtySession {
+        Self::watchdog_start();
+        let thread_name = std::thread::current()
+            .name()
+            .unwrap_or("(unnamed)")
+            .to_string();
+        Self::log_direct(&format!("[e2e-spawn] {thread_name}\n"));
         unsafe {
             let master_fd = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
             assert!(master_fd >= 0, "posix_openpt 失败：{}", std::io::Error::last_os_error());
