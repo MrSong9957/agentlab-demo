@@ -789,6 +789,11 @@ struct SessionLock {
     handle: windows_sys::Win32::Foundation::HANDLE,
 }
 
+// 安全：HANDLE 为裸指针但互斥体句柄的 ReleaseMutex/CloseHandle 可跨线程
+// 调用（Windows 互斥体对象语义）；守卫仅封装句柄所有权，不涉及线程局部状态。
+#[cfg(windows)]
+unsafe impl Send for SessionLock {}
+
 #[cfg(windows)]
 impl Drop for SessionLock {
     fn drop(&mut self) {
