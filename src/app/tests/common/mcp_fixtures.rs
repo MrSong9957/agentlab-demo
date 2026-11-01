@@ -111,8 +111,8 @@ pub fn setup_two(scenario_fx: &str, scenario_fy: &str, extra_fx: &str, extra_fy:
     let tmp = std::env::temp_dir().display().to_string().replace('\\', "/");
     let json = format!(
         r#"{{"mcp_servers": {{
-            "fx": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "{scenario_fx}", "--record", "{rec}"], "cwd": "{tmp}"{extra_fx}}},
-            "fy": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "{scenario_fy}", "--record", "{rec}"], "cwd": "{tmp}"{extra_fy}}}
+            "fx": {{"enabled": true, "command": "{py}", "args": ["-X", "utf8", "{fixture}", "--scenario", "{scenario_fx}", "--record", "{rec}"], "cwd": "{tmp}"{extra_fx}}},
+            "fy": {{"enabled": true, "command": "{py}", "args": ["-X", "utf8", "{fixture}", "--scenario", "{scenario_fy}", "--record", "{rec}"], "cwd": "{tmp}"{extra_fy}}}
         }}}}"#,
         rec = record_path.display().to_string().replace('\\', "/"),
         py = PY,
@@ -151,7 +151,7 @@ pub fn setup_no_prepare(
     let record_path = record_dir.path().join("record.jsonl");
     let fixture = FIXTURE.replace('\\', "/");
     let json = format!(
-        r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "{scenario}", "--record", "{}"], "cwd": "{}"{extra}}}}}}}"#,
+        r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "{py}", "args": ["-X", "utf8", "{fixture}", "--scenario", "{scenario}", "--record", "{}"], "cwd": "{}"{extra}}}}}}}"#,
         record_path.display().to_string().replace('\\', "/"),
         std::env::temp_dir().display().to_string().replace('\\', "/"),
         py = PY
