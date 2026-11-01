@@ -467,7 +467,8 @@ fn cd_inside_command_does_not_stick() {
 fn exec_b04_dual_stream_mb_drain_after_cap() {
     // 平台等价：cmd for /l 双流循环（unix 保留原 while 计数）
     let cmd = if cfg!(windows) {
-        "for /l %i in (1,1,40000) do @(echo out-wwwwwwwwww & echo err-eeeeeeeeee 1>&2)".to_string()
+        // 紧凑形态：`echo X &` 的空格会进 echo 输出（038 实测尾空格破坏行匹配）
+        "for /l %i in (1,1,40000) do @(echo out-wwwwwwwwww&echo err-eeeeeeeeee 1>&2)".to_string()
     } else {
         "i=0; while [ $i -lt 40000 ]; do echo out-wwwwwwwwww; echo err-eeeeeeeeee 1>&2; \
                i=$((i+1)); done".to_string()
