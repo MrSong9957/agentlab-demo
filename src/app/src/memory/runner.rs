@@ -608,6 +608,7 @@ pub fn memory_reset(user_dir: &Path, args: &str) -> String {
         Err(e) => return format!("错误：读取记忆根失败：{e}"),
     };
     let db_path = crate::memory::store::memories_db_path(&root);
+    let mut db_drop_failed = false;
     for entry in entries.flatten() {
         let path = entry.path();
         let mut ok = match entry.file_type() {
@@ -622,18 +623,33 @@ pub fn memory_reset(user_dir: &Path, args: &str) -> String {
             if let Ok(conn) =
                 rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
             {
+                // 事务包裹＋表名引号转义（038 安全测试 D2：中途失败不得以
+                // 「已清理」掩盖）
                 let drop_all = |conn: &rusqlite::Connection| -> rusqlite::Result<()> {
                     let tables: Vec<String> = {
                         let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?;
                         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
                         rows.collect::<rusqlite::Result<Vec<String>>>()?
                     };
-                    for t in tables {
-                        conn.execute(&format!("DROP TABLE IF EXISTS \"{t}\""), [])?;
+                    conn.execute_batch("BEGIN IMMEDIATE")?;
+                    let r = (|| {
+                        for t in &tables {
+                            let escaped = t.replace('"', "\"\"");
+                            conn.execute(&format!("DROP TABLE IF EXISTS \"{escaped}\""), [])?;
+                        }
+                        Ok::<(), rusqlite::Error>(())
+                    })();
+                    match r {
+                        Ok(()) => conn.execute_batch("COMMIT").map(|_| ()),
+                        Err(e) => {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            Err(e)
+                        }
                     }
-                    Ok(())
                 };
-                ok = drop_all(&conn).is_ok();
+                let dropped = drop_all(&conn).is_ok();
+                ok = dropped;
+                db_drop_failed = !dropped;
             }
         }
         if ok {
@@ -651,7 +667,11 @@ pub fn memory_reset(user_dir: &Path, args: &str) -> String {
                 e.as_ref()
                     .ok()
                     .and_then(|e| e.file_name().into_string().ok())
-                    .is_some_and(|n| n != EPOCH_FILE && root.join(&n) != db_path)
+                    // DROP 失败的 DB 计回残留（安全测试 D2：不得以「已清理」掩盖）
+            .is_some_and(|n| {
+                let p = root.join(&n);
+                p != db_path || db_drop_failed
+            })
             })
             .count()
         })
