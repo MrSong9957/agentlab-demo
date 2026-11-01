@@ -3,6 +3,7 @@
 //! 核对实际请求 JSON（消息序/角色/id 对应/内容）、工具输出、文件字节、执行顺序与历史。
 
 mod common;
+use common::cmd_builder;
 
 use common::{spawn_mock, MockResp, TempDir};
 use serde_json::{json, Value};
@@ -267,7 +268,7 @@ fn t3_exec_command_returns_real_output_and_exit_code() {
     let dir = TempDir::new("tl-t3");
     let mock = spawn_mock(vec![
         MockResp::json(200, tc_response(
-            &[call("call-exec-77", "exec_command", json!({ "cmd": "echo out-T3; exit 7" }).to_string())],
+            &[call("call-exec-77", "exec_command", json!({ "cmd": cmd_builder::seq(&[cmd_builder::echo("out-T3"), "exit 7".into()]) }).to_string())],
             None,
         )),
         MockResp::json(200, ok_response("命令完成")),
@@ -408,7 +409,7 @@ fn t8_request_failure_no_retry_history_kept() {
     ] {
         let dir = TempDir::new(&format!("tl-t8 with space-{label}"));
         let target = dir.path().join("t8-once.txt");
-        let cmd = "echo T8 >> t8-once.txt";
+        let cmd = cmd_builder::append_line(std::path::Path::new("t8-once.txt"), "T8");
         let mock = spawn_mock(vec![
             MockResp::json(200, tc_response(
                 &[call("call-t8-001", "exec_command", json!({ "cmd": cmd, "workdir": dir.path().display().to_string() }).to_string())],
@@ -422,7 +423,7 @@ fn t8_request_failure_no_retry_history_kept() {
         assert!(out.contains("错误："), "{label}：{out}");
         assert!(out.contains("Agent：恢复完成-T8"), "{label}：下一轮须可恢复：{out}");
         assert_eq!(mock.count(), 3, "{label}：turn1=2、turn2=1，无自动重发");
-        assert_eq!(std::fs::read(&target).unwrap(), b"T8\n", "{label}：真实追加恰一次");
+        assert_eq!(std::fs::read(&target).unwrap(), format!("T8{}", cmd_builder::nl()).into_bytes(), "{label}：真实追加恰一次");
         assert_eq!(out.matches("[工具] exec_command").count(), 1, "{label}：已执行工具不重放");
         let body3 = req_body(&mock, 2);
         assert_eq!(
@@ -544,7 +545,7 @@ fn t13_cap_resets_next_turn_and_carries_batch8() {
 fn t14_eighth_request_final_reply_ends_normally() {
     let dir = TempDir::new("tl-t14 with space");
     let target = dir.path().join("t14-effects.txt");
-    let cmd = "echo T14 >> t14-effects.txt";
+    let cmd = cmd_builder::append_line(std::path::Path::new("t14-effects.txt"), "T14");
     let tc = tc_response(
         &[call("call-t14-loo", "exec_command", json!({ "cmd": cmd, "workdir": dir.path().display().to_string() }).to_string())],
         None,
@@ -565,7 +566,7 @@ fn t14_eighth_request_final_reply_ends_normally() {
     assert_eq!(tool_msgs(&body8).len(), 7, "第 8 次请求携带此前 7 批结果");
     assert_eq!(
         std::fs::read_to_string(&target).unwrap(),
-        "T14\n".repeat(7),
+        format!("T14{}", cmd_builder::nl()).repeat(7),
         "前 7 批各真实执行一次，最终回复不增加副作用"
     );
 }
@@ -577,7 +578,12 @@ fn t14_eighth_request_final_reply_ends_normally() {
 fn t15_update_plan_flow_with_real_exec_and_cli_output() {
     let dir = TempDir::new("tl-t15");
     let made = dir.path().join("t15-made.txt");
-    let cmd = format!("echo T15-OK > {}", made.display());
+    // 平台等价：cmd 行尾数字/重定向解析差异——统一括号包裹
+    let cmd = if cfg!(windows) {
+        format!("(echo T15-OK)>{}", made.display())
+    } else {
+        format!("echo T15-OK > {}", made.display())
+    };
     let plan1 = json!({
         "explanation": "开始任务",
         "plan": [
@@ -604,7 +610,7 @@ fn t15_update_plan_flow_with_real_exec_and_cli_output() {
     assert_eq!(code, Some(0), "{out}");
     assert_eq!(mock.count(), 4);
     // 真实 exec 副作用（计划调用不产生文件副作用——本目录仅此一个文件）
-    assert_eq!(std::fs::read_to_string(&made).unwrap(), "T15-OK\n");
+    assert_eq!(std::fs::read_to_string(&made).unwrap(), format!("T15-OK{}", cmd_builder::nl()));
     let entries = std::fs::read_dir(dir.path().join("user").join("sessions")).unwrap().count();
     assert_eq!(entries, 1, "计划文字不触发文件副作用（仅自动会话）");
     // CLI 输出：活动行＋两次清单（状态变化可见）＋说明

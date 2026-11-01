@@ -294,6 +294,7 @@ pub fn cleanup_cred_file(tag: &str) {
         terminal_chat::catalog::credential_dir().join(format!("cred-{tag}.json")),
     );
 }
+pub mod cmd_builder;
 pub mod mcp_fixtures;
 // 038-CI：PTY 测试设施基于 posix_openpt/grantpt（POSIX 语义），Windows 不编译；
 // 依赖本模块的测试文件均带同级 unix 门控。

@@ -4,6 +4,7 @@
 //! 终止、容量、独立总时限的完整行为）见 tests/proc_session.rs。
 
 mod common;
+use common::cmd_builder;
 
 use std::fs;
 use std::path::PathBuf;
@@ -31,10 +32,8 @@ fn log_size(path: &PathBuf) -> u64 {
 
 /// 后台写入循环 + 长睡眠前台：直接子进程是 sh，孙进程持续写文件。
 fn writer_cmd(log: &PathBuf) -> String {
-    format!(
-        "while true; do echo x >> {log}; sleep 0.05; done & sleep 30",
-        log = log.display()
-    )
+    // 持续写入者＋保活：平台等价构造（038 蓝图 cmd_builder）
+    cmd_builder::seq(&[cmd_builder::writer_loop(log), cmd_builder::sleep_ms(30_000)])
 }
 
 /// 单次调用入口（参数层解析＋管理器执行）：与 turn 层分派同构——
@@ -135,8 +134,14 @@ fn cd_child_mode() {
     };
     let target = std::env::var("TCHAT_CD_TARGET").expect("缺少 TCHAT_CD_TARGET");
     let mgr = ProcessManager::new();
-    let after_cd = run_with(&mgr, &json!({ "cmd": format!("cd {target} && pwd") }), None);
-    let back = run_with(&mgr, &json!({ "cmd": "pwd" }), None);
+    // 平台等价：cmd `cd /d` 切换目录并打印（pwd 无对应内置）
+    let (after_cd_cmd, back_cmd) = if cfg!(windows) {
+        (format!("cd /d {target} && cd"), "cd".to_string())
+    } else {
+        (format!("cd {target} && pwd"), "pwd".to_string())
+    };
+    let after_cd = run_with(&mgr, &json!({ "cmd": after_cd_cmd }), None);
+    let back = run_with(&mgr, &json!({ "cmd": back_cmd }), None);
     mgr.close();
     std::fs::write(
         &outcome,
@@ -226,9 +231,18 @@ fn command_computes_product_and_writes_exact_file() {
     let product = dir.path().join("product.txt");
     assert!(!product.exists());
 
+    // 平台等价：$((算术))/printf 为 sh 设施——Windows 侧预计算后经 echo 写文件
+    let cmd = if cfg!(windows) {
+        cmd_builder::seq(&[
+            cmd_builder::echo_to_file(&product, "21"),
+            cmd_builder::cat(&product),
+        ])
+    } else {
+        "printf '%s\\n' \"$((7 * 3))\" > product.txt && cat product.txt".to_string()
+    };
     let r = run(
         &json!({
-            "cmd": "printf '%s\\n' \"$((7 * 3))\" > product.txt && cat product.txt",
+            "cmd": cmd,
             "workdir": dir.path().display().to_string(),
         }),
         None,
@@ -239,14 +253,14 @@ fn command_computes_product_and_writes_exact_file() {
     assert_eq!(r.error, None);
     assert!(!r.truncated);
     assert!(r.session_id.is_none(), "完成不留会话");
-    assert_eq!(r.output, "21\n");
-    assert_eq!(fs::read(&product).unwrap(), b"21\n");
+    assert_eq!(r.output, format!("21{}", cmd_builder::nl()));
+    assert_eq!(fs::read(&product).unwrap(), format!("21{}", cmd_builder::nl()).into_bytes());
 }
 
 /// 场景：stdout/stderr 各输出一行、退出码 7 → 两行都返回，completed、exit_code=7。
 #[test]
 fn stdout_stderr_merged_exit_code_preserved() {
-    let r = run(&json!({ "cmd": "echo out-line; echo err-line 1>&2; exit 7" }), None);
+    let r = run(&json!({ "cmd": cmd_builder::seq(&[cmd_builder::echo("out-line"), cmd_builder::echo_err("err-line"), "exit 7".into()]) }), None);
     assert_eq!(r.status, ExecStatus::Completed);
     assert_eq!(r.exit_code, Some(7));
     assert_eq!(r.error, None);
@@ -333,9 +347,19 @@ fn cancel_keeps_process_then_terminate_stops_writes() {
 #[test]
 fn oversized_output_truncated_to_char_cap() {
     // 100 行 ×（“行”+2 位数字+🎉+换行 = 5 字符）= 500 码点 > 上限 200
-    let cmd = "i=0; while [ $i -lt 100 ]; do printf '行%02d🎉\\n' $i; i=$((i+1)); done";
+    // 平台等价：printf 格式化＋unicode 码页为 sh 设施——Windows 经 PowerShell
+    // EncodedCommand（base64 UTF-16LE，无引号歧义）以 UTF-8 输出同等内容
+    let cmd = if cfg!(windows) {
+        use base64::Engine as _;
+        let script = "[Console]::OutputEncoding=[Text.Encoding]::UTF8;0..99|ForEach-Object{('行{0:D2}' -f $_)+[char]0x1F389}";
+        let enc: String = base64::engine::general_purpose::STANDARD
+            .encode(script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect::<Vec<u8>>());
+        format!("powershell -NoProfile -EncodedCommand {enc}")
+    } else {
+        "i=0; while [ $i -lt 100 ]; do printf '行%02d🎉\\n' $i; i=$((i+1)); done".to_string()
+    };
     let full: String = (0..100)
-        .map(|i| format!("行{i:02}🎉\n"))
+        .map(|i| format!("行{i:02}🎉{}", cmd_builder::nl()))
         .collect();
     let r = run(
         &json!({ "cmd": cmd, "max_output_chars": 200 }),
@@ -381,8 +405,14 @@ fn cd_inside_command_does_not_stick() {
     let child_ok = status.status.success();
     let child_stderr = String::from_utf8_lossy(&status.stderr).to_string();
     let outcome_text = fs::read_to_string(&outcome).ok();
-    let target_canon = fs::canonicalize(&target).ok();
-    let session_canon = fs::canonicalize(&session).ok();
+    // 平台等价：Windows fs::canonicalize 返回 \\?\ 前缀，cmd 输出无前缀
+    let strip_verbatim = |p: std::path::PathBuf| {
+        p.to_str()
+            .map(|s| s.trim_start_matches("\\?").to_string())
+            .unwrap_or_default()
+    };
+    let target_canon = fs::canonicalize(&target).ok().map(strip_verbatim.clone());
+    let session_canon = fs::canonicalize(&session).ok().map(strip_verbatim);
     let _ = fs::remove_dir_all(&host);
     assert!(child_ok, "cd 子进程异常退出：{child_stderr}");
     let v: serde_json::Value = serde_json::from_str(&outcome_text.unwrap_or_else(|| {
@@ -394,7 +424,7 @@ fn cd_inside_command_does_not_stick() {
     assert_eq!(v["after_cd"]["exit_code"], json!(0));
     assert_eq!(
         v["after_cd"]["output"].as_str().unwrap().trim(),
-        target_canon.as_ref().and_then(|p| p.to_str()).unwrap_or_default(),
+        target_canon.clone().unwrap_or_default(),
         "cd 后 pwd 必须输出目标目录"
     );
     // 第二次：缺省 workdir 的 pwd 精确等于原会话目录（不得沿用上次目标目录）
@@ -402,7 +432,7 @@ fn cd_inside_command_does_not_stick() {
     assert_eq!(v["back"]["exit_code"], json!(0));
     assert_eq!(
         v["back"]["output"].as_str().unwrap().trim(),
-        session_canon.as_ref().and_then(|p| p.to_str()).unwrap_or_default(),
+        session_canon.clone().unwrap_or_default(),
         "命令内 cd 不得改变后续调用的默认目录"
     );
 }
@@ -413,8 +443,13 @@ fn cd_inside_command_does_not_stick() {
 /// 命令正常收尾（任一管道未排空都会把子进程阻塞），前缀与截断标志正确。
 #[test]
 fn exec_b04_dual_stream_mb_drain_after_cap() {
-    let cmd = "i=0; while [ $i -lt 40000 ]; do echo out-wwwwwwwwww; echo err-eeeeeeeeee 1>&2; \
-               i=$((i+1)); done";
+    // 平台等价：cmd for /l 双流循环（unix 保留原 while 计数）
+    let cmd = if cfg!(windows) {
+        "for /l %i in (1,1,40000) do @(echo out-wwwwwwwwww & echo err-eeeeeeeeee 1>&2)".to_string()
+    } else {
+        "i=0; while [ $i -lt 40000 ]; do echo out-wwwwwwwwww; echo err-eeeeeeeeee 1>&2; \
+               i=$((i+1)); done".to_string()
+    };
     let r = run(
         &json!({ "cmd": cmd, "yield_time_ms": 30000, "max_output_chars": 200 }),
         None,
@@ -443,7 +478,17 @@ fn exec_b04_dual_stream_mb_drain_after_cap() {
 #[test]
 fn exec_b05_utf8_multibyte_across_read_boundary() {
     // 8190 个 A 后跟“中🙂”（3+4 字节），再 99 个 b：多字节序列跨越 8192 边界
-    let cmd = "printf '%0.sA' $(seq 1 8190); printf '中🙂'; printf '%0.sb' $(seq 1 99)";
+    // 平台等价：printf/seq 为 sh 设施——Windows 经 PowerShell EncodedCommand
+    // 精确输出同一字节序列（多字节仍跨越 8192 读取边界）
+    let cmd = if cfg!(windows) {
+        use base64::Engine as _;
+        let script = "[Console]::OutputEncoding=[Text.Encoding]::UTF8;[Console]::Out.Write('A'*8190+'中🙂'+'b'*99)";
+        let enc: String = base64::engine::general_purpose::STANDARD
+            .encode(script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect::<Vec<u8>>());
+        format!("powershell -NoProfile -EncodedCommand {enc}")
+    } else {
+        "printf '%0.sA' $(seq 1 8190); printf '中🙂'; printf '%0.sb' $(seq 1 99)".to_string()
+    };
     let r = run(&json!({ "cmd": cmd, "yield_time_ms": 30000 }), None);
     assert_eq!(r.status, ExecStatus::Completed, "{r:?}");
     let mut expected = String::new();
@@ -567,7 +612,7 @@ fn exec_p01_huge_timeout_accepted_then_terminate_reaps_group() {
 fn n4a_max_output_chars_upper_bound() {
     let dir = temp_dir("n4a");
     let flag = dir.join("probe.txt");
-    let touch = format!("touch {}", flag.display());
+    let touch = cmd_builder::touch(&flag);
     for bad in [100_001usize, 1_000_000, 200_000_000] {
         let r = run(&json!({ "cmd": &touch, "max_output_chars": bad }), None);
         let err = r.error.clone().unwrap_or_default();
@@ -576,13 +621,14 @@ fn n4a_max_output_chars_upper_bound() {
     }
     assert!(!flag.exists(), "拒绝不得启动进程");
     // 恰上限 100000 合法：大输出截断为精确前缀、truncated、正常收尾
-    let big = "i=0; while [ $i -lt 30000 ]; do echo 0123456789; i=$((i+1)); done"; // 300000 码点
+    // 平台等价：cmd for /l 计数输出（行尾随平台）
+    let big = cmd_builder::count_lines("0123456789", 30_000); // 300000 码点
     let r = run(&json!({ "cmd": big, "max_output_chars": 100_000, "yield_time_ms": 30000 }), None);
     assert_eq!(r.status, ExecStatus::Completed, "{r:?}");
     assert_eq!(r.exit_code, Some(0), "排空后正常收尾：{r:?}");
     assert!(r.truncated, "{r:?}");
     assert_eq!(r.output.chars().count(), 100_000, "码点恰为上限");
-    let expect: String = "0123456789\n".repeat(10000).chars().take(100_000).collect();
+    let expect: String = format!("0123456789{}", cmd_builder::nl()).repeat(10000).chars().take(100_000).collect();
     assert_eq!(r.output, expect, "前缀逐字精确");
     let _ = fs::remove_dir_all(&dir);
 }

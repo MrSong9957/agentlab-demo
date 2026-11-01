@@ -4,6 +4,7 @@
 //! 不靠固定睡眠猜执行顺序。
 
 mod common;
+use common::cmd_builder;
 
 use std::fs;
 use std::path::PathBuf;
@@ -76,7 +77,12 @@ fn running_returns_session_process_continues_query_completes() {
     let hits = dir.join("hits.log");
     let mgr = ProcessManager::new();
     let args = ExecArgs::from_value(&json!({
-        "cmd": format!("echo x >> {}; sleep 0.6; echo DONE", hits.display()),
+        // 平台等价（cmd_builder）：sh 的 `;` 序列在 cmd 无效（038 实测）
+        "cmd": cmd_builder::seq(&[
+            cmd_builder::append_line(&hits, "x"),
+            cmd_builder::sleep_ms(600),
+            cmd_builder::echo("DONE"),
+        ]),
         "yield_time_ms": 250,
     }))
     .unwrap();
@@ -125,7 +131,13 @@ fn short_command_completes_inline_without_session() {
 #[test]
 fn incremental_output_without_replay() {
     let mgr = ProcessManager::new();
-    let out = mgr.start(&exec_args("echo ONE; sleep 0.8; echo TWO", 300), None);
+    let out = mgr.start(
+        &exec_args(
+            &cmd_builder::seq(&[cmd_builder::echo("ONE"), cmd_builder::sleep_ms(800), cmd_builder::echo("TWO")]),
+            300,
+        ),
+        None,
+    );
     assert_eq!(out.result.status, ExecStatus::Running);
     assert_eq!(out.result.output.trim(), "ONE", "先取走第一段");
     let sid = out.result.session_id.unwrap();
@@ -145,7 +157,7 @@ fn explicit_timeout_kills_without_any_query() {
     let log = dir.join("log");
     let mgr = ProcessManager::new();
     let args = ExecArgs::from_value(&json!({
-        "cmd": format!("while true; do echo x >> {}; sleep 0.05; done", log.display()),
+        "cmd": cmd_builder::writer_loop(&log),
         "yield_time_ms": 250,
         "timeout_ms": 1500,
     }))
@@ -175,7 +187,7 @@ fn read_does_not_reset_deadline() {
     let mgr = ProcessManager::new();
     let timeout_ms = 1000u64;
     let args = ExecArgs::from_value(&json!({
-        "cmd": "while true; do date +%s%N; sleep 0.05; done",
+        "cmd": cmd_builder::writer_loop_stdout(),
         "yield_time_ms": 250,
         "timeout_ms": timeout_ms,
     }))
@@ -237,7 +249,7 @@ fn cancel_wait_keeps_process_alive_and_queryable() {
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_flag = cancel.clone();
     let args = ExecArgs::from_value(&json!({
-        "cmd": format!("while true; do echo x >> {}; sleep 0.05; done", log.display()),
+        "cmd": cmd_builder::writer_loop(&log),
         "yield_time_ms": 4000,
     }))
     .unwrap();
@@ -297,7 +309,7 @@ fn deadline_survives_cancel() {
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_for_thread = cancel.clone();
     let args = ExecArgs::from_value(&json!({
-        "cmd": format!("while true; do echo x >> {}; sleep 0.05; done", log.display()),
+        "cmd": cmd_builder::writer_loop(&log),
         "yield_time_ms": 4000,
         "timeout_ms": 1200,
     }))
@@ -566,7 +578,7 @@ fn close_kills_all_and_rejects_new_starts() {
     let log = dir.join("log");
     let mgr = ProcessManager::new();
     let args = ExecArgs::from_value(&json!({
-        "cmd": format!("while true; do echo x >> {}; sleep 0.05; done", log.display()),
+        "cmd": cmd_builder::writer_loop(&log),
         "yield_time_ms": 250,
     }))
     .unwrap();
@@ -608,7 +620,12 @@ fn reset_closes_old_and_allows_fresh_start() {
 fn big_dual_stream_completes_and_truncates() {
     let mgr = ProcessManager::new();
     let args = ExecArgs::from_value(&json!({
-        "cmd": "seq 1 60000; seq 1 60000 >&2",
+        // 平台等价：Windows for /l 逐行 echo 慢于 seq，行数缩放为 15000×2
+        // （两流仍超管道缓冲、前缀断言与截断上限不变）
+        "cmd": cmd_builder::seq(&[
+            cmd_builder::seq_lines(if cfg!(windows) { 15_000 } else { 60_000 }, false),
+            cmd_builder::seq_lines(if cfg!(windows) { 15_000 } else { 60_000 }, true),
+        ]),
         "yield_time_ms": 5000,
         "max_output_chars": 5000,
     }))
@@ -617,7 +634,7 @@ fn big_dual_stream_completes_and_truncates() {
     assert_eq!(out.result.status, ExecStatus::Completed, "{:?}", out.result.status);
     assert!(out.result.truncated, "超码点上限标记截断");
     assert!(out.result.output.chars().count() <= 5000);
-    assert!(out.result.output.starts_with("1\n2\n"), "保留前缀");
+    assert!(cmd_builder::normalize(&out.result.output).starts_with("1\n2\n"), "保留前缀");
 }
 
 /// 超过 1 MiB 待取缓存的输出：仍能完成并返回有界输出（头尾保留语义由
@@ -626,7 +643,12 @@ fn big_dual_stream_completes_and_truncates() {
 fn oversized_pending_stays_bounded() {
     let mgr = ProcessManager::new();
     let args = ExecArgs::from_value(&json!({
-        "cmd": "sleep 0.4; seq 1 400000",
+        // 平台等价：Windows 用 30 字节行×40000（>1MiB 语义不变）避免 40 万次
+        // for /l 迭代超出终态等待窗
+        "cmd": cmd_builder::seq(&[
+            cmd_builder::sleep_ms(400),
+            cmd_builder::count_lines("012345678901234567890123456789", if cfg!(windows) { 40_000 } else { 400_000 }),
+        ]),
         "yield_time_ms": 250,
         "max_output_chars": 100000,
     }))
@@ -688,7 +710,11 @@ fn turn_exec_running_then_write_stdin_across_requests() {
         &mut |body: &serde_json::Value| {
             sent += 1;
             Ok(match sent {
-                1 => tc_exec("c1", "sleep 0.5; echo DONE", 250),
+                1 => tc_exec(
+                    "c1",
+                    &cmd_builder::seq(&[cmd_builder::sleep_ms(500), cmd_builder::echo("DONE")]),
+                    250,
+                ),
                 2 => {
                     // 从第 2 请求体中取 c1 结果的 session_id——同轮续接
                     let sid = body["messages"]
@@ -850,7 +876,10 @@ fn turn_cap_exhaustion_keeps_sessions_for_next_turn() {
 fn exited_undrained_session_still_occupies_capacity() {
     let mgr = ProcessManager::new();
     // s1：返回 running 后自然退出，不查询——记录保留（终态＋待取输出）
-    let out = mgr.start(&exec_args("sleep 0.3; echo tail-line", 250), None);
+    let out = mgr.start(
+        &exec_args(&cmd_builder::seq(&[cmd_builder::sleep_ms(300), cmd_builder::echo("tail-line")]), 250),
+        None,
+    );
     let sid = out.result.session_id.unwrap();
     std::thread::sleep(Duration::from_millis(1200)); // 进程已退出，输出未取走
     assert!(mgr.live_sessions().iter().any(|(id, _)| id == &sid), "已退出未取走的记录仍在册");
