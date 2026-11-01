@@ -669,8 +669,10 @@ pub fn memory_reset(user_dir: &Path, args: &str) -> String {
                     .and_then(|e| e.file_name().into_string().ok())
                     // DROP 失败的 DB 计回残留（安全测试 D2：不得以「已清理」掩盖）
             .is_some_and(|n| {
-                let p = root.join(&n);
-                p != db_path || db_drop_failed
+                n != EPOCH_FILE && {
+                    let p = root.join(&n);
+                    p != db_path || db_drop_failed
+                }
             })
             })
             .count()

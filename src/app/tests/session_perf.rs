@@ -404,11 +404,11 @@ fn perf_tiers_baseline_driven() {
         pty.wait("你> ");
         pty.send("/resume auto-20250103T000000-64"); // 换成 64 MiB 会话再换回，制造真实替换窗口
         pty.wait("丢弃当前");
-        let st_before = sample_proc(pty.child.id());
+        let st_before = sample_proc(pty.child.as_ref().map(|c| c.id()).unwrap_or(0));
         rss_obs.push(st_before.vm_rss_kib);
         pty.send("y");
         pty.wait("恢复");
-        let st = sample_proc(pty.child.id());
+        let st = sample_proc(pty.child.as_ref().map(|c| c.id()).unwrap_or(0));
         peaks.push(st.vm_hwm_kib / 1024.0);
         rss_obs.push(st.vm_rss_kib);
         // 再换回 32 MiB：下一轮窗口

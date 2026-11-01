@@ -29,7 +29,7 @@ static PTY_NAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub struct PtyCli {
     master: fs::File,
-    pub child: Child,
+    pub child: Option<Child>,
     captured: Vec<u8>,
     /// 已被 wait 消费到的位置：后续等待只在新输出中匹配。
     consumed: usize,
@@ -95,7 +95,7 @@ impl PtyCli {
             cmd.stdin(Stdio::from(fs::File::from_raw_fd(fd0)));
             cmd.stdout(Stdio::from(fs::File::from_raw_fd(fd1)));
             cmd.stderr(Stdio::from(fs::File::from_raw_fd(fd2)));
-            let child = cmd.spawn().expect("PTY CLI 子进程启动失败");
+            let child = Some(cmd.spawn().expect("PTY CLI 子进程启动失败"));
             PtyCli {
                 master: fs::File::from_raw_fd(master_fd),
                 child,
@@ -131,12 +131,12 @@ impl PtyCli {
                 return;
             }
             if Instant::now() > deadline {
-                let pid = self.child.id() as i32;
+                let pid = self.child.as_ref().map(|c| c.id()).unwrap_or(0) as i32;
                 let state = fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|t| {
                     t.rsplit_once(')').map(|(_, a)| a.trim_start().chars().next().unwrap_or('?'))
                 });
-                match self.child.try_wait() {
-                    Ok(Some(st)) => panic!("等待 {:?} 时子进程已退出：{st}", needle),
+                match self.child.as_mut().and_then(|c| c.try_wait().ok()).flatten() {
+                    Some(st) => panic!("等待 {:?} 时子进程已退出：{st}", needle),
                     _ => panic!(
                         "等待 {:?} 超时（子进程状态 {:?}）：\n{}",
                         needle,
@@ -164,12 +164,12 @@ impl PtyCli {
                 return;
             }
             if Instant::now() > deadline {
-                let pid = self.child.id() as i32;
+                let pid = self.child.as_ref().map(|c| c.id()).unwrap_or(0) as i32;
                 let state = fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|t| {
                     t.rsplit_once(')').map(|(_, a)| a.trim_start().chars().next().unwrap_or('?'))
                 });
-                match self.child.try_wait() {
-                    Ok(Some(st)) => panic!(
+                match self.child.as_mut().and_then(|c| c.try_wait().ok()).flatten() {
+                    Some(st) => panic!(
                         "等待屏幕 {:?} 时子进程已退出（{st}）。屏幕：\n{}\n原始输出：\n{}",
                         needle,
                         self.vt,
@@ -232,7 +232,11 @@ impl PtyCli {
         let deadline = Instant::now() + self.watchdog;
         while !data.is_empty() {
             if Instant::now() > deadline {
-                let state = self.child.try_wait();
+                let state = self
+                    .child
+                    .as_mut()
+                    .and_then(|c| c.try_wait().ok())
+                    .flatten();
                 panic!(
                     "PTY 写入超时（子进程未读输入？state={state:?}）：\n{}",
                     String::from_utf8_lossy(&self.captured)
@@ -284,14 +288,19 @@ impl PtyCli {
     pub fn finish(mut self) -> (String, Option<i32>) {
         let deadline = Instant::now() + self.watchdog;
         let status = loop {
-            match self.child.try_wait() {
-                Ok(Some(s)) => break s,
-                Ok(None) if Instant::now() < deadline => {
+            match self
+                .child
+                .as_mut()
+                .and_then(|c| c.try_wait().ok())
+                .flatten()
+            {
+                Some(s) => break s,
+                None if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(20))
                 }
                 _ => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
+                    let _ = self.child.as_mut().map(|c| c.kill());
+                    let _ = self.child.as_mut().map(|c| c.wait());
                     panic!("PTY CLI 子进程未在期限内退出");
                 }
             }
@@ -302,7 +311,21 @@ impl PtyCli {
 
 impl Drop for PtyCli {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // 038 D-mac：同 e2e_acceptance——退出序列写满 PTY 缓冲的子进程阻塞在
+        // 退出中，Drop 的无界 wait 形成死锁闭环。先有界排空 master，再强杀，
+        // 收尸交分离线程（Drop 永不无限阻塞）。
+        let Some(mut child) = self.child.take() else { return };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => self.poll_read(),
+                Err(_) => break,
+            }
+        }
+        let _ = child.kill();
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
     }
 }

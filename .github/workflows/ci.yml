@@ -163,6 +163,32 @@ jobs:
           kill "$SAMPLER" 2>/dev/null || true
           echo "== 失败用例的证据行（before/after_close、FDSCAN、marker_pid）==" | tee d2d3-evidence.txt
           grep -E "before_close|after_close|FDSCAN|marker_pid|leftover" d2d3-tests.log | head -40 | tee -a d2d3-evidence.txt || true
+      - name: D1 产品启动链对证（strace 产品的 bwrap 启动＋argv 全量转储）
+        run: |
+          # 最小产品链复现：attack06 同路径——经产品 entry 构造 031 沙箱启动
+          # （write_policy＋policy_from_env＋真实 exec_command 沙箱面），strace
+          # 捕获 bwrap 的 seccomp/memfd/close_range 调用与完整 argv。
+          gcc -x c - -o /tmp/probe2 <<'EOF'
+          #include <stdio.h>
+          #include <errno.h>
+          #include <string.h>
+          #include <unistd.h>
+          #include <sys/syscall.h>
+          int main(void) {
+              long r = syscall(437, NULL, 0);
+              printf("clone3_ret=%ld errno=%d (%s)\n", r, errno, strerror(errno));
+              return 0;
+          }
+          EOF
+          {
+            echo "== 产品的 bwrap 启动链（policy_from_env → build_tool_command）=="
+            strace -f -e trace=seccomp,memfd_create,close_range,execve -o /tmp/strace-product.txt \
+              cargo test --locked -p terminal-chat --test security_attack_031 attack06_seccomp_allows_toolchain_blocks_privileged_syscalls -- --exact --nocapture 2>&1 | tail -20
+            echo "== bwrap argv（来自 strace execve 行）=="
+            grep -E "execve.*bwrap" /tmp/strace-product.txt | head -3
+            echo "== seccomp/memfd/close_range 调用序列 =="
+            grep -E "seccomp|memfd_create|close_range" /tmp/strace-product.txt | head -30
+          } | tee d1-product-chain.txt || true
       - name: 上传诊断工件
         if: always()
         uses: actions/upload-artifact@v4
@@ -170,6 +196,7 @@ jobs:
           name: runner-diagnosis
           path: |
             diagnosis-env.txt
+            d1-product-chain.txt
             d1-seccomp.txt
             d2d3-tests.log
             d2d3-evidence.txt

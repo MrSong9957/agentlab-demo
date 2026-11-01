@@ -35,7 +35,7 @@ rquickjs = { version = "=0.14.0", default-features = false, features = ["std", "
 # 038：Windows 平台层（apply_patch 句柄重开/句柄身份核验；proc_session 进程树
 # 作业对象终止/交互终端 ConPTY；windows-sys 与 tui 同版本同特性集风格）。
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Console", "Win32_System_Threading", "Win32_Security"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Console", "Win32_System_Threading", "Win32_Security", "Win32_System_Pipes"] }
 
 [dev-dependencies]
 # 022 §5.4：TLS mock 服务器（自签证书）；与 reqwest 传递的 rustls 同版本同 provider，避免双 provider。

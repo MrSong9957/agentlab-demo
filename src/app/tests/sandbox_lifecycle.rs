@@ -373,7 +373,7 @@ fn lifecycle_sandbox_payload_stops_after_cli_sigkill() {
         "[sandbox={sandbox}] 轮结束后载荷应存活（跨轮保留）；扫描标记：{marker}"
     );
     // 宿主异常退出（SIGKILL）：全部线程随进程死亡 → bwrap PDEATHSIG → 载荷停止。
-    let cli_pid = pty.child.id();
+    let cli_pid = pty.child.as_ref().map(|c| c.id()).unwrap_or(0);
     unsafe { libc::kill(cli_pid as libc::pid_t, libc::SIGKILL) };
     let dl = std::time::Instant::now() + Duration::from_secs(3);
     let mut last_live = usize::MAX;

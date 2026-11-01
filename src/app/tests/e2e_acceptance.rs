@@ -1071,7 +1071,7 @@ fn s106_resume_answered_async_question_displays_without_new_requests() {
 /// rustyline 阶段 CR 经 ICRNL 同样按行结束）。
 struct PtySession {
     master: File,
-    child: Child,
+    child: Option<Child>,
     captured: Vec<u8>,
     vt: tchat_tui::test_backend::VT100Backend,
     vt_fed: usize,
@@ -1192,7 +1192,7 @@ impl PtySession {
             cmd.stdin(Stdio::from(File::from_raw_fd(fd0)));
             cmd.stdout(Stdio::from(File::from_raw_fd(fd1)));
             cmd.stderr(Stdio::from(File::from_raw_fd(fd2)));
-            let child = cmd.spawn().expect("PTY 子进程启动失败");
+            let child = Some(cmd.spawn().expect("PTY 子进程启动失败"));
             // 038：master 非阻塞（写侧 poll＋看门狗配套，卡死转为证据化 panic）；
             // 注意只作用于 master——从设备 fd0/1/2 是子进程 stdio，保持阻塞语义。
             let fl = libc::fcntl(master_fd, libc::F_GETFL);
@@ -1232,8 +1232,8 @@ impl PtySession {
                 return Ok(());
             }
             if Instant::now() > deadline {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
+                let _ = self.child.as_mut().map(|c| c.kill());
+                let _ = self.child.as_mut().map(|c| c.wait());
                 return Err(format!(
                     "等待屏幕 {:?} 超时（{:?}），屏幕：\n{}\n原始输出：\n{}",
                     needle,
@@ -1285,8 +1285,8 @@ impl PtySession {
         let target = needle.as_bytes();
         while !window_contains(&self.captured, target) {
             if Instant::now() > deadline {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
+                let _ = self.child.as_mut().map(|c| c.kill());
+                let _ = self.child.as_mut().map(|c| c.wait());
                 return Err(format!(
                     "等待输出 {:?} 超时（{:?}），已捕获：\n{}",
                     needle,
@@ -1305,7 +1305,11 @@ impl PtySession {
         let deadline = Instant::now() + WATCHDOG;
         while !data.is_empty() {
             if Instant::now() > deadline {
-                let state = self.child.try_wait();
+                let state = self
+                    .child
+                    .as_mut()
+                    .and_then(|c| c.try_wait().ok())
+                    .flatten();
                 panic!(
                     "PTY 写入超时（子进程未读输入？state={state:?}）：\n{}",
                     String::from_utf8_lossy(&self.captured)
@@ -1363,8 +1367,8 @@ impl PtySession {
                 return Ok(());
             }
             if Instant::now() > deadline {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
+                let _ = self.child.as_mut().map(|c| c.kill());
+                let _ = self.child.as_mut().map(|c| c.wait());
                 return Err(format!(
                     "等待屏幕条件 {:?} 超时，屏幕：\n{}",
                     desc,
@@ -1393,14 +1397,19 @@ impl PtySession {
     fn finish(mut self) -> (String, std::process::ExitStatus) {
         let deadline = Instant::now() + WATCHDOG;
         let status = loop {
-            match self.child.try_wait() {
-                Ok(Some(s)) => break s,
-                Ok(None) if Instant::now() < deadline => {
+            match self
+                .child
+                .as_mut()
+                .and_then(|c| c.try_wait().ok())
+                .flatten()
+            {
+                Some(s) => break s,
+                None if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(20))
                 }
                 _ => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
+                    let _ = self.child.as_mut().map(|c| c.kill());
+                    let _ = self.child.as_mut().map(|c| c.wait());
                     panic!("PTY 子进程未在期限内退出");
                 }
             }
@@ -1431,8 +1440,24 @@ impl PtySession {
 
 impl Drop for PtySession {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // 038 D-mac（插桩实证）：子进程退出序列向 master 回写时可能填满 PTY
+        // 缓冲而阻塞在退出中（macOS E 态 2h20m），同时 Drop 的无界 child.wait()
+        // 阻塞测试线程＝无人排空 master 的死锁闭环（整目标零输出）。修复＝
+        // Drop 先有界排空 master 让子进程能写完退出序列；超时强杀；收尸交
+        // 分离线程（Drop 永不无限阻塞）。
+        let Some(mut child) = self.child.take() else { return };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => self.read_once(50),
+                Err(_) => break,
+            }
+        }
+        let _ = child.kill();
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
     }
 }
 
@@ -2782,7 +2807,8 @@ fn s12_tui_ctrl_d_empty_input_exits_with_code_0() {
     pty.send_raw(b"\x04");
     std::thread::sleep(Duration::from_millis(600));
     assert!(
-        pty.child.try_wait().unwrap().is_none(),
+        // 进程存活探测（kill 0）：child 字段已 Option 化，此处只读语义足够
+        unsafe { libc::kill(pty.child.as_ref().unwrap().id() as i32, 0) == 0 },
         "非空草稿 Ctrl+D 不得退出（J10 退出条件＝空输入行；非空＝母本 composer 键位，无操作）"
     );
     // 清空草稿（5 个退格）后 Ctrl+D：空输入行 EOF 退出
@@ -3341,7 +3367,10 @@ impl PtySession {
     /// 010 收尾轮：CLI 子进程线程数（/proc/<pid>/task 项数）——直接观测取消
     /// 后辅助线程的存活与回收，不依赖 180s 超时兜底推断。
     fn thread_count(&self) -> usize {
-        std::fs::read_dir(format!("/proc/{}/task", self.child.id()))
+        std::fs::read_dir(format!(
+            "/proc/{}/task",
+            self.child.as_ref().map(|c| c.id()).unwrap_or(0)
+        ))
             .map(|entries| entries.count())
             .unwrap_or(0)
     }
@@ -6258,7 +6287,10 @@ fn s60_draft_then_f4_enter_still_controls_tool() {
     pty.dwell(600);
     assert_eq!(mock.count(), 2, "草稿不得被发送（仍两轮）");
     assert!(!pty.output().contains("再见"), "不得触发裸 exit");
-    assert!(pty.child.try_wait().unwrap().is_none(), "CLI 存活");
+    assert!(
+        unsafe { libc::kill(pty.child.as_ref().unwrap().id() as i32, 0) == 0 },
+        "CLI 存活"
+    );
     // 草稿仍在：q 关页后输入区内容未丢
     pty.send_raw(b"q");
     pty.dwell(200);
@@ -6900,7 +6932,8 @@ fn s69b_esc_cancels_with_selection_preserved() {
     pty.send_raw(b"\x1b");
     pty.dwell(600);
     assert!(
-        pty.child.try_wait().unwrap().is_none(),
+        // 进程存活探测（kill 0）：child 字段已 Option 化，此处只读语义足够
+        unsafe { libc::kill(pty.child.as_ref().unwrap().id() as i32, 0) == 0 },
         "取消后 CLI 存活"
     );
     pty.send_raw(&sgr_right_down(10, 10));
@@ -7368,7 +7401,8 @@ fn s74_esc_with_tool_focus_cancels_and_keeps_focus() {
     pty.wait_screen_timeout("已停止等待模型回复", Duration::from_secs(2))
         .expect("聚焦态 Esc＝取消（聚焦不得提前消费）");
     assert!(
-        pty.child.try_wait().unwrap().is_none(),
+        // 进程存活探测（kill 0）：child 字段已 Option 化，此处只读语义足够
+        unsafe { libc::kill(pty.child.as_ref().unwrap().id() as i32, 0) == 0 },
         "取消后 CLI 存活"
     );
     pty.dwell(5000);
@@ -7438,7 +7472,8 @@ fn s75_esc_with_shortcut_overlay_cancel_and_keep_hints() {
         "再按 ? 收起提示（既有切换方式）"
     );
     assert!(
-        pty.child.try_wait().unwrap().is_none(),
+        // 进程存活探测（kill 0）：child 字段已 Option 化，此处只读语义足够
+        unsafe { libc::kill(pty.child.as_ref().unwrap().id() as i32, 0) == 0 },
         "CLI 全程存活"
     );
     pty.send_line("/exit");
@@ -7514,7 +7549,8 @@ fn s76_idle_esc_is_noop_across_states() {
         pty.screen()
     );
     assert!(
-        pty.child.try_wait().unwrap().is_none(),
+        // 进程存活探测（kill 0）：child 字段已 Option 化，此处只读语义足够
+        unsafe { libc::kill(pty.child.as_ref().unwrap().id() as i32, 0) == 0 },
         "空闲 Esc 全程零副作用（CLI 存活，无取消动作）"
     );
     assert_eq!(mock.count(), 2, "空闲 Esc 零模型请求");
@@ -7835,7 +7871,8 @@ fn s80_search_plus_focus_enter_follows_search_rules() {
         "场景4 Enter＝退出搜索：{s4}"
     );
     assert!(
-        pty.child.try_wait().unwrap().is_none(),
+        // 进程存活探测（kill 0）：child 字段已 Option 化，此处只读语义足够
+        unsafe { libc::kill(pty.child.as_ref().unwrap().id() as i32, 0) == 0 },
         "场景4 不得裸退出（CLI 存活）"
     );
     for _ in 0..6 { pty.send_raw(b"\x7f"); pty.read_once(30); }
