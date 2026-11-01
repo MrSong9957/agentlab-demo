@@ -28,7 +28,13 @@ pub fn normalize(s: &str) -> String {
 }
 
 fn path_str(p: &Path) -> String {
-    p.display().to_string().replace('\\', "/")
+    // Windows 保留原生反斜杠：cmd 重定向目标中的 `/` 会被解析为开关前缀
+    // （`(echo x)>C:/...` 报 syntax of the command is incorrect——038 实测）
+    if cfg!(windows) {
+        p.display().to_string()
+    } else {
+        p.display().to_string().replace('\\', "/")
+    }
 }
 
 /// 子命令序列：unix 以 `;` 连接，Windows 以 `&` 连接。
@@ -75,8 +81,9 @@ pub fn writer_loop_stdout() -> String {
 /// 计数，亚秒为单次超时窗口）。
 pub fn sleep_ms(ms: u64) -> String {
     if cfg!(windows) {
-        // 回环 ping：-n K 的请求间隔≈1 秒（回复即时到达也按间隔发送），粒度 1s
-        format!("ping -n {} 127.0.0.1>nul", ms / 1000 + 1)
+        // 回环 ping：-n K 的请求间隔≈1 秒（回复即时到达也按间隔发送）；无亚秒
+        // 粒度——亚秒统一取 1 秒档（命令串内的先后顺序契约不受影响）
+        format!("ping -n {} 127.0.0.1>nul", if ms < 1000 { 2 } else { ms / 1000 + 1 })
     } else if ms % 1000 == 0 {
         format!("sleep {}", ms / 1000)
     } else {
