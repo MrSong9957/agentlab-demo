@@ -233,8 +233,8 @@ fn workdir_resolves_relative_paths() {
     // 缺省 workdir：pwd 落盘于会话目录，且内容即该目录（证明缺省＝会话当前目录）
     assert_eq!(v["default"]["status"], json!("completed"), "{}", v["default"]);
     assert_eq!(
-        pwd_canon.as_deref(),
-        session_canon.as_deref(),
+        pwd_canon.as_deref().map(|s| common::long_norm(std::path::Path::new(s)).to_string_lossy().into_owned()),
+        session_canon.as_deref().map(|s| common::long_norm(std::path::Path::new(s)).to_string_lossy().into_owned()),
         "缺省 workdir 的输出落在会话目录且 pwd 即该目录"
     );
 }
@@ -247,6 +247,7 @@ fn command_computes_product_and_writes_exact_file() {
     assert!(!product.exists());
 
     // 平台等价：$((算术))/printf 为 sh 设施——Windows 侧预计算后经 echo 写文件
+    // Windows：echo 重定向（set /p 语法在 runner 实测报 syntax incorrect——038 迭代 31）
     let cmd = if cfg!(windows) {
         cmd_builder::seq(&[
             cmd_builder::echo_to_file(&product, "21"),
@@ -342,7 +343,9 @@ fn cancel_keeps_process_then_terminate_stops_writes() {
 
     // 016：取消等待 ≠ 进程停止——进程继续写文件
     let s1 = log_size(&log);
-    thread::sleep(Duration::from_millis(400));
+    // Windows 写入者每行一次 PowerShell（约 400-600ms）——观察窗按平台放大
+    // （契约不变：取消等待 ≠ 进程停止，窗口只影响采样时长）
+    thread::sleep(Duration::from_millis(if cfg!(windows) { 2500 } else { 400 }));
     let s2 = log_size(&log);
     assert!(s2 > s1, "取消后受管理进程应继续运行（{s1} -> {s2}）");
 
@@ -435,18 +438,24 @@ fn cd_inside_command_does_not_stick() {
     // 第一次：cd 后 pwd 输出精确等于目标目录（自然完成、退出码 0）
     assert_eq!(v["after_cd"]["status"], json!("completed"), "{}", v["after_cd"]);
     assert_eq!(v["after_cd"]["exit_code"], json!(0));
-    assert_eq!(
-        v["after_cd"]["output"].as_str().unwrap().trim(),
-        target_canon.clone().unwrap_or_default(),
-        "cd 后 pwd 必须输出目标目录"
+    let cmp_norm = |s: &str| common::long_norm(std::path::Path::new(s.trim())).to_string_lossy().into_owned();
+    let eq_norm = |a: String, b: String| {
+        if cfg!(windows) { a.eq_ignore_ascii_case(&b) } else { a == b }
+    };
+    assert!(
+        eq_norm(cmp_norm(v["after_cd"]["output"].as_str().unwrap()), target_canon.clone().unwrap_or_default()),
+        "cd 后 pwd 必须输出目标目录：{} vs {}",
+        v["after_cd"]["output"].as_str().unwrap(),
+        target_canon.clone().unwrap_or_default()
     );
     // 第二次：缺省 workdir 的 pwd 精确等于原会话目录（不得沿用上次目标目录）
     assert_eq!(v["back"]["status"], json!("completed"), "{}", v["back"]);
     assert_eq!(v["back"]["exit_code"], json!(0));
-    assert_eq!(
-        v["back"]["output"].as_str().unwrap().trim(),
-        session_canon.clone().unwrap_or_default(),
-        "命令内 cd 不得改变后续调用的默认目录"
+    assert!(
+        eq_norm(cmp_norm(v["back"]["output"].as_str().unwrap()), session_canon.clone().unwrap_or_default()),
+        "命令内 cd 不得改变后续调用的默认目录：{} vs {}",
+        v["back"]["output"].as_str().unwrap(),
+        session_canon.clone().unwrap_or_default()
     );
 }
 
@@ -473,16 +482,17 @@ fn exec_b04_dual_stream_mb_drain_after_cap() {
     assert_eq!(r.output.chars().count(), 200, "码点恰为上限");
     // 跨流时序无契约：不钉先后；200 码点为精确前缀（可落在行中）。完整性检查：
     // 完整行必须是两条合法流之一，尾段（截断处）必须是某一合法行的前缀——无损坏、无混合
-    let (complete, tail) = r.output.rsplit_once('\n').unwrap_or(("", r.output.as_str()));
+    let normalized = cmd_builder::normalize(&r.output);
+    let (complete, tail) = normalized.rsplit_once('\n').unwrap_or(("", normalized.as_str()));
     for line in complete.lines() {
         assert!(
             line == "out-wwwwwwwwww" || line == "err-eeeeeeeeee",
-            "完整行必须属于两条合法流：{line}"
+            "完整行必须属于两条合法流：{line:?}"
         );
     }
     if !tail.is_empty() {
         let ok_prefix = "out-wwwwwwwwww\n".starts_with(tail) || "err-eeeeeeeeee\n".starts_with(tail);
-        assert!(ok_prefix, "截断尾段必须是合法行前缀：{tail}");
+        assert!(ok_prefix, "截断尾段必须是合法行前缀：{tail:?}");
     }
 }
 
@@ -554,14 +564,23 @@ fn exec_p01_huge_timeout_accepted_then_terminate_reaps_group() {
     let c2 = cancel.clone();
     let pgid_path = pgid_file.clone();
     let kid_path = kid_file.clone();
+    let writer_log = dir.join("w-p01.log");
+    let writer_log_in = writer_log.clone();
     let h = thread::spawn(move || {
         let mgr2 = ProcessManager::new();
-        let r = run_with(
-            &mgr2,
-            &json!({ "cmd": format!(
+        // 平台分支：pgid/kid 记录机制为 unix 信号语义（$$/$!/killpg）——Windows
+        // 由文件增长观测同一契约面（超大时限受理＋取消不终止＋terminate 回收树）
+        let cmd = if cfg!(windows) {
+            cmd_builder::writer_loop(&writer_log_in)
+        } else {
+            format!(
                 "echo $$ > {p}; sleep 30 & echo $! > {k}; wait",
                 p = pgid_path.display(), k = kid_path.display()
-            ), "yield_time_ms": 8000, "timeout_ms": u64::MAX }),
+            )
+        };
+        let r = run_with(
+            &mgr2,
+            &json!({ "cmd": cmd, "yield_time_ms": 8000, "timeout_ms": u64::MAX }),
             Some(&*c2),
         );
         done.store(true, Ordering::SeqCst);
@@ -578,9 +597,19 @@ fn exec_p01_huge_timeout_accepted_then_terminate_reaps_group() {
     let (r, mgr2) = h.join().unwrap();
     assert_eq!(r.status, ExecStatus::Cancelled, "{r:?}");
     let sid = r.session_id.expect("取消后保留句柄");
+    #[cfg(unix)]
     let pgid: i32 = fs::read_to_string(&pgid_file).unwrap().trim().parse().unwrap();
+    #[cfg(unix)]
     let kid: i32 = fs::read_to_string(&kid_file).unwrap().trim().parse().unwrap();
-    // 取消不杀：组长进程组仍存在
+    // 取消不杀：unix＝组长进程组仍存在；Windows＝写入者仍增长
+    #[cfg(windows)]
+    {
+        let s1 = fs::metadata(&writer_log).map(|m| m.len()).unwrap_or(0);
+        thread::sleep(Duration::from_millis(2500));
+        let s2 = fs::metadata(&writer_log).map(|m| m.len()).unwrap_or(0);
+        assert!(s2 > s1, "取消当前轮不得终止写入者（{s1} -> {s2}）");
+    }
+    #[cfg(unix)]
     thread::sleep(Duration::from_millis(200));
     // 038：killpg(0) 存活探测为 unix 信号语义——Windows 由下方 child 状态
     // 断言（Terminated）覆盖同一契约面。
@@ -595,26 +624,33 @@ fn exec_p01_huge_timeout_accepted_then_terminate_reaps_group() {
     // 明确终止：回收整个受管理进程组
     let term = WriteStdinArgs::from_value(&json!({ "session_id": sid, "terminate": true })).unwrap();
     assert_eq!(mgr2.interact(&term, None).result.status, ExecStatus::Terminated);
-    let kid_state = |pid: i32| -> Option<char> {
-        fs::read_to_string(format!("/proc/{pid}/stat")).ok()?.rsplit_once(')')?.1.trim_start().chars().next()
-    };
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        #[cfg(unix)]
-        let errno = unsafe {
-            let rc = libc::killpg(pgid, 0);
-            if rc == 0 { None } else { std::io::Error::last_os_error().raw_os_error() }
+    #[cfg(unix)]
+    {
+        let kid_state = |pid: i32| -> Option<char> {
+            fs::read_to_string(format!("/proc/{pid}/stat")).ok()?.rsplit_once(')')?.1.trim_start().chars().next()
         };
-        #[cfg(not(unix))]
-        let errno: Option<i32> = None;
-        if errno == Some(libc::ESRCH) || matches!(kid_state(kid), None | Some('Z') | Some('X')) {
-            break;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let errno = unsafe {
+                let rc = libc::killpg(pgid, 0);
+                if rc == 0 { None } else { std::io::Error::last_os_error().raw_os_error() }
+            };
+            if errno == Some(libc::ESRCH) || matches!(kid_state(kid), None | Some('Z') | Some('X')) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "终止后进程组未回收：pgid={pgid} kid={kid}"
+            );
+            thread::sleep(Duration::from_millis(10));
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "终止后进程组未回收：pgid={pgid} kid={kid}"
-        );
-        thread::sleep(Duration::from_millis(10));
+    }
+    #[cfg(windows)]
+    {
+        let s1 = fs::metadata(&writer_log).map(|m| m.len()).unwrap_or(0);
+        thread::sleep(Duration::from_millis(2500));
+        let s2 = fs::metadata(&writer_log).map(|m| m.len()).unwrap_or(0);
+        assert_eq!(s1, s2, "终止后写入者（含树内子进程）停止写入：{s1} -> {s2}");
     }
     let _ = fs::remove_dir_all(&dir);
 }

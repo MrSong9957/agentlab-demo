@@ -54,15 +54,13 @@ pub fn append_line(log: &Path, text: &str) -> String {
 }
 
 /// 无限循环向文件追加一行＋亚秒延时（取消/时限/组杀测试的存活写入者）。
-/// Windows 用 `for /l` step=0 无限循环＋`ping -w` 超时提供延时（TEST-NET
-/// 地址 192.0.2.1 不可达，-w 超时确定性生效，不发真实网络流量）。
+/// Windows 每行一次 PowerShell（约 300-500ms/行）：增长窗口可观测且不淹没
+/// 输出缓存（回环 ping 的 -n 间隔在 runner 实测不产生预期延时——038 迭代 31
+/// incremental_output 证据：300ms 窗口内两行全到）。
 pub fn writer_loop(log: &Path) -> String {
     let log = path_str(log);
     if cfg!(windows) {
-        // 回环 ping（ping.exe 进程约 30-60ms）作节流：约 15-30 行/秒——足够
-        // 增长窗口观测、又不至于淹没输出缓存干扰时限测量。（TEST-NET 的
-        // ping -w 超时在 runner 上被立即拒绝＝无延时——038 实测）
-        format!("for /l %i in (1,0,2) do @((echo x)>>{log} & ping -n 1 127.0.0.1>nul)")
+        format!("for /l %i in (1,0,2) do @((echo x)>>{log} & powershell -NoProfile -Command \"Start-Sleep -Milliseconds 100\")")
     } else {
         format!("while true; do echo x >> {log}; sleep 0.05; done")
     }
@@ -71,19 +69,18 @@ pub fn writer_loop(log: &Path) -> String {
 /// 无限循环向 stdout 写计数行＋亚秒延时（stdout 存活写入者）。
 pub fn writer_loop_stdout() -> String {
     if cfg!(windows) {
-        "for /l %i in (1,0,2) do @(echo %i & ping -n 1 127.0.0.1>nul)".to_string()
+        "for /l %i in (1,0,2) do @(echo %i & powershell -NoProfile -Command \"Start-Sleep -Milliseconds 100\")".to_string()
     } else {
         "while true; do date +%s%N; sleep 0.05; done".to_string()
     }
 }
 
-/// 休眠。unix `sleep`（小数）；Windows `ping -w` 超时近似（秒级为 1000ms 超时
-/// 计数，亚秒为单次超时窗口）。
+/// 休眠。unix `sleep`（小数）；Windows PowerShell `Start-Sleep`（精确毫秒；
+/// 进程启动开销数百毫秒属夹具可接受范围——回环 ping 的 -n 间隔在 runner
+/// 实测不产生预期延时）。
 pub fn sleep_ms(ms: u64) -> String {
     if cfg!(windows) {
-        // 回环 ping：-n K 的请求间隔≈1 秒（回复即时到达也按间隔发送）；无亚秒
-        // 粒度——亚秒统一取 1 秒档（命令串内的先后顺序契约不受影响）
-        format!("ping -n {} 127.0.0.1>nul", if ms < 1000 { 2 } else { ms / 1000 + 1 })
+        format!("powershell -NoProfile -Command \"Start-Sleep -Milliseconds {ms}\"")
     } else if ms % 1000 == 0 {
         format!("sleep {}", ms / 1000)
     } else {

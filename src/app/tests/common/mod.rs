@@ -296,6 +296,23 @@ pub fn cleanup_cred_file(tag: &str) {
 }
 pub mod cmd_builder;
 pub mod mcp_fixtures;
+
+/// 路径形态统一（比较用）：Windows 上 canonicalize 返回 `\\?\` verbatim＋长名，
+/// 而 cmd 输出/环境注入可能是 8.3 短名或无前缀形态——统一为「无 verbatim 前缀
+/// 的长路径」。unix 恒等（canonicalize 已是长路径语义）。比较双方都经本函数
+/// 归一，授权集合与实际访问对象的判定不受形态影响（产品侧 verbatim 保留不变）。
+pub fn long_norm(p: &std::path::Path) -> std::path::PathBuf {
+    let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let s = canon.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    {
+        std::path::PathBuf::from(s.strip_prefix(r"\\?\").map(String::from).unwrap_or(s))
+    }
+    #[cfg(not(windows))]
+    {
+        std::path::PathBuf::from(s)
+    }
+}
 // 038-CI：PTY 测试设施基于 posix_openpt/grantpt（POSIX 语义），Windows 不编译；
 // 依赖本模块的测试文件均带同级 unix 门控。
 #[cfg(unix)]

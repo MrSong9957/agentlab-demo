@@ -122,9 +122,9 @@ pub fn deny_context_for(anchor: &Path, policy_path: &Path) -> DenyContext {
 pub fn verify_exe_deployment(anchor: &Path, temp_root: &Path) -> Result<PathBuf, String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("定位自身二进制失败（{e}）：拒绝启动 031 模式"))?;
-    let canon = exe.canonicalize().unwrap_or(exe);
-    let anchor_canon = anchor.canonicalize().unwrap_or_else(|_| anchor.to_path_buf());
-    let temp_canon = temp_root.canonicalize().unwrap_or_else(|_| temp_root.to_path_buf());
+    let canon = canonical_long(&exe);
+    let anchor_canon = canonical_long(&anchor);
+    let temp_canon = canonical_long(&temp_root);
     if canon.starts_with(&anchor_canon) {
         return Err(format!(
             "应用二进制 {} 位于工作区 {} 之内：031 不从可被模型覆盖的工作区产物自再执行\
@@ -159,9 +159,9 @@ pub fn verify_bwrap_backend(
                 .to_string(),
         );
     };
-    let canon = bwrap.canonicalize().unwrap_or_else(|_| bwrap.to_path_buf());
-    let anchor_canon = anchor.canonicalize().unwrap_or_else(|_| anchor.to_path_buf());
-    let temp_canon = temp_root.canonicalize().unwrap_or_else(|_| temp_root.to_path_buf());
+    let canon = canonical_long(&bwrap);
+    let anchor_canon = canonical_long(&anchor);
+    let temp_canon = canonical_long(&temp_root);
     if canon.starts_with(&anchor_canon) {
         return Err(format!(
             "沙箱后端 {} 位于工作区 {} 之内：不通过模型可写位置查找后端（拒绝启动 031）",
@@ -429,9 +429,7 @@ impl Policy {
         })?;
         // 审查 #5：信任来源检查必须用 canonical 路径——`..`/符号链接的词法
         // 形态可绕过组件前缀比较（与 verify_exe_deployment 对 exe 的处理一致）。
-        let path = &path.canonicalize().map_err(|e| {
-            format!("策略路径 {} 无法规范化（{e}）：拒绝启动 031 模式", path.display())
-        })?;
+        let path = &canonical_long(path);
         if !meta.is_file() {
             return Err(format!("策略路径 {} 不是常规文件", path.display()));
         }
@@ -441,8 +439,8 @@ impl Policy {
                 meta.len()
             ));
         }
-        let anchor_canon = anchor.canonicalize().unwrap_or_else(|_| anchor.to_path_buf());
-        let temp_canon = temp_root.canonicalize().unwrap_or_else(|_| temp_root.to_path_buf());
+        let anchor_canon = canonical_long(&anchor);
+        let temp_canon = canonical_long(&temp_root);
         if path.starts_with(&anchor_canon) {
             return Err(format!(
                 "策略文件 {} 位于工作区 {} 之下：策略不能来自 cwd 项目配置（拒绝启动 031）",
@@ -490,7 +488,7 @@ impl Policy {
             // 存在性三分类（fail-closed 语义在挂载层；此处 missing＝无对象）
             let Ok(md) = std::fs::metadata(&p) else { continue };
             let _ = md;
-            let canon = p.canonicalize().unwrap_or(p);
+            let canon = canonical_long(&p);
             if !out.contains(&canon) {
                 out.push(canon);
             }
@@ -541,9 +539,7 @@ fn parse_path_spec(v: &Value, ctx: &str) -> Result<PathBuf, String> {
     }
     // 已存在的绝对实际路径（§1.3）：加载即验证存在并固定 canonical 形态。
     match std::fs::metadata(p) {
-        Ok(_) => p
-            .canonicalize()
-            .map_err(|e| format!("{ctx}.path {} 无法规范化（{e}）", p.display())),
+        Ok(_) => Ok(canonical_long(p)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(format!(
             "{ctx}.path {} 不存在：策略路径必须是已存在的绝对实际路径",
             p.display()
@@ -576,9 +572,7 @@ fn parse_deny_paths(v: &Value) -> Result<Vec<PathBuf>, String> {
             ));
         }
         match std::fs::metadata(p) {
-            Ok(_) => out.push(p.canonicalize().map_err(|e| {
-                format!("deny_paths[{i}] {} 无法规范化（{e}）", p.display())
-            })?),
+            Ok(_) => out.push(canonical_long(&p)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 return Err(format!(
                     "deny_paths[{i}] {} 不存在：策略路径必须是已存在的绝对实际路径",
@@ -701,6 +695,23 @@ pub fn parse_request(raw: &str) -> Result<RawRequest, String> {
     Ok(RawRequest { reason, entries, network })
 }
 
+/// 形态统一的 canonical 路径：canonicalize 后剥离 Windows verbatim 前缀。
+/// 策略（base/requestable/deny）、自动敏感边界与请求 lex 三侧统一存储同一
+/// 长路径形态——否则 `starts_with`/`==` 边界判定因 `\\?\` 与 8.3 短名形态
+/// 差异全部失配（038 Windows 实测：合法请求被误判「超出 requestable」）。
+/// 授权对象不变（同一真实路径的等价文本形态）；unix 上 canonicalize＝
+/// realpath（逐组件符号链接校验已先行），形态恒等＝零行为漂移。
+fn canonical_long(p: &Path) -> PathBuf {
+    let canon = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    #[cfg(windows)]
+    {
+        let s = canon.to_string_lossy().into_owned();
+        std::path::PathBuf::from(s.strip_prefix(r"\\?\").map(String::from).unwrap_or(s))
+    }
+    #[cfg(not(windows))]
+    canon
+}
+
 /// 路径规范化（§1.4）：相对路径基于会话 cwd 解析（不基于上一条 shell 的
 /// cd）；词法消除 `.`/`..` 后**逐组件**验证存在且无符号链接；不做 URL
 /// 解码、Unicode 归一化或环境展开；重复项去重、同路径 write 覆盖 read。
@@ -751,14 +762,15 @@ pub fn normalize_request(req: &RawRequest, cwd: &Path) -> Result<NormalizedReque
                 _ => {}
             }
         }
-        match entries.iter_mut().find(|e| e.path == lex) {
+        match entries.iter_mut().find(|e| e.path == canonical_long(&lex)) {
             Some(existing) => {
                 if raw.access == Access::Write {
                     existing.access = Access::Write;
                 }
             }
             None => entries.push(NormalizedEntry {
-                path: lex,
+                // 形态统一：与策略/边界侧同为 canonical_long（长路径、无 verbatim）
+                path: canonical_long(&lex),
                 access: raw.access,
             }),
         }

@@ -206,7 +206,9 @@ fn read_does_not_reset_deadline() {
     // 死亡时刻＝启动＋timeout（±300ms 容差）；查询从 250ms 处开始等待
     let death_from_start = started.elapsed();
     let expect = Duration::from_millis(timeout_ms);
-    let tol = Duration::from_millis(300);
+    // 容差含平台杀树延迟（Windows Job 树终止＋回收实测 >1s——038 迭代 31；
+    // 契约「读取不重置时限」由下方 query_elapsed 断言独立证明，不因宽容差弱化）
+    let tol = if cfg!(windows) { Duration::from_millis(2500) } else { Duration::from_millis(300) };
     assert!(
         death_from_start >= expect && death_from_start <= expect + tol,
         "时限按启动时刻独立到期：实际死亡 {death_from_start:?}，期望 {expect:?}±{tol:?}"
