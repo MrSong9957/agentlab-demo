@@ -59,3 +59,33 @@
 - mcp 残留 13＋mcp_tls 1：tools=0 场景细分（错误被 manager 吞掉，需错误面取证）。
 - exec_command/exec_sandbox/双流截断等零星：cmd 行为差异逐个对证。
 - exec_p01（$$/$! 组杀验证）＝unix 专属验证结构需平台重设计。
+
+## 最终 L3 全量与新增敏感项判定（2026-11-01T12:40Z 前后，HEAD 616e963）
+
+- `cargo check --locked`：0 错误（L1）。全量 `cargo test --workspace --no-fail-fast --locked`
+  两轮：3853/3/6 与 3852/3/6（c18_barrier/p16/session_perf 轮换浮动）。
+- 3 个失败逐项归因（均非本轮代码回归）：
+  1. `proc_session::pipe_ctrl_c_interrupts_and_terminate_kills_ignoring_process`
+     ＝存量（干净 HEAD 复现证据见 2026-10-30-local-verification.md）。
+  2. `request_permissions_sandbox::p16_full_launch_faces_and_peak_rss`——单跑通过
+     （90s）；全量并行下 RSS/时限敏感（机器口径，与 session_perf 同类）。
+  3. `js_orchestration_perf::c18_barrier_proves_overlap`——**交叉复现实验定性为
+     环境敏感、非代码回归**：同一 HEAD 代码在 /tmp 隔离 worktree（原生 overlay
+     fs）构建运行 4 次全通过（0.16s），在 /workspace（D:\ 经 WSL2 9p 挂载）构建
+     运行 6 次全失败（barrier 437-454µs×1000 vs serial 304-312ms，并行族膨胀
+     ~3×翻转对比）；含 CARGO_INCREMENTAL=0 全量重建后仍失败——机制＝9p 提供的
+     二进制页加载 I/O（并行 spawn 争用更重）。基线 5f98508 在 9p 下亦曾通过
+     （phase3 3854/2）——负载与文件系统状态共同作用。处置：登记为环境敏感项
+     （与 session_perf 同类单列），不改断言（对比断言在健康 fs 上有效；CI 端
+     JS34_PERF_SAMPLE 采样机制照旧）。
+- 安全自查（Security Gate 范围核对）：本轮产品改动 4 处——session create 句柄
+  补 read（Windows 句柄访问权；不改变 0600/ACL 语义，读的是本进程自建私有文件）；
+  memory 根锁命名互斥体（`Local\<SHA-256 前 16 字节>`——登录会话隔离，不含路径
+  明文，无跨用户信息面）；normalize_request/absolute_lexical 盘符保留（路径验证
+  语义收紧而非放松）；D-mac 有界写（测试设施）。无新增凭证/网络/反序列化面。
+  Security-Testing-Gate 代理按其触发条件评估：无对外接口/Schema/持久化格式变更，
+  不触发接口攻防报告（与 2026-10-30 验证记录 §四 同口径）。
+- 审查说明：仓库与全局均无 ce-code-review 技能（compound-engineering 插件未安装
+  ——按 wiki 初始化配置该技能属 EveryInc 插件，Claude Code 安装方式，本环境
+  不可用）。替代：按 Karpathy 准则逐提交自查（每处修改可说清与任务关系；unix
+  侧行为零变化经全量回归验证；cfg(windows) 分支经静态审计）。
