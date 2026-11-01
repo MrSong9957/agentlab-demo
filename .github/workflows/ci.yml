@@ -80,3 +80,97 @@ jobs:
         run: cargo check --locked
       - name: cargo test（全量：单元＋集成＋回归＋E2E）
         run: cargo test --workspace --no-fail-fast --locked
+
+  # D1–D3 runner 异常诊断（docs/logs/038-github-actions-ci/2026-10-31-runner-diagnosis-plan.md
+  # 的机械翻译）：非门禁——仅手动触发时与主验证并行运行，只采集证据工件供根因
+  # 分析，不改变 CI 结论。D1＝seccomp 生效性（attack06：clone3 应 ENOSYS 实测
+  # EINVAL）；D2＝沙箱进程树回收（c13/e_reaping：close 后成员存活超 poll 窗口）；
+  # D3＝沙箱内 MCP 服务器（b2_mcp：fd 缺失→tools=0）。
+  runner-diagnosis:
+    name: runner-diagnosis (D1-D3)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: 安装诊断依赖
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap strace gcc
+      - name: 环境取证
+        run: |
+          {
+            echo "== 版本 =="; bwrap --version; uname -srvo
+            echo "== userns/bpf sysctl =="
+            for k in kernel.unprivileged_userns_clone user.max_user_namespaces kernel.unprivileged_bpf_disabled; do
+              sysctl "$k" 2>/dev/null || echo "$k: (不可读)"
+            done
+            echo "== userns 干跑 =="
+            unshare --user --map-root-user echo userns-ok || echo "userns-FAIL"
+          } | tee diagnosis-env.txt
+      - name: D1 seccomp 生效性（最小复现：产品同款 cBPF 字节，不经产品进程链）
+        run: |
+          gcc -x c - -o /tmp/probe <<'EOF'
+          #include <stdio.h>
+          #include <errno.h>
+          #include <string.h>
+          #include <unistd.h>
+          #include <sys/syscall.h>
+          int main(void) {
+              long r = syscall(437, NULL, 0); /* clone3 */
+              printf("clone3_ret=%ld errno=%d (%s)\n", r, errno, strerror(errno));
+              return 0;
+          }
+          EOF
+          python3 - <<'PY'
+          import struct
+          # 复刻 sandbox::build_seccomp_filter（字节一致）：arch 门→EPERM 清单→
+          # ENOSYS 清单→clone 命名空间掩码→ALLOW
+          EPERM=[101,155,165,166,167,168,169,175,176,246,272,300,303,304,308,310,311,313,320,321,323,328,428,429,430,431,432]
+          def insn(code,jt,jf,k): return struct.pack('<HBBI',code,jt,jf,k)
+          prog  = insn(0x20,0,0,4) + insn(0x15,1,0,0xC000003E) + insn(0x06,0,0,0x00080000)
+          prog += insn(0x20,0,0,0)
+          for nr in EPERM: prog += insn(0x15,0,1,nr) + insn(0x06,0,0,0x00050000|1)
+          prog += insn(0x15,0,1,437) + insn(0x06,0,0,0x00050000|38)
+          prog += insn(0x15,0,4,56) + insn(0x20,0,0,16) + insn(0x54,0,0,0x7E020000) + insn(0x15,1,0,0)
+          prog += insn(0x06,0,0,0x00050000|1) + insn(0x06,0,0,0x7FFF0000)
+          open('/tmp/filter.bpf','wb').write(prog)
+          print("filter bytes:", len(prog))
+          PY
+          {
+            echo "== 带 --seccomp（期望 clone3 errno=38 ENOSYS）=="
+            bwrap --ro-bind / / --unshare-user --unshare-ipc --cap-drop ALL --dev-bind /dev /dev --seccomp 3 3</tmp/filter.bpf -- /tmp/probe || echo "(exit=$?)"
+            echo "== 不带 --seccomp 对照（期望 errno=22 EINVAL）=="
+            bwrap --ro-bind / / --unshare-user --unshare-ipc --cap-drop ALL --dev-bind /dev /dev -- /tmp/probe || echo "(exit=$?)"
+            echo "== strace：bwrap 是否调用 seccomp(SET_MODE_FILTER)＝加载侧取证 =="
+            strace -f -e trace=seccomp,memfd_create,close_range -o /tmp/strace.txt \
+              bwrap --ro-bind / / --unshare-user --unshare-ipc --cap-drop ALL --dev-bind /dev /dev --seccomp 3 3</tmp/filter.bpf -- /tmp/probe || true
+            grep -E "seccomp|memfd|close_range" /tmp/strace.txt | head -40 || true
+          } | tee d1-seccomp.txt
+      - name: D2/D3 失败用例复跑＋进程树采样
+        run: |
+          : > ps-samples.txt
+          (while true; do
+            echo "--- $(date +%s.%N)" >> ps-samples.txt
+            ps -eo pid,ppid,pgid,sid,stat,comm --no-headers | grep -E "bwrap|sleep|python3" >> ps-samples.txt || true
+            for p in $(pgrep -x sleep); do grep NSpid /proc/"$p"/status 2>/dev/null >> ps-samples.txt || true; done
+            sleep 0.2
+          done) &
+          SAMPLER=$!
+          cargo test --locked -p terminal-chat --no-fail-fast \
+            --test security_attack_031 --test sandbox_matrix_probes --test multi_agent \
+            2>&1 | tee d2d3-tests.log
+          kill "$SAMPLER" 2>/dev/null || true
+          echo "== 失败用例的证据行（before/after_close、FDSCAN、marker_pid）==" | tee d2d3-evidence.txt
+          grep -E "before_close|after_close|FDSCAN|marker_pid|leftover" d2d3-tests.log | head -40 | tee -a d2d3-evidence.txt || true
+      - name: 上传诊断工件
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-diagnosis
+          path: |
+            diagnosis-env.txt
+            d1-seccomp.txt
+            d2d3-tests.log
+            d2d3-evidence.txt
+            ps-samples.txt

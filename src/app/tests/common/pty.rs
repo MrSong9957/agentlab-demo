@@ -269,11 +269,11 @@ impl PtyCli {
 
     /// 018-B：原样发送按键字节（不追加 CR）——功能键（F6）、方向键、Tab 与
     /// 需自控提交时机的粘贴使用；与 [`Self::send`]（文本＋Enter）区分。
+    /// 038 D-mac：走有界写——无界 write_all 在子进程停读输入时永久阻塞
+    /// （macOS 卡死形态），超时转储证据后 panic。
     pub fn send_keys(&mut self, keys: &str) {
         std::thread::sleep(Duration::from_millis(50));
-        self.master
-            .write_all(keys.as_bytes())
-            .expect("PTY 写入失败");
+        self.write_bounded(keys.as_bytes());
     }
 
     pub fn output(&self) -> String {

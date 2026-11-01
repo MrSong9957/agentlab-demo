@@ -694,7 +694,7 @@ fn a17_mcp_with_view_image_batch_pairs_then_image_projection() {
     let json = format!(
         r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "echo", "--record", "{}"], "cwd": "{}"}}}}}}"#,
         record_path.display().to_string().replace('\\', "/"),
-        std::env::temp_dir().display(),
+        std::env::temp_dir().display().to_string().replace('\\', "/"),
         py = PY,
     );
     std::fs::write(dir.path().join("mcp.json"), json).expect("写入 mcp.json");

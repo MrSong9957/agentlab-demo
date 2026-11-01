@@ -187,7 +187,7 @@ fn a02_cwd_must_be_existing_absolute_directory() {
 
     let ok = parse_ok_str(format!(
         r#"{{"mcp_servers": {{"a": {{"command": "p", "cwd": "{}"}}}}}}"#,
-        std::env::temp_dir().display()
+        std::env::temp_dir().display().to_string().replace('\\', "/")
     ))
     .servers;
     match &ok[0].1.transport {

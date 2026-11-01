@@ -109,7 +109,7 @@ fn a03_shell_metacharacters_passed_verbatim_no_shell() {
     let json = format!(
         r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "echo", "--record", "{}", "; rm -rf /tmp/x", "`id`", "$(whoami)"], "cwd": "{}"}}}}}}"#,
         record_path.display().to_string().replace('\\', "/"),
-        std::env::temp_dir().display(),
+        std::env::temp_dir().display().to_string().replace('\\', "/"),
         py = PY,
     );
     std::fs::write(dir.path().join("mcp.json"), json).expect("写入 mcp.json");
@@ -487,7 +487,7 @@ fn a12_server_death_after_side_effect_marks_unknown_once() {
     let json = format!(
         r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "write_then_die", "--record", "{}"], "cwd": "{}"}}}}}}"#,
         record_path.display().to_string().replace('\\', "/"),
-        std::env::temp_dir().display(),
+        std::env::temp_dir().display().to_string().replace('\\', "/"),
         py = PY,
     );
     std::fs::write(dir.path().join("mcp.json"), json).expect("写入 mcp.json");
@@ -759,7 +759,7 @@ fn a06_cross_server_same_tool_names_resolved_with_hash() {
     let json = format!(
         r#"{{"mcp_servers": {{"aa": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "echo", "--record", "{rec}"], "cwd": "{cwd}"}}, "bb": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "echo", "--record", "{rec}"], "cwd": "{cwd}"}}}}}}"#,
         rec = record_path.display().to_string().replace('\\', "/"),
-        cwd = std::env::temp_dir().display(),
+        cwd = std::env::temp_dir().display().to_string().replace('\\', "/"),
         py = PY,
     );
     std::fs::write(dir.path().join("mcp.json"), json).expect("写入 mcp.json");
@@ -891,7 +891,7 @@ fn p2_active_notification_without_recent_call_still_relists() {
     let json = format!(
         r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "notify_on_list", "--record", "{}"], "cwd": "{}"}}}}}}"#,
         record_path.display().to_string().replace('\\', "/"),
-        std::env::temp_dir().display(),
+        std::env::temp_dir().display().to_string().replace('\\', "/"),
         py = PY,
     );
     std::fs::write(dir.path().join("mcp.json"), json).expect("写入 mcp.json");

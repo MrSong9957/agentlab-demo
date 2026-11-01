@@ -79,7 +79,7 @@ pub fn setup_with(scenario: &str, extra: &str, delay_ms: u64) -> TestCtx {
     ));
     let json = format!(
         r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "{py}", "args": [{args}], "cwd": "{}"{extra}}}}}}}"#,
-        std::env::temp_dir().display(),
+        std::env::temp_dir().display().to_string().replace('\\', "/"),
         py = PY
     );
     std::fs::write(dir.path().join("mcp.json"), json).expect("写入 mcp.json");
@@ -108,7 +108,7 @@ pub fn setup_two(scenario_fx: &str, scenario_fy: &str, extra_fx: &str, extra_fy:
     let record_dir = TempDir::new("mcp-record");
     let record_path = record_dir.path().join("record.jsonl");
     let fixture = FIXTURE.replace('\\', "/");
-    let tmp = std::env::temp_dir().display().to_string();
+    let tmp = std::env::temp_dir().display().to_string().replace('\\', "/");
     let json = format!(
         r#"{{"mcp_servers": {{
             "fx": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "{scenario_fx}", "--record", "{rec}"], "cwd": "{tmp}"{extra_fx}}},
@@ -153,7 +153,7 @@ pub fn setup_no_prepare(
     let json = format!(
         r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "{scenario}", "--record", "{}"], "cwd": "{}"{extra}}}}}}}"#,
         record_path.display().to_string().replace('\\', "/"),
-        std::env::temp_dir().display(),
+        std::env::temp_dir().display().to_string().replace('\\', "/"),
         py = PY
     );
     std::fs::write(dir.path().join("mcp.json"), json).expect("写入 mcp.json");

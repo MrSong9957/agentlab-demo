@@ -1438,7 +1438,7 @@ fn sec_disabled_server_resource_calls_fail_with_zero_requests() {
     let json = format!(
         r#"{{"mcp_servers": {{"fx": {{"enabled": false, "command": "{py}", "args": ["{fixture}", "--scenario", "resources_only", "--record", "{}"], "cwd": "{}"}}}}}}"#,
         record.display(),
-        std::env::temp_dir().display(),
+        std::env::temp_dir().display().to_string().replace('\\', "/"),
         py = PY,
     );
     std::fs::write(dir.path().join("mcp.json"), json).unwrap();
@@ -1583,7 +1583,7 @@ fn review_list_pollution_catches_escaped_secret() {
     let json = format!(
         r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "resources_polluted", "--record", "{rec}"], "cwd": "{tmp}", "env_vars": ["{canary}"]}}}}}}"#,
         rec = record.display(),
-        tmp = std::env::temp_dir().display(),
+        tmp = std::env::temp_dir().display().to_string().replace('\\', "/"),
         canary = common::mcp_fixtures::CANARY,
         py = PY,
     );

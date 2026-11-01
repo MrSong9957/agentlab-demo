@@ -714,9 +714,18 @@ pub fn normalize_request(req: &RawRequest, cwd: &Path) -> Result<NormalizedReque
             cwd.join(p)
         };
         let lex = crate::sandbox::absolute_lexical(&joined);
-        let mut cur = PathBuf::from("/");
+        // 逐组件起点＝真实前缀＋根：Windows 绝对路径含盘符前缀（C:）——从 "/" 起步
+        // 会丢弃盘符、按进程当前盘解析组件（runner 仓库在 D:、临时目录在 C: →
+        // 组件 NotFound 误报「路径组件不存在」——038 Windows CI 实测）。
+        let mut cur = PathBuf::new();
         for comp in lex.components() {
             match comp {
+                std::path::Component::Prefix(prefix) => {
+                    cur.push(prefix.as_os_str());
+                }
+                std::path::Component::RootDir => {
+                    cur.push(std::path::MAIN_SEPARATOR.to_string());
+                }
                 std::path::Component::Normal(part) => {
                     cur.push(part);
                     match std::fs::symlink_metadata(&cur) {
@@ -739,7 +748,6 @@ pub fn normalize_request(req: &RawRequest, cwd: &Path) -> Result<NormalizedReque
                         }
                     }
                 }
-                std::path::Component::RootDir => {}
                 _ => {}
             }
         }

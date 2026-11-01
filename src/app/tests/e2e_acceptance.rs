@@ -1213,7 +1213,12 @@ impl PtySession {
         self.feed_screen(); // 解析器先行消化（DSR 回报解析器真实光标）
         let cursor = self.vt.vt100().screen().cursor_position();
         let replies = self.query_responder.advance(&self.captured[from..], cursor);
-        let _ = self.master.write_all(&replies);
+        // 038 D-mac：应答写回必须走有界写——读路径内的无界 write_all 在子进程
+        // 停读时永久阻塞（等待循环的截止时间永远到不了＝卡死形态），转有界写
+        // 后超时转储证据并以 panic 收场（不把卡死当测试通过）。
+        if !replies.is_empty() {
+            self.write_bounded(&replies);
+        }
     }
 
     /// 轮询 master 直到累计输出包含 needle；超时则杀死子进程并报错（看门狗）。
