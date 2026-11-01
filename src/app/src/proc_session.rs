@@ -2070,6 +2070,7 @@ fn writer_cmd(log: &std::path::Path) -> String {
 
 /// 接缝①：省略 timeout_ms＝不设截止（journal 记 None）；正整数（含 >60000 与
 /// u64::MAX）＝有截止；查询不新增、不改变已记录的截止时间。
+#[cfg(unix)] // 038：seam 时钟注入经子进程 sh 语法命令（unix 设施）
 #[test]
 fn seam_deadline_journal_omission_and_acceptance() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2107,6 +2108,7 @@ fn seam_deadline_journal_omission_and_acceptance() {
 
 /// 接缝②：截止时间计算边界注入失败——拒绝执行、零命令副作用
 ///（数值防御分支在本平台不可自然触达，见 compute_deadline 文档）。
+#[cfg(unix)] // 038：seam 时钟注入经子进程 sh 语法命令（unix 设施）
 #[test]
 fn seam_deadline_injection_rejects_execution() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2135,6 +2137,7 @@ fn seam_deadline_injection_rejects_execution() {
 /// 接缝③：终止失败注入——未确认清理成功不得返回“已终止”；进程保留可查询；
 /// 不误伤其他会话；解除注入后重试 terminate 成功。
     #[cfg(unix)] // 038：killpg 注入为 unix 设施测试
+#[cfg(unix)] // 038：seam 时钟注入经子进程 sh 语法命令（unix 设施）
 #[test]
 fn seam_killpg_injection_terminate_reports_failure_keeps_session() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2196,6 +2199,7 @@ fn seam_killpg_injection_terminate_reports_failure_keeps_session() {
 /// 接缝④：时限到期的终止失败——不得伪装成“已终止回收”的 timeout；
 /// 进程保留、如实说明，解除注入后可终止。
     #[cfg(unix)] // 038：killpg 注入为 unix 设施测试
+#[cfg(unix)] // 038：seam 时钟注入经子进程 sh 语法命令（unix 设施）
 #[test]
 fn seam_killpg_injection_deadline_not_fake_timeout() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2283,6 +2287,7 @@ fn wait_log_frozen(log: &std::path::Path) -> u64 {
 
 /// 时钟前移到恰过截止：无任何后续查询，监控线程自行到期终止真实进程
 ///（日志停止增长＝进程组死亡），事后一次查询确认 timeout 与记录移除。
+#[cfg(unix)] // 038：seam 时钟注入经子进程 sh 语法命令（unix 设施）
 #[test]
 fn seam_clock_shift_expiry_without_query() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2322,6 +2327,7 @@ fn seam_clock_shift_expiry_without_query() {
 
 /// 取消当前轮（等待被取消、进程保留）后，原截止时间仍然生效：
 /// 前移到恰过**启动时**截止即终止——若取消会重置/暂停时限则不会到期。
+#[cfg(unix)] // 038：seam 时钟注入经子进程 sh 语法命令（unix 设施）
 #[test]
 fn seam_clock_shift_deadline_survives_cancel() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2359,6 +2365,7 @@ fn seam_clock_shift_deadline_survives_cancel() {
 
 /// 查询与输入不延长截止：先查询（管道会话）并发送输入（PTY 会话），
 /// 再前移到恰过**启动时**截止——若查询/输入重置截止则不会到期。
+#[cfg(unix)] // 038：seam 时钟注入经子进程 sh 语法命令（unix 设施）
 #[test]
 fn seam_clock_shift_query_and_input_do_not_extend_deadline() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2408,6 +2415,7 @@ fn seam_clock_shift_query_and_input_do_not_extend_deadline() {
 
 /// 省略 timeout_ms：单调读数前移一小时后进程仍存活（不套用任何固定总时限），
 /// 日志持续增长；随后明确终止成功。
+#[cfg(unix)] // 038：seam 时钟注入经子进程 sh 语法命令（unix 设施）
 #[test]
 fn seam_clock_shift_omitted_timeout_has_no_fixed_limit() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
