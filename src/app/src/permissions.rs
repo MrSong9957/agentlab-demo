@@ -539,7 +539,8 @@ fn parse_path_spec(v: &Value, ctx: &str) -> Result<PathBuf, String> {
     }
     // 已存在的绝对实际路径（§1.3）：加载即验证存在并固定 canonical 形态。
     match std::fs::metadata(p) {
-        Ok(_) => Ok(canonical_long(p)),
+        Ok(_) => canonical_long_checked(p)
+            .map_err(|e| format!("{ctx}.path {} 无法规范化（{e}）：拒绝", p.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(format!(
             "{ctx}.path {} 不存在：策略路径必须是已存在的绝对实际路径",
             p.display()
@@ -572,7 +573,9 @@ fn parse_deny_paths(v: &Value) -> Result<Vec<PathBuf>, String> {
             ));
         }
         match std::fs::metadata(p) {
-            Ok(_) => out.push(canonical_long(&p)),
+            Ok(_) => out.push(canonical_long_checked(&p).map_err(|e| {
+                format!("deny_paths[{i}] {} 无法规范化（{e}）：拒绝", p.display())
+            })?),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 return Err(format!(
                     "deny_paths[{i}] {} 不存在：策略路径必须是已存在的绝对实际路径",
@@ -702,14 +705,25 @@ pub fn parse_request(raw: &str) -> Result<RawRequest, String> {
 /// 授权对象不变（同一真实路径的等价文本形态）；unix 上 canonicalize＝
 /// realpath（逐组件符号链接校验已先行），形态恒等＝零行为漂移。
 fn canonical_long(p: &Path) -> PathBuf {
-    let canon = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    canonical_long_checked(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// fail-closed 变体（038 安全测试 B4）：canonicalize 失败时返回错误而非静默
+/// 保留原形态——策略装载路径用它恢复「拒绝启动」语义。
+fn canonical_long_checked(p: &Path) -> std::io::Result<PathBuf> {
+    let canon = std::fs::canonicalize(p)?;
     #[cfg(windows)]
     {
         let s = canon.to_string_lossy().into_owned();
+        // UNC 特判（038 安全测试 B2）：\\?\UNC\srv\share 剥离后是「服务器名
+        // 为 UNC」的畸形形态——还原为原生 \\srv\share 形态
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return Ok(std::path::PathBuf::from(format!("\\\\\\{rest}")));
+        }
         std::path::PathBuf::from(s.strip_prefix(r"\\?\").map(String::from).unwrap_or(s))
     }
     #[cfg(not(windows))]
-    canon
+    Ok(canon)
 }
 
 /// 路径规范化（§1.4）：相对路径基于会话 cwd 解析（不基于上一条 shell 的

@@ -720,7 +720,8 @@ impl StorageBroken {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Storage::FileSystem::LockFileEx;
         use windows_sys::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK;
-        let db = crate::memory::store::memories_db_path(&e.tmp.path().join("memories"));
+        let db =
+            terminal_chat::memory::store::memories_db_path(&e.tmp.path().join("memories"));
         let f = std::fs::OpenOptions::new()
             .read(true)
             .open(&db)
@@ -742,6 +743,7 @@ impl StorageBroken {
     fn restore(&self) {}
 }
 
+#[cfg(unix)]
 impl Drop for StorageBroken {
     fn drop(&mut self) {
         // 断言中途 panic 也保证恢复，让 TempDir 清理可用。
