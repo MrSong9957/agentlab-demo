@@ -11,3 +11,33 @@ apply_patch_sandbox/context_management/context_perf/js_orchestration/js_orchestr
 
 ## macos: 仍运行中（PTY 卡死截断前）
 读路径卡死诊断（D-mac）待下一轮。
+
+## 下一轮实施蓝图：测试夹具跨平台命令助手
+
+### 设计
+新建 `tests/common/cmd_builder.rs`（unix/windows cfg 双实现）：
+- `write_file(path, content)` → unix: `printf '%s' 'content' > path`；windows: `(echo content) > path` 或 PowerShell `Set-Content`
+- `append_loop(path, count, interval_ms)` → unix: `while` 循环；windows: `for /l` 循环
+- `sleep(ms)` → unix: `sleep N`；windows: `ping -n N+1 127.0.0.1 >nul` 或 `timeout /t`
+- `cat(path)` → unix: `cat path`；windows: `type path`
+- `kill_int(pid)` → unix: `kill -INT pid`；windows: 无同构（由产品 terminate 覆盖）
+
+### 影响范围（219 失败 → 按目标分解）
+| 目标 | 失败数 | 主要模式 |
+|---|---|---|
+| exec_command | ~40 | write_file, sleep, cat |
+| exec_sandbox | ~35 | write_file, append_loop, sleep |
+| apply_patch_sandbox | ~30 | write_file, sleep |
+| context_management | ~25 | write_file |
+| context_perf | ~20 | write_file, cat |
+| js_orchestration | ~20 | write_file, sleep |
+| js_orchestration_perf | ~20 | write_file |
+| mcp_config | ~15 | write_file, cat |
+| 其他 | ~14 | sleep, cat |
+
+### macOS PTY 读路径卡死 D-mac 诊断方案
+在 `common/pty.rs` 的 `poll_read` 中加 bounded read：poll(50ms) 后 read 返回
+`EAGAIN` 时记一次 miss，连续 miss 超 watchdog 触发 panic 并转储 `child.try_wait()`
+＋captured 尾部。Windows/macOS 的 `read` 调用也套 poll 门控（当前直接 read 可能
+阻塞——macOS fdescfs/BSD PTY 的 poll 行为差异待实证）。同方案写入
+`e2e_acceptance.rs` 的 `read_once`。
