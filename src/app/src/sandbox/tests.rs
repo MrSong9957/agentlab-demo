@@ -22,6 +22,7 @@ fn tmp_ws(tag: &str) -> PathBuf {
 /// 一致（ro-bind 根→dev→bind 可写根→根内 deny 遮蔽→会话/命名空间→cap-drop→--）。
 /// 手写单可写根策略以精确断言层级（policy_for 的 temp 可写根另测）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn policy_argv_binds_root_writable_and_masks_env() {
     let ws = tmp_ws("argv");
     fs::write(ws.join(".env"), "FAKE-TEST-TOKEN=1\n").unwrap();
@@ -81,6 +82,7 @@ fn policy_argv_binds_root_writable_and_masks_env() {
 /// 直接 EROFS 失败——整个沙箱不可用。两分支：目录在＝遮蔽（WSL 部署面），
 /// 不在＝不产生该参数（Docker/裸机部署面）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn wsl_interop_mask_follows_dir_presence_flag() {
     let ws = tmp_ws("wsl-mask");
     fs::write(ws.join(".env"), "FAKE-TEST-TOKEN=8\n").unwrap();
@@ -103,9 +105,10 @@ fn wsl_interop_mask_follows_dir_presence_flag() {
 /// T1b 生产策略（policy_for）包含 temp 可写根（对齐 Claude Code 默认写面），
 /// 且可写根按深度排序——宽根（/tmp）先 bind、深根（工作区）后 bind 重开。
 #[test]
-// 038：纯快照构造（不依赖 bwrap//proc），三端执行。macOS 上 temp_dir
-// （/var/folders/…）经产品侧 canonicalize 落在 /private/var/…——断言对齐
-// 产品自身的规范化（见 sandbox.rs policy_for 的可写根构造注释）。
+// 038：纯快照构造（不依赖 bwrap//proc）。macOS 上 temp_dir 经产品侧
+// canonicalize 落在 /private/var/…——断言对齐产品自身的规范化。Windows：
+// temp 可写根 argv 断言依赖 bind 布局（Linux 沙箱设施），门控。
+#[cfg(not(target_os = "windows"))]
 fn policy_for_includes_temp_writable_root() {
     let ws = tmp_ws("policy-temp");
     let policy = policy_for(&ws);
@@ -134,6 +137,7 @@ fn policy_for_includes_temp_writable_root() {
 /// T1c deny 目标为目录＝`--perms 000`＋`--tmpfs`＋`--remount-ro` 遮蔽
 ///（上游 `append_existing_unreadable_path_args` 目录分支）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn denied_directory_is_masked_with_readonly_tmpfs() {
     let ws = tmp_ws("deny-dir");
     fs::create_dir_all(ws.join("secrets")).unwrap();
@@ -160,6 +164,7 @@ fn denied_directory_is_masked_with_readonly_tmpfs() {
 
 /// T1d deny 在全部可写根之外（rootless 分支）＝仍被遮蔽（不因不可写而漏保护）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn deny_outside_writable_roots_is_still_masked() {
     let ws = tmp_ws("rootless");
     let outside_dir = std::env::temp_dir().join(format!("tchat-sb-outside-{}", std::process::id()));
@@ -183,6 +188,7 @@ fn deny_outside_writable_roots_is_still_masked() {
 
 /// T1e 可写根本身是符号链接＝bind canonical 目标（上游 `mount_root` 语义）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn writable_root_symlink_binds_canonical_target() {
     let real = tmp_ws("ws-real");
     fs::write(real.join(".env"), "FAKE-TEST-TOKEN=4\n").unwrap();
@@ -228,6 +234,7 @@ fn probe_with_nonexistent_bwrap_reports_error() {
 /// 写绑定恢复；主进程从沙箱 /proc 视图消失＝G3 读/kill 面关闭）。成对语义下
 /// 不再有 `--tmpfs /proc`（上游：tmpfs 仅在未挂新 procfs 时遮蔽继承视图）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn pid_namespace_and_proc_paired() {
     let ws = tmp_ws("pidns");
     fs::write(ws.join(".env"), "FAKE-TEST-TOKEN=7\n").unwrap();
@@ -261,6 +268,7 @@ fn pid_namespace_and_proc_paired() {
 /// T2 deny 路径穿可写目录内的符号链接＝组装失败（上游 TOCTTOU fail-closed，
 /// 注释逐字保留的那条路径）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn deny_path_through_writable_symlink_fails_closed() {
     let ws = tmp_ws("symlink");
     fs::create_dir_all(ws.join("real")).unwrap();
@@ -278,6 +286,7 @@ fn deny_path_through_writable_symlink_fails_closed() {
 /// T3 deny 目标自身是符号链接＝组装失败（与 027 open_nofollow_chain「符号链接
 /// 拒绝」同语义：遮蔽只保护当前目标，逻辑路径可被沙箱内改写）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn deny_target_itself_symlink_fails_closed() {
     let ws = tmp_ws("deny-symlink");
     fs::write(ws.join("secret"), "FAKE-TEST-TOKEN=2\n").unwrap();
@@ -290,6 +299,7 @@ fn deny_target_itself_symlink_fails_closed() {
 
 /// T4 deny 路径不存在＝no-op 不遮蔽（上游预创建空文件的差异点，见适配注释）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn missing_deny_path_is_noop() {
     let ws = tmp_ws("missing");
     let policy = policy_for(&ws);
@@ -308,6 +318,7 @@ fn missing_deny_path_is_noop() {
 /// 存在」的硬链接：检查到挂载之间及运行期的并发变化仍是边界（不构成完整
 /// 竞态防护），见 docs/logs/033-tool-sandbox/2026-10-27-b1-b2-risk-verification.md。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn deny_target_with_hardlinks_fails_closed() {
     let ws = tmp_ws("deny-hardlink");
     // 夹具预清理（幂等）：上次失败运行的残留会让 hard_link EEXIST 掩盖真实信号。
@@ -327,6 +338,7 @@ fn deny_target_with_hardlinks_fails_closed() {
 
 /// B1 控制组：单链接（nlink=1）deny 目标照常遮蔽（既有 T1 层级语义不变）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn deny_target_single_link_still_masks() {
     let ws = tmp_ws("deny-single");
     let env = ws.join(".env");
@@ -345,6 +357,7 @@ fn deny_target_single_link_still_masks() {
 /// 分支）＝检查**跟随到的实际文件**的链接数（符号链接自身恒为 1，查链接本身
 /// 会漏判）；实际文件多链接时同样拒绝。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn rootless_symlink_deny_follows_to_actual_file_nlink() {
     let ws = tmp_ws("deny-sl-nlink");
     let outside = std::env::temp_dir().join(format!("tchat-sb-out-sl-{}", std::process::id()));
@@ -376,6 +389,7 @@ fn rootless_symlink_deny_follows_to_actual_file_nlink() {
 /// 任何 stat 错误都返回 false，会把这类错误静默当 missing 跳过检查（不遮蔽、
 /// 不拒绝＝fail-open，本轮 RED 留档）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn deny_target_metadata_error_fails_closed() {
     let ws = tmp_ws("deny-eloop");
     let outside = std::env::temp_dir().join(format!("tchat-sb-out-loop-{}", std::process::id()));
@@ -431,6 +445,7 @@ fn deny_target_parent_permission_error_fails_closed() {
 /// 控制组：路径组件非目录（ENOTDIR）与 NotFound 同类＝既有 missing no-op
 /// 语义不变（不遮蔽、不拒绝；missing_deny_path_is_noop 覆盖 NotFound 面）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn deny_target_enotdir_is_noop() {
     let ws = tmp_ws("deny-enotdir");
     let notdir = ws.join("plain-file");
@@ -450,6 +465,7 @@ fn deny_target_enotdir_is_noop() {
 
 /// T5 cwd 符号链接别名：命令 cwd 进入 canonical（上游 --chdir 分支）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn symlinked_command_cwd_gets_chdir() {
     let ws = tmp_ws("cwd-alias");
     let alias = tmp_ws("cwd-alias-link-parent").join("alias");
@@ -468,6 +484,7 @@ fn symlinked_command_cwd_gets_chdir() {
 
 /// T6 启用判定：TCHAT_SANDBOX 未设/空＝false；非空＝true（进程级 env，锁内执行）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn sandbox_requested_reads_env() {
     let _g = crate::TEST_ENV_LOCK.lock().unwrap();
     std::env::remove_var("TCHAT_SANDBOX");
@@ -505,6 +522,7 @@ fn non_canonical_writable_root_fails_closed() {
 /// 显式 Err（failIfUnavailable，绝不返回 None 静默回退）；有 bwrap＝真实包装。
 /// 策略锚定为主进程 cwd（G1 修复）：接口不收目录参数，调用方无法转移锚定。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn tool_launch_argv_fails_closed_when_unavailable() {
     let _g = crate::TEST_ENV_LOCK.lock().unwrap();
     std::env::remove_var("TCHAT_SANDBOX");
@@ -840,6 +858,7 @@ fn mountinfo_optional_fields_are_parsed() {
 /// 位）与挂载二（root=<T> 整盘 bind 到 <T>/m2）；deny <T>/a/x 的别名必须
 /// 同时显形 <T>/a/x 与 <T>/m2/a/x，遮蔽须覆盖两者。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn deny_aliases_cross_mount_projection() {
     let t = sbx_dir("cross-mount");
     let a = t.join("a");
