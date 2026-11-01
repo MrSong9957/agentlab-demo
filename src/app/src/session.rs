@@ -779,6 +779,28 @@ fn auto_file_name() -> String {
 
 // ---------- 独占锁（§6-I） ----------
 
+/// 会话锁守卫：Windows＝命名互斥体句柄（Drop＝ReleaseMutex＋CloseHandle）；
+/// unix＝无类型（flock 随文件句柄存活，State 不额外持守卫）。
+#[cfg(unix)]
+type SessionLock = ();
+
+#[cfg(windows)]
+struct SessionLock {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl Drop for SessionLock {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::ReleaseMutex;
+        unsafe {
+            ReleaseMutex(self.handle);
+            CloseHandle(self.handle);
+        }
+    }
+}
+
 enum LockOutcome {
     Acquired,
     Busy,
@@ -788,7 +810,13 @@ enum LockOutcome {
 /// 对数据文件本身的 `flock(LOCK_EX|LOCK_NB)`：进程退出/崩溃自动释放，
 /// 无需母本的锁文件与协调锁清理。
 #[cfg(unix)]
-fn try_flock(file: &File) -> LockOutcome {
+fn try_flock(path: &Path, file: &File) -> (LockOutcome, Option<SessionLock>) {
+    let _ = path;
+    (try_flock_unix(file), None)
+}
+
+#[cfg(unix)]
+fn try_flock_unix(file: &File) -> LockOutcome {
     let r = unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(file), libc::LOCK_EX | libc::LOCK_NB) };
     if r == 0 {
         return LockOutcome::Acquired;
@@ -801,39 +829,39 @@ fn try_flock(file: &File) -> LockOutcome {
     }
 }
 
-/// Windows 版：LockFileEx 独占＋立即失败（flock 语义对应物——句柄关闭即
-/// 释放，无需协调清理；占用＝ERROR_LOCK_VIOLATION）。
-/// 锁目标＝远离数据区的固定偏移（0x4000_0000_0000）：Windows 字节锁为强制
-/// 语义，锁数据字节（如字节 0）会令任何外部读者在读到该字节时报 ERROR 33
-/// ——unix advisory flock 不阻止读（038 实测：测试侧 fs::read 整文件失败）。
-/// 锁数据区之外的超 range 偏移保留互斥检测（并发写者同偏移竞争＝Busy），
-/// 数据读不受影响＝与 unix 外部语义一致。
+/// Windows 版：命名互斥体（`Local\<路径 SHA-256 前 16 字节>`，登录会话隔离，
+/// 无文件系统痕迹；同 memory::runner::flock_root 模式）——Windows 字节锁为
+/// 强制语义，锁数据字节令外部读者在读到锁字节时报 ERROR 33（unix advisory
+/// flock 不阻止读——038 实测 fs::read 整文件失败），故不用 LockFileEx。
+/// WAIT_ABANDONED 视为取得（持有进程已死＝flock「进程死即释放」）；0ms 等待
+/// 对应 LOCK_NB 立即失败语义；守卫 Drop＝释放。
 #[cfg(windows)]
-fn try_flock(file: &File) -> LockOutcome {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
-    };
-    let mut ov: windows_sys::Win32::System::IO::OVERLAPPED = unsafe { std::mem::zeroed() };
-    ov.OffsetHigh = 0x0000_4000;
-    let ok = unsafe {
-        LockFileEx(
-            file.as_raw_handle() as _,
-            (LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY) as u32,
-            0,
-            1,
-            0,
-            &mut ov,
-        )
-    };
-    if ok != 0 {
-        LockOutcome::Acquired
+fn try_flock(path: &Path, _file: &File) -> (LockOutcome, Option<SessionLock>) {
+    use sha2::{Digest, Sha256};
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
+    let name: String = format!(
+        "Local\tchat-session-{}\0",
+        digest.iter().take(16).map(|b| format!("{b:02x}")).collect::<String>()
+    );
+    let wide: Vec<u16> = name.encode_utf16().collect();
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };
+    if handle.is_null() {
+        return (LockOutcome::Failed("CreateMutexW 失败".into()), None);
+    }
+    let wait = unsafe { WaitForSingleObject(handle, 0) };
+    if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
+        (LockOutcome::Acquired, Some(SessionLock { handle }))
+    } else if wait == WAIT_TIMEOUT {
+        unsafe { CloseHandle(handle) };
+        (LockOutcome::Busy, None)
     } else {
-        let err = std::io::Error::last_os_error();
-        match err.raw_os_error() {
-            Some(33) => LockOutcome::Busy, // ERROR_LOCK_VIOLATION
-            _ => LockOutcome::Failed(err.to_string()),
-        }
+        unsafe { CloseHandle(handle) };
+        (LockOutcome::Failed("WaitForSingleObject 失败".into()), None)
     }
 }
 
@@ -905,7 +933,11 @@ enum State {
     /// 尚无 auto 目标：本运行首次需要追加落盘时创建（恢复快照/降级后亦然）。
     Idle,
     /// 追加目标：打开后持锁复用的同一文件描述符。
-    Writing { _path: PathBuf, file: File },
+    Writing {
+        _path: PathBuf,
+        file: File,
+        _lock: Option<SessionLock>,
+    },
     /// 停用：此后仅内存（行超限/截回失败/创建失败）。
     Disabled,
 }
@@ -1040,10 +1072,10 @@ impl Session {
         // 任一失败只清理临时文件，self 不动（旧目标与普通自动保存保持原样，
         // 不再出现「无检查点的 V3 残档」或迁移失败即停用）。
         if self.version != 3 {
-            let (path, file, bytes) =
+            let (path, file, bytes, session_lock) =
                 self.create_v3_target_with_checkpoint(history, cp_line.as_str())?;
             self.version = 3;
-            self.state = State::Writing { _path: path, file };
+            self.state = State::Writing { _path: path, file, _lock: session_lock };
             self.durable_len = bytes;
             // 游标越过检查点：调用方回执成功后恰推入一条同名记录
             self.persisted_upto = history.len() + 1;
@@ -1115,9 +1147,10 @@ impl Session {
             }
         }
         if self.version != 3 {
-            let (path, file, bytes) = self.create_v3_target_with_tail(history, &[line.as_str()])?;
+            let (path, file, bytes, session_lock) =
+                self.create_v3_target_with_tail(history, &[line.as_str()])?;
             self.version = 3;
-            self.state = State::Writing { _path: path, file };
+            self.state = State::Writing { _path: path, file, _lock: session_lock };
             self.durable_len = bytes;
             // 迁移开篇已写完整 transcript＋事件行；游标停在普通记录末，
             // 事件行由 untracked 吸收（内存 push 后 flush 跳过）。
@@ -1189,9 +1222,10 @@ impl Session {
             }
         }
         if self.version != 3 {
-            let (path, file, bytes) = self.create_v3_target_with_tail(history, &[line.as_str()])?;
+            let (path, file, bytes, session_lock) =
+                self.create_v3_target_with_tail(history, &[line.as_str()])?;
             self.version = 3;
-            self.state = State::Writing { _path: path, file };
+            self.state = State::Writing { _path: path, file, _lock: session_lock };
             self.durable_len = bytes;
             self.persisted_upto = history.len();
             self.agent_untracked += 1;
@@ -1383,7 +1417,7 @@ impl Session {
             .read(true)
             .open(&path)
             .map_err(|e| format!("打开会话 {} 失败：{e}", path.display()))?;
-        let lock = try_flock(&file);
+        let (lock, session_lock) = try_flock(&path, &file);
         match lock {
             LockOutcome::Acquired => {
                 let file_len = file
@@ -1410,7 +1444,7 @@ impl Session {
                 self.error_reported = false;
                 self.orch_untracked = 0;
                 self.agent_untracked = 0;
-                self.state = State::Writing { _path: path, file };
+                self.state = State::Writing { _path: path, file, _lock: session_lock };
                 Ok(ResumeInfo { loaded, degraded: false })
             }
             LockOutcome::Busy => {
@@ -1437,8 +1471,8 @@ impl Session {
             return None;
         }
         match self.create_auto_file(history) {
-            Ok((path, file, bytes)) => {
-                self.state = State::Writing { _path: path, file };
+            Ok((path, file, bytes, session_lock)) => {
+                self.state = State::Writing { _path: path, file, _lock: session_lock };
                 self.durable_len = bytes;
                 self.persisted_upto = history.len();
                 // 开篇已含全部内存记录（含已提交事件）——计数清零。
@@ -1453,7 +1487,10 @@ impl Session {
         }
     }
 
-    fn create_auto_file(&self, history: &[HistoryItem]) -> Result<(PathBuf, File, u64), String> {
+    fn create_auto_file(
+        &self,
+        history: &[HistoryItem],
+    ) -> Result<(PathBuf, File, u64, Option<SessionLock>), String> {
         catalog::ensure_private_dir(&self.dir)
             .map_err(|e| format!("自动会话目录初始化失败：{e}"))?;
         let base = auto_file_name();
@@ -1497,7 +1534,8 @@ impl Session {
             // 会被本运行持续追加，正是续写目标；坑009：命名不提供互斥）。
             // Busy＝该名字已被并发恢复者抢先持锁（文件刚创建仍 0 字节，抢锁者
             // 装载空文件会得到明确错误）→ 视同名字冲突换下一候选；其余错误停用
-            match try_flock(&file) {
+            let (lock_outcome, session_lock) = try_flock(&path, &file);
+            match lock_outcome {
                 LockOutcome::Acquired => {}
                 LockOutcome::Busy => continue,
                 LockOutcome::Failed(e) => return Err(format!("自动会话文件加锁失败：{e}")),
@@ -1525,7 +1563,7 @@ impl Session {
                 Ok(())
             })();
             match outcome {
-                Ok(()) => return Ok((path, file, bytes)),
+                Ok(()) => return Ok((path, file, bytes, session_lock)),
                 Err(msg) => {
                     // 创建即失败：无已提交记录可保，清掉残档后停用
                     let _ = std::fs::remove_file(&path);
@@ -1544,7 +1582,7 @@ impl Session {
         &self,
         history: &[HistoryItem],
         cp_line: &str,
-    ) -> Result<(PathBuf, File, u64), String> {
+    ) -> Result<(PathBuf, File, u64, Option<SessionLock>), String> {
         self.create_v3_target_with_tail(history, &[cp_line])
     }
 
@@ -1554,7 +1592,7 @@ impl Session {
         &self,
         history: &[HistoryItem],
         tail_lines: &[&str],
-    ) -> Result<(PathBuf, File, u64), String> {
+    ) -> Result<(PathBuf, File, u64, Option<SessionLock>), String> {
         catalog::ensure_private_dir(&self.dir)
             .map_err(|e| format!("自动会话目录初始化失败：{e}"))?;
         let base = auto_file_name();
@@ -1590,7 +1628,8 @@ impl Session {
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(format!("创建自动会话文件失败：{e}")),
             };
-            match try_flock(&file) {
+            let (lock_outcome, session_lock) = try_flock(&path, &file);
+            match lock_outcome {
                 LockOutcome::Acquired => {}
                 LockOutcome::Busy => continue,
                 LockOutcome::Failed(e) => return Err(format!("自动会话文件加锁失败：{e}")),
@@ -1625,7 +1664,7 @@ impl Session {
                 Ok(())
             })();
             match outcome {
-                Ok(()) => return Ok((path, file, bytes)),
+                Ok(()) => return Ok((path, file, bytes, session_lock)),
                 Err(msg) => {
                     // 局部演练失败：清掉残档，self 未被触碰（旧目标原样）
                     let _ = std::fs::remove_file(&path);
