@@ -36,8 +36,17 @@ use crate::exec::{
     MAX_SESSIONS,
 };
 
-/// 运行时固定的 Shell。
+/// 运行时固定的 Shell：unix＝/bin/sh -c；Windows＝cmd /C（标准平台等价，
+/// 038——exec 契约＝经平台 shell 执行命令字符串，退出码经 shell 传递）。
+#[cfg(unix)]
 const SHELL: &str = "/bin/sh";
+#[cfg(windows)]
+const SHELL: &str = "cmd";
+/// unix＝"-c"；windows＝"/C"（cmd 的执行开关）。
+#[cfg(unix)]
+const SHELL_EXEC_FLAG: &str = "-c";
+#[cfg(windows)]
+const SHELL_EXEC_FLAG: &str = "/C";
 /// 监控线程轮询子进程退出／终止请求的间隔。
 const MONITOR_POLL: Duration = Duration::from_millis(10);
 /// 等待循环的单次等待上限（取消标志响应粒度）。
@@ -1539,7 +1548,7 @@ fn build_tool_command(
 ) -> std::io::Result<(Command, Option<crate::sandbox::SeccompFd>)> {
     if let Some(snapshot) = policy {
         let launch = crate::sandbox::permission_launch_argv(
-            vec![SHELL.to_string(), "-c".to_string(), cmd.to_string()],
+            vec![SHELL.to_string(), SHELL_EXEC_FLAG.to_string(), cmd.to_string()],
             snapshot,
             workdir,
         )?;
@@ -1575,7 +1584,7 @@ fn build_tool_command(
     } else {
         match crate::sandbox::tool_launch_argv(vec![
             SHELL.to_string(),
-            "-c".to_string(),
+            SHELL_EXEC_FLAG.to_string(),
             cmd.to_string(),
         ])? {
             Some((program, args, child_env)) => {
@@ -1597,7 +1606,7 @@ fn build_tool_command(
             }
             None => {
                 let mut c = Command::new(SHELL);
-                c.arg("-c").arg(cmd);
+                c.arg(SHELL_EXEC_FLAG).arg(cmd);
                 Ok((c, None))
             }
         }
