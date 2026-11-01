@@ -39,3 +39,42 @@ FD 继承/树回收），报告结论：**高风险 0 项；中风险 1 项（D1
 4. macOS e2e 挂点：以插桩单独触发 workflow_dispatch 取证。
 5. c18_barrier：按项目规则选用可复现验证环境（/tmp 原生 fs）复验；9p 环境
    相关性已有交叉实验记录，机制解释不作已证结论。
+
+## 迭代 32 续：D-mac 挂点收敛（插桩实证）＋Windows 219→55（be32bc9..c216494）
+
+### D-mac 挂点收敛（插桩证据，run 41341822162 macos job）
+- 插桩证据：e2e 二进制 2h21m 总 CPU 20ms（纯睡眠）；3 个 terminal-chat 子进程
+  卡 **E 态（退出中）2h20m**；整目标零输出。
+- 挂死链＝死锁闭环：子进程退出序列写满 PTY 缓冲→阻塞在退出中；测试线程
+  Drop→无界 child.wait()→无人排空 master→互卡；Drop 无看门狗＝零输出形态。
+- 修复（be32bc9）：PtySession/PtyCli Drop＝先有界（10s）排空 master（让子进程
+  写完退出序列）→超时强杀→分离线程收尸（Drop 永不无限阻塞）；child 字段
+  Option 化；存活断言改 kill(0) 探测。本地 e2e 150/150 绿。
+- 修复验证：D-mac 修复后的 macos 轮被后续推送并发取消——待单独完整轮验证
+  （下一轮 macos 即可直接验证挂死是否解除）。
+
+### Windows 55 失败逐项归因（windows11.log，run 41359234973，c216494）
+- proc_session 13：6＝pty_*/ConPTY fail-closed（待 ConPTY 实现）；2＝Start-Sleep
+  引号在 cmd→powershell 传参中被回显进输出（`-Command "..."` 双引号经 Rust
+  转义后 powershell 回显命令行）→改无引号形态 `powershell ... -Command
+  Start-Sleep -Milliseconds 800`；2＝双流行 for/l echo 尾空格（`echo X &` 的
+  空格进输出）→改 `echo X&echo Y` 紧凑形态；read_does_not_reset 2.5s 容差
+  边界（2.504s>2.5s）→微调；pipe_ctrl_c＝存量；turn_exec/incremental 同
+  Start-Sleep 回显根因。
+- memory 族 11：DROP 降级保留 memories.sqlite 文件（内容已清）与「文件不存在」
+  断言冲突（unix 删除语义）→Windows 断言改「新库 0 行」；phase1 注入的全文件
+  字节锁连读查询也锁（database is locked）→注入机制需只锁写面（下轮设计）。
+- exec/cd_inside：cmp_norm 在 remove_dir_all 之后执行→目录已删 canonicalize
+  失败退回短名→归一取值移到清理之前。
+- attack02 展示路径断言/attack05/2×request_permissions：形态断言测试侧同步
+  （产品已统一 canonical_long，断言侧补 ln）。
+- mcp 13+tls 1、tool_search_perf 1、multi_agent 1、terminal_chat 3：错误面
+  取证后逐项（下轮）。
+
+### 本轮结论
+- Windows：219→72→55（编译清零保持）；全部 55 项有根因记录（上表）。
+- L3（e8dd11b 本地）：3852/4/6——bwrap_backend 环境竞态（TMPDIR 并行改写）
+  已修（c216494 env_lock），其余 3＝已登记环境敏感/存量。
+- 安全低风险项：B2/B4 已修；A1（互斥体名随机成分）/A4（其余临界区 None 契约
+  统一）/B3（junction 检测）/C3（理论项）登记下轮（A4 的 mem_write 处已随 D1
+  统一）。
