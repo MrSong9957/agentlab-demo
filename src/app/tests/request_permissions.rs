@@ -869,6 +869,10 @@ fn nested_read_under_write_reduced_in_snapshot() {
 /// 明确失败，零模型命令执行；不回退普通/033）。
 #[test]
 fn bwrap_backend_deployment_refuses_missing_or_model_writable() {
+    // 环境隔离：std::env::temp_dir() 实时读 TMPDIR——policy_env_assembly_gates
+    // 并行改写 TMPDIR 时本测试的临时目录断言会被扰动（038 L3 并行实测），
+    // 取同一把 env_lock 串行化
+    let _env = env_lock();
     let f = fixtures();
     // 缺后端：None → 启动期明确失败
     let err = permissions::verify_bwrap_backend(None, &f.anchor, &std::env::temp_dir()).unwrap_err();
