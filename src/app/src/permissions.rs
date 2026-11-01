@@ -720,7 +720,9 @@ fn canonical_long_checked(p: &Path) -> std::io::Result<PathBuf> {
         if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
             return Ok(std::path::PathBuf::from(format!("\\\\\\{rest}")));
         }
-        std::path::PathBuf::from(s.strip_prefix(r"\\?\").map(String::from).unwrap_or(s))
+        Ok(std::path::PathBuf::from(
+            s.strip_prefix(r"\\?\").map(String::from).unwrap_or(s),
+        ))
     }
     #[cfg(not(windows))]
     Ok(canon)
