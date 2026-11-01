@@ -1,9 +1,9 @@
 # 038 迭代轮 30 三平台状态（2026-11-01，commit 9a1e65c，run 41255654319）
 
-数字对应 run 41255654319（ubuntu/windows job 已完成，macos job 卡死截断未跑完）；**非最终 HEAD e6a62e3 的重新验证**——其后仅 2 个 [skip ci] 文档提交，无产品代码变更。
+数字对应 run 41255654319（ubuntu/windows job 已完成，macos job 卡死未跑完）；**非收口 HEAD 的重新验证**——9a1e65c 之后仅文档提交（无产品代码变更），收口 HEAD 未重新执行完整验证；现有验证仍含失败与未完成部分，最终候选未通过完整验收。
 
 ## ubuntu: 3852/4
-4 失败＝D1-D3 runner 异常真实检查（c13/b2_mcp/attack06/sandbox_matrix）＋已登记存量。本地全量 3854/2/6（commit 5f98508 phase3 全量；2 失败＝proc_session 管道 Ctrl-C、session_perf 预算，存量复现证据见 `2026-10-31-phase3-status.md` 与 `2026-10-30-local-verification.md`）。
+4 失败＝恢复的真实检查在 GH runner 上复现的 D1-D3 待诊断异常（c13/b2_mcp/attack06/sandbox_matrix；根因仍未证实，方案见 `2026-10-31-runner-diagnosis-plan.md`）＋已登记存量。本地全量 3854/2/6（commit 5f98508 phase3 全量；2 失败＝proc_session 管道 Ctrl-C、session_perf 预算，存量复现证据见 `2026-10-31-phase3-status.md` 与 `2026-10-30-local-verification.md`）。
 
 ## windows: 3110/219（编译清零＋SHELL cmd /C 修复）
 SHELL 平台等价（cmd /C）修复后 3110 用例通过。剩余 219 失败＝测试夹具使用 sh 语法命令串
@@ -12,7 +12,7 @@ echo/重定向）或引入跨平台命令构造——为下一轮主工作（~8 
 apply_patch_sandbox/context_management/context_perf/js_orchestration/js_orchestration_perf/mcp_config 等）。
 
 ## macos: 2812 通过/28 失败后卡死，测试未跑完（收口更新 2026-11-01）
-run 41255654319 macos job：2812 通过、28 失败后卡死；截至 2026-11-01T01:06Z 收口检查该 job 仍 in_progress，其后测试目标未在 macOS 执行（此前同入口运行曾以 150 分钟上限截断，见规格 §6）。读路径卡死诊断（D-mac）待下一轮。
+run 41255654319 macos job（00:13Z 启动）：2812 通过、28 失败后卡死；**截至 2026-11-01T01:58Z 复查仍 in_progress（约 1 小时 46 分）**——既非超时截断、也非正常完成，其后测试目标未在 macOS 执行（job 上限 150 分钟；此前同入口运行曾以该上限截断，见规格 §6）。读路径卡死诊断（D-mac）待下一轮。
 
 ## 下一轮实施蓝图：测试夹具跨平台命令助手
 
