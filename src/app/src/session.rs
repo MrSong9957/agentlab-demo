@@ -803,6 +803,11 @@ fn try_flock(file: &File) -> LockOutcome {
 
 /// Windows 版：LockFileEx 独占＋立即失败（flock 语义对应物——句柄关闭即
 /// 释放，无需协调清理；占用＝ERROR_LOCK_VIOLATION）。
+/// 锁目标＝远离数据区的固定偏移（0x4000_0000_0000）：Windows 字节锁为强制
+/// 语义，锁数据字节（如字节 0）会令任何外部读者在读到该字节时报 ERROR 33
+/// ——unix advisory flock 不阻止读（038 实测：测试侧 fs::read 整文件失败）。
+/// 锁数据区之外的超 range 偏移保留互斥检测（并发写者同偏移竞争＝Busy），
+/// 数据读不受影响＝与 unix 外部语义一致。
 #[cfg(windows)]
 fn try_flock(file: &File) -> LockOutcome {
     use std::os::windows::io::AsRawHandle;
@@ -810,6 +815,7 @@ fn try_flock(file: &File) -> LockOutcome {
         LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
     };
     let mut ov: windows_sys::Win32::System::IO::OVERLAPPED = unsafe { std::mem::zeroed() };
+    ov.OffsetHigh = 0x0000_4000;
     let ok = unsafe {
         LockFileEx(
             file.as_raw_handle() as _,

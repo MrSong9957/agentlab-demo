@@ -607,13 +607,35 @@ pub fn memory_reset(user_dir: &Path, args: &str) -> String {
         Ok(e) => e,
         Err(e) => return format!("错误：读取记忆根失败：{e}"),
     };
+    let db_path = crate::memory::store::memories_db_path(&root);
     for entry in entries.flatten() {
         let path = entry.path();
-        let ok = match entry.file_type() {
+        let mut ok = match entry.file_type() {
             Ok(t) if t.is_dir() => std::fs::remove_dir_all(&path).is_ok(),
             Ok(_) => std::fs::remove_file(&path).is_ok(),
             Err(_) => false,
         };
+        // Windows：在途连接持有的 memories.sqlite 不可删除（unix unlink 语义
+        // 差异）——降级为内容重置（DROP 全部用户表），生成内容同样清空＝
+        // 「重置后无生成记忆」的外部契约不变；文件作为基础设施保留（同 .epoch）
+        if !ok && path == db_path {
+            if let Ok(conn) =
+                rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            {
+                let drop_all = |conn: &rusqlite::Connection| -> rusqlite::Result<()> {
+                    let tables: Vec<String> = {
+                        let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?;
+                        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+                        rows.collect::<rusqlite::Result<Vec<String>>>()?
+                    };
+                    for t in tables {
+                        conn.execute(&format!("DROP TABLE IF EXISTS \"{t}\""), [])?;
+                    }
+                    Ok(())
+                };
+                ok = drop_all(&conn).is_ok();
+            }
+        }
         if ok {
             cleared += 1;
         }
@@ -629,7 +651,7 @@ pub fn memory_reset(user_dir: &Path, args: &str) -> String {
                 e.as_ref()
                     .ok()
                     .and_then(|e| e.file_name().into_string().ok())
-                    .is_some_and(|n| n != EPOCH_FILE)
+                    .is_some_and(|n| n != EPOCH_FILE && root.join(&n) != db_path)
             })
             .count()
         })

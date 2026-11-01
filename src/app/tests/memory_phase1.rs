@@ -684,14 +684,19 @@ fn m3_directory_named_like_session_fails_gracefully() {
 
 // —— 定点补验：真实存储 I/O 故障（区别于失权拒提交） ——
 
-/// 确定性写入故障：把记忆库目录改名——SQLite journal 以打开时的主库路径
-/// 派生（`…/memories.sqlite-journal`），父目录失联后任何写事务的 journal
-/// 创建即 ENOENT（对 root 与普通用户同样生效；读取经既有 fd 不受影响）。
+/// 确定性写入故障注入。unix＝把记忆库目录改名：SQLite journal 以打开时的
+/// 主库路径派生（`…/memories.sqlite-journal`），父目录失联后任何写事务的
+/// journal 创建即 ENOENT（对 root 与普通用户同样生效；读取经既有 fd 不受
+/// 影响）。Windows＝对 DB 文件持外部强制字节锁（Windows 字节锁为强制语义，
+/// sqlite 写事务命中锁区即存储错误；与 unix 同一契约路径——存储错误→Failed
+/// ＋零部分提交。目录改名在 Windows 与打开连接冲突＝不可能等价，038 实测）。
+#[cfg(unix)]
 struct StorageBroken {
     root: PathBuf,
     parked: PathBuf,
 }
 
+#[cfg(unix)]
 impl StorageBroken {
     fn break_it(e: &Env) -> Self {
         let root = e.tmp.path().join("memories");
@@ -702,6 +707,39 @@ impl StorageBroken {
     fn restore(&self) {
         std::fs::rename(&self.parked, &self.root).expect("恢复记忆库目录");
     }
+}
+
+#[cfg(windows)]
+struct StorageBroken {
+    _lock_file: std::fs::File,
+}
+
+#[cfg(windows)]
+impl StorageBroken {
+    fn break_it(e: &Env) -> Self {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::LockFileEx;
+        use windows_sys::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK;
+        let db = crate::memory::store::memories_db_path(&e.tmp.path().join("memories"));
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&db)
+            .expect("打开 DB 以注入存储错误");
+        let mut ov: windows_sys::Win32::System::IO::OVERLAPPED = unsafe { std::mem::zeroed() };
+        let ok = unsafe {
+            LockFileEx(
+                f.as_raw_handle() as _,
+                LOCKFILE_EXCLUSIVE_LOCK as u32,
+                0,
+                0xFFFF_FFFF,
+                0x0000_3FFF,
+                &mut ov,
+            )
+        };
+        assert!(ok != 0, "注入全文件字节锁失败");
+        Self { _lock_file: f }
+    }
+    fn restore(&self) {}
 }
 
 impl Drop for StorageBroken {

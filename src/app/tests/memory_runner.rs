@@ -616,6 +616,8 @@ fn m7_reset_requires_confirm_and_preserves_sessions() {
     fs::write(real.join("keep.txt"), "keep").unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(&real, memories_root(dir2.path())).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&real, memories_root(dir2.path())).unwrap();
     let out = runner::memory_reset(dir2.path(), "confirm");
     assert!(out.contains("拒绝"), "符号链接根必须拒绝：{out}");
     assert_eq!(fs::read(real.join("keep.txt")).unwrap(), b"keep", "链接目标字节不变");
