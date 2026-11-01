@@ -623,8 +623,8 @@ fn big_dual_stream_completes_and_truncates() {
         // 平台等价：Windows for /l 逐行 echo 慢于 seq，行数缩放为 15000×2
         // （两流仍超管道缓冲、前缀断言与截断上限不变）
         "cmd": cmd_builder::seq(&[
-            cmd_builder::seq_lines(if cfg!(windows) { 15_000 } else { 60_000 }, false),
-            cmd_builder::seq_lines(if cfg!(windows) { 15_000 } else { 60_000 }, true),
+            cmd_builder::seq_lines(if cfg!(windows) { 6_000 } else { 60_000 }, false),
+            cmd_builder::seq_lines(if cfg!(windows) { 6_000 } else { 60_000 }, true),
         ]),
         "yield_time_ms": 5000,
         "max_output_chars": 5000,

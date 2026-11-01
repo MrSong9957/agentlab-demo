@@ -36,6 +36,14 @@ fn writer_cmd(log: &PathBuf) -> String {
     cmd_builder::seq(&[cmd_builder::writer_loop(log), cmd_builder::sleep_ms(30_000)])
 }
 
+/// Windows fs::canonicalize 的 \\?\ verbatim 前缀剥离（cmd 输出与文本断言
+/// 均无此前缀；temp 目录还可能呈 8.3 短名——规范化后统一长名形态）。
+fn strip_verbatim(p: std::path::PathBuf) -> String {
+    p.to_str()
+        .map(|s| s.strip_prefix(r"\\?\").unwrap_or(s).to_string())
+        .unwrap_or_default()
+}
+
 /// 单次调用入口（参数层解析＋管理器执行）：与 turn 层分派同构——
 /// 解析失败按 error 结果回传；短命令在等待窗口内完成、不留会话。
 fn run(input: &serde_json::Value, cancel: Option<&AtomicBool>) -> ExecResult {
@@ -110,7 +118,12 @@ fn workdir_child_mode() {
     fs::write("sub/in-rel.txt", "rel-cwd-content\n").unwrap();
     let mgr = ProcessManager::new();
     let relative = run_with(&mgr, &json!({ "cmd": "cat in-rel.txt", "workdir": "sub" }), None);
-    let default = run_with(&mgr, &json!({ "cmd": "pwd > pwd-default.txt" }), None);
+    // 平台等价：pwd 为 sh 内置（runner PATH 的 Git usr/bin 无 pwd.exe）——cmd 用 cd
+    let default = run_with(
+        &mgr,
+        &json!({ "cmd": if cfg!(windows) { "cd > pwd-default.txt" } else { "pwd > pwd-default.txt" } }),
+        None,
+    );
     mgr.close();
     std::fs::write(
         &outcome,
@@ -183,6 +196,8 @@ fn workdir_resolves_relative_paths() {
     let session = host.join("session");
     fs::create_dir_all(&session).unwrap();
     let outcome = host.join("outcome.json");
+    // 平台等价：Windows fs::canonicalize 返回 \\?\ 前缀、temp 目录可能呈 8.3
+    // 短名（RUNNER~1）——统一剥离前缀并以规范化长路径为 cd 目标，cmd `cd` 输出
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("workdir_resolves_relative_paths")
         .arg("--exact")
@@ -199,10 +214,10 @@ fn workdir_resolves_relative_paths() {
     let outcome_text = fs::read_to_string(&outcome).ok();
     let rel_file = fs::read_to_string(session.join("sub/in-rel.txt")).ok();
     let pwd_text = fs::read_to_string(session.join("pwd-default.txt")).ok();
-    let session_canon = fs::canonicalize(&session).ok();
+    let session_canon = fs::canonicalize(&session).ok().map(strip_verbatim);
     let pwd_canon = pwd_text
         .as_deref()
-        .and_then(|t| std::fs::canonicalize(t.trim()).ok());
+        .and_then(|t| std::fs::canonicalize(t.trim()).ok().map(strip_verbatim));
     let _ = fs::remove_dir_all(&host);
     assert!(child_ok, "workdir 子进程异常退出：{child_stderr}");
     let v: serde_json::Value = serde_json::from_str(&outcome_text.unwrap_or_else(|| {
@@ -218,8 +233,8 @@ fn workdir_resolves_relative_paths() {
     // 缺省 workdir：pwd 落盘于会话目录，且内容即该目录（证明缺省＝会话当前目录）
     assert_eq!(v["default"]["status"], json!("completed"), "{}", v["default"]);
     assert_eq!(
-        pwd_canon.as_ref().and_then(|p| p.to_str()),
-        session_canon.as_ref().and_then(|p| p.to_str()),
+        pwd_canon.as_deref(),
+        session_canon.as_deref(),
         "缺省 workdir 的输出落在会话目录且 pwd 即该目录"
     );
 }
@@ -351,7 +366,7 @@ fn oversized_output_truncated_to_char_cap() {
     // EncodedCommand（base64 UTF-16LE，无引号歧义）以 UTF-8 输出同等内容
     let cmd = if cfg!(windows) {
         use base64::Engine as _;
-        let script = "[Console]::OutputEncoding=[Text.Encoding]::UTF8;0..99|ForEach-Object{('行{0:D2}' -f $_)+[char]0x1F389}";
+        let script = "[Console]::OutputEncoding=[Text.Encoding]::UTF8;0..99|ForEach-Object{('行{0:D2}' -f $_)+'🎉'}";
         let enc: String = base64::engine::general_purpose::STANDARD
             .encode(script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect::<Vec<u8>>());
         format!("powershell -NoProfile -EncodedCommand {enc}")
@@ -391,11 +406,16 @@ fn cd_inside_command_does_not_stick() {
     fs::create_dir_all(&session).unwrap();
     fs::create_dir_all(&target).unwrap();
     let outcome = host.join("outcome.json");
+    // 平台等价：Windows fs::canonicalize 返回 \\?\ 前缀、temp 目录可能呈 8.3
+    // 短名（RUNNER~1）——统一剥离前缀并以规范化长路径为 cd 目标，cmd `cd` 输出
+    // 才与期望一致
+    let target_canon = fs::canonicalize(&target).ok().map(strip_verbatim);
+    let session_canon = fs::canonicalize(&session).ok().map(strip_verbatim);
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("cd_inside_command_does_not_stick")
         .arg("--exact")
         .env("TCHAT_CD_OUTCOME", &outcome)
-        .env("TCHAT_CD_TARGET", target.display().to_string())
+        .env("TCHAT_CD_TARGET", target_canon.clone().unwrap_or_else(|| target.display().to_string()))
         .current_dir(&session)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -405,14 +425,7 @@ fn cd_inside_command_does_not_stick() {
     let child_ok = status.status.success();
     let child_stderr = String::from_utf8_lossy(&status.stderr).to_string();
     let outcome_text = fs::read_to_string(&outcome).ok();
-    // 平台等价：Windows fs::canonicalize 返回 \\?\ 前缀，cmd 输出无前缀
-    let strip_verbatim = |p: std::path::PathBuf| {
-        p.to_str()
-            .map(|s| s.trim_start_matches("\\?").to_string())
-            .unwrap_or_default()
-    };
-    let target_canon = fs::canonicalize(&target).ok().map(strip_verbatim.clone());
-    let session_canon = fs::canonicalize(&session).ok().map(strip_verbatim);
+
     let _ = fs::remove_dir_all(&host);
     assert!(child_ok, "cd 子进程异常退出：{child_stderr}");
     let v: serde_json::Value = serde_json::from_str(&outcome_text.unwrap_or_else(|| {

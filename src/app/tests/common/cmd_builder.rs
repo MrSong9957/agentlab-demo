@@ -53,7 +53,10 @@ pub fn append_line(log: &Path, text: &str) -> String {
 pub fn writer_loop(log: &Path) -> String {
     let log = path_str(log);
     if cfg!(windows) {
-        format!("for /l %i in (1,0,2) do @((echo x)>>{log} & ping -n 1 -w 40 192.0.2.1>nul)")
+        // 回环 ping（ping.exe 进程约 30-60ms）作节流：约 15-30 行/秒——足够
+        // 增长窗口观测、又不至于淹没输出缓存干扰时限测量。（TEST-NET 的
+        // ping -w 超时在 runner 上被立即拒绝＝无延时——038 实测）
+        format!("for /l %i in (1,0,2) do @((echo x)>>{log} & ping -n 1 127.0.0.1>nul)")
     } else {
         format!("while true; do echo x >> {log}; sleep 0.05; done")
     }
@@ -62,7 +65,7 @@ pub fn writer_loop(log: &Path) -> String {
 /// 无限循环向 stdout 写计数行＋亚秒延时（stdout 存活写入者）。
 pub fn writer_loop_stdout() -> String {
     if cfg!(windows) {
-        "for /l %i in (1,0,2) do @(echo %i & ping -n 1 -w 40 192.0.2.1>nul)".to_string()
+        "for /l %i in (1,0,2) do @(echo %i & ping -n 1 127.0.0.1>nul)".to_string()
     } else {
         "while true; do date +%s%N; sleep 0.05; done".to_string()
     }
@@ -72,11 +75,8 @@ pub fn writer_loop_stdout() -> String {
 /// 计数，亚秒为单次超时窗口）。
 pub fn sleep_ms(ms: u64) -> String {
     if cfg!(windows) {
-        if ms >= 1000 {
-            format!("ping -n {} -w 1000 192.0.2.1>nul", ms / 1000 + 1)
-        } else {
-            format!("ping -n 1 -w {ms} 192.0.2.1>nul")
-        }
+        // 回环 ping：-n K 的请求间隔≈1 秒（回复即时到达也按间隔发送），粒度 1s
+        format!("ping -n {} 127.0.0.1>nul", ms / 1000 + 1)
     } else if ms % 1000 == 0 {
         format!("sleep {}", ms / 1000)
     } else {

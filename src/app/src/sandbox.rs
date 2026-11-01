@@ -1370,13 +1370,15 @@ pub(crate) fn absolute_lexical(path: &Path) -> PathBuf {
     for component in path.components() {
         use std::path::Component;
         match component {
-            Component::RootDir => current.push(Path::new("/")),
+            Component::RootDir => current.push(std::path::MAIN_SEPARATOR.to_string()),
             Component::CurDir => {}
             Component::ParentDir => {
                 current.pop();
             }
             Component::Normal(part) => current.push(part),
-            Component::Prefix(_) => {}
+            // Windows 盘符前缀必须保留：丢弃后 "/Users\..." 按进程当前盘解析
+            // （runner 仓库在 D:、临时目录在 C: → 组件 NotFound——038 实测）
+            Component::Prefix(p) => current.push(p.as_os_str()),
         }
     }
     current
