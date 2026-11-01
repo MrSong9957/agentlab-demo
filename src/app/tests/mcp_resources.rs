@@ -9,7 +9,7 @@ mod common;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use common::mcp_fixtures::{definition_names, read_record, setup, setup_with, TestCtx};
+use common::mcp_fixtures::{definition_names, read_record, setup, setup_with, TestCtx, PY};
 use common::TempDir;
 use terminal_chat::context::ContextSources;
 use terminal_chat::proc_session::ProcessManager;
@@ -1436,9 +1436,10 @@ fn sec_disabled_server_resource_calls_fail_with_zero_requests() {
     let fixture = common::mcp_fixtures::FIXTURE.replace('\\', "/");
     let record = dir.path().join("record.jsonl");
     let json = format!(
-        r#"{{"mcp_servers": {{"fx": {{"enabled": false, "command": "python3", "args": ["{fixture}", "--scenario", "resources_only", "--record", "{}"], "cwd": "{}"}}}}}}"#,
+        r#"{{"mcp_servers": {{"fx": {{"enabled": false, "command": "{py}", "args": ["{fixture}", "--scenario", "resources_only", "--record", "{}"], "cwd": "{}"}}}}}}"#,
         record.display(),
-        std::env::temp_dir().display()
+        std::env::temp_dir().display(),
+        py = PY,
     );
     std::fs::write(dir.path().join("mcp.json"), json).unwrap();
     let manager = terminal_chat::mcp::manager::McpManager::new();
@@ -1580,10 +1581,11 @@ fn review_list_pollution_catches_escaped_secret() {
     let fixture = common::mcp_fixtures::FIXTURE.replace('\\', "/");
     let record = dir.path().join("record.jsonl");
     let json = format!(
-        r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "python3", "args": ["{fixture}", "--scenario", "resources_polluted", "--record", "{rec}"], "cwd": "{tmp}", "env_vars": ["{canary}"]}}}}}}"#,
+        r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "resources_polluted", "--record", "{rec}"], "cwd": "{tmp}", "env_vars": ["{canary}"]}}}}}}"#,
         rec = record.display(),
         tmp = std::env::temp_dir().display(),
         canary = common::mcp_fixtures::CANARY,
+        py = PY,
     );
     std::fs::write(dir.path().join("mcp.json"), json).unwrap();
     let manager = terminal_chat::mcp::manager::McpManager::new();

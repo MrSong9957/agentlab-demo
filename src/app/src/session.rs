@@ -1472,7 +1472,14 @@ impl Session {
                 }
                 #[cfg(not(unix))]
                 {
-                    std::fs::OpenOptions::new().append(true).create_new(true).open(&path)
+                    // read(true)：Windows LockFileEx 要求句柄具备 GENERIC_READ/
+                    // GENERIC_WRITE；append-only 句柄（仅 FILE_APPEND_DATA）取锁
+                    // 得 ERROR_ACCESS_DENIED——CI 实测（038）自动保存因此停用。
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .read(true)
+                        .create_new(true)
+                        .open(&path)
                 }
             };
             let mut file = match opened {
@@ -1564,8 +1571,10 @@ impl Session {
                 }
                 #[cfg(not(unix))]
                 {
+                    // read(true)：同 create_auto_file——LockFileEx 句柄访问权要求。
                     std::fs::OpenOptions::new()
                         .append(true)
+                        .read(true)
                         .create_new(true)
                         .open(&path)
                 }

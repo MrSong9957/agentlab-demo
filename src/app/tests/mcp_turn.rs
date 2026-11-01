@@ -10,7 +10,7 @@ mod common;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use common::mcp_fixtures::{read_record, setup, setup_with, EnvGuard, CANARY, CANARY_VALUE};
+use common::mcp_fixtures::{read_record, setup, setup_with, EnvGuard, CANARY, CANARY_VALUE, PY};
 use common::TempDir;
 use terminal_chat::context::ContextSources;
 use terminal_chat::proc_session::ProcessManager;
@@ -692,9 +692,10 @@ fn a17_mcp_with_view_image_batch_pairs_then_image_projection() {
     let record_path = record_dir.path().join("record.jsonl");
     let fixture = common::mcp_fixtures::FIXTURE.replace('\\', "/");
     let json = format!(
-        r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "python3", "args": ["{fixture}", "--scenario", "echo", "--record", "{}"], "cwd": "{}"}}}}}}"#,
+        r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "echo", "--record", "{}"], "cwd": "{}"}}}}}}"#,
         record_path.display().to_string().replace('\\', "/"),
-        std::env::temp_dir().display()
+        std::env::temp_dir().display(),
+        py = PY,
     );
     std::fs::write(dir.path().join("mcp.json"), json).expect("写入 mcp.json");
     let manager = terminal_chat::mcp::manager::McpManager::new();

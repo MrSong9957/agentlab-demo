@@ -8,6 +8,13 @@ use super::{TempDir, ENV_LOCK};
 use terminal_chat::mcp::manager::{McpManager, McpSnapshot};
 
 pub const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mcp_stdio_server.py");
+
+/// stdio 夹具解释器：Windows 托管 runner 无 python3（仅 python）——038 CI 实测
+/// 启动失败、startup 记录为 0，stdio 族（mcp_stdio/resources/turn 等）全数失败。
+#[cfg(windows)]
+pub const PY: &str = "python";
+#[cfg(not(windows))]
+pub const PY: &str = "python3";
 pub const CANARY: &str = "TCHAT_MCP_TOKEN_A";
 pub const CANARY_VALUE: &str = "tchat-mcp-canary-022-secret";
 
@@ -71,8 +78,9 @@ pub fn setup_with(scenario: &str, extra: &str, delay_ms: u64) -> TestCtx {
         record_path.display().to_string().replace('\\', "/")
     ));
     let json = format!(
-        r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "python3", "args": [{args}], "cwd": "{}"{extra}}}}}}}"#,
-        std::env::temp_dir().display()
+        r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "{py}", "args": [{args}], "cwd": "{}"{extra}}}}}}}"#,
+        std::env::temp_dir().display(),
+        py = PY
     );
     std::fs::write(dir.path().join("mcp.json"), json).expect("写入 mcp.json");
     let manager = McpManager::new();
@@ -103,10 +111,11 @@ pub fn setup_two(scenario_fx: &str, scenario_fy: &str, extra_fx: &str, extra_fy:
     let tmp = std::env::temp_dir().display().to_string();
     let json = format!(
         r#"{{"mcp_servers": {{
-            "fx": {{"enabled": true, "command": "python3", "args": ["{fixture}", "--scenario", "{scenario_fx}", "--record", "{rec}"], "cwd": "{tmp}"{extra_fx}}},
-            "fy": {{"enabled": true, "command": "python3", "args": ["{fixture}", "--scenario", "{scenario_fy}", "--record", "{rec}"], "cwd": "{tmp}"{extra_fy}}}
+            "fx": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "{scenario_fx}", "--record", "{rec}"], "cwd": "{tmp}"{extra_fx}}},
+            "fy": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "{scenario_fy}", "--record", "{rec}"], "cwd": "{tmp}"{extra_fy}}}
         }}}}"#,
         rec = record_path.display().to_string().replace('\\', "/"),
+        py = PY,
     );
     std::fs::write(dir.path().join("mcp.json"), json).expect("写入 mcp.json");
     let manager = McpManager::new();
@@ -142,9 +151,10 @@ pub fn setup_no_prepare(
     let record_path = record_dir.path().join("record.jsonl");
     let fixture = FIXTURE.replace('\\', "/");
     let json = format!(
-        r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "python3", "args": ["{fixture}", "--scenario", "{scenario}", "--record", "{}"], "cwd": "{}"{extra}}}}}}}"#,
+        r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "{scenario}", "--record", "{}"], "cwd": "{}"{extra}}}}}}}"#,
         record_path.display().to_string().replace('\\', "/"),
-        std::env::temp_dir().display()
+        std::env::temp_dir().display(),
+        py = PY
     );
     std::fs::write(dir.path().join("mcp.json"), json).expect("写入 mcp.json");
     let manager = McpManager::new();
