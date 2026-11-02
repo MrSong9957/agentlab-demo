@@ -2797,24 +2797,19 @@ mod tests {
         // 012 模型契约：模型面结果 JSON 不因展示捕获而改变、不含展示字段。
         // 两次调用各用独立目录（Add 不覆盖），路径归一后逐字节比对。
         let norm = |dir: &std::path::Path, r: &ApplyPatchResult| -> String {
-            // 038 Windows：结果 JSON 内路径为 canonicalize 长名形态（8.3 短名
-            // 被展开、verbatim 剥离由 canonical_long 完成）——替换目标同函数
-            // 归一，比较结构而非路径形态（unix 恒等）。
-            let canon = std::fs::canonicalize(dir)
-                .unwrap_or_else(|_| dir.to_path_buf())
-                .to_string_lossy()
-                .into_owned();
-            let canon = {
-                #[cfg(windows)]
-                let canon = canon
-                    .strip_prefix(r"\\?\")
-                    .map(String::from)
-                    .unwrap_or(canon);
-                canon
-            };
-            serde_json::to_string(r)
-                .unwrap()
-                .replace(canon.as_str(), "<DIR>")
+            // 038 Windows：①替换在 serde_json 转义后的文本上进行——路径分隔符
+            // 在 JSON 文本中是 `\\`，目标串须同形（单反斜杠目标恒 miss）；
+            // ②Add 操作记录的是词法路径（8.3 短名原样），canonical 长名形态
+            // 同记——两种形态都替换，比较结构而非路径形态（unix 恒等）。
+            let text = serde_json::to_string(r).unwrap();
+            let esc = |s: &str| s.replace('\\', "\\\\");
+            let raw = esc(&dir.display().to_string());
+            let canon = esc(
+                &std::fs::canonicalize(dir)
+                    .unwrap_or_else(|_| dir.to_path_buf())
+                    .to_string_lossy(),
+            );
+            text.replace(&raw, "<DIR>").replace(&canon, "<DIR>")
         };
         let dir_a = disp_dir("contract-a");
         let pa = format!(

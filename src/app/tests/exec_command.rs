@@ -32,8 +32,15 @@ fn log_size(path: &PathBuf) -> u64 {
 
 /// 后台写入循环 + 长睡眠前台：直接子进程是 sh，孙进程持续写文件。
 fn writer_cmd(log: &PathBuf) -> String {
-    // 持续写入者＋保活：平台等价构造（038 蓝图 cmd_builder）
-    cmd_builder::seq(&[cmd_builder::writer_loop(log), cmd_builder::sleep_ms(30_000)])
+    // 持续写入者＋保活：平台等价构造（038 蓝图 cmd_builder）。
+    // 038 Windows：不得经 seq 追加保活 sleep——`for ... do X & Y` 的 `& Y`
+    // 被 cmd 绑进 for 循环体（每迭代多执行一次 30s 睡眠的 powershell）＝
+    // 写入停滞；Windows 侧 for /l (1,0,2) 自身即无限循环，无需保活前台。
+    if cfg!(windows) {
+        cmd_builder::writer_loop(log)
+    } else {
+        cmd_builder::seq(&[cmd_builder::writer_loop(log), cmd_builder::sleep_ms(30_000)])
+    }
 }
 
 /// Windows fs::canonicalize 的 \\?\ verbatim 前缀剥离（cmd 输出与文本断言

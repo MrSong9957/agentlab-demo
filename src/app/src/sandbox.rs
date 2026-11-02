@@ -405,14 +405,25 @@ fn create_filesystem_args(policy: &SandboxPolicy) -> Result<Vec<String>, String>
         .filter(|root| root.exists())
         .map(|root| {
             // 038 Windows CI 实证：components() 的分量语义（verbatim 路径
-            // 「..」不作 ParentDir 解释等平台差异）可让 `sub\..` 穿透下方
-            // 词法清洁比较——补一道与分量语义无关的字符串级分段检查，两道
-            // 任一命中即拒绝（unix 行为不变：原本就被 components 检查拒绝）。
-            let nonclean = absolute_lexical(root) != *root
-                || root
-                    .to_string_lossy()
-                    .split(['/', '\\'])
-                    .any(|seg| seg == "." || seg == "..");
+            // 「..」不作 ParentDir 解释等平台差异）可让 `sub\..` 穿透词法
+            // 清洁比较。四道判据按序判定：
+            // ② 字符串级点分段——无条件拒绝（点分段依赖内核回溯，即便存在
+            //    符号链接组件，遮蔽排布同样不可信）；
+            // ① components 词法走查失配；
+            // ③ 「内核解析 ≠ 词法清洁形态」——仅当路径不含符号链接组件时
+            //    拒绝（符号链接根的 canonical bind 语义由上游 remap 承接，
+            //    canonical_target_if_symlinked_path=Some 即放行）。
+            // unix 行为不变（原本就被①拒绝）。
+            let has_dot_seg = root
+                .to_string_lossy()
+                .split(['/', '\\'])
+                .any(|seg| seg == "." || seg == "..");
+            let lex_clean = absolute_lexical(root);
+            let canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+            let nonclean = has_dot_seg
+                || lex_clean != *root
+                || (lex_clean != absolute_lexical(&canon)
+                    && canonical_target_if_symlinked_path(root).is_none());
             if nonclean {
                 return Err(format!(
                     "可写根 {} 词法非清洁（含 ./.. 等组件）：拒绝组装（解析失配会致遮蔽失效）",

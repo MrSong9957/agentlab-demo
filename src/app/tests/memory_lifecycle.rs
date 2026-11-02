@@ -241,12 +241,22 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 fn isolated_rg(e: &Env) -> String {
+    // 038 Windows：PATH 探测带 .exe（choco shim 为 rg.exe）；命令免引号
+    // （模式 ASCII 单词＋夹具路径无空格）绕开 cmd /C 引号剥离。
     let rg = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-        .map(|path| path.join("rg"))
+        .map(|path| path.join(if cfg!(windows) { "rg.exe" } else { "rg" }))
         .find(|path| path.is_file())
         .expect("real rg required");
-    let home = shell_quote(e.dir.join("home").to_str().unwrap());
-    format!("env -i HOME={home} XDG_CONFIG_HOME={home} XDG_CACHE_HOME={home} LC_ALL=C TZ=UTC {} --no-config --line-number --fixed-strings --color=never -- 'SHARED-M9' {}", shell_quote(rg.to_str().unwrap()), shell_quote(e.root.join("MEMORY.md").to_str().unwrap()))
+    if cfg!(windows) {
+        format!(
+            "{} --no-config --line-number --fixed-strings --color=never -- SHARED-M9 {}",
+            rg.to_str().unwrap(),
+            e.root.join("MEMORY.md").to_str().unwrap()
+        )
+    } else {
+        let home = shell_quote(e.dir.join("home").to_str().unwrap());
+        format!("env -i HOME={home} XDG_CONFIG_HOME={home} XDG_CACHE_HOME={home} LC_ALL=C TZ=UTC {} --no-config --line-number --fixed-strings --color=never -- 'SHARED-M9' {}", shell_quote(rg.to_str().unwrap()), shell_quote(e.root.join("MEMORY.md").to_str().unwrap()))
+    }
 }
 
 #[test]

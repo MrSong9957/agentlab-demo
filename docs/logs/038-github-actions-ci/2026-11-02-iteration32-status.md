@@ -187,3 +187,45 @@ macos job 收束后提取（预计 ~03:56 上限或提前完成）。
 owner 线程守卫、path_covers 三处＋测试期望归一、f2 平台分科、apply_patch
 relative_paths 期望归一。本地（Linux）request_permissions 38/38、attack02、
 f2_swap、relative_paths 全绿。
+
+## 迭代 34：批次一/二回报（41382750135、41387309164）＋批次三
+
+**Windows 54→32**（41387309164）。修复确认：b04、min_output_cap、mcp_stdio×2、
+mcp_resources×3、mcp_turn a09×3、m1/m2×2、memory m3×2、reset_between/
+reset_during、install_dir、nested_read、policy_load、attack02/05、c18、
+sandbox_mode_wraps_tool、js sandbox_wrapper（fail-open 闭合）。剩余 32 项
+新归因：
+1. **cancel（3→3）**＝cmd for 体吞噬：writer_cmd 经 seq 追加的 `& sleep` 被
+   cmd 绑进 for 循环体（每迭代多跑一次 30s 睡眠 powershell）＝写入停滞——
+   两轮"零增长"同一根因；Windows 分支去掉保活追加（for /l (1,0,2) 自身无限）。
+2. **CLIXML 进度噪声**：powershell EncodedCommand 在 stdout 为管道时把进度
+   流序列化进 stdout（"Preparing modules for first use"）＝
+   incremental_output/running_returns 前缀污染——ps_encoded 统一
+   $ProgressPreference='SilentlyContinue' 前缀。
+3. **result_json**：替换在 serde_json 转义后文本上进行（单反斜杠目标恒
+   miss）；Add 记录词法路径（短名原样）＋canonical 两种形态都替换。
+4. **view_image**：目录开档在内核即被拒（CreateFile 无 BACKUP_SEMANTICS
+   打开目录＝error 5），词法消 dot 后仍如此——打开失败时按路径元数据判型，
+   目录复用统一「非普通文件」错误面。
+5. **G2 verbatim**：tmp_ws 经 canonicalize＝verbatim 形态，`sub\..` 的分量
+   语义平台差异仍未被②命中——升级四道判据（点分段无条件拒绝；③内核解析
+   ≠词法形态仅在非符号链接路径拒绝）＋测试失败时打印 raw/segments/lex 诊断
+   （若下轮仍失败可直接归因）。
+6. **m6/memory_lifecycle rg**：路径探测带 .exe 已生效（越过探测）；新失败
+   ＝cmd /C 多引号剥离规则吞掉内层引号对＋夹具路径含空格——Windows 分支
+   免引号＋无空格夹具路径（空格语义由 unix 分支覆盖）。
+7. proc_session 管道族 13 项：CLIXML＋超时容忍属夹具层；pty_* 5 项待 ConPTY。
+
+**macOS 全集首次可见**（job 不再 23 分钟截断）：92 项/19 目标——js worker
+spawn EINVAL（os error 22）×41 最大家族、e2e TUI s 系×25、normalize 逐组件
+检查拒 /var 符号链接×7、attack/sandbox_lifecycle×6、其余单点。**此前的
+"47→25 改善"实为截断口径（两轮 job 分别只完成 7/5 个目标）**。request_
+permissions 的 /var 拒绝非回归——该目标此前从未在 mac job 中跑到。
+**ubuntu**：两轮均只剩 D1–D3 四项（c09 为偶发，pipe_ctrl_c 失败为本地容器
+特性，CI 全绿）。
+
+**批次三（本轮提交）**：ConPTY 实现（ChildHandle 抽象＋CreatePseudoConsole
+＋PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE＋CreateProcessW；作业挂接/整树终止
+与管道模式同机制；进程退出→ClosePseudoConsole 拆除顺序）；mingw 交叉 check
+（x86_64-pc-windows-gnu target）本地验证 cfg(windows) 代码 0 error——
+不依赖 CI 即可验证 Windows 编译面；批次三夹具/产品修复如上 1–6。

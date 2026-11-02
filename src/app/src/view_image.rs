@@ -636,8 +636,27 @@ fn open_regular_file(path: &Path) -> Result<std::fs::File, String> {
             .map_err(|e| format!("图片路径无法打开（{}）：{e}", path.display()))?
     };
     #[cfg(not(unix))]
-    let file = std::fs::File::open(&open_path)
-        .map_err(|e| format!("图片路径无法打开（{}）：{e}", path.display()))?;
+    let file = {
+        // 038 Windows：目录开档被内核拒绝（CreateFile 无 BACKUP_SEMANTICS
+        // 打开目录＝os error 5），类型复核到不了——打开失败时先按路径元数据
+        // 判型，目录/特殊文件复用统一的「非普通文件」错误面（语义与 unix
+        // 句柄侧判定一致）。
+        match std::fs::File::open(&open_path) {
+            Ok(f) => f,
+            Err(e) => {
+                if let Ok(md) = std::fs::symlink_metadata(&open_path) {
+                    if !md.is_file() {
+                        let kind = if md.is_dir() { "目录" } else { "设备/FIFO/套接字等特殊文件" };
+                        return Err(format!(
+                            "图片路径不是普通文件（{}）：{kind}",
+                            path.display()
+                        ));
+                    }
+                }
+                return Err(format!("图片路径无法打开（{}）：{e}", path.display()));
+            }
+        }
+    };
     let meta = file
         .metadata()
         .map_err(|e| format!("图片文件元数据读取失败（{}）：{e}", path.display()))?;

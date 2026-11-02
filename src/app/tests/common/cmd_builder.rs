@@ -16,10 +16,15 @@ use std::path::Path;
 /// 平台行尾（命令输出的真实平台语义）。
 /// PowerShell EncodedCommand 包装（base64 UTF-16LE）：无引号歧义、无回显
 /// 通路（038 实测 -Command 两种引号形态都把命令行回显进输出流）。
+/// `$ProgressPreference='SilentlyContinue'`：stdout 为管道时 PowerShell 把
+/// 进度流以 CLIXML 序列化写进 stdout（首次启动的 "Preparing modules for
+/// first use" 等）——污染内容断言（038 实测 incremental_output 前缀噪声）；
+/// 进度流不属契约内容，统一静默。
 pub fn ps_encoded(script: &str) -> String {
     use base64::Engine as _;
+    let full = format!("$ProgressPreference='SilentlyContinue';{script}");
     let enc: String = base64::engine::general_purpose::STANDARD
-        .encode(script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect::<Vec<u8>>());
+        .encode(full.encode_utf16().flat_map(|u| u.to_le_bytes()).collect::<Vec<u8>>());
     format!("powershell -NoProfile -EncodedCommand {enc}")
 }
 

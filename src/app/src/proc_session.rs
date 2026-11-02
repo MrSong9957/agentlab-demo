@@ -31,6 +31,16 @@ use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+// 038 ConPTY：ChildHandle::Raw 的句柄级 wait/退出码读取与伪终端拆除。
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+#[cfg(windows)]
+use windows_sys::Win32::System::Console::{ClosePseudoConsole, HPCON};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+#[cfg(windows)]
+use std::os::windows::process::ExitStatusExt;
+
 use crate::exec::{
     cap_output, resolve_workdir, ExecArgs, ExecResult, ExecStatus, WriteStdinArgs,
     MAX_SESSIONS,
@@ -559,7 +569,8 @@ impl ProcessManager {
         #[cfg(windows)]
         {
             // 作业挂接失败＝失去树终止能力（016 契约）——显式 panic，不静默。
-            if let Err(e) = win::assign_child_to_job(sp.child.id(), &sp.child) {
+            let (job_pid, job_handle) = sp.child.raw_process();
+            if let Err(e) = win::assign_raw_process(job_pid, job_handle) {
                 panic!("作业对象挂接失败（Windows 树终止不可用）：{e}");
             }
         }
@@ -573,7 +584,12 @@ impl ProcessManager {
         if let Some(err) = sp.stderr {
             spawn_reader(session.clone(), err);
         }
-        if let Some(master) = &sp.master {
+        if let Some(pty_reader) = &sp.pty_reader {
+            // 038 ConPTY：输入/输出双句柄——读取线程接 ConPTY 输出通道。
+            if let Ok(reader) = pty_reader.try_clone() {
+                spawn_reader(session.clone(), reader);
+            }
+        } else if let Some(master) = &sp.master {
             if let Ok(reader) = master.try_clone() {
                 spawn_reader(session.clone(), reader);
             }
@@ -1525,9 +1541,12 @@ fn ceil_char_boundary(s: &str, limit: usize) -> usize {
 
 /// 一次成功启动的产物。
 struct Spawned {
-    child: Child,
+    child: ChildHandle,
     /// PTY master（输入通道）；管道模式为 None。
     master: Option<Arc<File>>,
+    /// ConPTY 输出通道（038）：Windows PTY 的输入/输出是两个独立句柄，不能
+    /// 像 unix master 那样一份句柄既写又读——读取线程经本字段接入。
+    pty_reader: Option<Arc<File>>,
     stdout: Option<std::process::ChildStdout>,
     stderr: Option<std::process::ChildStderr>,
 }
@@ -1541,24 +1560,81 @@ struct Spawned {
 /// 031：`policy` 携带时改走 [`crate::sandbox::permission_launch_argv`]（受限
 /// 读树＋deny 优先＋网络开关＋seccomp 的动态策略入口）；seccomp fd 守卫须
 /// 存活到 spawn 返回——本函数内联完成 spawn 前‥后的全部时序。
-fn build_tool_command(
+/// 启动参数中间形态（038 ConPTY）：std Command 无读取接口，Windows PTY 路径
+/// 需要原始 program/argv/env 交给 CreateProcessW——两个消费方（std Command
+/// 构造与 ConPTY 启动）共用同一决策，行为零分歧。
+struct ToolArgv {
+    program: String,
+    args: Vec<String>,
+    /// Some＝白名单环境（env_clear＋仅此清单）；None＝继承进程环境（普通
+    /// 模式既有行为）。
+    env: Option<Vec<(String, String)>>,
+    /// 沙箱包装启动（bwrap 为 program）：unix 侧继承 fd 收口行为随分支保留。
+    sandbox_wrapped: bool,
+    #[cfg(unix)]
+    seccomp: Option<crate::sandbox::SeccompFd>,
+}
+
+fn tool_argv(
     cmd: &str,
     workdir: &std::path::Path,
     policy: Option<&crate::sandbox::PolicySnapshot>,
-) -> std::io::Result<(Command, Option<crate::sandbox::SeccompFd>)> {
+) -> std::io::Result<ToolArgv> {
+    let _ = workdir;
     if let Some(snapshot) = policy {
         let launch = crate::sandbox::permission_launch_argv(
             vec![SHELL.to_string(), SHELL_EXEC_FLAG.to_string(), cmd.to_string()],
             snapshot,
             workdir,
         )?;
-        let mut c = Command::new(&launch.program);
-        c.args(&launch.args);
-        // 038：pre_exec 为 unix API——Windows 无沙箱路径（policy 恒 None，
-        // 本分支不可达），cfg 门控仅为可编译性。
-        #[cfg(unix)]
-        match launch.seccomp.as_ref() {
+        Ok(ToolArgv {
+            program: launch.program,
+            args: launch.args,
+            env: Some(launch.env),
+            sandbox_wrapped: true,
             #[cfg(unix)]
+            seccomp: launch.seccomp,
+        })
+    } else {
+        match crate::sandbox::tool_launch_argv(vec![
+            SHELL.to_string(),
+            SHELL_EXEC_FLAG.to_string(),
+            cmd.to_string(),
+        ])? {
+            Some((program, args, child_env)) => Ok(ToolArgv {
+                program,
+                args,
+                env: Some(child_env),
+                sandbox_wrapped: true,
+                #[cfg(unix)]
+                seccomp: None,
+            }),
+            None => Ok(ToolArgv {
+                program: SHELL.to_string(),
+                args: vec![SHELL_EXEC_FLAG.to_string(), cmd.to_string()],
+                env: None,
+                sandbox_wrapped: false,
+                #[cfg(unix)]
+                seccomp: None,
+            }),
+        }
+    }
+}
+
+fn build_tool_command(
+    cmd: &str,
+    workdir: &std::path::Path,
+    policy: Option<&crate::sandbox::PolicySnapshot>,
+) -> std::io::Result<(Command, Option<crate::sandbox::SeccompFd>)> {
+    let t = tool_argv(cmd, workdir, policy)?;
+    let mut c = Command::new(&t.program);
+    c.args(&t.args);
+    if t.sandbox_wrapped {
+        // 031：seccomp fd 守卫须存活到 spawn——经返回值交给调用方。
+        // Some＝close_range 版收口（除 seccomp fd 外全部关闭）；None＝033-B2
+        // 的 CLOEXEC 标记版（launcher 遗留 fd execve 时关闭；仅沙箱分支）。
+        #[cfg(unix)]
+        match t.seccomp.as_ref() {
             Some(guard) => {
                 let fd = guard.raw();
                 unsafe {
@@ -1567,50 +1643,30 @@ fn build_tool_command(
                     });
                 }
             }
-            #[cfg(unix)]
             None => unsafe {
                 c.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
             },
-            #[cfg(windows)]
-            _ => unreachable!("031 沙箱仅 unix"),
         }
         #[cfg(windows)]
-        let _ = &launch;
-        #[cfg(windows)]
-        let _ = &launch;
-        c.env_clear();
-        c.envs(launch.env);
-        Ok((c, launch.seccomp))
-    } else {
-        match crate::sandbox::tool_launch_argv(vec![
-            SHELL.to_string(),
-            SHELL_EXEC_FLAG.to_string(),
-            cmd.to_string(),
-        ])? {
-            Some((program, args, child_env)) => {
-                let mut c = Command::new(program);
-                c.args(args);
-                // 033-B2：继承 fd ≥3 标记 CLOEXEC（execve 时关闭）——launcher 遗留的
-                // 非 CLOEXEC fd 不再进入沙箱载荷；仅沙箱分支（普通模式零变化）。
-                // 闭包为无捕获 fn 项，pre_exec 异步信号安全（单个 syscall）。
-                // 038：pre_exec 为 unix API（Windows 无沙箱路径，本分支不可达）。
-                #[cfg(unix)]
-                unsafe {
-                    c.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
-                }
-                #[cfg(windows)]
-                let _ = &c;
-                c.env_clear();
-                c.envs(child_env);
-                Ok((c, None))
-            }
-            None => {
-                let mut c = Command::new(SHELL);
-                c.arg(SHELL_EXEC_FLAG).arg(cmd);
-                Ok((c, None))
-            }
-        }
+        let _ = &c;
     }
+    match t.env {
+        Some(env) => {
+            c.env_clear();
+            c.envs(env);
+        }
+        None => {}
+    }
+    Ok((c, {
+        #[cfg(unix)]
+        {
+            t.seccomp
+        }
+        #[cfg(windows)]
+        {
+            None
+        }
+    }))
 }
 
 /// 管道模式：stdin 关闭，stdout/stderr 管道；独立进程组。
@@ -1638,25 +1694,214 @@ fn spawn_piped(
     }
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    Ok(Spawned { child, master: None, stdout, stderr })
+    Ok(Spawned { child: ChildHandle::Std(child), master: None, pty_reader: None, stdout, stderr })
 }
 
 /// PTY 模式：分配真实伪终端作为控制终端；会话组长自身成组
 ///（pre_exec setsid，不用 process_group——setpgid 后 setsid 会失败）。
 /// 031：同管道模式的 spawn 后 PID 命名空间验证（TTY 组终止路径）。
-/// Windows：交互终端（ConPTY＋CreateProcessW 属性清单）为已登记里程碑
-///（含产品 SHELL 语义的 Windows 决策）——本轮显式 fail-closed，不静默降级。
-
-/// Windows 版：显式 fail-closed（见 unix 版注释）。
+/// Windows 版（038 ConPTY，008 A6 的 Windows 等价实现）：CreatePseudoConsole
+/// ＋PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE 属性清单＋CreateProcessW。会话语义
+/// 对齐 unix 版：ConPTY 输出端＝读取线程通道；输入端＝master（Arc<File> 输入
+/// 通道）；整树终止经作业对象（spawn 后挂接）；伪终端拆除顺序＝进程退出→
+/// ClosePseudoConsole（ChildHandle::Raw::wait，monitor 唯一 wait 点）。
+/// 沙箱请求（TCHAT_SANDBOX）仍经 tool_argv fail-closed——bwrap 缺失＝Err。
 #[cfg(windows)]
 fn spawn_pty(
-    _cmd: &str,
-    _workdir: &std::path::Path,
-    _policy: Option<&crate::sandbox::PolicySnapshot>,
+    cmd: &str,
+    workdir: &std::path::Path,
+    policy: Option<&crate::sandbox::PolicySnapshot>,
 ) -> std::io::Result<Spawned> {
-    Err(std::io::Error::other(
-        "交互终端（ConPTY）实现为 038 已登记后续里程碑：Windows 暂不支持 PTY 会话",
-    ))
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HANDLE_FLAG_INHERIT};
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::System::Console::{
+        ClosePseudoConsole, CreatePseudoConsole, COORD, HPCON,
+    };
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, EXTENDED_STARTUPINFO_PRESENT, InitializeProcThreadAttributeList,
+        PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, STARTUPINFOEXW, STARTUPINFOW,
+        TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
+    };
+
+    // —— 管道对：输入（ConPTY 读端可继承）与输出（ConPTY 写端可继承）——
+    fn inherit_pipe() -> std::io::Result<(HANDLE, HANDLE)> {
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: std::ptr::null_mut(),
+            bInheritHandle: 1,
+        };
+        let (mut r, mut w): (HANDLE, HANDLE) = (std::ptr::null_mut(), std::ptr::null_mut());
+        if unsafe { CreatePipe(&mut r, &mut w, &sa as *const _, 0) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok((r, w))
+    }
+    let (pty_in_read, our_in_write) = inherit_pipe()?;
+    let (our_out_read, pty_out_write) = inherit_pipe()?;
+
+    // —— 伪终端（80×24，与 unix open_pty 的初始窗口一致）——
+    let mut hpc: HPCON = 0;
+    let create_pc =
+        unsafe { CreatePseudoConsole(COORD { X: 80, Y: 24 }, pty_in_read, pty_out_write, 0, &mut hpc) };
+    if create_pc != 0 {
+        unsafe {
+            CloseHandle(pty_in_read);
+            CloseHandle(pty_out_write);
+            CloseHandle(our_in_write);
+            CloseHandle(our_out_read);
+        }
+        return Err(std::io::Error::from_raw_os_error(create_pc));
+    }
+    // ConPTY 已持有两端句柄，父进程侧立即关闭（文档顺序）。
+    unsafe {
+        CloseHandle(pty_in_read);
+        CloseHandle(pty_out_write);
+    }
+
+    // —— 属性清单：挂 PSEUDOCONSOLE（唯一属性）——
+    let mut attr_size: usize = 0;
+    unsafe {
+        // 预查询：传 null 必失败但填充所需字节数（文档约定）。
+        let _ = InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut attr_size);
+    }
+    let mut attr_buf = vec![0u8; attr_size];
+    if unsafe {
+        InitializeProcThreadAttributeList(attr_buf.as_mut_ptr() as *mut _, 1, 0, &mut attr_size)
+    } == 0
+    {
+        unsafe { ClosePseudoConsole(hpc) };
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe {
+        UpdateProcThreadAttribute(
+            attr_buf.as_mut_ptr() as *mut _,
+            0,
+            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
+            &mut hpc as *mut _ as *mut std::ffi::c_void,
+            std::mem::size_of::<HPCON>(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        )
+    } == 0
+    {
+        unsafe { ClosePseudoConsole(hpc) };
+        return Err(std::io::Error::last_os_error());
+    }
+
+    // —— 命令行：tool_argv（沙箱 fail-closed 在此生效）＋Windows 引号拼接 ——
+    let t = tool_argv(cmd, workdir, policy)?;
+    let mut cmdline = quote_windows_arg(&t.program);
+    for a in &t.args {
+        cmdline.push(' ');
+        cmdline.push_str(&quote_windows_arg(a));
+    }
+    let mut cmdline_w: Vec<u16> = cmdline.encode_utf16().chain(std::iter::once(0)).collect();
+    let workdir_w: Vec<u16> =
+        workdir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let env_block: Option<Vec<u16>> = t.env.as_ref().map(|env| {
+        let mut b: Vec<u16> = Vec::new();
+        for (k, v) in env {
+            b.extend(format!("{k}={v}").encode_utf16());
+            b.push(0);
+        }
+        b.push(0);
+        b
+    });
+
+    let mut siex: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+    siex.StartupInfo = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOEXW>() as u32,
+        ..unsafe { std::mem::zeroed() }
+    };
+    siex.lpAttributeList = attr_buf.as_mut_ptr() as *mut _;
+    let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe {
+        CreateProcessW(
+            std::ptr::null(),
+            cmdline_w.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0, // bInheritHandles=FALSE：可继承性已在 ConPTY 端句柄满足
+            EXTENDED_STARTUPINFO_PRESENT,
+            env_block
+                .as_ref()
+                .map(|b| b.as_ptr() as *mut std::ffi::c_void)
+                .unwrap_or(std::ptr::null_mut()),
+            workdir_w.as_ptr(),
+            &siex.StartupInfo,
+            &mut pi,
+        )
+    } == 0
+    {
+        let e = std::io::Error::last_os_error();
+        unsafe {
+            ClosePseudoConsole(hpc);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        }
+        return Err(e);
+    }
+    unsafe { CloseHandle(pi.hThread) };
+    let pid = pi.dwProcessId;
+    let process: HANDLE = pi.hProcess;
+    let _ = HANDLE_FLAG_INHERIT; // 继承性经 SECURITY_ATTRIBUTES 传递；显式消除未用告警
+
+    // 作业对象挂接（016 整树终止）：与管道模式同机制；挂接失败＝失去树终止
+    // 能力——终止已启动的进程并显式报错，不静默降级。
+    if let Err(e) = win::assign_raw_process(pid, process) {
+        unsafe {
+            TerminateProcess(process, 1);
+            let _ = WaitForSingleObject(process, 5_000);
+            ClosePseudoConsole(hpc);
+            CloseHandle(process);
+        }
+        return Err(e);
+    }
+
+    let master = Arc::new(unsafe { File::from_raw_handle(our_in_write) });
+    let pty_reader = Arc::new(unsafe { File::from_raw_handle(our_out_read) });
+    Ok(Spawned {
+        child: ChildHandle::Raw { process, pid, hpc },
+        master: Some(master),
+        pty_reader: Some(pty_reader),
+        stdout: None,
+        stderr: None,
+    })
+}
+
+/// Windows 命令行引号拼接（CreateProcessW lpCommandLine 约定）：含空白或
+/// 引号的参数加引号，反斜杠仅在与收尾引号相邻时成对转义。
+#[cfg(windows)]
+fn quote_windows_arg(arg: &str) -> String {
+    if !arg.is_empty()
+        && !arg.chars().any(|c| c == ' ' || c == '\t' || c == '"')
+    {
+        return arg.to_string();
+    }
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    let mut backslashes = 0usize;
+    for c in arg.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                out.extend(std::iter::repeat('\\').take(backslashes * 2 + 1));
+                backslashes = 0;
+                out.push('"');
+            }
+            _ => {
+                out.extend(std::iter::repeat('\\').take(backslashes));
+                backslashes = 0;
+                out.push(c);
+            }
+        }
+    }
+    out.extend(std::iter::repeat('\\').take(backslashes * 2));
+    out.push('"');
+    out
 }
 
 #[cfg(unix)]
@@ -1695,7 +1940,7 @@ fn spawn_pty(
         crate::sandbox::verify_child_pid_namespace(child.id())?;
     }
     let master = Arc::new(master);
-    Ok(Spawned { child, master: Some(master), stdout: None, stderr: None })
+    Ok(Spawned { child: ChildHandle::Std(child), master: Some(master), pty_reader: None, stdout: None, stderr: None })
 }
 
 /// 038：macOS ptsname 静态缓冲的串行化锁（见 open_pty 内注释）。
@@ -1765,9 +2010,94 @@ fn open_pty() -> std::io::Result<(File, File)> {
     }
 }
 
-/// 监控线程：拥有 `Child`——轮询退出、执行终止请求／时限到期；退出后等
+/// 子进程句柄抽象（038 ConPTY）：std Child（管道模式、unix PTY）或 ConPTY
+/// 原生进程句柄（Windows PTY——CreateProcessW 的产物不构回 std Child）。
+/// 统一轮询/回收接口供监控线程使用，016 生命周期契约平台等价。
+/// 安全：HANDLE 为裸指针但句柄级操作（Wait/GetExitCode/Close/PseudoConsole
+/// 拆除）可跨线程调用；Raw 的句柄所有权随枚举整体移交监控线程（唯一持有
+/// 者），无别名访问。
+enum ChildHandle {
+    Std(Child),
+    /// ConPTY 子进程：process 句柄负责 wait/终止回收；hpc 负责 ClosePseudo
+    /// Console（wait 到终态后关闭——先进程退出再拆伪终端的文档顺序）。
+    #[cfg(windows)]
+    Raw { process: HANDLE, pid: u32, hpc: HPCON },
+}
+
+#[cfg(windows)]
+unsafe impl Send for ChildHandle {}
+
+
+impl ChildHandle {
+    fn id(&self) -> u32 {
+        match self {
+            ChildHandle::Std(c) => c.id(),
+            #[cfg(windows)]
+            ChildHandle::Raw { pid, .. } => *pid,
+        }
+    }
+
+    /// 作业挂接用的（pid, 原生句柄）——Std 经 AsRawHandle；Raw 自持句柄。
+    #[cfg(windows)]
+    fn raw_process(&self) -> (u32, HANDLE) {
+        match self {
+            ChildHandle::Std(c) => {
+                use std::os::windows::io::AsRawHandle;
+                (c.id(), unsafe { c.as_raw_handle() as HANDLE })
+            }
+            ChildHandle::Raw { process, pid, .. } => (*pid, *process),
+        }
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match self {
+            ChildHandle::Std(c) => c.try_wait(),
+            #[cfg(windows)]
+            ChildHandle::Raw { process, .. } => unsafe {
+                match WaitForSingleObject(*process, 0) {
+                    WAIT_OBJECT_0 => {
+                        let mut code: u32 = 0;
+                        if GetExitCodeProcess(*process, &mut code) == 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(Some(std::process::ExitStatus::from_raw(code)))
+                    }
+                    WAIT_TIMEOUT => Ok(None),
+                    _ => Err(std::io::Error::last_os_error()),
+                }
+            },
+        }
+    }
+
+    /// 终态回收：Std＝阻塞 wait；Raw＝阻塞等待＋读退出码＋拆伪终端＋关句柄
+    ///（monitor_thread 的唯一调用点；Drop 兜底不再重复清理）。
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        match self {
+            ChildHandle::Std(c) => c.wait(),
+            #[cfg(windows)]
+            ChildHandle::Raw { process, hpc, .. } => unsafe {
+                loop {
+                    match WaitForSingleObject(*process, 5_000) {
+                        WAIT_OBJECT_0 => break,
+                        WAIT_FAILED => return Err(std::io::Error::last_os_error()),
+                        _ => {} // WAIT_TIMEOUT：继续等（016 宽限语义内的有界阻塞）
+                    }
+                }
+                let mut code: u32 = 0;
+                if GetExitCodeProcess(*process, &mut code) == 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                ClosePseudoConsole(*hpc);
+                CloseHandle(*process);
+                Ok(std::process::ExitStatus::from_raw(code))
+            },
+        }
+    }
+}
+
+/// 监控线程：拥有子进程句柄——轮询退出、执行终止请求／时限到期；退出后等
 /// 读取线程收尾（有界），置 collect_done。终态回收（wait）只发生在这里。
-fn monitor_thread(session: Arc<Session>, mut child: Child, deadline: Option<Instant>) {
+fn monitor_thread(session: Arc<Session>, mut child: ChildHandle, deadline: Option<Instant>) {
     let pgid = child.id() as GroupId;
     let terminal = loop {
         // 收口缝（仅 cfg(test)）：门控停靠点——见 test_gate_wait（不持锁）。
@@ -2474,6 +2804,11 @@ mod win {
         std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
     pub fn assign_child_to_job(pid: u32, child: &Child) -> io::Result<()> {
+        assign_raw_process(pid, child.as_raw_handle() as HANDLE)
+    }
+
+    /// 038 ConPTY：CreateProcessW 产物的原生句柄挂接（无 std Child 可用）。
+    pub fn assign_raw_process(pid: u32, process: HANDLE) -> io::Result<()> {
         let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if job.is_null() {
             return Err(io::Error::last_os_error());
@@ -2491,7 +2826,7 @@ mod win {
                 CloseHandle(job);
                 return Err(io::Error::last_os_error());
             }
-            if AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0 {
+            if AssignProcessToJobObject(job, process) == 0 {
                 CloseHandle(job);
                 return Err(io::Error::last_os_error());
             }

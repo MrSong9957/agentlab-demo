@@ -507,10 +507,22 @@ fn non_canonical_writable_root_fails_closed() {
     fs::write(raw.join(".env"), "FAKE-TEST-TOKEN=6\n").unwrap(); // 同一文件（经解析）
     let policy = SandboxPolicy {
         full_disk_read: true,
-        writable_roots: vec![raw],
+        writable_roots: vec![raw.clone()],
         unreadable_roots: vec![ws.join(".env")],
     };
-    let err = create_bwrap_command_args(vec!["sh".into()], &policy, &ws, false).unwrap_err();
+    let err = match create_bwrap_command_args(vec!["sh".into()], &policy, &ws, false) {
+        Err(e) => e,
+        Ok(argv) => panic!(
+            "非词法清洁可写根必须显式拒绝：诊断 raw={raw:?} segments={segs:?} lex={lex:?} argv_n={argv}",
+            raw = raw.to_string_lossy(),
+            segs = raw
+                .to_string_lossy()
+                .split(['/', '\\'])
+                .collect::<Vec<_>>(),
+            lex = absolute_lexical(&raw).to_string_lossy(),
+            argv = argv.len()
+        ),
+    };
     assert!(
         err.contains("词法非清洁"),
         "非词法清洁可写根必须显式拒绝：{err}"
