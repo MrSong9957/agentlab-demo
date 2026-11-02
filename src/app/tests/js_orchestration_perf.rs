@@ -126,6 +126,7 @@ fn run_cell_to_terminal(code: &str, dispatcher: Arc<dyn LeafDispatcher>) -> (u12
     (elapsed, observation.status)
 }
 
+#[cfg(unix)]
 fn worker_rss_kib(pid: u32) -> u64 {
     std::fs::read_to_string(format!("/proc/{pid}/status"))
         .ok()
@@ -135,6 +136,29 @@ fn worker_rss_kib(pid: u32) -> u64 {
                 .and_then(|l| l.split_whitespace().nth(1).and_then(|v| v.parse().ok()))
         })
         .unwrap_or(0)
+}
+
+/// Windows：/proc 不存在——WorkingSetSize（字节）即 RSS 等价物（038 实测
+/// /proc 路径返回 0＝"主进程 RSS 读取失败"）。
+#[cfg(windows)]
+fn worker_rss_kib(pid: u32) -> u64 {
+    use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return 0;
+        }
+        let mut pmc: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+        pmc.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        let ok = GetProcessMemoryInfo(handle, &mut pmc, pmc.cb);
+        windows_sys::Win32::Foundation::CloseHandle(handle);
+        if ok != 0 {
+            pmc.WorkingSetSize as u64 / 1024
+        } else {
+            0
+        }
+    }
 }
 
 /// p95 计算（升序样本的第 95 百分位，线性插值省略——取 ceil(0.95n) 位）。

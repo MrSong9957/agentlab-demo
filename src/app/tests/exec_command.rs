@@ -343,10 +343,16 @@ fn cancel_keeps_process_then_terminate_stops_writes() {
 
     // 016：取消等待 ≠ 进程停止——进程继续写文件
     let s1 = log_size(&log);
-    // Windows 写入者每行一次 PowerShell（约 400-600ms）——观察窗按平台放大
-    // （契约不变：取消等待 ≠ 进程停止，窗口只影响采样时长）
-    thread::sleep(Duration::from_millis(if cfg!(windows) { 2500 } else { 400 }));
-    let s2 = log_size(&log);
+    // 有界轮询替代固定睡眠（Windows PowerShell 写入者每行 400-600ms——固定
+    // 窗口在 runner 两次实测零增长；契约不变：取消等待 ≠ 进程停止）
+    let grow_deadline = std::time::Instant::now() + Duration::from_millis(if cfg!(windows) { 6000 } else { 1500 });
+    let s2 = loop {
+        let v = log_size(&log);
+        if v > s1 || std::time::Instant::now() > grow_deadline {
+            break v;
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
     assert!(s2 > s1, "取消后受管理进程应继续运行（{s1} -> {s2}）");
 
     // 明确终止回收：整个进程组停止写入
@@ -489,8 +495,11 @@ fn exec_b04_dual_stream_mb_drain_after_cap() {
     let normalized = cmd_builder::normalize(&r.output);
     let (complete, tail) = normalized.rsplit_once('\n').unwrap_or(("", normalized.as_str()));
     for line in complete.lines() {
+        // 尾随空白剥离：cmd echo 的重定向空格绑定（`text 1>&2`/`text1>&2`）
+        // 产生的尾随字符不属内容契约（038 实测 "err-eeeeeeeeee " 与
+        // "err-eeeeeeeeee1" 两形态）
         assert!(
-            line == "out-wwwwwwwwww" || line == "err-eeeeeeeeee",
+            line.trim_end() == "out-wwwwwwwwww" || line.trim_end() == "err-eeeeeeeeee",
             "完整行必须属于两条合法流：{line:?}"
         );
     }

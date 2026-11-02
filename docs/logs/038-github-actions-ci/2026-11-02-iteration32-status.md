@@ -125,3 +125,17 @@ EncodedCommand（-Command 回显根因）＋关联修复消除 41 项。剩余 1
    为差异（下轮对证）。
 6. **c18_host_rss_bounded**：/proc RSS 读取在 Windows 不存在→主进程 RSS 采样
    需 Windows 机制或平台登记（下轮）。
+
+## 迭代 32 末批：Windows 14 项中 4 项修复（本地验证，待 CI 回报）
+1. b04 行成员判定 trim_end（`text1>&2` 空格绑定两形态均归一）。
+2. cancel 观察窗改有界轮询（6s Windows／1.5s unix——固定 400ms/2.5s 窗在
+   runner 两次实测零增长）。
+3. c18_host_rss：Windows 分支 GetProcessMemoryInfo WorkingSetSize（/proc 不
+   存在——/proc 路径恒 0＝"主进程 RSS 读取失败"），新增
+   Win32_System_ProcessStatus feature。
+4. f39e616 教训登记：文档推送同样触发并发组取消采证轮——采证期间禁止任何
+   推送（含 docs）。
+剩余 10 项：sandbox 文本族×4、RUNNER~1 短名族×4（apply_patch display capture
+与 view_image 属 0.02s 家族——套件内确定性失败、单跑待验）、mcp_resources×3
+（报文未捕获，下轮取证）。macOS sample 堆栈：活跑 f1fbb53（41372513512）
+macos job 收束后提取（预计 ~03:56 上限或提前完成）。
