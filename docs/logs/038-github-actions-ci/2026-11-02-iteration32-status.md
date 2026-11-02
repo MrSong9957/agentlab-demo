@@ -105,3 +105,23 @@ Drop 排空/强杀修复**未解除挂死**（同 3 子进程 E 态 1h25m＝出�
   采样写入工件日志）——直接给出产品退出路径的精确阻塞调用栈。
 - 已知：其余 17 个 spawn 未发生＝3 个卡死测试线程占满 3 线程池，约 20 用例
   排队其后——修复 3 场景即可全量解锁。
+
+## 迭代 32 终定：Windows 55→14（windows13.log，b42da47 轮＝首个 EncodedCommand 全量验证）
+
+EncodedCommand（-Command 回显根因）＋关联修复消除 41 项。剩余 14 项分类归因：
+1. **sandbox fail-closed 文本族×4**（non_canonical_writable_root、sandbox_mode_pty_
+   timeout、sandbox_mode_wraps_tool、js sandbox_wrapper）：Windows 无 bwrap 的
+   报错文本/哨兵行为与 unix 断言预期不同——按平台报错契约逐个对齐（下轮）。
+2. **RUNNER~1 短名族×4**（result_json_display_capture、view_image 目录 Access
+   denied、internal_apply os error 87、install_dir）：lib 单测夹具比较含短名——
+   比较侧 long_norm 化＋view_image 的 `dir\.` 形态开档行为下轮处理。
+3. **exec_command×2**：b04 `echo X 1>&2` 的无空格形态把 `1` 绑进文本（打印
+   err-eeeeeeeeee1）→行成员判定改 trim_end（内容契约不含尾随空白）；cancel
+   3→3＝PowerShell 写入者节流仍慢于 400ms 窗→窗口 2.5s 已有但取点仍早（下轮
+   用 wait_until_true 有界轮询替代固定睡眠）。
+4. **mcp_resources×3**（m1_directed_list、m2_read_preserves、m2_templates）：
+   scenario 级细分——错误面取证后修（下轮）。
+5. **min_output_cap 码点边界**（"p" vs "中"）：Windows 输出截断的字节级边界行
+   为差异（下轮对证）。
+6. **c18_host_rss_bounded**：/proc RSS 读取在 Windows 不存在→主进程 RSS 采样
+   需 Windows 机制或平台登记（下轮）。
