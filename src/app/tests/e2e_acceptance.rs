@@ -1122,12 +1122,39 @@ impl PtySession {
                 let threads = Command::new("ps")
                     .args(["-M", "-p", &me.to_string()])
                     .output();
+                // E 态（退出中）子进程堆栈采样：`sample` 直接给出阻塞调用栈
+                // （产品退出路径的精确挂点——038 D-mac 三轮取证）
+                let mut sample_out = String::new();
+                let mut sample_done = false;
+                if let Ok(all) = &filtered {
+                    for line in all.lines() {
+                        if line.contains("(terminal-chat)") && line.contains(" Es ") {
+                            let pid = line.split_whitespace().next().unwrap_or("").to_string();
+                            if pid.is_empty() {
+                                continue;
+                            }
+                            let out = Command::new("sample")
+                                .args([&pid, "2", "-file", &format!("/tmp/sample-{pid}.txt")])
+                                .output();
+                            let stacks = std::fs::read_to_string(format!("/tmp/sample-{pid}.txt"))
+                                .unwrap_or_default();
+                            sample_out.push_str(&format!(
+                                "[sample {pid}] exit={}\n{}\n",
+                                out.map(|o| o.status.code()).unwrap_or(None).map(|c| c.to_string()).unwrap_or_else(|| "None".into()),
+                                &stacks[..stacks.len().min(4000)]
+                            ));
+                            sample_done = true;
+                        }
+                    }
+                }
+                let _ = sample_done;
                 Self::log_direct(&format!(
-                    "[e2e-watch] t={t}s\n[ps -axo 过滤]\n{}\n[ps -M 自身线程]\n{}\n",
+                    "[e2e-watch] t={t}s\n[ps -axo 过滤]\n{}\n[ps -M 自身线程]\n{}\n{}\n",
                     filtered.as_deref().unwrap_or("(ps 失败)"),
                     threads
                         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                        .unwrap_or_else(|_| "(ps -M 失败)".into())
+                        .unwrap_or_else(|_| "(ps -M 失败)".into()),
+                    sample_out
                 ));
             });
         });
