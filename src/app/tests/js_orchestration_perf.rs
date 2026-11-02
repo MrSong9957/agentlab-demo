@@ -126,7 +126,9 @@ fn run_cell_to_terminal(code: &str, dispatcher: Arc<dyn LeafDispatcher>) -> (u12
     (elapsed, observation.status)
 }
 
-#[cfg(unix)]
+/// 038 macOS：无 /proc——经 `ps -o rss=` 取当前 RSS（KiB）；Linux 维持
+/// /proc VmRSS 精读。
+#[cfg(all(unix, not(target_os = "macos")))]
 fn worker_rss_kib(pid: u32) -> u64 {
     std::fs::read_to_string(format!("/proc/{pid}/status"))
         .ok()
@@ -135,6 +137,18 @@ fn worker_rss_kib(pid: u32) -> u64 {
                 .find(|l| l.starts_with("VmRSS:"))
                 .and_then(|l| l.split_whitespace().nth(1).and_then(|v| v.parse().ok()))
         })
+        .unwrap_or(0)
+}
+
+#[cfg(target_os = "macos")]
+fn worker_rss_kib(pid: u32) -> u64 {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .expect("ps 采样失败");
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
         .unwrap_or(0)
 }
 

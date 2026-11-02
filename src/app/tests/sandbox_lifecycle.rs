@@ -59,29 +59,69 @@ fn seed_grant(user: &Path, url: &str, key: &str) {
 }
 
 /// cmdline 含全部片段的进程 pid 集（僵尸进程 cmdline 为空，天然不计入——
-/// 「活进程」与「僵尸/已死」在扫描层面即区分）。
+/// 「活进程」与「僵尸/已死」在扫描层面即区分）。038 macOS：无 /proc——经
+/// `ps -axo pid=,command=` 等价扫描（macOS 的 Z 态进程 command 为
+/// "(name)"，与 /proc cmdline 空同样天然不计入）。
 fn scan_procs(frags: &[&str]) -> Vec<u32> {
     let mut out = Vec::new();
-    for e in std::fs::read_dir("/proc").unwrap().flatten() {
-        let Some(pid) = e.file_name().to_string_lossy().parse::<u32>().ok() else { continue };
-        let Ok(cl) = fs::read_to_string(format!("/proc/{pid}/cmdline")) else { continue };
-        if !cl.is_empty() && frags.iter().all(|f| cl.contains(f)) {
-            out.push(pid);
+    #[cfg(target_os = "macos")]
+    {
+        let ps = std::process::Command::new("ps")
+            .args(["-axo", "pid=,command="])
+            .output()
+            .expect("ps 扫描失败");
+        for line in String::from_utf8_lossy(&ps.stdout).lines() {
+            let mut it = line.trim().splitn(2, char::is_whitespace);
+            let Some(pid) = it.next().and_then(|p| p.parse::<u32>().ok()) else { continue };
+            let Some(cmd) = it.next() else { continue };
+            if !cmd.is_empty() && frags.iter().all(|f| cmd.contains(f)) {
+                out.push(pid);
+            }
         }
+        out.sort_unstable();
+        return out;
     }
-    out.sort_unstable();
-    out
+    #[cfg(not(target_os = "macos"))]
+    {
+        for e in std::fs::read_dir("/proc").unwrap().flatten() {
+            let Some(pid) = e.file_name().to_string_lossy().parse::<u32>().ok() else { continue };
+            let Ok(cl) = fs::read_to_string(format!("/proc/{pid}/cmdline")) else { continue };
+            if !cl.is_empty() && frags.iter().all(|f| cl.contains(f)) {
+                out.push(pid);
+            }
+        }
+        out.sort_unstable();
+        out
+    }
 }
 
 /// /proc/{pid} 状态（区分活进程与僵尸：State Z＝已死未收割，非泄漏）。
+/// 038 macOS：无 /proc——经 `ps -o stat=` 等价（macOS STAT 首 T＝stopped/
+/// 终态、Z＝僵尸；活进程返回 S/R/U 等），语义对齐。
 fn proc_state(pid: u32) -> Option<String> {
-    fs::read_to_string(format!("/proc/{pid}/status"))
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("State:"))
-                .map(|l| l.trim().to_string())
-        })
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() {
+            None // ps 无输出＝条目已消失
+        } else {
+            Some(format!("State: {s}"))
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("State:"))
+                    .map(|l| l.trim().to_string())
+            })
+    }
 }
 
 fn cli_command(cfg: &Path, user: &Path, work: &Path, key_name: &str, key: &str) -> Command {

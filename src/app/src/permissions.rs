@@ -729,30 +729,29 @@ fn canonical_long_checked(p: &Path) -> std::io::Result<PathBuf> {
 }
 
 /// 「p 位于 prefix 之下（或相等）」的真实对象判定：先做文本前缀快路径；
-/// Windows 下尾组件不存在时 canonicalize 回退原形态（8.3 短名／verbatim
-/// 前缀残留），与已 canonicalize 的策略侧前缀文本失配＝同一真实对象被误判
-/// 越界（038 Windows CI 实测：install\bin 形态逃过目录级 deny、verbatim
-/// 授权路径被误判「超出 requestable」）。回退路径＝最长**已存在**祖先的
-/// canonicalize（真实形态）＋词法余部——授权对象一致性不依赖路径存在性。
-/// unix 上 canonicalize 恒成功（组件校验已先行），形态恒一＝零行为漂移。
+/// 文本失配时按「最长已存在祖先的 canonicalize＋词法余部」比较真实对象。
+/// - Windows：尾组件不存在时 canonicalize 回退原形态（8.3 短名／verbatim
+///   前缀残留）（038 Windows CI 实测：install\bin 形态逃过目录级 deny）；
+/// - macOS：/var→private/var 符号链接使词法形态与 canonical 形态分叉
+///  （038 macOS CI 实测：write /var/... 与 deny /private/var/... 失配）；
+/// - Linux：canonicalize 恒成功、形态恒一，快路径即终局＝零行为漂移。
 fn path_covers(p: &Path, prefix: &Path) -> bool {
     if p == prefix || p.starts_with(prefix) {
         return true;
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         let p_real = canonical_long(&existing_ancestor_form(p));
         let prefix_real = canonical_long(&existing_ancestor_form(prefix));
         return p_real == prefix_real || p_real.starts_with(&prefix_real);
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     false
 }
 
-/// Windows 辅助：p 本身 canonicalize 失败（尾组件不存在）时，改用最长的
-/// 已存在祖先的 canonicalize 结果＋词法余部重建等价形态；unix 上即原路径
-/// （canonicalize 已在上面成功，本函数不会被调用到回退分支）。
-#[cfg(windows)]
+/// 辅助：p 本身 canonicalize 失败（尾组件不存在/词法形态分叉）时，改用
+/// 最长的已存在祖先的 canonicalize 结果＋词法余部重建等价形态。
+#[cfg(any(windows, target_os = "macos"))]
 fn existing_ancestor_form(p: &Path) -> PathBuf {
     if std::fs::canonicalize(p).is_ok() {
         return p.to_path_buf();

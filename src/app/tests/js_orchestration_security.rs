@@ -263,10 +263,19 @@ fn env_and_fd_sentinels_absent_from_worker() {
     let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
     let pid = cell.worker_pid();
 
-    // env 哨兵：worker environ 不含宿主凭证
-    let environ = std::fs::read(format!("/proc/{pid}/environ"))
-        .expect("worker 进程存活且 environ 可读");
-    let env_str = String::from_utf8_lossy(&environ).to_string();
+    // env 哨兵：worker environ 不含宿主凭证。038 macOS：无 /proc——经
+    // `ps -Eww`（自有进程可见环境）等价取证；Linux 维持 /proc environ 直读。
+    let env_str = if cfg!(target_os = "macos") {
+        let out = std::process::Command::new("ps")
+            .args(["-Eww", "-p", &pid.to_string()])
+            .output()
+            .expect("ps -E 采样失败");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    } else {
+        let environ = std::fs::read(format!("/proc/{pid}/environ"))
+            .expect("worker 进程存活且 environ 可读");
+        String::from_utf8_lossy(&environ).into_owned()
+    };
     std::env::remove_var(SENTINEL_KEY);
     drop(_env_guard);
     assert!(
@@ -274,17 +283,32 @@ fn env_and_fd_sentinels_absent_from_worker() {
         "宿主 env 哨兵泄漏进 worker environ：{env_str:?}"
     );
 
-    // fd 哨兵：planted 非 CLOEXEC fd 不进 worker
-    let mut leaked: Option<(String, String)> = None;
-    for entry in std::fs::read_dir(format!("/proc/{pid}/fd")).expect("worker fd 目录可读") {
-        let entry = entry.unwrap();
-        let target = std::fs::read_link(entry.path())
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
-        if target.contains("fd-sentinel") {
-            leaked = Some((entry.file_name().to_string_lossy().to_string(), target));
+    // fd 哨兵：planted 非 CLOEXEC fd 不进 worker。038 macOS：无 /proc fd——
+    // 经 `lsof -p`（runner 预装）扫描打开文件名等价取证。
+    let leaked = if cfg!(target_os = "macos") {
+        let out = std::process::Command::new("lsof")
+            .args(["-Fn", "-p", &pid.to_string()])
+            .output()
+            .expect("lsof 采样失败");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        if text.contains("fd-sentinel") {
+            Some(("lsof".to_string(), text))
+        } else {
+            None
         }
-    }
+    } else {
+        let mut leaked: Option<(String, String)> = None;
+        for entry in std::fs::read_dir(format!("/proc/{pid}/fd")).expect("worker fd 目录可读") {
+            let entry = entry.unwrap();
+            let target = std::fs::read_link(entry.path())
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if target.contains("fd-sentinel") {
+                leaked = Some((entry.file_name().to_string_lossy().to_string(), target));
+            }
+        }
+        leaked
+    };
     let observation = cell.terminate(&mut sink, &[]);
     assert_eq!(observation.status, CellStatus::Terminated);
     unsafe { libc::close(planted_fd) };
