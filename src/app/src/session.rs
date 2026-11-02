@@ -787,12 +787,27 @@ type SessionLock = ();
 #[cfg(windows)]
 struct SessionLock {
     handle: windows_sys::Win32::Foundation::HANDLE,
+    /// 取得所有权（WaitForSingleObject 返回）的线程。ReleaseMutex 契约要求
+    /// 「由拥有互斥体的线程释放」——非拥有线程调用必失败（ERROR_NOT_OWNER），
+    /// 互斥体保持被持有。守卫可能随 State 跨线程移动（TUI：turn 线程经
+    /// on_history 取锁，退出时 UI 线程经 flush_final/Drop 释放），Drop 按
+    /// owner 判定是否可释放；不可释放时仅关句柄，互斥体由拥有线程退出时
+    /// 自动废弃（WAIT_ABANDONED＝flock「进程死即释放」同语义）。
+    owner: std::thread::ThreadId,
 }
 
-// 安全：HANDLE 为裸指针但互斥体句柄的 ReleaseMutex/CloseHandle 可跨线程
-// 调用（Windows 互斥体对象语义）；守卫仅封装句柄所有权，不涉及线程局部状态。
+// 安全：HANDLE 为裸指针但句柄级操作（CloseHandle）可跨线程调用；ReleaseMutex
+// 仅在 owner 线程执行（Drop 内判定）；守卫本身不访问线程局部状态。
 #[cfg(windows)]
 unsafe impl Send for SessionLock {}
+
+#[cfg(windows)]
+impl SessionLock {
+    /// 当前线程是否仍拥有该互斥体（ReleaseMutex 的调用资格判定）。
+    fn releasable_by_current_thread(&self) -> bool {
+        self.owner == std::thread::current().id()
+    }
+}
 
 #[cfg(windows)]
 impl Drop for SessionLock {
@@ -800,7 +815,9 @@ impl Drop for SessionLock {
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::ReleaseMutex;
         unsafe {
-            ReleaseMutex(self.handle);
+            if self.releasable_by_current_thread() {
+                ReleaseMutex(self.handle);
+            }
             CloseHandle(self.handle);
         }
     }
@@ -860,7 +877,10 @@ fn try_flock(path: &Path, _file: &File) -> (LockOutcome, Option<SessionLock>) {
     }
     let wait = unsafe { WaitForSingleObject(handle, 0) };
     if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
-        (LockOutcome::Acquired, Some(SessionLock { handle }))
+        (
+            LockOutcome::Acquired,
+            Some(SessionLock { handle, owner: std::thread::current().id() }),
+        )
     } else if wait == WAIT_TIMEOUT {
         unsafe { CloseHandle(handle) };
         (LockOutcome::Busy, None)

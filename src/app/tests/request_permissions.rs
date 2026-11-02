@@ -279,7 +279,9 @@ fn policy_load_accepts_trusted_location() {
     // temp root 传不含夹具的目录：可信位置正例不被临时目录规则误伤
     let fake_temp = f.trusted.join("fake-tmp-unused");
     let policy = Policy::load_verified(&p, &f.anchor, &fake_temp).unwrap();
-    assert_eq!(policy.base.entries[0].path, f.anchor.canonicalize().unwrap());
+    // 038-CI：策略装载侧统一 canonical_long 形态（剥 verbatim；unix 恒等），
+    // 期望侧同函数归一
+    assert_eq!(policy.base.entries[0].path, ln(&f.anchor.canonicalize().unwrap()));
 }
 
 #[test]

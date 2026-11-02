@@ -77,6 +77,12 @@ type RootLock = std::fs::File;
 #[cfg(windows)]
 struct RootLock {
     handle: windows_sys::Win32::Foundation::HANDLE,
+    /// 取得所有权（WaitForSingleObject 返回）的线程。ReleaseMutex 契约要求
+    /// 由拥有互斥体的线程释放；守卫跨线程 Drop（如在共享锁临界区内产生的
+    /// 守卫随返回值移动到其他线程）时跳过 ReleaseMutex——互斥体由拥有线程
+    /// 退出时废弃（WAIT_ABANDONED＝flock「进程死即释放」同语义），临界区内
+    /// 的代数复核兜底一致性。
+    owner: std::thread::ThreadId,
 }
 
 #[cfg(windows)]
@@ -85,7 +91,9 @@ impl Drop for RootLock {
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::ReleaseMutex;
         unsafe {
-            ReleaseMutex(self.handle);
+            if self.owner == std::thread::current().id() {
+                ReleaseMutex(self.handle);
+            }
             CloseHandle(self.handle);
         }
     }
@@ -144,7 +152,7 @@ fn flock_root(root: &Path, _exclusive: bool) -> Option<RootLock> {
         unsafe { CloseHandle(handle) };
         return None;
     }
-    Some(RootLock { handle })
+    Some(RootLock { handle, owner: std::thread::current().id() })
 }
 
 /// 共享写守卫（RAII）：持有期间 reset 的排他清空被互斥——「检查代数＋

@@ -1431,9 +1431,11 @@ impl PtySession {
                 .flatten()
             {
                 Some(s) => break s,
-                None if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(20))
-                }
+                // 038 D-mac（CI 实证）：等待期必须持续排干 master——产品退出
+                // 序列向 slave 回写大块渲染（图片卡/问题恢复/计划快照），master
+                // 不排干则缓冲写满、子进程阻塞在退出中（E 态泄漏，SIGKILL 不可
+                // 中断内核写等待）＝「PTY 子进程未在期限内退出」级联失败。
+                None if Instant::now() < deadline => self.read_once(20),
                 _ => {
                     let _ = self.child.as_mut().map(|c| c.kill());
                     panic!("PTY 子进程未在期限内退出");

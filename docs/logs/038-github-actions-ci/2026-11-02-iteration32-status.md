@@ -139,3 +139,51 @@ EncodedCommand（-Command 回显根因）＋关联修复消除 41 项。剩余 1
 与 view_image 属 0.02s 家族——套件内确定性失败、单跑待验）、mcp_resources×3
 （报文未捕获，下轮取证）。macOS sample 堆栈：活跑 f1fbb53（41372513512）
 macos job 收束后提取（预计 ~03:56 上限或提前完成）。
+
+## 迭代 33：41373539854（08f1d75）三平台完整归因——Windows 真实全集 54 项
+
+**口径修正：此前「14」是 windows job 未完整跑完全部目标时的部分计数**。本轮
+三平台 job 均完整结束（29m16s，failure），Windows 实际失败 54 项/19 个目标
+（exec_b04、cancel、min_output_cap、c18 等 12 项与既有归因一致；c18_host_rss
+经 GetProcessMemoryInfo 修复已通过；其余 42 项为此前从未被观测的目标）。
+
+- **macOS 主根因（级联 47 项）＝夹具 finish() 等待循环只 sleep 不排干 master**
+  （e2e_acceptance.rs:1434）：产品退出序列向 slave 回写大块渲染（图片卡/
+  问题恢复/计划快照）写满 PTY 缓冲后阻塞在退出中（看门狗两次采到 `?<Es`
+  E 态子进程 11–21s 不死＝SIGKILL 无法中断内核写等待）→「PTY 子进程未在
+  期限内退出」级联；泄漏进程累积后 runner 在 23m 处截断（连失败汇总都未打
+  完，无超时无取消——资源耗尽形态）。修复＝等待期 read_once(20) 持续排干。
+  s82 挂 421s 后自愈通过（曾疑 s100×2+s101 实为同根因的不同表现）。
+- **mcp 家族统一根因＝setup() 模板漏 `-X utf8`**（mcp_fixtures.rs:72，其余
+  模板均有）：Windows 管道 stdout 默认 locale 编码（cp1252）——夹具含中文
+  的场景（content_types/is_error/resources 等）UnicodeEncodeError 崩溃＝
+  「传输已关闭，响应未到达」；a03 mojibake（record 记录 ä½ å¥½＝cp1252 解码
+  UTF-8 字节）与 ubuntu/macOS（locale UTF-8）幸免完全互证。
+- **Windows 授权形态族×4（canonical_long 残留缺口）**：install_dir deny 逃逸
+  （策略尾组件不存在→canonical_long 回退原形态→RUNNER~1 短名 vs deny 长名
+  文本失配）、nested_read verbatim 授权路径被误判「超出 requestable」、
+  attack02/policy_load 期望侧绑定 verbatim 形态。修复＝path_covers（最长已
+  存在祖先 canonicalize＋词法余部）应用于 requestable 子集/deny 冲突/base
+  覆盖三处比较；测试期望侧归一。
+- **Windows 锁语义审计（ReleaseMutex 线程所有权契约）**：SessionLock/
+  RootLock 的 Drop 此前无条件 ReleaseMutex——TUI 下 turn 线程经 on_history
+  取锁、UI 线程经 flush_final/Drop 释放＝非拥有线程释放（ERROR_NOT_OWNER
+  静默失败，互斥体滞留）。修复＝守卫记录 owner ThreadId，Drop 判定后释放；
+  同线程重入（WaitForSingleObject 对自有互斥体递归成功）经 resume 的
+  same_file 复用分支规避，canonicalize 失败形态下残余差异已登记（递归深度
+  语义与 unix flock 二次加锁 Busy 不同，单写者外部可观测语义不变）。
+- **f2_swap_barrier 平台分科**：macOS 无 /proc 且 fdescfs 拒写重开——FIFO
+  占位路径 O_NONBLOCK 重开 ENXIO＝fail-closed（拒写）即设计语义；Linux
+  /proc/self/fd＝真 inode 绑定写成功。测试按平台断言（共同不变量：FIFO 未
+  被读写、不写错对象）。
+- **D1–D3 诊断工件（workflow_dispatch 41378437334）**：独立探针 bwrap＋
+  产品同款 cBPF＝clone3 ENOSYS ✓；产品链 strace 显示 bwrap **未调用
+  seccomp(SET_MODE_FILTER)**，且 runner `unshare --user` 失败（AppArmor 限
+  制 userns；bwrap 自带 profile 故独立探针可用）——产品链根因继续收敛方向
+  ＝seccomp fd 传递/加载侧；诊断 job 下轮补 apparmor sysctl＋bwrap stderr。
+  D2 证据：close 后 marker sleep 被 init 收养（marker_pid=1）＝ns 成员未补杀。
+
+本轮修复（提交批次一）：mcp -X utf8、mac finish() 排干、SessionLock/RootLock
+owner 线程守卫、path_covers 三处＋测试期望归一、f2 平台分科、apply_patch
+relative_paths 期望归一。本地（Linux）request_permissions 38/38、attack02、
+f2_swap、relative_paths 全绿。

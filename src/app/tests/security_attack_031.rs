@@ -428,7 +428,12 @@ fn attack02_path_attacks_parse_and_enforce() {
         .as_str()
         .unwrap()
         .to_string();
-    assert_eq!(shown, x.canonicalize().unwrap().display().to_string(), "展示路径应为词法归一后的实际路径：{v}");
+    // 038-CI：展示路径为 canonical_long 形态（canonicalize 后剥 Windows
+    // verbatim 前缀；unix 恒等）——期望侧同函数归一，不绑定原始 verbatim 形态
+    let x_canon = x.canonicalize().unwrap().display().to_string();
+    #[cfg(windows)]
+    let x_canon = x_canon.strip_prefix(r"\\?\").map(String::from).unwrap_or(x_canon);
+    assert_eq!(shown, x_canon, "展示路径应为词法归一后的实际路径：{v}");
 
     // 3) 字面 %XX 不解码：%41 目录按字面批准；解码形态（A）不存在 → 拒绝
     let mut host = CountingHost::allow();

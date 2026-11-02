@@ -2384,14 +2384,32 @@ mod tests {
             let c = std::ffi::CString::new(v.as_os_str().as_encoded_bytes().to_vec()).unwrap();
             assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
         });
-        assert_eq!(r1["ok"], json!(true), "写入须绑定已判型 inode：{r1}");
-        assert_eq!(r1["state_known"], json!(true), "{r1}");
-        assert_eq!(
-            r1["changed_files"],
-            json!([{ "path": victim.display().to_string(), "action": "update" }]),
-            "{r1}"
-        );
-        assert_eq!(std::fs::read(&orig).unwrap(), expect_new.as_bytes(), "原 inode 内容逐字节正确");
+        // 平台分科（038 macOS CI 实证）：Linux 经 /proc/self/fd 重开＝真 inode
+        // 绑定，替换窗口内写入仍落到原 inode（ok=true）；macOS 无 /proc 且
+        // fdescfs 拒绝写重开——写入路径的 O_NONBLOCK 重开在 FIFO 占位上立即
+        // ENXIO 失败＝fail-closed（拒绝写入错对象），绝不截断/写入占位 FIFO。
+        // 两个平台共同的安全不变量：占位 FIFO 未被读写、原 inode 内容不被
+        // 写穿到错误对象。
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(r1["ok"], json!(true), "写入须绑定已判型 inode：{r1}");
+            assert_eq!(r1["state_known"], json!(true), "{r1}");
+            assert_eq!(
+                r1["changed_files"],
+                json!([{ "path": victim.display().to_string(), "action": "update" }]),
+                "{r1}"
+            );
+            assert_eq!(std::fs::read(&orig).unwrap(), expect_new.as_bytes(), "原 inode 内容逐字节正确");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(r1["ok"], json!(false), "FIFO 占位路径必须拒绝写入（fail-closed）：{r1}");
+            assert_eq!(
+                std::fs::read(&orig).unwrap(),
+                b"a\nb\nc\nd\ne\n",
+                "macOS 无 inode 绑定通路：原 inode 内容保持改写前状态（不写错对象）"
+            );
+        }
         assert!(
             std::fs::symlink_metadata(&victim).unwrap().file_type().is_fifo(),
             "占位 FIFO 未被读写（仍为 FIFO）"
@@ -2412,14 +2430,22 @@ mod tests {
             assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
             std::fs::rename(&f, &l).unwrap(); // 原子替换链接本体，无中间状态
         });
-        assert_eq!(r2["ok"], json!(true), "链接目标经 fd 绑定写入原 inode：{r2}");
-        assert_eq!(r2["state_known"], json!(true), "{r2}");
-        assert_eq!(
-            r2["changed_files"],
-            json!([{ "path": link.display().to_string(), "action": "update" }]),
-            "{r2}"
-        );
-        assert_eq!(std::fs::read(&realf).unwrap(), expect_new.as_bytes(), "原 inode 内容逐字节正确");
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(r2["ok"], json!(true), "链接目标经 fd 绑定写入原 inode：{r2}");
+            assert_eq!(r2["state_known"], json!(true), "{r2}");
+            assert_eq!(
+                r2["changed_files"],
+                json!([{ "path": link.display().to_string(), "action": "update" }]),
+                "{r2}"
+            );
+            assert_eq!(std::fs::read(&realf).unwrap(), expect_new.as_bytes(), "原 inode 内容逐字节正确");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(r2["ok"], json!(false), "链接被替换为 FIFO 后必须拒绝写入：{r2}");
+            assert_eq!(std::fs::read(&realf).unwrap(), b"a\nb\nc\nd\ne\n");
+        }
         assert!(
             std::fs::symlink_metadata(&link).unwrap().file_type().is_fifo(),
             "重指向后的 FIFO 未被读写（仍为 FIFO）"

@@ -728,6 +728,55 @@ fn canonical_long_checked(p: &Path) -> std::io::Result<PathBuf> {
     Ok(canon)
 }
 
+/// 「p 位于 prefix 之下（或相等）」的真实对象判定：先做文本前缀快路径；
+/// Windows 下尾组件不存在时 canonicalize 回退原形态（8.3 短名／verbatim
+/// 前缀残留），与已 canonicalize 的策略侧前缀文本失配＝同一真实对象被误判
+/// 越界（038 Windows CI 实测：install\bin 形态逃过目录级 deny、verbatim
+/// 授权路径被误判「超出 requestable」）。回退路径＝最长**已存在**祖先的
+/// canonicalize（真实形态）＋词法余部——授权对象一致性不依赖路径存在性。
+/// unix 上 canonicalize 恒成功（组件校验已先行），形态恒一＝零行为漂移。
+fn path_covers(p: &Path, prefix: &Path) -> bool {
+    if p == prefix || p.starts_with(prefix) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        let p_real = canonical_long(&existing_ancestor_form(p));
+        let prefix_real = canonical_long(&existing_ancestor_form(prefix));
+        return p_real == prefix_real || p_real.starts_with(&prefix_real);
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+/// Windows 辅助：p 本身 canonicalize 失败（尾组件不存在）时，改用最长的
+/// 已存在祖先的 canonicalize 结果＋词法余部重建等价形态；unix 上即原路径
+/// （canonicalize 已在上面成功，本函数不会被调用到回退分支）。
+#[cfg(windows)]
+fn existing_ancestor_form(p: &Path) -> PathBuf {
+    if std::fs::canonicalize(p).is_ok() {
+        return p.to_path_buf();
+    }
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    let mut anc = p.to_path_buf();
+    loop {
+        match (anc.parent(), anc.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+                rest.push(name.to_os_string());
+                anc = parent.to_path_buf();
+                if std::fs::canonicalize(&anc).is_ok() {
+                    let mut out = canonical_long(&anc);
+                    for part in rest.into_iter().rev() {
+                        out.push(part);
+                    }
+                    return out;
+                }
+            }
+            _ => return p.to_path_buf(),
+        }
+    }
+}
+
 /// 路径规范化（§1.4）：相对路径基于会话 cwd 解析（不基于上一条 shell 的
 /// cd）；词法消除 `.`/`..` 后**逐组件**验证存在且无符号链接；不做 URL
 /// 解码、Unicode 归一化或环境展开；重复项去重、同路径 write 覆盖 read。
@@ -1024,7 +1073,7 @@ pub fn build_snapshot(
 ) -> Result<crate::sandbox::PolicySnapshot, String> {
     for g in &grants.entries {
         let ok = policy.requestable.entries.iter().any(|r| {
-            g.path.starts_with(&r.path) && r.access.covers(g.access)
+            path_covers(&g.path, &r.path) && r.access.covers(g.access)
         });
         if !ok {
             return Err(format!(
@@ -1070,7 +1119,7 @@ pub fn build_snapshot(
     // 有效 deny（含自动敏感边界）与内容面矛盾：内容路径位于 deny 之下＝保护
     // 的内容又被授权暴露（解析层已拒显式组合；此处覆盖自动边界与部署拓扑）。
     for p in read_paths.iter().chain(write_paths.iter()) {
-        if deny_paths.iter().any(|d| p == d || p.starts_with(d)) {
+        if deny_paths.iter().any(|d| path_covers(p, d)) {
             return Err(format!(
                 "策略矛盾：内容路径 {} 位于永久拒绝路径之下（deny 优先，拒绝启动）",
                 p.display()
@@ -1108,7 +1157,7 @@ pub fn base_covers(policy: &Policy, req: &NormalizedRequest) -> bool {
             .base
             .entries
             .iter()
-            .any(|b| e.path.starts_with(&b.path) && b.access.covers(e.access))
+            .any(|b| path_covers(&e.path, &b.path) && b.access.covers(e.access))
     }) && (!req.network || policy.base.network)
 }
 

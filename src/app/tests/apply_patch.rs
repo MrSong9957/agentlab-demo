@@ -507,7 +507,10 @@ fn relative_paths_resolve_against_session_cwd() {
     assert!(r.ok, "{r:?}");
     let expect = subdir.join("rel.txt");
     assert_eq!(read(&expect), b"content\n");
-    assert_eq!(r.changed_files[0].path, expect.display().to_string());
+    // 038-CI：结果路径为 canonicalize 形态（macOS /var→/private/var 符号链接
+    // 被解析；linux 恒等）——期望侧同函数归一，比较真实对象而非形态
+    let expect_canon = expect.canonicalize().unwrap().display().to_string();
+    assert_eq!(r.changed_files[0].path, expect_canon);
     assert_eq!(r.changed_files[0].action, Action::Add);
     let _ = fs::remove_dir_all(&dir);
 }

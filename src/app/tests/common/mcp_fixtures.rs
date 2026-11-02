@@ -69,7 +69,11 @@ pub fn setup_with(scenario: &str, extra: &str, delay_ms: u64) -> TestCtx {
     let record_dir = TempDir::new("mcp-record");
     let record_path = record_dir.path().join("record.jsonl");
     let fixture = FIXTURE.replace('\\', "/");
-    let mut args = format!("\"{fixture}\", \"--scenario\", \"{scenario}\"");
+    // 038-CI：-X utf8 与 setup_with/多服务器模板一致——Windows 管道默认
+    // locale 编码（runner 实测 cp1252），无此参数时夹具含中文的场景在
+    // stdout 写入处 UnicodeEncodeError 崩溃＝传输已关闭（ubuntu/macOS
+    // locale 本为 UTF-8 故此差异只在 Windows CI 显形）。
+    let mut args = format!("\"-X\", \"utf8\", \"{fixture}\", \"--scenario\", \"{scenario}\"");
     if delay_ms > 0 {
         args.push_str(&format!(", \"--delay-ms\", \"{delay_ms}\""));
     }
