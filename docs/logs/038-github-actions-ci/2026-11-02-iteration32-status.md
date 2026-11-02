@@ -263,3 +263,28 @@ tool_search_perf）；pty.rs finish() 等待期排干（同 e2e finish 根因）
 retention 大小写分支扩展到 macOS（APFS 默认不敏感）；m4 大小写折叠碰撞
 诊断；m7 平台分科；pty 三测试 Windows 命令分支。ubuntu 侧 D2 修复后 c13/
 e_reaping 待 CI 复测。
+
+## 迭代 35 末批（环境重置事故与恢复）
+
+**D2 v1 生产事故（如实记录）**：批次五（0764134）的 sweep 读组长（bwrap）的
+ns/pid inode——bwrap raw_clone 为载荷建新 ns 后自身留在调用者 ns，target 实
+为容器 ns inode；会话终止时 sweep 扫 /proc 对「同 ns」进程 SIGKILL＝容器进
+程树连坐死亡。两处实证：①本地容器 zcode server 被杀（会话环境重置）；②
+CI 41398734625 ubuntu job 49 分钟后「hosted runner lost communication」。
+修正（遍历组长 children 取 ns≠self 的载荷 ns；children 不可得降级不补杀）
+在容器内由并发协作完成并已合入本地提交。
+
+**环境重置损失与恢复**：gh CLI、GitHub 推送凭据、rustup mingw target、
+/tmp 采证目录全部丢失。批次六（e7fae16：mac /proc 族等价取证＋path_covers
+mac 扩展）、批次七（perf 门禁分科＋m4 折叠分科）、D2 修正三个提交滞留本地。
+匿名 API 复核（仓库公开）：0764134 三平台 failure（ubuntu＝事故轮）。
+
+**待凭据恢复后的动作**：推送三个本地提交→CI 验证（重点：windows G2 字符
+串构造/proc_session 容差族、mac /proc 族＋retention 大小写＋perf 门禁、
+ubuntu D2 修正后 c13/e_reaping）；恢复 rustup mingw 交叉 check。
+
+**本地验证记录（批次七 HEAD）**：lib 290/0、request_permissions 38/0、
+attack031 7/0、sandbox_lifecycle 4/0、js_security 18/0、memory_storage_files
+22/0、session_perf 1/0、proc_session 27/1（pipe_ctrl_c＝本地容器 dash 特
+性，CI ubuntu 绿）、multi_agent c13 2/0、sandbox_matrix_probes e_reaping
+1/0＋b2_mcp 1/0＋attack06 1/0（放宽 seccomp profile 容器）。
