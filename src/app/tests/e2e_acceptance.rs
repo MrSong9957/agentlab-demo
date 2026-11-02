@@ -1232,8 +1232,7 @@ impl PtySession {
                 return Ok(());
             }
             if Instant::now() > deadline {
-                let _ = self.child.as_mut().map(|c| c.kill());
-                let _ = self.child.as_mut().map(|c| c.wait());
+                Self::kill_and_reap_detached(&mut self.child);
                 return Err(format!(
                     "等待屏幕 {:?} 超时（{:?}），屏幕：\n{}\n原始输出：\n{}",
                     needle,
@@ -1285,8 +1284,7 @@ impl PtySession {
         let target = needle.as_bytes();
         while !window_contains(&self.captured, target) {
             if Instant::now() > deadline {
-                let _ = self.child.as_mut().map(|c| c.kill());
-                let _ = self.child.as_mut().map(|c| c.wait());
+                Self::kill_and_reap_detached(&mut self.child);
                 return Err(format!(
                     "等待输出 {:?} 超时（{:?}），已捕获：\n{}",
                     needle,
@@ -1408,8 +1406,7 @@ impl PtySession {
                     std::thread::sleep(Duration::from_millis(20))
                 }
                 _ => {
-                    let _ = self.child.as_mut().map(|c| c.kill());
-                    let _ = self.child.as_mut().map(|c| c.wait());
+                    Self::kill_and_reap_detached(&mut self.child);
                     panic!("PTY 子进程未在期限内退出");
                 }
             }
@@ -1435,6 +1432,20 @@ impl PtySession {
             }
         }
         (self.output(), status)
+    }
+}
+
+impl PtySession {
+    /// 038 D-mac：强杀后**不**内联 wait——E 态（退出中）子进程不可被 kill 中断，
+    /// 内联 wait 永久阻塞＝timeout 分支的 panic 永不打印（零输出卡死形态）。
+    /// 收尸交分离线程；有界确认期后立即返回（超时必须报告失败）。
+    fn kill_and_reap_detached(child: &mut Option<Child>) {
+        let _ = child.as_mut().map(|c| c.kill());
+        if let Some(mut c) = child.take() {
+            std::thread::spawn(move || {
+                let _ = c.wait();
+            });
+        }
     }
 }
 

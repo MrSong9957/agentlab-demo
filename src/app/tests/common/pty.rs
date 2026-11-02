@@ -299,13 +299,25 @@ impl PtyCli {
                     std::thread::sleep(Duration::from_millis(20))
                 }
                 _ => {
-                    let _ = self.child.as_mut().map(|c| c.kill());
-                    let _ = self.child.as_mut().map(|c| c.wait());
+                    Self::kill_and_reap_detached(&mut self.child);
                     panic!("PTY CLI 子进程未在期限内退出");
                 }
             }
         };
         (self.output(), status.code())
+    }
+}
+
+impl PtyCli {
+    /// 038 D-mac：同 e2e_acceptance——强杀后不内联 wait（E 态不可中断），
+    /// 收尸交分离线程。
+    fn kill_and_reap_detached(child: &mut Option<Child>) {
+        let _ = child.as_mut().map(|c| c.kill());
+        if let Some(mut c) = child.take() {
+            std::thread::spawn(move || {
+                let _ = c.wait();
+            });
+        }
     }
 }
 
