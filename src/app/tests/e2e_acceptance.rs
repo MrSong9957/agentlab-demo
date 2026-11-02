@@ -1232,7 +1232,9 @@ impl PtySession {
                 return Ok(());
             }
             if Instant::now() > deadline {
-                Self::kill_and_reap_detached(&mut self.child);
+                // 只 kill 不 wait 不 take（038 b42da47 教训：take 使 child=None
+                // 破坏后续路径）；E 态收尸由测试结束的 Drop 分离逻辑承接
+                let _ = self.child.as_mut().map(|c| c.kill());
                 return Err(format!(
                     "等待屏幕 {:?} 超时（{:?}），屏幕：\n{}\n原始输出：\n{}",
                     needle,
@@ -1284,7 +1286,7 @@ impl PtySession {
         let target = needle.as_bytes();
         while !window_contains(&self.captured, target) {
             if Instant::now() > deadline {
-                Self::kill_and_reap_detached(&mut self.child);
+                let _ = self.child.as_mut().map(|c| c.kill());
                 return Err(format!(
                     "等待输出 {:?} 超时（{:?}），已捕获：\n{}",
                     needle,
@@ -1406,7 +1408,7 @@ impl PtySession {
                     std::thread::sleep(Duration::from_millis(20))
                 }
                 _ => {
-                    Self::kill_and_reap_detached(&mut self.child);
+                    let _ = self.child.as_mut().map(|c| c.kill());
                     panic!("PTY 子进程未在期限内退出");
                 }
             }

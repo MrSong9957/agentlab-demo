@@ -299,7 +299,8 @@ impl PtyCli {
                     std::thread::sleep(Duration::from_millis(20))
                 }
                 _ => {
-                    Self::kill_and_reap_detached(&mut self.child);
+                    // 只 kill 不 wait 不 take（同 e2e——Drop 分离收尸承接）
+                    let _ = self.child.as_mut().map(|c| c.kill());
                     panic!("PTY CLI 子进程未在期限内退出");
                 }
             }
