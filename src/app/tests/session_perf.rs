@@ -101,7 +101,29 @@ fn sample_proc(pid: u32) -> ProcStatus {
             .expect("ps rss 数值");
         return ProcStatus { vm_hwm_kib: rss, vm_rss_kib: rss };
     }
-    #[cfg(not(target_os = "macos"))]
+    // 038 Windows：GetProcessMemoryInfo WorkingSetSize（同 c18_host_rss）。
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::ProcessStatus::{
+            GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return ProcStatus { vm_hwm_kib: 0.0, vm_rss_kib: 0.0 };
+            }
+            let mut pmc: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+            pmc.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+            let ok = GetProcessMemoryInfo(handle, &mut pmc, pmc.cb);
+            windows_sys::Win32::Foundation::CloseHandle(handle);
+            let rss = if ok != 0 { pmc.WorkingSetSize as f64 / 1024.0 } else { 0.0 };
+            return ProcStatus { vm_hwm_kib: rss, vm_rss_kib: rss };
+        }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let text = fs::read_to_string(format!("/proc/{pid}/status")).expect("读取 /proc/<pid>/status");
         let mut hwm = 0.0;

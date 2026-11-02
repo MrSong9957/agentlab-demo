@@ -103,8 +103,9 @@ fn run_query<'a>(
 }
 
 fn vm_hwm_kb() -> u64 {
-    // 038 macOS：无 /proc——经 `ps -o rss=` 取当前 RSS（峰值不可得，边界
-    // 已登记）；Linux 维持 /proc HWM 精读。
+    // 038 macOS/Windows：无 /proc——mac 经 `ps -o rss=` 取当前 RSS（峰值
+    // 不可得，边界已登记）；Windows 经 GetProcessMemoryInfo WorkingSetSize
+    // （同 c18_host_rss 模式）；Linux 维持 /proc HWM 精读。
     #[cfg(target_os = "macos")]
     {
         let out = std::process::Command::new("ps")
@@ -116,7 +117,25 @@ fn vm_hwm_kb() -> u64 {
             .parse()
             .expect("ps rss 数值");
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::ProcessStatus::{
+            GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+        };
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        unsafe {
+            let handle = GetCurrentProcess();
+            let mut pmc: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+            pmc.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+            if GetProcessMemoryInfo(handle, &mut pmc, pmc.cb) != 0 {
+                return pmc.WorkingSetSize as u64 / 1024;
+            }
+            return 0;
+        }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let status = std::fs::read_to_string("/proc/self/status").expect("读取 /proc/self/status");
         for line in status.lines() {

@@ -503,7 +503,17 @@ fn non_canonical_writable_root_fails_closed() {
     let ws = tmp_ws("s4a");
     fs::write(ws.join(".env"), "FAKE-TEST-TOKEN=5\n").unwrap();
     fs::create_dir_all(ws.join("sub")).unwrap();
-    let raw = ws.join("sub").join(".."); // 内核解析回 ws；词法非 canonical
+    // 038 Windows 实证：PathBuf::join("..") 在 push 时折叠（raw 即干净路径，
+    // 词法非清洁形态无法经 join 构造）——以字符串拼接保留 `sub\..` 原样；
+    // 该形态仅 unix 上可写经（verbatim 路径内核不解析 ..，.env 改写跳过，
+    // 边界对象由上方的 ws\.env 承载）。
+    let raw = PathBuf::from(format!(
+        "{}{}sub{}..",
+        ws.display(),
+        std::path::MAIN_SEPARATOR,
+        std::path::MAIN_SEPARATOR
+    ));
+    #[cfg(not(windows))]
     fs::write(raw.join(".env"), "FAKE-TEST-TOKEN=6\n").unwrap(); // 同一文件（经解析）
     let policy = SandboxPolicy {
         full_disk_read: true,

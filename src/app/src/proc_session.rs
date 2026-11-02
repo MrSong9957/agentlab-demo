@@ -555,6 +555,7 @@ impl ProcessManager {
                         readers_total,
                         extra,
                         owner,
+                        sp.ns_inode.clone(),
                     ));
                     st.sessions.insert(session.id.clone(), session.clone());
                     (session, sp, deadline)
@@ -1030,6 +1031,9 @@ fn cancelled_before_start(cancel: Option<&AtomicBool>) -> Option<ExecResult> {
 struct Session {
     id: String,
     cmd: String,
+    /// 038 D2：沙箱 pid 命名空间标识（spawn 时 /proc/<leader>/ns/pid 的
+    /// readlink）——组长死后按它补杀残留成员；非沙箱会话为 None。
+    ns_inode: Option<String>,
     /// 031：本进程是否以「基线＋额外授权」出生（§1.7-5——到期收尾只针对
     /// 此类进程；基线进程继续 016 可续接语义）。
     extra: bool,
@@ -1102,12 +1106,14 @@ impl Session {
         readers: usize,
         extra: bool,
         owner: OwnerTag,
+        ns_inode: Option<String>,
     ) -> Self {
         Self {
             id,
             cmd,
             extra,
             owner,
+            ns_inode,
             st: Mutex::new(SessionState {
                 phase: Phase::Running { pgid },
                 pending: PendingBuffer::new(),
@@ -1547,6 +1553,8 @@ struct Spawned {
     /// ConPTY 输出通道（038）：Windows PTY 的输入/输出是两个独立句柄，不能
     /// 像 unix master 那样一份句柄既写又读——读取线程经本字段接入。
     pty_reader: Option<Arc<File>>,
+    /// 038 D2：沙箱 ns 标识（unix 沙箱 spawn 时捕获）；None＝无沙箱。
+    ns_inode: Option<String>,
     stdout: Option<std::process::ChildStdout>,
     stderr: Option<std::process::ChildStderr>,
 }
@@ -1689,12 +1697,32 @@ fn spawn_piped(
     c.process_group(0);
     let mut child = c.spawn()?;
     #[cfg(unix)]
-    if policy.is_some() {
+    let ns_inode = if policy.is_some() {
         crate::sandbox::verify_child_pid_namespace(child.id())?;
-    }
+        read_ns_inode(child.id())
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    let ns_inode = None;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    Ok(Spawned { child: ChildHandle::Std(child), master: None, pty_reader: None, stdout, stderr })
+    Ok(Spawned {
+        child: ChildHandle::Std(child),
+        master: None,
+        pty_reader: None,
+        ns_inode,
+        stdout,
+        stderr,
+    })
+}
+
+/// 038 D2：组长进程的 pid ns 标识（readlink /proc/<pid>/ns/pid）。
+#[cfg(unix)]
+fn read_ns_inode(pid: u32) -> Option<String> {
+    std::fs::read_link(format!("/proc/{pid}/ns/pid"))
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// PTY 模式：分配真实伪终端作为控制终端；会话组长自身成组
@@ -1867,6 +1895,7 @@ fn spawn_pty(
         child: ChildHandle::Raw { process, pid, hpc },
         master: Some(master),
         pty_reader: Some(pty_reader),
+        ns_inode: None,
         stdout: None,
         stderr: None,
     })
@@ -1904,14 +1933,16 @@ fn quote_windows_arg(arg: &str) -> String {
     out
 }
 
-/// 038 D2：按 NSpid 链补杀命名空间残留成员（unix）。组长（bwrap）死后，
-/// ns 内成员在宿主侧以孤儿存活且不属组长进程组——killpg 覆盖不到。扫描
-/// /proc：status 的 NSpid 行含组长 pid 的进程＝同 ns 成员，SIGKILL 补杀。
-/// 有界：一轮扫描＋150ms 后一次重试（内核 ns 拆解异步；残留仅在极端时序
-/// 下跨过首个窗口）。仅本进程有权限杀同 ns 成员（同 uid），无越权面。
+/// 038 D2：按 ns 标识补杀命名空间残留成员（unix）。组长（bwrap）死后，
+/// ns 内成员在宿主侧以孤儿存活且不属组长进程组——killpg 覆盖不到；成员的
+/// NSpid 链也不含组长 pid（链只映射该进程自己跨 ns 的 pid）。以 spawn 时
+/// 捕获的 ns inode（/proc/<leader>/ns/pid 的 readlink）精确圈定同 ns 成员：
+/// 扫描 /proc，ns/pid readlink 相同者 SIGKILL。有界：一轮＋150ms 重试
+/// （内核 ns 拆解异步）；分离线程调用，不阻塞终态收口。仅同 uid 进程
+/// 可杀，无越权面。
 #[cfg(unix)]
-fn sweep_namespace_members(leader_pid: GroupId) {
-    fn kill_round(leader: libc::pid_t) -> usize {
+fn sweep_namespace_members(ns_inode: String) {
+    fn kill_round(target: &str) -> usize {
         let mut killed = 0usize;
         let Ok(entries) = std::fs::read_dir("/proc") else {
             return 0;
@@ -1920,37 +1951,23 @@ fn sweep_namespace_members(leader_pid: GroupId) {
             let Ok(name) = entry.file_name().into_string() else {
                 continue;
             };
-            let Ok(pid) = name.parse::<libc::pid_t>() else {
-                continue;
-            };
-            if pid == leader {
+            if name.parse::<libc::pid_t>().is_err() {
                 continue;
             }
-            let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+            let Ok(link) = std::fs::read_link(format!("/proc/{}/ns/pid", name)) else {
                 continue;
             };
-            for line in status.lines() {
-                if let Some(rest) = line.strip_prefix("NSpid:") {
-                    // NSpid: <宿主 pid> <ns1 pid> <ns2 pid>…——链上任一环等于
-                    // 组长 pid 即同命名空间成员
-                    if rest
-                        .split_whitespace()
-                        .filter_map(|t| t.parse::<libc::pid_t>().ok())
-                        .any(|v| v == leader)
-                    {
-                        if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
-                            killed += 1;
-                        }
-                    }
-                    break;
-                }
+            if link.to_string_lossy() == target
+                && unsafe { libc::kill(name.parse::<libc::pid_t>().unwrap(), libc::SIGKILL) } == 0
+            {
+                killed += 1;
             }
         }
         killed
     }
-    let _first = kill_round(leader_pid);
+    let _first = kill_round(&ns_inode);
     std::thread::sleep(Duration::from_millis(150));
-    let _retry = kill_round(leader_pid);
+    let _retry = kill_round(&ns_inode);
 }
 
 #[cfg(unix)]
@@ -1985,11 +2002,21 @@ fn spawn_pty(
     }
     let mut child = c.spawn()?;
     drop(c); // 关闭父进程持有的从设备副本（Command 内 Stdio 的 fd）
-    if policy.is_some() {
+    let ns_inode = if policy.is_some() {
         crate::sandbox::verify_child_pid_namespace(child.id())?;
-    }
+        read_ns_inode(child.id())
+    } else {
+        None
+    };
     let master = Arc::new(master);
-    Ok(Spawned { child: ChildHandle::Std(child), master: Some(master), pty_reader: None, stdout: None, stderr: None })
+    Ok(Spawned {
+        child: ChildHandle::Std(child),
+        master: Some(master),
+        pty_reader: None,
+        ns_inode,
+        stdout: None,
+        stderr: None,
+    })
 }
 
 /// 038：macOS ptsname 静态缓冲的串行化锁（见 open_pty 内注释）。
@@ -2176,7 +2203,14 @@ fn monitor_thread(session: Arc<Session>, mut child: ChildHandle, deadline: Optio
                     // NSpid 链补杀——分离线程执行（两轮扫描＋间隔约数百 ms，
                     // 不得阻塞终态收口时序）。
                     #[cfg(unix)]
-                    std::thread::spawn(move || sweep_namespace_members(pgid));
+                    {
+                        let ns = session.ns_inode.clone();
+                        std::thread::spawn(move || {
+                            if let Some(ns_inode) = ns {
+                                sweep_namespace_members(ns_inode);
+                            }
+                        });
+                    }
                     break match reason {
                         KillReq::Deadline => Phase::TimedOut,
                         KillReq::Terminate => Phase::Terminated,
@@ -2187,7 +2221,14 @@ fn monitor_thread(session: Arc<Session>, mut child: ChildHandle, deadline: Optio
                     // 不宣称发生过“终止并回收”。
                     drop(st);
                     #[cfg(unix)]
-                    std::thread::spawn(move || sweep_namespace_members(pgid));
+                    {
+                        let ns = session.ns_inode.clone();
+                        std::thread::spawn(move || {
+                            if let Some(ns_inode) = ns {
+                                sweep_namespace_members(ns_inode);
+                            }
+                        });
+                    }
                     let code = child.wait().ok().and_then(|s| s.code());
                     break Phase::Exited { code };
                 }
@@ -2201,7 +2242,14 @@ fn monitor_thread(session: Arc<Session>, mut child: ChildHandle, deadline: Optio
         match child.try_wait() {
             Ok(Some(status)) => {
                 #[cfg(unix)]
-                std::thread::spawn(move || sweep_namespace_members(pgid));
+                {
+                    let ns = session.ns_inode.clone();
+                    std::thread::spawn(move || {
+                        if let Some(ns_inode) = ns {
+                            sweep_namespace_members(ns_inode);
+                        }
+                    });
+                }
                 break Phase::Exited { code: status.code() };
             }
             Ok(None) => {}
