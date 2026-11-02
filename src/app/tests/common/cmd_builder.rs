@@ -14,6 +14,15 @@
 use std::path::Path;
 
 /// 平台行尾（命令输出的真实平台语义）。
+/// PowerShell EncodedCommand 包装（base64 UTF-16LE）：无引号歧义、无回显
+/// 通路（038 实测 -Command 两种引号形态都把命令行回显进输出流）。
+pub fn ps_encoded(script: &str) -> String {
+    use base64::Engine as _;
+    let enc: String = base64::engine::general_purpose::STANDARD
+        .encode(script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect::<Vec<u8>>());
+    format!("powershell -NoProfile -EncodedCommand {enc}")
+}
+
 pub fn nl() -> &'static str {
     if cfg!(windows) {
         "\r\n"
@@ -60,7 +69,10 @@ pub fn append_line(log: &Path, text: &str) -> String {
 pub fn writer_loop(log: &Path) -> String {
     let log = path_str(log);
     if cfg!(windows) {
-        format!("for /l %i in (1,0,2) do @((echo x)>>{log} & powershell -NoProfile -Command \"Start-Sleep -Milliseconds 100\")")
+        format!(
+            "for /l %i in (1,0,2) do @((echo x)>>{log} & {})",
+            ps_encoded("Start-Sleep -Milliseconds 100")
+        )
     } else {
         format!("while true; do echo x >> {log}; sleep 0.05; done")
     }
@@ -69,7 +81,10 @@ pub fn writer_loop(log: &Path) -> String {
 /// 无限循环向 stdout 写计数行＋亚秒延时（stdout 存活写入者）。
 pub fn writer_loop_stdout() -> String {
     if cfg!(windows) {
-        "for /l %i in (1,0,2) do @(echo %i & powershell -NoProfile -Command \"Start-Sleep -Milliseconds 100\")".to_string()
+        format!(
+            "for /l %i in (1,0,2) do @(echo %i & {})",
+            ps_encoded("Start-Sleep -Milliseconds 100")
+        )
     } else {
         "while true; do date +%s%N; sleep 0.05; done".to_string()
     }
@@ -80,7 +95,7 @@ pub fn writer_loop_stdout() -> String {
 /// 实测不产生预期延时）。
 pub fn sleep_ms(ms: u64) -> String {
     if cfg!(windows) {
-        format!("powershell -NoProfile -Command \"Start-Sleep -Milliseconds {ms}\"")
+        ps_encoded(&format!("Start-Sleep -Milliseconds {ms}"))
     } else if ms % 1000 == 0 {
         format!("sleep {}", ms / 1000)
     } else {

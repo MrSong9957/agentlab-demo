@@ -429,7 +429,8 @@ fn cd_inside_command_does_not_stick() {
     let child_stderr = String::from_utf8_lossy(&status.stderr).to_string();
     let outcome_text = fs::read_to_string(&outcome).ok();
 
-    let _ = fs::remove_dir_all(&host);
+    // 038 实测：清理必须在全部路径归一断言之后——目录已删时 canonicalize
+    // 失败退回短名形态（RUNNER~1），长名比较恒失败
     assert!(child_ok, "cd 子进程异常退出：{child_stderr}");
     let v: serde_json::Value = serde_json::from_str(&outcome_text.unwrap_or_else(|| {
         panic!("子进程成功退出但未写结果（entry 漂移或缺 cd_child_mode 调用？）")
@@ -457,6 +458,7 @@ fn cd_inside_command_does_not_stick() {
         v["back"]["output"].as_str().unwrap(),
         session_canon.clone().unwrap_or_default()
     );
+    let _ = fs::remove_dir_all(&host);
 }
 
 // ---------- 高风险清单补充（2026-10-10；016 语义适配）----------
@@ -467,8 +469,9 @@ fn cd_inside_command_does_not_stick() {
 fn exec_b04_dual_stream_mb_drain_after_cap() {
     // 平台等价：cmd for /l 双流循环（unix 保留原 while 计数）
     let cmd = if cfg!(windows) {
-        // 紧凑形态：`echo X &` 的空格会进 echo 输出（038 实测尾空格破坏行匹配）
-        "for /l %i in (1,1,40000) do @(echo out-wwwwwwwwww&echo err-eeeeeeeeee 1>&2)".to_string()
+        // 紧凑形态：`echo X &` 的空格会进 echo 输出；`text 1>&2` 的重定向
+        // 前空格同样进输出（038 实测）——全部消除
+        "for /l %i in (1,1,40000) do @(echo out-wwwwwwwwww&echo err-eeeeeeeeee1>&2)".to_string()
     } else {
         "i=0; while [ $i -lt 40000 ]; do echo out-wwwwwwwwww; echo err-eeeeeeeeee 1>&2; \
                i=$((i+1)); done".to_string()
