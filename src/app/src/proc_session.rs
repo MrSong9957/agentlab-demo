@@ -1699,7 +1699,7 @@ fn spawn_piped(
     #[cfg(unix)]
     let ns_inode = if policy.is_some() {
         crate::sandbox::verify_child_pid_namespace(child.id())?;
-        read_ns_inode(child.id())
+        read_payload_ns_inode(child.id())
     } else {
         None
     };
@@ -1717,12 +1717,33 @@ fn spawn_piped(
     })
 }
 
-/// 038 D2：组长进程的 pid ns 标识（readlink /proc/<pid>/ns/pid）。
+/// 038 D2 修正（2026-11-02 容器实证）：ns 补杀的圈定对象必须是「载荷」的
+/// pid ns，不能是组长（bwrap）自身——bwrap raw_clone 建新 ns 给载荷、自己
+/// 留在调用者 ns（/proc/<bwrap>/ns/pid == 容器 ns）；旧实现读组长 ns，
+/// 会话终止时 sweep 扫 /proc 杀「同 ns」进程＝SIGKILL 调用者 ns 全体
+/// （zcode server 与同容器进程树连坐死亡实证）。故遍历组长 children 取
+/// ns≠self 的载荷 ns；载荷瞬时退出（children 不可得）返回 None 降级为
+/// 不补杀——killpg 兜底仍在，不劣于无 D2 的旧行为。
 #[cfg(unix)]
-fn read_ns_inode(pid: u32) -> Option<String> {
-    std::fs::read_link(format!("/proc/{pid}/ns/pid"))
-        .ok()
-        .map(|p| p.to_string_lossy().into_owned())
+fn read_payload_ns_inode(leader_pid: u32) -> Option<String> {
+    let self_ns = std::fs::read_link("/proc/self/ns/pid").ok()?;
+    let tasks = std::fs::read_dir(format!("/proc/{leader_pid}/task")).ok()?;
+    for t in tasks.flatten() {
+        let Ok(text) = std::fs::read_to_string(t.path().join("children")) else {
+            continue;
+        };
+        for pid_str in text.split_whitespace() {
+            let Ok(pid) = pid_str.parse::<u32>() else {
+                continue;
+            };
+            if let Ok(ns) = std::fs::read_link(format!("/proc/{pid}/ns/pid")) {
+                if ns != self_ns {
+                    return Some(ns.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// PTY 模式：分配真实伪终端作为控制终端；会话组长自身成组
@@ -2004,7 +2025,7 @@ fn spawn_pty(
     drop(c); // 关闭父进程持有的从设备副本（Command 内 Stdio 的 fd）
     let ns_inode = if policy.is_some() {
         crate::sandbox::verify_child_pid_namespace(child.id())?;
-        read_ns_inode(child.id())
+        read_payload_ns_inode(child.id())
     } else {
         None
     };
@@ -2960,5 +2981,74 @@ mod win {
             },
             None => Err(io::Error::other("作业句柄不存在（会话未注册或已终止）")),
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod ns_sweep_tests {
+    use super::*;
+
+    /// 038 D2 修正回归（2026-11-02）：ns 补杀圈定必须是载荷 ns≠调用者 ns。
+    /// 旧实现读组长（bwrap）自身 ns＝调用者 ns，sweep 会 SIGKILL 调用者 ns
+    /// 全体进程（容器内 zcode server 连坐死亡实证）。断言双向：①完整沙箱
+    /// 形态下捕获到载荷 ns 且≠self ns；②非沙箱进程（无新 ns 子进程）返回
+    /// None（降级不补杀）。bwrap 不可用的环境（CI 裸机）跳过——圈定断言
+    /// 依赖真实 ns 结构。
+    #[test]
+    fn payload_ns_inode_targets_sandbox_not_caller() {
+        let probe = std::process::Command::new("bwrap")
+            .args(["--unshare-user", "--unshare-ipc", "--ro-bind", "/", "/", "true"])
+            .status();
+        if !probe.map(|s| s.success()).unwrap_or(false) {
+            eprintln!("bwrap 不可用，跳过 ns 圈定回归（无真实 ns 结构可比对）");
+            return;
+        }
+        // 完整沙箱形态（033 argv 的 ns 集：NEWNS|NEWUSER|NEWPID|NEWIPC），
+        // 载荷长跑保证 children 可读窗口。
+        let mut leader = std::process::Command::new("bwrap")
+            .args([
+                "--unshare-user",
+                "--unshare-pid",
+                "--unshare-ipc",
+                "--dev-bind",
+                "/",
+                "/",
+                "sleep",
+                "5",
+            ])
+            .spawn()
+            .expect("bwrap 完整沙箱形态 spawn 失败");
+        let leader_pid = leader.id();
+        let self_ns = std::fs::read_link("/proc/self/ns/pid")
+            .expect("self ns/pid 必须可读")
+            .to_string_lossy()
+            .into_owned();
+        // 载荷出现轮询（verify_child_pid_namespace 同窗，放宽至 500ms）。
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let ns = loop {
+            match read_payload_ns_inode(leader_pid) {
+                Some(ns) => break ns,
+                None if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                None => panic!("沙箱载荷 ns 未捕获（500ms 窗口；bwrap 载荷应已在新 ns）"),
+            }
+        };
+        assert_ne!(
+            ns, self_ns,
+            "载荷 ns 不得等于调用者 ns——旧实现（读组长自身）即此错误形态，\
+             该形态下 sweep 会杀调用者 ns 全体"
+        );
+        // 反向：无沙箱子进程的普通进程必须 None（降级不补杀，killpg 兜底）。
+        let mut plain = std::process::Command::new("sleep").arg("2").spawn().unwrap();
+        assert_eq!(
+            read_payload_ns_inode(plain.id()),
+            None,
+            "无新 ns 子进程必须返回 None"
+        );
+        let _ = plain.kill();
+        let _ = plain.wait();
+        let _ = leader.kill();
+        let _ = leader.wait();
     }
 }
