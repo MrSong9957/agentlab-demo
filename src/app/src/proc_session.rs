@@ -1904,6 +1904,55 @@ fn quote_windows_arg(arg: &str) -> String {
     out
 }
 
+/// 038 D2：按 NSpid 链补杀命名空间残留成员（unix）。组长（bwrap）死后，
+/// ns 内成员在宿主侧以孤儿存活且不属组长进程组——killpg 覆盖不到。扫描
+/// /proc：status 的 NSpid 行含组长 pid 的进程＝同 ns 成员，SIGKILL 补杀。
+/// 有界：一轮扫描＋150ms 后一次重试（内核 ns 拆解异步；残留仅在极端时序
+/// 下跨过首个窗口）。仅本进程有权限杀同 ns 成员（同 uid），无越权面。
+#[cfg(unix)]
+fn sweep_namespace_members(leader_pid: GroupId) {
+    fn kill_round(leader: libc::pid_t) -> usize {
+        let mut killed = 0usize;
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return 0;
+        };
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let Ok(pid) = name.parse::<libc::pid_t>() else {
+                continue;
+            };
+            if pid == leader {
+                continue;
+            }
+            let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+                continue;
+            };
+            for line in status.lines() {
+                if let Some(rest) = line.strip_prefix("NSpid:") {
+                    // NSpid: <宿主 pid> <ns1 pid> <ns2 pid>…——链上任一环等于
+                    // 组长 pid 即同命名空间成员
+                    if rest
+                        .split_whitespace()
+                        .filter_map(|t| t.parse::<libc::pid_t>().ok())
+                        .any(|v| v == leader)
+                    {
+                        if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
+                            killed += 1;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        killed
+    }
+    let _first = kill_round(leader_pid);
+    std::thread::sleep(Duration::from_millis(150));
+    let _retry = kill_round(leader_pid);
+}
+
 #[cfg(unix)]
 fn spawn_pty(
     cmd: &str,
@@ -2121,6 +2170,13 @@ fn monitor_thread(session: Arc<Session>, mut child: ChildHandle, deadline: Optio
                 KillOutcome::Ok => {
                     drop(st);
                     let _ = child.wait(); // 回收组长
+                    // 038 D2（CI 实证）：沙箱（bwrap 命名空间）成员的宿主侧
+                    // 进程组与组长不同——killpg 只覆盖组长；ns 内残留成员在
+                    // 组长死后仍以孤儿形态存活（marker 被 init 收养）。按
+                    // NSpid 链补杀——分离线程执行（两轮扫描＋间隔约数百 ms，
+                    // 不得阻塞终态收口时序）。
+                    #[cfg(unix)]
+                    std::thread::spawn(move || sweep_namespace_members(pgid));
                     break match reason {
                         KillReq::Deadline => Phase::TimedOut,
                         KillReq::Terminate => Phase::Terminated,
@@ -2130,6 +2186,8 @@ fn monitor_thread(session: Arc<Session>, mut child: ChildHandle, deadline: Optio
                     // 组已不存在＝我们发信号前进程已死：按自然退出如实归属，
                     // 不宣称发生过“终止并回收”。
                     drop(st);
+                    #[cfg(unix)]
+                    std::thread::spawn(move || sweep_namespace_members(pgid));
                     let code = child.wait().ok().and_then(|s| s.code());
                     break Phase::Exited { code };
                 }
@@ -2142,6 +2200,8 @@ fn monitor_thread(session: Arc<Session>, mut child: ChildHandle, deadline: Optio
         }
         match child.try_wait() {
             Ok(Some(status)) => {
+                #[cfg(unix)]
+                std::thread::spawn(move || sweep_namespace_members(pgid));
                 break Phase::Exited { code: status.code() };
             }
             Ok(None) => {}

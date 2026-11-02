@@ -229,3 +229,37 @@ permissions 的 /var 拒绝非回归——该目标此前从未在 mac job 中�
 与管道模式同机制；进程退出→ClosePseudoConsole 拆除顺序）；mingw 交叉 check
 （x86_64-pc-windows-gnu target）本地验证 cfg(windows) 代码 0 error——
 不依赖 CI 即可验证 Windows 编译面；批次三夹具/产品修复如上 1–6。
+
+## 迭代 35：批次三回报（41392289704）＋批次四
+
+**Windows 32→21**。ConPTY 生效实证：pty_child/pty_interactive/pty_cancel/
+pty_write_window 在修复后通过（pty_write_window 的 sh 命令仍需 Windows 分支
+——本轮修）；**ConPTY 管线（CreatePseudoConsole＋属性清单＋CreateProcessW
+＋作业挂接＋退出后拆伪终端）在 CI 上端到端工作**。其余确认：cancel（for 体
+吞噬修复）、incremental_output/running_returns（CLIXML 静默）、blocked_input
+升到 Running 后差 terminate 语义、result_json/view_image/m6×2/exec_sandbox、
+install_dir、attack05、same_chain、resources_filename、c18、reset 两例。
+
+剩余 21 项新归因：
+1. **G2 破案（诊断输出）**：Windows `PathBuf::join("..")` 在 push 时折叠——
+   `ws.join("sub").join("..")` 产物就是干净路径（raw 无 sub/.. 可言）＝测试
+   前提在 Windows 上不可经 join 构造。下轮改字符串拼接构造＋失败诊断保留。
+2. **pty_interactive/pty_child/pty_write_window**：命令为 sh 设施（printf/
+   read/echo、`[ -t 0 ]`、stty）——Windows 等价分支（PowerShell In.ReadLine
+   /IsInputRedirected/sleep）。
+3. **input_limit_exact -1073741502（0xC0000142 STATUS_DLL_INIT_FAILED）**＝
+   并行 spawn 下的 runner 级瞬态（Windows CI 已知形态），非产品缺陷。
+4. **pipe_ctrl_c**：Windows 中断档＝整树终止（产品文档化的残差登记）——
+   「忽略中断仍运行」断言需平台分科。
+5. **read_does_not_reset_deadline 2.53s**：Windows spawn/监控粒度下超时容差
+   待对齐（下轮对证）。
+6. **m7_reset_during_inflight**：Windows DROP 降级后旧连接查询＝no such
+   table（预期形态）——断言平台分科（本轮已修）。
+7. **c15/t18/ts30**：依赖真实注入/时序，下轮按消息对证。
+
+批次四（本轮提交）：**D2 ns 成员补杀**（monitor 终态后按 NSpid 链分离线程
+SIGKILL 补杀，unix 门控）；macOS RSS 采样 ps 分支（session_perf/
+tool_search_perf）；pty.rs finish() 等待期排干（同 e2e finish 根因）；
+retention 大小写分支扩展到 macOS（APFS 默认不敏感）；m4 大小写折叠碰撞
+诊断；m7 平台分科；pty 三测试 Windows 命令分支。ubuntu 侧 D2 修复后 c13/
+e_reaping 待 CI 复测。

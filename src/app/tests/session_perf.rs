@@ -86,18 +86,36 @@ struct ProcStatus {
 }
 
 fn sample_proc(pid: u32) -> ProcStatus {
-    let text = fs::read_to_string(format!("/proc/{pid}/status")).expect("读取 /proc/<pid>/status");
-    let mut hwm = 0.0;
-    let mut rss = 0.0;
-    for line in text.lines() {
-        if let Some(v) = line.strip_prefix("VmHWM:") {
-            hwm = v.trim().trim_end_matches(" kB").parse().unwrap();
-        }
-        if let Some(v) = line.strip_prefix("VmRSS:") {
-            rss = v.trim().trim_end_matches(" kB").parse().unwrap();
-        }
+    // 038 macOS：无 /proc——经 `ps -o rss=` 取当前 RSS（KiB）；峰值 HWM 不可
+    // 得，以当前值兼作两字段（采样上限断言为宽口径天花板，边界已登记）。
+    // Linux 维持 /proc 的 HWM/RSS 精读。
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps 采样失败");
+        let rss: f64 = String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("ps rss 数值");
+        return ProcStatus { vm_hwm_kib: rss, vm_rss_kib: rss };
     }
-    ProcStatus { vm_hwm_kib: hwm, vm_rss_kib: rss }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let text = fs::read_to_string(format!("/proc/{pid}/status")).expect("读取 /proc/<pid>/status");
+        let mut hwm = 0.0;
+        let mut rss = 0.0;
+        for line in text.lines() {
+            if let Some(v) = line.strip_prefix("VmHWM:") {
+                hwm = v.trim().trim_end_matches(" kB").parse().unwrap();
+            }
+            if let Some(v) = line.strip_prefix("VmRSS:") {
+                rss = v.trim().trim_end_matches(" kB").parse().unwrap();
+            }
+        }
+        ProcStatus { vm_hwm_kib: hwm, vm_rss_kib: rss }
+    }
 }
 
 struct RunningCli {

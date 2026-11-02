@@ -793,8 +793,28 @@ pub fn normalize_request(req: &RawRequest, cwd: &Path) -> Result<NormalizedReque
         // 逐组件起点＝真实前缀＋根：Windows 绝对路径含盘符前缀（C:）——从 "/" 起步
         // 会丢弃盘符、按进程当前盘解析组件（runner 仓库在 D:、临时目录在 C: →
         // 组件 NotFound 误报「路径组件不存在」——038 Windows CI 实测）。
-        let mut cur = PathBuf::new();
-        for comp in lex.components() {
+        // 038 macOS CI 实证：会话 cwd 落在 /var→private/var 这类系统级符号
+        // 链接之下时，从根起走会把信任锚自身拒掉（「含符号链接组件 /var」），
+        // cwd 之内的一切请求恒失败。锚定走查：请求（词法消解后）位于会话
+        // cwd 之内时，锚内组件以**解析后的 cwd** 起步（一次性解析＝会话建立
+        // 时已判定，非逐请求 TOCTTOU 面），只逐组件验证锚外余部；越出 cwd
+        // 的请求（绝对出界/.. 回溯出界）维持从根起走的既有严格语义。
+        let cwd_lex = crate::sandbox::absolute_lexical(cwd);
+        let cwd_comps: Vec<_> = cwd_lex.components().collect();
+        let lex_comps: Vec<_> = lex.components().collect();
+        let common = lex_comps
+            .iter()
+            .zip(cwd_comps.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let anchored = common == cwd_comps.len();
+        let mut cur = if anchored {
+            std::fs::canonicalize(cwd)
+                .map_err(|_| "路径组件状态不可判定：拒绝（会话 cwd 解析失败）".to_string())?
+        } else {
+            PathBuf::new()
+        };
+        for comp in lex_comps.into_iter().skip(if anchored { common } else { 0 }) {
             match comp {
                 std::path::Component::Prefix(prefix) => {
                     cur.push(prefix.as_os_str());

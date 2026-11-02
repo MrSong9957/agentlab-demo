@@ -573,6 +573,7 @@ fn spawn_worker(exe: &std::path::Path) -> Result<std::process::Child, String> {
             ))
         }
     };
+    #[cfg(not(target_os = "macos"))]
     let as_limit = WORKER_AS_LIMIT;
     let cpu_limit = WORKER_CPU_LIMIT_SECS;
     let mut command = std::process::Command::new(&program);
@@ -613,12 +614,19 @@ fn spawn_worker(exe: &std::path::Path) -> Result<std::process::Child, String> {
                     // best-effort：失败（ENOSYS/EINVAL）不阻断 worker 启动
                     let _ = libc::syscall(436 as libc::c_long, 3u64, u64::MAX, 0u64);
                 }
-                let as_lim = libc::rlimit {
-                    rlim_cur: as_limit,
-                    rlim_max: as_limit,
-                };
-                if libc::setrlimit(libc::RLIMIT_AS, &as_lim) != 0 {
-                    return Err(std::io::Error::last_os_error());
+                // 038 macOS CI 实证：Darwin 不实现 RLIMIT_AS——setrlimit 恒
+                // EINVAL＝worker 全部启动失败（os error 22）。macOS 跳过 AS
+                // 上限（登记的平台能力边界），CPU 上限与宿主侧墙钟观察兜底
+                // 保留；Linux 的 AS/CPU 双上限不变。
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let as_lim = libc::rlimit {
+                        rlim_cur: as_limit,
+                        rlim_max: as_limit,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_AS, &as_lim) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
                 }
                 let cpu_lim = libc::rlimit {
                     rlim_cur: cpu_limit,

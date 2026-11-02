@@ -285,6 +285,9 @@ impl PtyCli {
     }
 
     /// 结束会话：限期等待退出，返回（输出，退出码）。
+    /// 038 macOS：等待期必须持续排干 master——产品退出序列写满 PTY 缓冲后
+    /// 阻塞在退出中（E 态泄漏，SIGKILL 不可中断内核写等待）＝「未在期限内
+    /// 退出」级联失败（与 e2e_acceptance finish() 同根因同修法）。
     pub fn finish(mut self) -> (String, Option<i32>) {
         let deadline = Instant::now() + self.watchdog;
         let status = loop {
@@ -296,7 +299,7 @@ impl PtyCli {
             {
                 Some(s) => break s,
                 None if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(20))
+                    self.poll_read();
                 }
                 _ => {
                     // 只 kill 不 wait 不 take（同 e2e——Drop 分离收尸承接）

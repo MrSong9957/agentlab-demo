@@ -336,8 +336,15 @@ fn deadline_survives_cancel() {
 #[test]
 fn pty_interactive_read_answer() {
     let mgr = ProcessManager::new();
+    // 038 Windows：printf/read/echo 为 sh 设施——PowerShell 读行等价（提示
+    // "NAME:"、行读入、回显 HELLO <name>）；断言与流程完全一致。
+    let cmd = if cfg!(windows) {
+        cmd_builder::ps_encoded("'NAME: '; $n = [Console]::In.ReadLine(); \"HELLO $n\"")
+    } else {
+        "printf 'NAME: '; read name; echo \"HELLO $name\"".to_string()
+    };
     let args = ExecArgs::from_value(&json!({
-        "cmd": "printf 'NAME: '; read name; echo \"HELLO $name\"",
+        "cmd": cmd,
         "yield_time_ms": 5000,
         "tty": true,
     }))
@@ -361,17 +368,24 @@ fn pty_interactive_read_answer() {
 #[test]
 fn pty_child_sees_terminal() {
     let mgr = ProcessManager::new();
-    let args = ExecArgs::from_value(&json!({
-        "cmd": "if [ -t 0 ]; then echo ISATTY; else echo NOTTY; fi",
-        "yield_time_ms": 10_000,
-        "tty": true,
-    }))
-    .unwrap();
+    // 038 Windows：isatty 判定等价＝[Console]::IsInputRedirected（true＝
+    // 被重定向＝非终端）。
+    let tty_probe = |tty: bool| -> ExecArgs {
+        let cmd = if cfg!(windows) {
+            cmd_builder::ps_encoded(
+                "if ([Console]::IsInputRedirected) { 'NOTTY' } else { 'ISATTY' }",
+            )
+        } else {
+            "if [ -t 0 ]; then echo ISATTY; else echo NOTTY; fi".to_string()
+        };
+        ExecArgs::from_value(&json!({ "cmd": cmd, "yield_time_ms": 10_000, "tty": tty })).unwrap()
+    };
+    let args = tty_probe(true);
     let out = mgr.start(&args, None);
     assert_eq!(out.result.status, ExecStatus::Completed);
     assert!(out.result.output.contains("ISATTY"), "{:?}", out.result.output);
     // 管道模式（tty=false）不是终端
-    let out = mgr.start(&exec_args("if [ -t 0 ]; then echo ISATTY; else echo NOTTY; fi", 10_000), None);
+    let out = mgr.start(&tty_probe(false), None);
     assert_eq!(out.result.status, ExecStatus::Completed);
     assert!(out.result.output.contains("NOTTY"), "{:?}", out.result.output);
 }
@@ -1101,8 +1115,15 @@ fn pty_cancel_stops_further_input_submission() {
 #[test]
 fn pty_write_window_expiry_returns_running_for_nonreading_program() {
     let mgr = ProcessManager::new();
+    // 038 Windows：stty/sleep 为 sh 设施——等价「不读输入的常驻程序」＝
+    // PowerShell 睡眠（无 [Console] 读操作＝不消费输入）。
+    let cmd = if cfg!(windows) {
+        cmd_builder::sleep_ms(30_000)
+    } else {
+        "stty raw -echo 2>/dev/null; sleep 30".to_string()
+    };
     let args = ExecArgs::from_value(&json!({
-        "cmd": "stty raw -echo 2>/dev/null; sleep 30",
+        "cmd": cmd,
         "yield_time_ms": 250,
         "tty": true,
     }))

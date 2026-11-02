@@ -103,13 +103,29 @@ fn run_query<'a>(
 }
 
 fn vm_hwm_kb() -> u64 {
-    let status = std::fs::read_to_string("/proc/self/status").expect("读取 /proc/self/status");
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("VmHWM:") {
-            return rest.trim().trim_end_matches("kB").trim().parse().expect("kB 数值");
-        }
+    // 038 macOS：无 /proc——经 `ps -o rss=` 取当前 RSS（峰值不可得，边界
+    // 已登记）；Linux 维持 /proc HWM 精读。
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .expect("ps 采样失败");
+        return String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("ps rss 数值");
     }
-    0
+    #[cfg(not(target_os = "macos"))]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").expect("读取 /proc/self/status");
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("VmHWM:") {
+                return rest.trim().trim_end_matches("kB").trim().parse().expect("kB 数值");
+            }
+        }
+        0
+    }
 }
 
 fn p95(samples: &mut [u128]) -> u128 {

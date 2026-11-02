@@ -841,24 +841,36 @@ fn m7_reset_during_inflight_pipeline_full_interaction() {
     );
     // 旧任务记账落在旧连接（已删 inode）——失败阶段如实可查，不污染新库
     let row = store
-        .job_row("memory_consolidate_global", "global")
+        .job_row("memory_consolidate_global", "global");
+    // 038 Windows：库文件被在途连接持有，reset 降级为 DROP 全表（文件保留，
+    // 产品侧已文档化）——旧连接上 jobs 表已不存在，「已删 inode 留存」语义
+    // 不可表达；核对面由下方「无用户表」断言承载（生成内容清空＝同一外部
+    // 契约）。unix 维持已删 inode 的行留存断言（实际 SQL 行为，如实记录：
+    // 失效路径的 job_failed 记账写事务失败按上游 `let _` 吞没——行保持领取
+    // 态 running、last_error 未写入）。
+    #[cfg(windows)]
+    match row {
+        Err(e) if e.contains("no such table") => {}
+        other => panic!("Windows DROP 降级后旧连接查询应报 no such table：{other:?}"),
+    }
+    #[cfg(not(windows))]
+    let row = row
         .unwrap()
         .expect("旧连接上任务行可读（领取态留存于已删 inode）");
-    // 实际 SQL 行为（如实记录，非推断）：失效路径的 job_failed 记账在
-    // 已删 inode 的连接上写事务失败（journal 无法回放已删主文件），按上游
-    // `let _` 语义吞没——行保持领取态 running、last_error 未写入；核心
-    // 保证由文件面承载（根内零生成内容，见上）。
-    assert_eq!(
-        row.status, "running",
-        "记账落空后行保持领取态（实际 SQL 行为）"
-    );
-    assert_eq!(
-        row.last_error, None,
-        "失败原因未落（写已删 inode 失败被吞）"
-    );
+    #[cfg(not(windows))]
+    {
+        assert_eq!(
+            row.status, "running",
+            "记账落空后行保持领取态（实际 SQL 行为）"
+        );
+        assert_eq!(
+            row.last_error, None,
+            "失败原因未落（写已删 inode 失败被吞）"
+        );
+    }
     drop(store);
     // 新库未受污染（不存在＝未被旧任务重建）
-    assert!(!root.join("memories.sqlite").is_file());
+    common::assert_memories_db_reset_cleared(&root, "新库未被旧任务重建");
     // 原始会话保留（A31）
     assert!(
         sessions.join("auto-old-9.jsonl").is_file(),
