@@ -32,17 +32,13 @@ use std::sync::OnceLock;
 const WSL_INTEROP_DIR: &str = "/run/WSL";
 
 /// 沙箱模式启用判定（027 的 `TCHAT_ISOLATED_TOOLS` 判定入口的替代位）。
+/// 全平台一致：TCHAT_SANDBOX 非空即请求沙箱——后端不可用（Windows 无
+/// bubblewrap）由 resolve_launcher 显式报错、启动 fail-closed（038 Windows
+/// CI 实证：非 unix 恒 false 使请求被静默忽略＝fail-open，命令无沙箱执行）。
 pub fn sandbox_requested() -> bool {
-    #[cfg(unix)]
-    {
-        std::env::var("TCHAT_SANDBOX")
-            .ok()
-            .is_some_and(|v| !v.trim().is_empty())
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
+    std::env::var("TCHAT_SANDBOX")
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty())
 }
 
 /// 启动审计行：启用时输出 bwrap 位置或不可用原因（用户可见的启用确认／失败预告）。
@@ -408,7 +404,16 @@ fn create_filesystem_args(policy: &SandboxPolicy) -> Result<Vec<String>, String>
         .iter()
         .filter(|root| root.exists())
         .map(|root| {
-            if absolute_lexical(root) != *root {
+            // 038 Windows CI 实证：components() 的分量语义（verbatim 路径
+            // 「..」不作 ParentDir 解释等平台差异）可让 `sub\..` 穿透下方
+            // 词法清洁比较——补一道与分量语义无关的字符串级分段检查，两道
+            // 任一命中即拒绝（unix 行为不变：原本就被 components 检查拒绝）。
+            let nonclean = absolute_lexical(root) != *root
+                || root
+                    .to_string_lossy()
+                    .split(['/', '\\'])
+                    .any(|seg| seg == "." || seg == "..");
+            if nonclean {
                 return Err(format!(
                     "可写根 {} 词法非清洁（含 ./.. 等组件）：拒绝组装（解析失配会致遮蔽失效）",
                     path_to_string(root)

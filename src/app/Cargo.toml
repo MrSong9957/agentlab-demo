@@ -40,3 +40,6 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage
 [dev-dependencies]
 # 022 §5.4：TLS mock 服务器（自签证书）；与 reqwest 传递的 rustls 同版本同 provider，避免双 provider。
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# 038：memory_lifecycle 的 reset 断言需读取 memories.sqlite 表清单（Windows
+# 降级路径文件保留、断言「无用户表」）；与主依赖同版本同特性，不新增编译面。
+rusqlite = { version = "0.40.2", features = ["bundled"] }

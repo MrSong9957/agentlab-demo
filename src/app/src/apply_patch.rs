@@ -2797,9 +2797,24 @@ mod tests {
         // 012 模型契约：模型面结果 JSON 不因展示捕获而改变、不含展示字段。
         // 两次调用各用独立目录（Add 不覆盖），路径归一后逐字节比对。
         let norm = |dir: &std::path::Path, r: &ApplyPatchResult| -> String {
+            // 038 Windows：结果 JSON 内路径为 canonicalize 长名形态（8.3 短名
+            // 被展开、verbatim 剥离由 canonical_long 完成）——替换目标同函数
+            // 归一，比较结构而非路径形态（unix 恒等）。
+            let canon = std::fs::canonicalize(dir)
+                .unwrap_or_else(|_| dir.to_path_buf())
+                .to_string_lossy()
+                .into_owned();
+            let canon = {
+                #[cfg(windows)]
+                let canon = canon
+                    .strip_prefix(r"\\?\")
+                    .map(String::from)
+                    .unwrap_or(canon);
+                canon
+            };
             serde_json::to_string(r)
                 .unwrap()
-                .replace(dir.display().to_string().as_str(), "<DIR>")
+                .replace(canon.as_str(), "<DIR>")
         };
         let dir_a = disp_dir("contract-a");
         let pa = format!(

@@ -622,17 +622,21 @@ fn read_bounded(file: &mut std::fs::File, path: &Path) -> Result<Vec<u8>, String
 /// 打开并复核为普通文件：Linux 以 O_NONBLOCK 打开避免 FIFO 阻塞，再按句柄
 /// 元数据复核文件类型；目录/设备/FIFO/缺失/不可读均明确报错（§3.1）。
 fn open_regular_file(path: &Path) -> Result<std::fs::File, String> {
+    // 038 Windows：`dir\.` 形态的打开被内核拒绝（os error 5 Access denied），
+    // 类型复核永远到不了——词法消除 dot/_dotdot 分量后打开，unix 行为不变
+    //（消除不改变指向对象）；类型判定仍在打开后的句柄侧。
+    let open_path = crate::sandbox::absolute_lexical(path);
     #[cfg(unix)]
     let file = {
         use std::os::unix::fs::OpenOptionsExt;
         std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NONBLOCK)
-            .open(path)
+            .open(&open_path)
             .map_err(|e| format!("图片路径无法打开（{}）：{e}", path.display()))?
     };
     #[cfg(not(unix))]
-    let file = std::fs::File::open(path)
+    let file = std::fs::File::open(&open_path)
         .map_err(|e| format!("图片路径无法打开（{}）：{e}", path.display()))?;
     let meta = file
         .metadata()

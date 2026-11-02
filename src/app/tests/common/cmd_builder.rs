@@ -63,16 +63,14 @@ pub fn append_line(log: &Path, text: &str) -> String {
 }
 
 /// 无限循环向文件追加一行＋亚秒延时（取消/时限/组杀测试的存活写入者）。
-/// Windows 每行一次 PowerShell（约 300-500ms/行）：增长窗口可观测且不淹没
-/// 输出缓存（回环 ping 的 -n 间隔在 runner 实测不产生预期延时——038 迭代 31
-/// incremental_output 证据：300ms 窗口内两行全到）。
+/// Windows 文件写入者为纯 cmd 自旋：每行一次 PowerShell 的启动在并行套件
+/// 下停顿可达数秒（41373539854 实测：取消后 6s 观察窗零增长＝第二轮
+/// powershell 未返回）；本变体只断言「增长/停止」（日志为测试私有文件，
+/// 无输出缓存顾虑），自旋写满足两类断言且不依赖外部进程启动时延。
 pub fn writer_loop(log: &Path) -> String {
     let log = path_str(log);
     if cfg!(windows) {
-        format!(
-            "for /l %i in (1,0,2) do @((echo x)>>{log} & {})",
-            ps_encoded("Start-Sleep -Milliseconds 100")
-        )
+        format!("for /l %i in (1,0,2) do @((echo x)>>{log})")
     } else {
         format!("while true; do echo x >> {log}; sleep 0.05; done")
     }

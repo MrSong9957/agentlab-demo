@@ -1,6 +1,9 @@
 //! 013-M9 lifecycle: deletion must reach the actual phase2 tools and Git baseline.
 #[path = "common/memory_v1.rs"]
 mod support;
+// 038：reset 断言助手（common/mod.rs 的 Windows 分科 DB 检查）。
+#[path = "common/mod.rs"]
+mod common;
 use serde_json::json;
 use terminal_chat::proc_session::ProcessManager;
 use std::cell::Cell;
@@ -201,9 +204,18 @@ fn citation(id: &str) -> String {
 fn assert_projection(e: &Env, expected_raw: &str, expected_summaries: &[(&str, &str)]) {
     // JSON string encoding preserves the raw file's exact trailing blank line.
     let expected_raw: String = serde_json::from_str(expected_raw).unwrap();
+    // 038 Windows：产品渲染的 rollout_path 为正斜杠形态（RUNNER~1 短名同理
+    // 保留）——原生与正斜杠两种前缀形态都替换为占位符，比较路径归属而非
+    // 分隔符形态（unix 两形态恒等，零行为变化）。
+    let sessions_native = e.sessions.to_str().unwrap().to_string();
+    let sessions_fwd = sessions_native.replace('\\', "/");
+    let cwd_native = std::env::current_dir().unwrap().to_str().unwrap().to_string();
+    let cwd_fwd = cwd_native.replace('\\', "/");
     let normalize = |text: String| {
-        text.replace(e.sessions.to_str().unwrap(), "<SESSIONS>")
-            .replace(std::env::current_dir().unwrap().to_str().unwrap(), "<CWD>")
+        text.replace(&sessions_native, "<SESSIONS>")
+            .replace(&sessions_fwd, "<SESSIONS>")
+            .replace(&cwd_native, "<CWD>")
+            .replace(&cwd_fwd, "<CWD>")
     };
     assert_eq!(
         normalize(fs::read_to_string(e.root.join("raw_memories.md")).unwrap()),
@@ -787,7 +799,7 @@ fn reset_between_selection_and_sync_preserves_new_epoch_resource() {
     );
     assert_eq!(fs::read_to_string(&fresh).unwrap(), "NEW-EPOCH-RESOURCE");
     assert!(!e.root.join(".git").exists());
-    assert!(!e.root.join("memories.sqlite").exists());
+    common::assert_memories_db_reset_cleared(&e.root, "reset 后生成库应清空");
     assert_eq!(
         fs::read_to_string(e.sessions.join("auto-reset-source.jsonl")).unwrap(),
         "original session\n"
@@ -869,7 +881,8 @@ fn reset_during_model_wait_does_not_hold_file_lock_or_rebuild_old_outputs() {
         fs::read_to_string(fresh).unwrap(),
         "NEW-EPOCH-WHILE-WAITING"
     );
-    for name in ["MEMORY.md", "memory_summary.md", ".git", "memories.sqlite"] {
+    for name in ["MEMORY.md", "memory_summary.md", ".git"] {
         assert!(!e.root.join(name).exists(), "old task rebuilt {name}");
     }
+    common::assert_memories_db_reset_cleared(&e.root, "old task rebuilt");
 }

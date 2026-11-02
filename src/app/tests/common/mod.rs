@@ -327,3 +327,31 @@ impl std::ops::Deref for EnvLockGuard {
         &self.0
     }
 }
+
+/// 038 Windows：reset 对被在途连接持有的 memories.sqlite 降级为 DROP 全表
+///（文件作为基础设施保留——Windows 无 unix unlink 语义，产品侧已文档化）。
+/// 外部契约＝生成内容清空：Windows 断言「文件不存在或无用户表」，unix 断言
+/// 文件不存在。memory_lifecycle / memory_runner 的 reset 断言共用。
+pub fn assert_memories_db_reset_cleared(root: &Path, ctx: &str) {
+    let db = root.join("memories.sqlite");
+    #[cfg(windows)]
+    if db.exists() {
+        let conn = rusqlite::Connection::open_with_flags(
+            &db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap_or_else(|e| panic!("{ctx}: 保留的库文件必须可读：{e}"));
+        let tables: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|e| panic!("{ctx}: 读取表清单失败：{e}"));
+        assert_eq!(tables, 0, "{ctx}: 生成表应被 DROP 清空");
+        return;
+    }
+    #[cfg(not(windows))]
+    let _ = ctx;
+    assert!(!db.exists(), "{ctx}: memories.sqlite 应不存在");
+}

@@ -833,7 +833,7 @@ fn m7_reset_during_inflight_pipeline_full_interaction() {
         !root.join("memory_summary.md").exists(),
         "旧任务不得重建总摘要"
     );
-    assert!(!root.join("memories.sqlite").is_file(), "状态库不得复活");
+    common::assert_memories_db_reset_cleared(&root, "状态库不得复活");
     assert!(!root.join(".git").exists(), "Git 基线不得重建");
     assert!(
         !dir.path().join(".git").exists() && !sessions.join(".git").exists(),
@@ -919,7 +919,7 @@ fn m7_reset_invalidates_pipeline_before_phase2() {
         !root.join("rollout_summaries").exists() && !root.join("extensions").exists(),
         "不得重建布局/同步目录"
     );
-    assert!(!root.join("memories.sqlite").is_file(), "不得重建状态库");
+    common::assert_memories_db_reset_cleared(&root, "不得重建状态库");
     assert!(!root.join("MEMORY.md").exists(), "不得生成记忆产物");
     // mock 上旧任务不得再发起 phase2 请求（阶段边界中止）
     let reqs = mock.requests();

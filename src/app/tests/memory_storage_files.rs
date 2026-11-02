@@ -399,9 +399,16 @@ fn m4_full_snapshot_has_no_256_limit_or_age_filter() {
     assert_eq!(rows.first().unwrap().thread_id, "thread-000");
     assert_eq!(rows.last().unwrap().thread_id, "thread-259");
     let db = e.db_bytes();
-    e.sync();
+    let warnings = e.sync();
     let actual = files(&e.root);
-    assert_eq!(actual.len(), 261, "260 摘要＋完整 raw 合集");
+    // 038 Windows 取证：sync 警告与实际清单一并进断言（此前失败无法归因
+    // 是哪 36 个文件缺失、是否有被吞掉的写入警告）
+    assert_eq!(
+        actual.len(),
+        261,
+        "260 摘要＋完整 raw 合集：sync 警告={warnings:?} 清单={:?}",
+        actual.keys().take(8).collect::<Vec<_>>()
+    );
     let raw = String::from_utf8(actual["raw_memories.md"].clone()).unwrap();
     assert_eq!(raw.matches("## Thread `").count(), 260);
     assert!(raw.find("## Thread `thread-000`").unwrap() < raw.find("## Thread `thread-259`").unwrap());

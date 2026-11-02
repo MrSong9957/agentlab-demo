@@ -711,7 +711,10 @@ impl StorageBroken {
 
 #[cfg(windows)]
 struct StorageBroken {
-    _lock_file: std::fs::File,
+    // Option：restore(self) 消费句柄释放锁——unix 的 rename 语义是「立即恢复
+    // 访问」，Windows 侧锁必须同步释放，否则 restore 之后的验证查询全部
+    // database is locked（41373539854 实测：锁持有至测试结束＝m3 两例失败）
+    lock_file: Option<std::fs::File>,
 }
 
 #[cfg(windows)]
@@ -738,9 +741,13 @@ impl StorageBroken {
             )
         };
         assert!(ok != 0, "注入全文件字节锁失败");
-        Self { _lock_file: f }
+        Self { lock_file: Some(f) }
     }
-    fn restore(&self) {}
+    /// 消费句柄＝关闭文件＝释放全文件字节锁（与 unix rename 恢复语义对齐：
+    /// restore 后存储层立即可访问）。
+    fn restore(self) {
+        drop(self.lock_file);
+    }
 }
 
 #[cfg(unix)]

@@ -679,13 +679,26 @@ fn rg_flow(needle: &str, expected_exit: i32, expected_output: &str) {
     )
     .unwrap();
     fs::write(&memory_file, "MEMORY_NEEDLE: 来自磁盘的真实经验\n").unwrap();
+    // 038 Windows：PATH 探测需带 .exe（choco shim 为 rg.exe，无扩展名探测
+    // 恒 miss＝「需要真实 rg」）；命令构造经平台 shell——`env -i` 是 sh 设施，
+    // Windows 侧以 rg --no-config 达成同一 hygiene（不读配置文件），其余
+    // 参数与断言完全一致（真实 rg 检索真实 MEMORY.md 的验收不变）。
     let rg = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-        .map(|p| p.join("rg"))
+        .map(|p| p.join(if cfg!(windows) { "rg.exe" } else { "rg" }))
         .find(|p| p.is_file())
         .expect("M6 验收需要真实 rg");
-    let home = shell_quote(&dir.path().display().to_string());
-    let cmd = format!("env -i HOME={home} XDG_CONFIG_HOME={home} XDG_CACHE_HOME={home} LC_ALL=C TZ=UTC {} --no-config --line-number --fixed-strings --color=never -- {} {}",
-        shell_quote(&rg.display().to_string()), shell_quote(needle), shell_quote(&memory_file.display().to_string()));
+    let cmd = if cfg!(windows) {
+        format!(
+            "\"{}\" --no-config --line-number --fixed-strings --color=never -- \"{}\" \"{}\"",
+            rg.display(),
+            needle,
+            memory_file.display()
+        )
+    } else {
+        let home = shell_quote(&dir.path().display().to_string());
+        format!("env -i HOME={home} XDG_CONFIG_HOME={home} XDG_CACHE_HOME={home} LC_ALL=C TZ=UTC {} --no-config --line-number --fixed-strings --color=never -- {} {}",
+            shell_quote(&rg.display().to_string()), shell_quote(needle), shell_quote(&memory_file.display().to_string()))
+    };
     let mock = common::spawn_mock(vec![
         common::MockResp::json(
             200,

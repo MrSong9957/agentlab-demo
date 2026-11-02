@@ -475,9 +475,11 @@ fn cd_inside_command_does_not_stick() {
 fn exec_b04_dual_stream_mb_drain_after_cap() {
     // 平台等价：cmd for /l 双流循环（unix 保留原 while 计数）
     let cmd = if cfg!(windows) {
-        // 紧凑形态：`echo X &` 的空格会进 echo 输出；`text 1>&2` 的重定向
-        // 前空格同样进输出（038 实测）——全部消除
-        "for /l %i in (1,1,40000) do @(echo out-wwwwwwwwww&echo err-eeeeeeeeee1>&2)".to_string()
+        // 紧凑形态：`echo X &` 的空格会进 echo 输出（由下方 trim_end 归一）。
+        // stderr 行必须保留 `1>&2` 前的空格：`err-eeeeeeeeee1>&2` 的紧邻数字
+        // 不绑定句柄（解析为 `>&2`），`1` 进文本＝"err-eeeeeeeeee1"——不是
+        // 尾随空白，trim_end 无法归一（41373539854 实测）
+        "for /l %i in (1,1,40000) do @(echo out-wwwwwwwwww&echo err-eeeeeeeeee 1>&2)".to_string()
     } else {
         "i=0; while [ $i -lt 40000 ]; do echo out-wwwwwwwwww; echo err-eeeeeeeeee 1>&2; \
                i=$((i+1)); done".to_string()
@@ -753,9 +755,18 @@ fn min_timeout_accepted_and_expires_as_one_millisecond() {
 #[test]
 fn min_output_cap_truncates_at_codepoint_boundaries() {
     let text = "中🙂文";
+    // 平台等价：printf 为 sh 设施——Windows 经 PowerShell 精确字节输出
+    //（OutputEncoding UTF-8，同 b05 已验证模式）
+    let cmd_exact = if cfg!(windows) {
+        cmd_builder::ps_encoded(
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8;[Console]::Out.Write('中🙂文')",
+        )
+    } else {
+        "printf '%s' '中🙂文'".to_string()
+    };
     for (cap, expected) in [(1usize, "中"), (2, "中🙂"), (3, text)] {
         let r = run(
-            &json!({ "cmd": "printf '%s' '中🙂文'", "max_output_chars": cap }),
+            &json!({ "cmd": cmd_exact, "max_output_chars": cap }),
             None,
         );
         assert_eq!(r.status, ExecStatus::Completed, "cap={cap}：{r:?}");
@@ -767,9 +778,16 @@ fn min_output_cap_truncates_at_codepoint_boundaries() {
     }
 
     // 码点额度为 1 时，后续 100 KB 仍须被读取丢弃，子进程正常收尾而不是堵塞。
+    let cmd_flood = if cfg!(windows) {
+        cmd_builder::ps_encoded(
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8;[Console]::Out.Write('中');[Console]::Out.Write('0'*100000)",
+        )
+    } else {
+        "printf '中'; yes 0123456789012345678901234567890 | head -c 100000".to_string()
+    };
     let r = run(
         &json!({
-            "cmd": "printf '中'; yes 0123456789012345678901234567890 | head -c 100000",
+            "cmd": cmd_flood,
             "max_output_chars": 1,
             "yield_time_ms": 30000,
         }),
