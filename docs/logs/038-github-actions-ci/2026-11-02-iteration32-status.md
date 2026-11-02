@@ -288,3 +288,27 @@ attack031 7/0、sandbox_lifecycle 4/0、js_security 18/0、memory_storage_files
 22/0、session_perf 1/0、proc_session 27/1（pipe_ctrl_c＝本地容器 dash 特
 性，CI ubuntu 绿）、multi_agent c13 2/0、sandbox_matrix_probes e_reaping
 1/0＋b2_mcp 1/0＋attack06 1/0（放宽 seccomp profile 容器）。
+
+## 迭代 36：本地 L3 全量（批次七后 HEAD）与并行抖动复跑
+
+**L3 全量第一轮**：`cargo check --locked`（通过）＋`cargo test --workspace
+--no-fail-fast --locked`＝**3856 通过/1 失败/6 忽略**——1 失败＝pipe_ctrl_c
+（本地容器 dash 对 trap'' INT 的组信号行为特性；CI ubuntu 同用例绿）。
+**并行抖动复跑捕获**：c18_barrier（串行对照 wall-clock 在容器多核争用下四
+连倒挂 217/250ms——对照降级采样，重叠验收由屏障结构化断言完整承载，五连
+复验绿）＋s141（定向复跑绿）。**定向绿全集**：lib 290、request_permissions
+38、attack031 7、sandbox_lifecycle 4、js_security 18、js_perf 7、
+memory_storage_files 22、session_perf 1、multi_agent c13 2、e_reaping 1、
+b2_mcp 1、attack06 1（本容器为放宽 seccomp profile——D1/D2/D3 复测通过，
+CI 严格 profile 的回报待推送后）。
+
+**推送阻塞（返回决策事项）**：会话环境重置丢失 GitHub 推送凭据（gh CLI、
+credential helper、ssh key 三路均无）。本地滞留 4 个提交待推送：
+批次六 e7fae16（mac /proc 族＋path_covers mac 扩展）、批次七（perf 门禁
+分科＋m4 折叠分科）、D2 载荷 ns 修正（安全修正——已推送的 0764134 含容器
+连坐缺陷，**应尽快推送替代**）、c18_barrier 对照降级。
+
+**安全测试记录（本轮范围）**：D2 v1 事故＝本会话最高优先安全发现，根因
+（bwrap ns 拓扑误解）与修正已入库；D1/D2/D3 复测命令与结果如上（放宽容器
+通过）；Windows 锁 ReleaseMutex owner 契约审计结论（迭代 33）＝同线程
+重入经 resume same_file 复用规避、跨线程释放经 owner 判定跳过。
