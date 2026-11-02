@@ -78,3 +78,21 @@ FD 继承/树回收），报告结论：**高风险 0 项；中风险 1 项（D1
 - 安全低风险项：B2/B4 已修；A1（互斥体名随机成分）/A4（其余临界区 None 契约
   统一）/B3（junction 检测）/C3（理论项）登记下轮（A4 的 mem_write 处已随 D1
   统一）。
+
+## 迭代 32 终：D-mac 二轮取证（41362078838 取消轮日志）——修正挂点判断
+
+Drop 排空/强杀修复**未解除挂死**（同 3 子进程 E 态 1h25m＝出生即卡）。二轮证据：
+- e2e 7 次 spawn 后冻结；s100×2＋s101 的 3 个 terminal-chat 子进程**从 spawn 起即
+  E 态**（ELAPSED＝job 全长）＝CLI 启动/退出早期即阻塞（macOS pty session-leader
+  teardown 形态——master 持有时 leader 退出死锁的已知类别）。
+- 测试线程真实挂点＝**timeout 分支的 kill→无界 wait()**：wait_screen 等看门狗到
+  期→kill（E 态子进程不可中断）→child.wait() 永不返回→panic 永未打印→零输出
+  ＋无失败报告。此前判断「Drop 无界 wait」只是次级挂点（本轮 Drop 修复后主挂点
+  上移到 timeout 分支——同款无界 wait 还存于 e2e_acceptance 1235/1288/1366 与
+  common/pty.rs 同位）。
+- 下轮修复序列：①全部 kill→wait 对改有界等待＋分离收尸（与 Drop 同款）；②
+  master 提前丢弃（先关 master 让 slave 侧写返回 EIO、退出序列不再阻塞——排空
+  不是解法，EOF 才是）；③若①②后仍 E 态＝macOS tty 驱动级死锁，转为产品侧
+  （CLI 退出序列不阻塞写：超时放弃）＋MACOSX pty 复用调研。
+- Windows 并行证据（windows12/windows11）：55 失败族中 powershell 回显与 b04
+  尾空格已修（81f236e EncodedCommand＋紧凑重定向），待下轮 CI 回报其余。
