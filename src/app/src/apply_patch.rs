@@ -195,6 +195,13 @@ pub fn apply_patch_sandboxed_with_exe(
     let child = spawn_cmd
         .env_clear() // 033：凭据环境不进补丁子进程（027 R1 环境面防线保留）
         .envs(child_env)
+        // 038 方案 A：受闸载荷自停标记——env_clear **之后**注入（清空会抹掉
+        // 先行 env()）；入口读任何输入前 SIGSTOP（确认前零指令推进），宿主
+        // 确认后 SIGCONT。普通非沙箱路径不设闸。
+        .env(
+            crate::sandbox::INTERNAL_GATE_ENV,
+            policy.map(|_| "stop").unwrap_or("off"),
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -204,8 +211,18 @@ pub fn apply_patch_sandboxed_with_exe(
         Err(e) => return err(format!("沙箱执行启动失败：{e}"), false),
     };
     if is_031 {
-        if let Err(e) = crate::sandbox::verify_child_pid_namespace(child.id()) {
-            return err(format!("沙箱执行隔离验证失败：{e}"), false);
+        // 038 方案 A：确认闸（隔离＋载荷 ns 标识确认后放行；载荷自停入口使
+        // 「确认前不执行」零竞态成立）。本接口无取消参数（同步等待），取消
+        // 由上层 turn 取消门控——确认循环无 cancel 检查（None）。
+        match crate::sandbox::confirm_sandbox_isolation_and_release(child.id(), None) {
+            Ok(crate::sandbox::SandboxConfirm::Released(_)) => {}
+            Ok(crate::sandbox::SandboxConfirm::LeaderGone) => {
+                return err(
+                    "沙箱执行启动失败：监督进程在确认前退出（载荷未执行）".into(),
+                    false,
+                )
+            }
+            Err(e) => return err(format!("沙箱执行隔离验证失败：{e}"), false),
         }
     }
     if let Err(e) = child.stdin.take().unwrap().write_all(args.patch.as_bytes()) {
@@ -235,6 +252,9 @@ pub fn apply_patch_sandboxed_with_exe(
 /// 进程内同一 run() → (结果, 变更) JSON 写 stdout。退出码：0＝完成（结果看
 /// JSON）、2＝协议失败。
 pub fn run_internal_apply() -> i32 {
+    // 038 方案 A：受闸载荷自停（宿主确认隔离＋登记清理标识后 SIGCONT 放行
+    // ——确认前零指令推进，读任何输入之前）。
+    crate::sandbox::internal_payload_self_stop_if_gated();
     use std::io::Read;
     // 流式限量：至多读 MAX_PATCH_BYTES+1 字节，超限即拒（先于整段入内存/转字符串）
     let mut bytes = Vec::new();

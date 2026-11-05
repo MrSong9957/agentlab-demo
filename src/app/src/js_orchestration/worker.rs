@@ -102,12 +102,17 @@ fn outbox_push(outbox: &Outbox, frame: Value) -> bool {
     true
 }
 
-/// `--internal-js` 入口：stdin/stdout 二进制帧协议；不读任何环境变量。
+/// `--internal-js` 入口：stdin/stdout 二进制帧协议。
 pub fn run_internal_js() -> i32 {
+    // 受闸载荷在入口读 init 帧前停止。宿主按进程名识别入口，并确认 T 状态后放行。
+    mark_gated_worker_entry();
+    crate::sandbox::internal_payload_self_stop_if_gated();
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout().lock();
     // init 帧（≤10 MiB）：源码＋工具目录。
-    let init = match read_frame(&mut input, MAX_INIT_FRAME_BYTES) {
+    let first_frame = read_frame(&mut input, MAX_INIT_FRAME_BYTES);
+    restore_worker_process_name();
+    let init = match first_frame {
         Ok(Some(frame)) if frame.get("t").and_then(Value::as_str) == Some("init") => frame,
         Ok(_) => {
             eprintln!("js-worker: 首帧不是 init");
@@ -156,6 +161,33 @@ pub fn run_internal_js() -> i32 {
             );
             3
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn mark_gated_worker_entry() {
+    if std::env::var(crate::sandbox::INTERNAL_GATE_ENV).ok().as_deref() == Some("stop") {
+        set_worker_process_name(b"tchat-js-ready\0");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn mark_gated_worker_entry() {}
+
+#[cfg(target_os = "linux")]
+fn restore_worker_process_name() {
+    if std::env::var(crate::sandbox::INTERNAL_GATE_ENV).ok().as_deref() == Some("stop") {
+        set_worker_process_name(b"terminal-chat\0");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn restore_worker_process_name() {}
+
+#[cfg(target_os = "linux")]
+fn set_worker_process_name(name: &[u8]) {
+    unsafe {
+        libc::prctl(libc::PR_SET_NAME, name.as_ptr() as libc::c_ulong, 0, 0, 0);
     }
 }
 

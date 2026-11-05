@@ -359,3 +359,77 @@ fn sandbox_move_wrapper_unavailable_zero_execution() {
     assert!(!dst.exists(), "目标不得被主进程代办创建");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---------- 038 方案 A：apply_patch 路径的启动确认闸（接线测试） ----------
+//
+// 契约：受闸载荷（--internal-apply 自停入口）在宿主确认「隔离＋清理标识」
+// 前零指令推进（读补丁之前 STOP）；确认超时不放行（整组终止＋Err）；放行
+// 后补丁真实落盘。真实接线（apply_patch_sandboxed_with_exe→spawn→confirm）。
+
+fn gate_env_guard() -> (std::path::PathBuf, ()) {
+    std::env::set_var("TCHAT_SANDBOX", "1");
+    (std::env::temp_dir(), ())
+}
+
+/// 放行路径：确认成功→补丁经 internal-apply 真实落盘（Update 生效）。
+#[test]
+fn gate_applies_patch_after_release() {
+    let _serial = SANDBOX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !terminal_chat::sandbox::probe_available() {
+        return; // 无 bwrap 环境：闸随沙箱后端分支
+    }
+    let (_tmp, _g) = gate_env_guard();
+    let root = temp_root("gate-release");
+    let file = root.join("gate.txt");
+    std::fs::write(&file, "old\n").unwrap();
+    let exe = std::path::PathBuf::from(env!("CARGO_BIN_EXE_terminal-chat"));
+    let (result, _) = run_sandboxed(&exe, &update_patch(&file, "old", "new"));
+    assert!(result.ok, "放行后补丁应成功：{result:?}");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "new\n",
+        "放行后 Update 真实落盘"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 确认失败路径（载荷提前退出）：exe 不存在＝bwrap exec 载荷失败→确认闸
+/// LeaderGone（监督进程在确认前退出）→不放行＋Err；目标文件不被写。
+/// 注：超时分支（确认循环 deadline）的确定性复现需要「载荷永不出现」的监督
+/// 形态，由 lib 单测 gate_confirm_timeout_does_not_release 承载（sleep 自成
+/// 组、children 恒空）——接线层真实沙箱下自停载荷在首个确认轮即被定位
+///（0ms/1ms 实测均通过），时序注入不可控。
+#[test]
+fn gate_leader_gone_rejects_and_does_not_execute() {
+    let _serial = SANDBOX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !terminal_chat::sandbox::probe_available() {
+        return;
+    }
+    std::env::set_var("TCHAT_SANDBOX", "1");
+    let root = temp_root("gate-gone");
+    let file = root.join("gate.txt");
+    std::fs::write(&file, "untouched\n").unwrap();
+    let bogus = root.join("no-such-terminal-chat");
+    let patch = update_patch(&file, "untouched", "changed");
+    let (result, _) = terminal_chat::apply_patch::apply_patch_sandboxed_with_exe(
+        &bogus,
+        &input_of(&patch),
+        None,
+    );
+    std::env::remove_var("TCHAT_SANDBOX");
+    assert!(!result.ok, "确认失败必须不放行：{result:?}");
+    let msg = result.error.as_deref().unwrap_or_default();
+    // LeaderGone 形态（实测）：载荷 exec 失败→监督进程退出→闸不放行（静默
+    // 让位于自然退出语义），错误经退出状态如实报告 bwrap execvp 失败——
+    // 「准确报告结果」契约由该形态承载（补丁未执行由下方断言独立锁定）。
+    assert!(
+        msg.contains("execvp") || msg.contains("确认前退出") || msg.contains("隔离") || msg.contains("超时"),
+        "错误须如实报告启动失败形态：{msg}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "untouched\n",
+        "确认失败＝补丁未执行（文件内容不变）"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

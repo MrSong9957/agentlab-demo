@@ -13,12 +13,14 @@ mod common;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
-use terminal_chat::exec::{ExecArgs, ExecResult, ExecStatus};
+use terminal_chat::exec::{ExecArgs, ExecResult, ExecStatus, WriteStdinArgs};
+use terminal_chat::proc_session::ProcessManager as GateMgr;
 use terminal_chat::proc_session::ProcessManager;
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -190,4 +192,73 @@ fn sandbox_mode_pty_timeout_semantics_preserved() {
 
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&dir2);
+}
+
+// ---------- 038 方案 A：沙箱启动确认闸（用户确认契约） ----------
+//
+// 集成层验证放行路径（gate03）：确认成功→用户命令执行→016 终止/句柄语义。
+// 「确认期取消不放行」「确认超时不放行」「清理不波及调用者 ns」「LeaderGone」
+// 的确定性复现需要直接操纵确认闸输入（cancel 预置位、无载荷的监督进程），
+// 位于 proc_session.rs 的 lib 单测（gate_confirm_*）——集成层无法从外部
+// 稳定构造这些竞态窗口（本容器 bwrap setup <1ms，时间注入不可控）。
+
+fn gate_supported() -> bool {
+    terminal_chat::sandbox::probe_available()
+}
+
+/// 放行后正常执行：确认成功（默认 2s 窗口）→用户命令执行（标记文件存在）、
+/// 运行中句柄可用；terminate=true 按 016 终止整组（Terminated）且停止写入。
+#[test]
+fn gate03_released_runs_and_terminate_satisfies_016() {
+    let _serial = SANDBOX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !gate_supported() {
+        return;
+    }
+    std::env::set_var("TCHAT_SANDBOX", "1");
+    struct EnvGuard;
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("TCHAT_SANDBOX");
+        }
+    }
+    let _guard = EnvGuard;
+
+    let dir = temp_dir("gate-release");
+    let mark = dir.join("gate-mark.txt");
+    let log = dir.join("w.log");
+    let mgr = GateMgr::new();
+    let out = mgr
+        .start(
+            &ExecArgs::from_value(&json!({
+                "cmd": format!(
+                    "echo GATE-MARK > {mark}; while true; do echo x >> {log}; sleep 0.05; done",
+                    mark = mark.display(),
+                    log = log.display()
+                ),
+                "yield_time_ms": 8000,
+            }))
+            .unwrap(),
+            None,
+        )
+        .result;
+    assert_eq!(out.status, ExecStatus::Running, "确认放行后进入运行态：{out:?}");
+    let sid = out.session_id.expect("运行态句柄");
+    // 放行证据：标记文件已由用户命令写出。
+    let mark_deadline = Instant::now() + Duration::from_secs(5);
+    while !mark.exists() && Instant::now() < mark_deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(mark.exists(), "放行后用户命令已执行（标记文件存在）");
+    // 016 终止：Terminated＋写入停止。
+    let term = WriteStdinArgs::from_value(
+        &json!({ "session_id": sid, "terminate": true }),
+    )
+    .unwrap();
+    let r = mgr.interact(&term, None).result;
+    assert_eq!(r.status, ExecStatus::Terminated, "{r:?}");
+    let s1 = log_size(&log);
+    thread::sleep(Duration::from_millis(400));
+    assert_eq!(log_size(&log), s1, "终止后整组停止写入");
+    mgr.close();
+    let _ = fs::remove_dir_all(&dir);
 }

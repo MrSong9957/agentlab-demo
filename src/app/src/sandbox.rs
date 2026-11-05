@@ -1309,6 +1309,258 @@ fn build_seccomp_fd() -> std::io::Result<Option<SeccompFd>> {
 /// bwrap 已退出＝自身 fail-hard 已生效（载荷未运行），返回 Ok；超时仍无任
 /// 何异 ns 子进程且进程存活＝隔离未建立：killpg 整组终止＋waitpid 回收并返
 /// 回 Err（模型命令拒绝）。
+/// 038 方案 A（用户确认契约）：沙箱载荷自停前缀——用户命令执行前进程自停
+///（SIGSTOP），宿主确认「隔离成立＋本会话清理标识（载荷 pid ns）已登记」后
+/// SIGCONT 放行；确认超时/失败/取消一律不放行（整组终止，016 有界清理）。
+/// STOP 失败即自杀（fail-closed：确认前绝不执行用户命令）。仅沙箱分支注入；
+/// 普通模式行为零变化。
+#[cfg(unix)]
+pub fn sandbox_gate_prefix() -> String {
+    "kill -s STOP $$ 2>/dev/null || kill -s KILL $$; ".to_string()
+}
+
+/// 确认超时（毫秒）：默认 2000ms；`TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS` 仅供
+/// 集成测试注入短超时（超时路径的确定性复现），产品路径不设置该变量。
+#[cfg(unix)]
+pub(crate) fn sandbox_confirm_timeout_ms() -> u64 {
+    std::env::var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2_000)
+}
+
+/// 沙箱启动确认结果。
+#[cfg(unix)]
+#[derive(Debug)]
+pub enum SandboxConfirm {
+    /// 隔离确认＋清理标识已登记＋载荷已放行（SIGCONT）。
+    Released(String),
+    /// 监督进程（bwrap）在 release 回调前退出。载荷没有获得放行帧；
+    /// --die-with-parent 负责级联终止，但此结果不证明载荷已被 wait。
+    LeaderGone,
+}
+
+#[cfg(unix)]
+pub(crate) enum SandboxRelease {
+    Pending,
+    Released,
+}
+
+/// 沙箱启动确认闸：确认载荷身份和隔离状态后放行；确认超时或取消时不放行。
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+pub fn confirm_sandbox_isolation_and_release(
+    leader_pid: u32,
+    cancel: Option<&AtomicBool>,
+) -> std::io::Result<SandboxConfirm> {
+    confirm_sandbox_with_release(
+        leader_pid,
+        cancel,
+        |pid, _, _| {
+            if unsafe { libc::kill(pid, libc::SIGCONT) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(SandboxRelease::Released)
+        },
+        kill_sandbox_group_and_wait,
+    )
+}
+
+#[cfg(unix)]
+pub(crate) fn confirm_sandbox_with_release(
+    leader_pid: u32,
+    cancel: Option<&AtomicBool>,
+    mut release: impl FnMut(libc::pid_t, &str, u64) -> std::io::Result<SandboxRelease>,
+    mut abort: impl FnMut(u32) -> std::io::Result<()>,
+) -> std::io::Result<SandboxConfirm> {
+    use std::path::Path;
+    let self_ns = std::fs::read_link("/proc/self/ns/pid").map_err(std::io::Error::other)?;
+    let deadline = Instant::now() + Duration::from_millis(sandbox_confirm_timeout_ms());
+    loop {
+        // 确认期取消：不放行，016 有界清理后报错。
+        if cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
+            return Err(abort_sandbox_confirmation(
+                &mut abort,
+                leader_pid,
+                "沙箱启动确认期间被用户取消：用户命令未执行",
+            ));
+        }
+        // 监督进程消失：未调用 release。--die-with-parent 会级联终止载荷，
+        // 但本函数没有载荷 PIDFD，不能把级联终止当作载荷已回收的证据。
+        if !Path::new(&format!("/proc/{leader_pid}")).exists() {
+            return Ok(SandboxConfirm::LeaderGone);
+        }
+        // 在监督进程 children 中定位载荷（ns ≠ 调用者 ns）＝隔离＋标识同点确认。
+        let mut payload: Option<(libc::pid_t, String, u64)> = None;
+        if let Ok(tasks) = std::fs::read_dir(format!("/proc/{leader_pid}/task")) {
+            for t in tasks.flatten() {
+                if let Ok(text) = std::fs::read_to_string(t.path().join("children")) {
+                    for pid_str in text.split_whitespace() {
+                        let Ok(pid) = pid_str.parse::<libc::pid_t>() else {
+                            continue;
+                        };
+                        if let (Ok(ns), Ok(stat)) = (
+                            std::fs::read_link(format!("/proc/{pid}/ns/pid")),
+                            read_process_identity(pid),
+                        ) {
+                            if stat.parent_pid == leader_pid as libc::pid_t && ns != self_ns {
+                                payload = Some((
+                                    pid,
+                                    ns.to_string_lossy().into_owned(),
+                                    stat.start_time,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((pid, ns, start_time)) = payload {
+            match release(pid, &ns, start_time) {
+                Ok(SandboxRelease::Released) => return Ok(SandboxConfirm::Released(ns)),
+                Ok(SandboxRelease::Pending) => {}
+                Err(error) => {
+                    return Err(abort_sandbox_confirmation(
+                        &mut abort,
+                        leader_pid,
+                        &format!("沙箱载荷身份捕获或放行失败：{error}"),
+                    ));
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(abort_sandbox_confirmation(
+                &mut abort,
+                leader_pid,
+                "沙箱隔离/清理标识确认超时：用户命令未执行",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) struct ProcessIdentity {
+    pub(crate) parent_pid: libc::pid_t,
+    pub(crate) state: char,
+    pub(crate) process_group: libc::pid_t,
+    pub(crate) session_id: libc::pid_t,
+    pub(crate) start_time: u64,
+}
+
+#[cfg(unix)]
+pub(crate) fn read_process_identity(pid: libc::pid_t) -> std::io::Result<ProcessIdentity> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let (_, fields) = stat
+        .rsplit_once(") ")
+        .ok_or_else(|| std::io::Error::other("/proc stat 格式无效"))?;
+    let fields: Vec<_> = fields.split_whitespace().collect();
+    let state = fields
+        .first()
+        .and_then(|value| value.chars().next())
+        .ok_or_else(|| std::io::Error::other("/proc stat 缺少进程状态"))?;
+    let parent_pid = fields
+        .get(1)
+        .ok_or_else(|| std::io::Error::other("/proc stat 缺少父进程 PID"))?
+        .parse()
+        .map_err(std::io::Error::other)?;
+    let process_group = fields
+        .get(2)
+        .ok_or_else(|| std::io::Error::other("/proc stat 缺少进程组"))?
+        .parse()
+        .map_err(std::io::Error::other)?;
+    let session_id = fields
+        .get(3)
+        .ok_or_else(|| std::io::Error::other("/proc stat 缺少会话"))?
+        .parse()
+        .map_err(std::io::Error::other)?;
+    let start_time = fields
+        .get(19)
+        .ok_or_else(|| std::io::Error::other("/proc stat 缺少启动时间"))?
+        .parse()
+        .map_err(std::io::Error::other)?;
+    Ok(ProcessIdentity { parent_pid, state, process_group, session_id, start_time })
+}
+
+#[cfg(unix)]
+fn abort_sandbox_confirmation(
+    abort: &mut impl FnMut(u32) -> std::io::Result<()>,
+    leader_pid: u32,
+    reason: &str,
+) -> std::io::Error {
+    match abort(leader_pid) {
+        Ok(()) => std::io::Error::other(format!("{reason}（载荷未放行，监督进程已回收）")),
+        Err(cleanup) => std::io::Error::other(format!(
+            "{reason}（载荷未放行，监督进程回收未确认：{cleanup}）"
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn kill_sandbox_group_and_wait(leader_pid: u32) -> std::io::Result<()> {
+    let pid = leader_pid as libc::pid_t;
+    let signal_error = if unsafe { libc::killpg(pid, libc::SIGKILL) } == 0 {
+        None
+    } else {
+        let error = std::io::Error::last_os_error();
+        (error.raw_os_error() != Some(libc::ESRCH)).then_some(error)
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if waited == pid || (waited < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)) {
+            return signal_error.map_or(Ok(()), Err);
+        }
+        if waited < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINTR) {
+                return Err(error);
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "监督进程在 2 秒内未被回收",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+
+/// 内部载荷受闸入口（apply_patch --internal-apply / js worker）。
+/// 宿主以 `TCHAT_INTERNAL_GATE=stop` 标记载荷。入口在读取输入前停止，用户代码
+/// 只会在宿主确认隔离和身份后收到输入。unix 专属；windows 无沙箱路径不设闸。
+pub const INTERNAL_GATE_ENV: &str = "TCHAT_INTERNAL_GATE";
+
+#[cfg(unix)]
+pub fn internal_payload_self_stop_if_gated() {
+    if std::env::var(INTERNAL_GATE_ENV).ok().as_deref() == Some("stop") {
+        unsafe {
+            libc::kill(libc::getpid(), libc::SIGSTOP);
+        }
+    }
+}
+
+/// 038 方案 A：MCP stdio 载荷包装（载荷为 mcp.json 指定的任意命令——不经
+/// 本产品代码，自停入口不可用）。等价形态：`sh -c 'kill -STOP $$; exec
+/// "$0" "$@"' <command> <args...>`——shell 自停后 execve 原位替换为目标载荷
+///（同 pid，SIGSTOP 跨 execve 持续），载荷第一条指令执行前即处于 STOP；
+/// 宿主确认后对（载荷＝）同 pid SIGCONT。args 经 "$@" 传递不展开、不重引。
+#[cfg(unix)]
+pub fn mcp_stdio_gate_wrap(command: &str, args: &[String]) -> (String, Vec<String>) {
+    let mut wrapped: Vec<String> = Vec::with_capacity(args.len() + 5);
+    wrapped.push("-c".to_string());
+    wrapped.push("exec \"$0\" \"$@\"".to_string());
+    wrapped.push(command.to_string());
+    wrapped.extend(args.iter().cloned());
+    ("/bin/sh".to_string(), wrapped)
+}
+
 pub fn verify_child_pid_namespace(child_pid: u32) -> std::io::Result<()> {
     let self_ns = std::fs::read_link("/proc/self/ns/pid")
         .map_err(std::io::Error::other)?;
@@ -1342,13 +1594,11 @@ pub fn verify_child_pid_namespace(child_pid: u32) -> std::io::Result<()> {
         if found_isolated {
             return Ok(()); // 载荷确在新 PID 命名空间
         }
-        if found_any_child && std::time::Instant::now() >= deadline {
-            break; // 有子进程但全部同 ns：隔离失败
-        }
+        // 038 方案 A（用户确认契约）：超时＝隔离未确认——无论有无子进程，
+        // 一律不放行：整组终止＋回收（016 有界清理）并报错。原「无子进程
+        // 超时保守放行」在 bwrap setup 慢/失败场景放过了未确认的执行面。
         if std::time::Instant::now() >= deadline {
-            // 无子进程且超时：bwrap 仍在 setup 或已失败——保守放行由退出状态
-            // 报告（killpg 兜底存在于会话生命周期）。
-            return Ok(());
+            break;
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
     }

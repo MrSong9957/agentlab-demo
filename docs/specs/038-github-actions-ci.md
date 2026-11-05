@@ -6,6 +6,67 @@
 - 本轮范围确认（用户指令同步）：①Linux 恢复 attack06/c13/b2_mcp/e_reaping/sec7 真实检查，修复实际缺陷，不得以提前 return/ignore/环境开关/削弱断言替代；②macOS 修复 /proc 依赖、AGENTS.md 链发现、符号链接与真实设备处理、PTY 卡死定位（低成本原因优先）；③Windows 补齐进程启动/树回收/交互终端平台实现，不再整文件排除隐藏缺口；④采样不得冒充阈值验证，各预算的实际通过环境如实记录；⑤验证分层 L1→L2→L3，卡死诊断用有限超时；⑥本轮不提交/推送/合并——远端三平台验证需推送授权，作为权限阻断返回
 - 更新时间：2026-11-02（迭代轮 33–35：Windows 54→21、macOS 92→42、ConPTY 闭合、D2 安全修正）
 
+## 0-A 方案 A：沙箱启动确认闸（2026-11-02 用户确认契约）
+
+每次沙箱启动先确认「隔离成立＋本会话清理标识（载荷 pid ns inode）已登记」，
+确认完成前不得执行用户命令；确认超时、失败或取消一律不放行——按 016 有界
+清理（整组终止＋回收）并报告结果；普通非沙箱行为保持不变。
+
+| 条款 | 实现 | 测试 |
+|---|---|---|
+| 确认完成前不执行用户命令 | 载荷自停前缀（`kill -s STOP $$`，失败即自杀 fail-closed）注入沙箱分支 sh 源码；宿主确认后 SIGCONT 放行（proc_session.rs `sandbox_gate_prefix`/`confirm_sandbox_isolation_and_release`） | lib 单测 `gate_confirm_cancel_does_not_execute`（真实 bwrap：取消预置位→Err＋标记文件不存在） |
+| 超时不放行 | 确认循环 deadline（默认 2000ms；`TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS` 仅供测试注入）→整组终止＋回收＋Err | `gate_confirm_timeout_does_not_release`（无载荷监督进程→确定性超时） |
+| 失败（载荷无法定位/标识缺失） | children 中无 ns≠self 载荷直到 deadline→同超时清理；载荷瞬时退出（children 不可得）→LeaderGone（不放行、按 016 自然退出收尾） | LeaderGone 分支 `gate_confirm_leader_gone_is_quiet`；标识缺失窗口由超时路径兜底（规格说明，未单独断言） |
+| 确认期取消 | 确认循环逐轮检查 cancel（调用线程同步确认，&AtomicBool 可用） | gate_confirm_cancel（同上） |
+| 清理不波及调用者 ns | killpg 限沙箱组；D2 sweep 按载荷 ns inode 圈定（≠调用者 ns） | gate_confirm_cancel 的哨兵存活断言＋`payload_ns_inode_targets_sandbox_not_caller` 回归 |
+| 确认后终止满足 016 | 会话生命周期不变（monitor/killpg/sweep 原样） | 集成 `gate03_released_runs_and_terminate_satisfies_016`（exec_sandbox.rs） |
+| 普通模式零变化 | 前缀仅注入 policy.is_some/tool_launch_argv Some 分支；确认闸仅沙箱会话 | 既有 exec_command/proc_session 全量回归（普通用例不触闸） |
+
+**放行语义**：确认点在调用线程同步执行（start_with_owner 内、monitor 启动
+前）——cancel 引用仅在调用线程可用（spawner 线程无法持 &AtomicBool）；确认
+成功前会话句柄不发布、输出不返回。verify_child_pid_namespace 的超时语义同
+步修订（原「无子进程超时保守放行」→超时即 Err＋清理），使 MCP stdio/
+apply_patch/js worker 等其余沙箱调用方在超时/失败场景同样不放行。
+
+**启动路径覆盖（2026-11-03 补齐，四路全接闸）**：
+①exec/proc_session——shell 自停前缀（`sandbox_gate_prefix` 注入 sh 源码）；
+②apply_patch internal-apply——载荷自停入口（`INTERNAL_GATE_ENV=stop`，
+`run_internal_apply` 读任何输入前 SIGSTOP；env 注入在 env_clear **之后**）；
+③js worker——同自停入口（`run_internal_js` 读 init 帧前 SIGSTOP；标记仅
+`sandbox_requested()` 时设置）；
+④MCP stdio——载荷为 mcp.json 任意命令（无自停入口可用），以 sh 自停＋
+execve 原位替换包装（`mcp_stdio_gate_wrap`：`sh -c 'kill -STOP $$…; exec
+"$0" "$@"' <command> <args...>`——同 pid 载荷首指令前即 STOP，SIGSTOP 跨
+execve 持续；args 经 "$@" 传递不展开）。宿主侧统一经
+`confirm_sandbox_isolation_and_release`（迁移至 sandbox.rs pub）。
+**接线测试**（真实 bwrap，非仅公共函数）：
+- exec：lib `gate_confirm_cancel_does_not_execute`（取消预置位→Err＋标记
+  文件不存在＋无关哨兵存活）／集成 `gate03`（放行→016 Terminated）；
+- apply_patch：`gate_applies_patch_after_release`（放行→真实落盘）／
+  `gate_leader_gone_rejects_and_does_not_execute`（坏 exe→确认失败→零执行）；
+- js：`gate_timeout_worker_startup_fails_closed`（0ms 窗＋即退假 worker→
+  启动失败）＋既有 env_and_fd_sentinels（沙箱放行→执行）；
+- MCP：a033_sandboxed_stdio（包装放行→工具发现→env 白名单）。
+超时分支的确定性复现＝lib `gate_confirm_timeout_does_not_release`（sleep
+自成组监督者，children 恒空）；接线层真实沙箱下自停载荷在首个确认轮即被
+定位（0/1ms 窗实测均放行——时序注入不可控，已实测登记）。
+**本轮实测记录**：MCP 包装首版漏传 program（bwrap `--` 后首参为 `-c`）——
+由 /dev/shm argv 转储定位并修复（mcp_stdio 35/0、mcp_resources 37/0、
+mcp_turn 26/0、mcp_stdio_sandbox 1/0 全绿后）。
+
+
+### JS worker 回收修复验证（2026-11-05，未提交候选）
+
+本次更新保留方案 A 和原验收契约。worker 身份捕获先登记 pidfd，再读取并复核 `/proc` 快照；入口必须达到 T 状态、身份和独立进程组检查通过后才放行。正常终止使用 payload pidfd；pidfd SIGKILL 与 SIGTERM 被拒时，产品只终止已验证的 worker 进程组，并保留 bwrap 完成等待。
+
+产品自身回收通过：正常终止、SIGTERM 回退、双重 pidfd 拒绝三连、取消、C13、CPU 5 秒和墙钟 120 秒用例均通过。双重拒绝三连逐个核对 worker 与同组后代 PID/start time；bwrap、主进程和独立会话哨兵均不在目标组。产品只有在 payload pidfd 与 bwrap 正常退出均确认后才返回终止成功并保存 `CellClosed`。
+
+产品报错但依赖诊断清理：所有 worker 信号都被拒时，产品有界返回 `WORKER_REAP_FAILED` 且不保存 `CellClosed`；外力终止 bwrap 时，产品也不误报成功。真实 bwrap pre-release 屏障回归返回 `LeaderGone` 而不是 `Released`。这些异常场景不新增产品等待归属要求；探针的外部 wait 不算产品回收。
+
+身份快照期间退出、worker 入口未就绪、取消确认、确认超时和放行后终止均有定向回归。C13 与 gate03 另外观察到 016 测试 shell 被外层 subreaper 接管；该现象不属于 JS worker，本次不修改 016 wait owner。
+
+本轮未运行 L3 或 038 全量验证。038 整体保持未完成。PID、start time、PGID/SID、命令和原始输出见 [`2026-11-05-process-reaping-closeout.md`](../logs/038-github-actions-ci/2026-11-05-process-reaping-closeout.md)。
+
 ## 1. 要做什么，有哪些要求
 
 把仓库既有的一键全量验证入口（AGENTS.md §8：`cargo check && cargo test --workspace --no-fail-fast`）接入 GitHub Actions，在 Windows、Linux、macOS 三个托管平台运行，推送代码或提 PR 时自动触发。

@@ -423,9 +423,24 @@ fn pipe_ctrl_c_interrupts_and_terminate_kills_ignoring_process() {
     let log = dir.join("log");
     let mgr = ProcessManager::new();
 
-    // ① 可中断：while 循环进程组收到 SIGINT 后退出
-    let out = mgr.start(&exec_args("while true; do echo x; sleep 0.1; done", 250), None);
+    // ① 可中断：while 循环进程组收到 SIGINT 后退出。
+    // 038 归因（本地全量并行失败实证）：spawn→trap 生效存在窗口——并行负载
+    // 下 250ms 内 trap 语句可能未执行，SIGINT 按默认处置杀死 sh＝Completed。
+    // 确定性时序：cmd 先写 READY 文件（trap 语句之后），测试等文件出现
+    // （trap 已生效）再发 \x03。
+    let ready_mark = dir.join("ctrlc-ready");
+    let out = mgr.start(
+        &exec_args(
+            &format!(
+                "trap '' INT; echo READY > {ready}; while true; do echo x; sleep 0.1; done",
+                ready = ready_mark.display()
+            ),
+            250,
+        ),
+        None,
+    );
     let sid = out.result.session_id.unwrap();
+    wait_until_true(|| ready_mark.exists(), "trap 生效标记（READY 文件）");
     let int = WriteStdinArgs::from_value(&json!({
         "session_id": sid, "chars": "\u{0003}", "yield_time_ms": 5000
     }))
@@ -459,13 +474,37 @@ fn pipe_ctrl_c_interrupts_and_terminate_kills_ignoring_process() {
         std::thread::sleep(Duration::from_millis(350));
         assert_eq!(log_size(&log), s1, "中断后整树终止停止写入");
     } else {
+        // ②同①的确定性时序：trap 生效标记（READY2 文件）出现后才发 \x03
+        //——并行负载下 spawn→trap 执行存在窗口（038 本地全量实证）。
+        let ready2 = dir.join("ctrlc-ready2");
         let args = ExecArgs::from_value(&json!({
-            "cmd": format!("trap '' INT; while true; do echo x >> {}; sleep 0.05; done", log.display()),
+            "cmd": format!(
+                "trap '' INT; echo READY2 > {ready2}; while true; do echo x >> {log}; sleep 0.05; done",
+                ready2 = ready2.display(),
+                log = log.display()
+            ),
             "yield_time_ms": 250,
         }))
         .unwrap();
         let out = mgr.start(&args, None);
         let sid2 = out.result.session_id.unwrap();
+        wait_until_true(|| ready2.exists(), "trap 生效标记（READY2 文件）");
+        // 038 诊断：发 \x03 前先确认 sh 仍在运行（区分「SIGINT 杀死」与
+        // 「发信号前已退出」两个假说）。
+        let pre = mgr
+            .interact(
+                &WriteStdinArgs::from_value(&json!({
+                    "session_id": sid2, "yield_time_ms": 5000
+                }))
+                .unwrap(),
+                None,
+            )
+            .result;
+        assert_eq!(
+            pre.status,
+            ExecStatus::Running,
+            "发 \x03 前必须仍在运行（否则死因另有其人）：{pre:?}"
+        );
         let int2 = WriteStdinArgs::from_value(&json!({
             "session_id": sid2, "chars": "\u{0003}", "yield_time_ms": 1000
         }))

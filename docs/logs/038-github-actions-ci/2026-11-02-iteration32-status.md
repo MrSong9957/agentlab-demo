@@ -312,3 +312,174 @@ credential helper、ssh key 三路均无）。本地滞留 4 个提交待推送�
 （bwrap ns 拓扑误解）与修正已入库；D1/D2/D3 复测命令与结果如上（放宽容器
 通过）；Windows 锁 ReleaseMutex owner 契约审计结论（迭代 33）＝同线程
 重入经 resume same_file 复用规避、跨线程释放经 owner 判定跳过。
+
+## 迭代 37（方案 A 核验与补修，工作区改动未提交）
+
+用户确认方案 A（沙箱启动确认闸）。条款→实现→测试映射见规格 §0-A。核心：
+载荷自停前缀（STOP）＋宿主确认（隔离＋载荷 ns 标识同点确认）＋SIGCONT 放行；
+超时/失败/取消统一整组终止（016 有界清理）＋Err。普通模式零前缀零闸。
+
+**实现要点**：确认闸在 start_with_owner 调用线程同步执行（monitor 启动前）
+——cancel 引用仅调用线程可用，故 spawner 线程只负责 spawn；确认成功前句柄
+不发布。verify_child_pid_namespace 超时语义修订（原「无子进程超时保守放行」
+→超时即 Err＋清理）惠及 MCP stdio/apply_patch/js worker 的失败场景。
+
+**测试**：lib 单测 3（cancel 真实 bwrap＋哨兵边界／超时确定性（无载荷监督
+进程）／LeaderGone）＋集成 1（gate03 放行→016 终止）；三连稳定；lib 293/0；
+exec_sandbox 3/0；沙箱族回归（c13 2/0、e_reaping、b2_mcp、attack031 7/0）。
+
+**c18 归因（规格归属核对）**：034 规格 120 行明文「并发有效性以屏障证明 4
+个独立调用实际重叠，**不靠模糊延迟断言**」——wall-clock 串行对照属规格明文
+排除的延迟断言，降级为采样不是验收弱化；验收本体＝结构化屏障断言（4 全到
+达才放行，未重叠必超时＝不可伪造）＋C04 集成。降级合规。
+
+**pipe_ctrl_c 归因（部分闭合）**：①段（可中断）失败＝spawn→trap 生效窗口
+竞态（并行负载下 250ms 内 trap 未执行→SIGINT 按继承处置杀 sh）——已修
+（READY 文件标记确定性时序，trap 语句后写出，测试等标记再发 \x03），单跑
+绿。②段（忽略中断）本地仍失败：诊断链——READY2 出现（trap 已执行）→前置
+查询确认 sh 存活→\x03（唯一信号＝killpg(SIGINT)，代码审查）→sh 死
+（Completed/exit None）。同形态三方独立复现（bash setsid/python
+DEVNULL+setsid/rust setpgid+null+pipe）全部 SURVIVES——与 harness 内行为矛
+盾，归因未闭合；CI ubuntu 同用例绿。**如实保留失败**，不称全量通过。
+
+**s141**：目标内并行 150/150 两轮绿（含 s141）——workspace 级并行失败与
+c18_barrier 同机制（跨目标多进程 CPU 争用放大时延），待 L3 全量复现后按
+证据处置窗口容差。
+
+## 迭代 37 末批：L3 全量（方案 A 候选）与安全审查
+
+**L3 全量**（工作区改动在库，含方案 A）：`cargo check --locked` 通过；
+`cargo test --workspace --no-fail-fast --locked`＝**3860 通过/1 失败/6 忽略**
+（较迭代 36 ＋4＝方案 A 测试 4 个）。复跑失败名单＝仅 pipe_ctrl_c②（归因未
+闭合，见上；CI ubuntu 绿）。**s141 与 c18_barrier 本轮全量通过**——s141
+证据累计：目标内并行两轮 150/150＋本轮全量＋定向四连＝5 绿/1 失败（并行
+时延偶发，与 c18 同机制；无确定性复现，不加猜测性窗口改动）。
+
+**安全审查自查（方案 A diff，450+ 行）**：①STOP 前缀注入点唯一（tool_argv
+沙箱两分支，Cow 统一；普通模式零注入），拼接层＝sh 源码（cmd 本就是 sh 源
+码——exec 契约，无新解析面），STOP 失败即自杀＝fail-closed；②CONT 放行对
+象精确到载荷 pid（children 定位，非 killpg），且仅 ns≠caller 确认后；
+③清理边界：killpg 限沙箱组＋D2 sweep 按载荷 ns 圈定，gate01 哨兵存活断言
+＋payload_ns 回归双向锁定；④TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS 接缝任何取值
+均不产生放行旁路（更长→超时清理；更短→更快不放行）——fail-closed 方向；
+⑤收尸边界：confirm 的 kill_group 内联 waitpid 在 monitor 启动前执行，无
+竞争；LeaderGone 无僵尸。**安全测试命令与结果**：gate_confirm_*（lib，
+真实 bwrap）三连 3/3；沙箱族回归（exec_sandbox 3、multi_agent 22、
+sandbox_matrix_probes 10、e2e_sandbox 7、request_permissions_sandbox 15、
+mcp_stdio_sandbox 1、attack031 7、lib 293）全部通过。SHA＝工作区未提交改
+动（基线 57d5408）。
+
+**ce-code-review 自查结论**：confirm 函数与接线逐段复查（放行前提/清理
+路径/竞态窗口）无缺陷；两处 Cow 借用问题在编译期发现并修复；测试断言的
+ECHILD 语义（confirm 已收尸）已按实际行为校正并注释。
+
+## 迭代 38（2026-11-03）：方案 A 启动路径全覆盖＋环境阻塞记录
+
+**四路启动闸全接**（契约条款→实现→接线测试映射见规格 §0-A 更新段）：
+①exec/proc_session（shell 前缀，迭代 37 已接）；②apply_patch internal-apply
+（INTERNAL_GATE_ENV 自停入口；env 注入点在 env_clear 后——初版在先被清除，
+编译期未暴露、接线测试暴露后修正）；③js worker（同自停入口，读 init 帧前
+STOP；标记仅沙箱请求设置——无条件设置会让普通模式 worker 永久 STOP）；
+④MCP stdio（sh 自停＋execve 原位替换包装；首版漏传 program——bwrap `--`
+后首参为 `-c`＝启动失败，/dev/shm argv 转储定位修复）。
+verify_child_pid_namespace 调用方缩减为 confirm 闸替代（proc_session/
+apply_patch/MCP/transport）；闸核心迁 sandbox.rs pub（跨模块复用）。
+
+**接线测试证据（真实 bwrap）**：
+- apply_patch_sandbox 9/0（含 gate_applies_patch_after_release＝放行真实
+  落盘；gate_leader_gone_rejects＝坏 exe→确认失败零执行）；
+- exec_sandbox 3/0（gate03 放行→016 Terminated→写入停止）；
+- js_orchestration_security 19 用例（gate_timeout_worker_startup_fails_closed
+  ＝0ms 窗＋即退假 worker→启动失败；env_and_fd＝放行后执行）；
+- mcp_stdio_sandbox 1/0＋mcp_stdio 35/0＋mcp_resources 37/0＋mcp_turn 26/0
+  （包装放行→协议面无回归）；
+- lib gate_confirm 3/0 ×3 连跑（取消/超时/LeaderGone 确定性）＋剥 trace 后
+  复跑 3/0；lib 全量 293/0。
+
+**pipe_ctrl_c② 归因（ce-debug 方法，按失败路径取证）**：①段（可中断）已修
+＝READY 文件标记确定性时序（spawn→trap 生效窗口竞态，并行负载实证）；②段
+（忽略中断）失败路径取证：READY2 在 trap 语句后写出且存在（trap 已生效）→
+前置查询确认 sh 存活→interrupt 唯一动作＝killpg(SIGINT)（代码审查）→
+Completed/exit None（sh 死于信号）。同形态三方独立对照（bash setsid、python
+DEVNULL+setsid、rust setpgid+DEVNULL+PIPE、std process_group posix_spawn/
+fork 双形态）全部 SURVIVES 且 SigIgn bit2 置位（trap 生效）——失败路径与
+对照路径存在未识别差异，归因未闭合。临时 interrupt 取证插桩已移除（结案
+前提未满足）。CI ubuntu 同用例绿＝环境相关。**如实保留失败**。
+
+**环境阻塞（返回门禁事项）**：容器累积僵尸 23,632（terminal-chat 11162/
+bwrap 8140/sh 3300 等，全部父进程＝PID1 `sleep infinity`——容器 init 不收
+尸，结构性不可回收）触发隐藏 pids 上限（≈23.9k，cgroup 内不可见）：仅剩
+27 线程余量，rustc codegen/cc 链接间歇性 EAGAIN/ICE。**最终全量 L3 被阻断**
+（最后一次完整 L3＝3860/1/6，在方案 A 接线前；接线后的全量仅能以目标级
+回归代替——如上清单）。清理需宿主侧操作（超出本轮授权）。
+
+**验证降级复核**：c18 wall-clock 对照降级＝034 规格 120 行明文排除模糊
+延迟断言，结构化屏障断言完整承载（合规，保留）；s141 失败与通过记录保留，
+CPU 争用为假设（未直接证明，无猜测性修复）。**6 忽略项核对**：源级
+`#[ignore]`＝4（multi_agent A1/A2/A3＋基线既有用例），与基线 e6e3662 的
+4 处位置一致、零新增；L3 聚合「6 忽略」为 cargo 按测试目标分别计数的口径
+差（multi_agent 目标报 3＋其余目标报 3），非新增跳过。
+
+## 迭代 38 末批：最终 L3 阻断终态
+
+`cargo test --workspace --no-fail-fast --locked` 在 lib 链接期 ICE（exit 101
+＝codegen 线程 EAGAIN）——环境 pids 上限阻断成立（非代码编译错误：同命令
+在方案 A 接线前完整通过 3860/1/6）。接线后的完整全量未能执行；目标级回归
+清单（上文）为接线后的最新证据。**待批准候选＝工作区差异（HEAD 57d5408
+未变）**：方案 A 四路闸＋接线测试＋verify 修订＋规格 §0-A 更新＋证据日志。
+云端验证（推送＋CI 三平台）单列待授权；宿主侧僵尸清理单列待授权。
+
+## 迭代 39（2026-11-03）：宿主清理未生效后的环境终态与②段取证补充
+
+宿主侧清理未发生：僵尸 23,656（略增）、pids.current 23,877、线程余量实测
+仅 7-8（长生命周期线程）——上界仍由僵尸槽位占满。降载构建（codegen-units
+=1＋jobs=1，本地 .cargo/config.toml 辅助——已撤除）首个依赖 crate 即 ICE；
+最终全量 L3 复跑同样在 lib 链接 ICE。**环境终态＝无法执行任何 rustc 链接。**
+
+**②段取证补充（免重建路径）**：旧测试二进制（Nov2 23:09 构建，含②旧版）
+＋/proc 1-3ms 外部采样器。两次尝试均被 EAGAIN 干扰（测试线程 spawn 失败／
+采样器误锁跨运行同标记的遗留 sh——该遗留 sh SigIgn bit2 置位（trap 生效）
+且存活远超其测试生命周期＝**至少一次运行中②sh 确实存活过 SIGINT** 的反证
+样本）；其最终死亡原因未证。②段在-container 归因仍不闭合；CI ubuntu 绿。
+残留问题清单更新：需要干净环境（或宿主清理）复跑以获得②的在位证据链。
+
+**迭代 38 记录勘误**：MCP 包装 program 缺失缺陷的发现路径——更正为
+「/dev/shm argv 转储（调试插桩）定位」，插桩已全部剥除（grep 0 残留）。
+
+## 迭代 40（2026-11-03）：环境临界终态
+
+降载三旋钮（jobs=1＋codegen-units=1＋llvm-args=-threads=1）后 once_cell 仍
+ICE；线程余量实测降至 2，bash 自身 fork 重试失败——容器进入「无法编译」终
+态。每次 rustc 尝试新增少量僵尸（23,878→23,883），继续尝试适得其反；本轮
+已停止一切编译尝试。**降载配置（.cargo/config.toml）已撤除**，内容存档：
+`[build] jobs=1; rustflags=["-C","codegen-units=1","-C","llvm-args=-threads=1"]; [profile.dev] codegen-units=1`（宿主清理后如需受限变体可原样恢复；
+规范 L3 命令运行时不应存在该文件）。
+
+**②段取证插桩保留在源中**（proc_session.rs request_group_interrupt 的
+PRE/POST150ms 状态快照——迭代 39 登记）——环境恢复后的首轮 proc_session
+pipe_ctrl 运行即产出在位证据（/dev/shm/int-trace），结案后移除。
+
+**需宿主侧执行（精确清单，均超出本轮授权）**：
+A. 清理僵尸：容器 PID1 为 `sleep infinity` 不收尸——需重启容器（僵尸随
+   PID1 消亡）或将 PID1 换成会 wait 的 init（宿主 compose 改动）；
+B. 或提升该容器 pids 上限（宿主侧 cgroup pids.max，容器内不可见不可改）；
+C. 完成后于 /workspace 运行规范 L3：`cargo check --locked &&
+   cargo test --workspace --no-fail-fast --locked`（工作区差异在库——方案 A
+   四路闸＋接线测试＋②插桩），预期 3864± 用例、唯一候选失败仍为
+   pipe_ctrl_c②（/dev/shm/int-trace 即产出②在位证据链）。
+
+## 迭代 41（2026-11-03）：fork 耗尽终态与条件执行器结局
+
+容器 fork 完全耗尽（`spawn bash EAGAIN`）——会话仅余 Read/Edit 等无 fork
+通道。**条件执行器（l3_runner.sh）结局＝超时退出**：220 轮轮询（12:08–
+16:43Z，约 4.6 小时）内宿主清理未发生；自 poll#2 起 runner 自身的 pids 读
+取亦失败（日志 pids= 空）；日志**无 CHECK-EXIT/TEST-EXIT/SUMMARY 行**＝
+L3 未被执行器运行（恢复后无双跑风险）。保全核验（无 fork 通道完成）：
+/workspace 为宿主 bind mount——git refs 实读核验（HEAD＝57d5408、远端＝
+0764134）＋spec §0-A／证据日志迭代 36–40 全文实读——重启不丢任何提交、
+修改或文档。**容器 ephemeral 项（重启丢失，已评估）**：/tmp/l3_runner.sh
+（内容在会话历史可重建）、/tmp/l3-conditional.log（本文引用已存）、
+/dev/shm/*（int-trace 尚未产生；②插桩在源码随 /workspace 存活，恢复后
+首轮 pipe_ctrl 运行即重新产出）。执行器不再重建（恢复后手动按序执行）。
+**等待用户批准原地重启容器**——重启即解除：僵尸消亡→fork 恢复→规范 L3
+补齐→②在位证据（插桩在源）→插桩移除→同一候选最终验证闭环。
