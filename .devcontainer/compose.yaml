@@ -12,9 +12,9 @@ services:
     user: dev
     working_dir: /workspace
     # 033：seccomp 放宽 profile——由执行 docker 的 CLI（compose）在宿主侧读取
-    # 该路径的文件内容、经 API 下发给引擎；引擎不读宿主文件系统（放行 bwrap
-    # 所需的 userns/mount syscall 集合；基线按引擎 docker-v29.8.2 →
-    # moby/profiles/seccomp 锁定生成，见 docs/logs/033-tool-sandbox/2026-10-27-dev-deploy.md）。
+# 该路径的文件内容、经 API 下发给引擎；引擎不读宿主文件系统（放行 bwrap
+# 所需的 userns/mount syscall 集合；基线按引擎 docker-v29.9.2 →
+# moby/profiles/seccomp seccomp/v0.2.4 锁定生成，见 docs/logs/033-tool-sandbox/2026-10-27-dev-deploy.md）。
     # 路径为宿主（CLI）视角绝对路径、D:/ 盘符正斜杠（docker.exe 接受且不被
     # MSYS 转换，2026-10-27 实测）；引擎版本变化时须重新生成基线，不得沿用
     # （deploy-033-host.sh 有版本守卫）。

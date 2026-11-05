@@ -1,13 +1,13 @@
 # 规格：开发容器内安装 Node.js 与最新 Pi Agent
 
-- 状态：已验收（2026-10-30 宿主重建镜像与容器后，运行验收通过；容器内证据见 `docs/logs/036-node-pi-container/2026-10-30-runtime-acceptance.md`，宿主侧生命周期与主动更新证据见 `docs/logs/036-node-pi-container/2026-10-30-host-side-runtime.md`）
-- 更新时间：2026-10-30
+- 状态：待验收（2026-11-04 更换 Pi 安装方式；2026-10-30 验收证据仅适用于原 npm 方案）
+- 更新时间：2026-11-04
 
 ## 1. 要做什么，有哪些要求
 
 让开发者重建容器后即可使用 Node.js、npm 和最新稳定版 Pi Coding Agent，并继续使用已有的 Pi 配置与会话。
 
-- R1. 镜像构建时安装官方 npm 包 `@earendil-works/pi-coding-agent` 的 `latest` 稳定版本；不把当前手动安装的版本作为固定目标。
+- R1. 镜像构建时安装 Pi 官方 GitHub Release 的 latest 独立二进制，校验官方 SHA256SUMS 并保留发行包资源；不使用 npm 安装 Pi。
 - R2. 镜像提供兼容 R1 的 Node.js LTS 与 npm；当前选用 Node.js 24 LTS 的最新补丁版本。
 - R3. 普通 `dev` 用户在交互 shell 和非登录 shell 中都能直接调用 `node`、`npm`、`pi`，实际执行镜像中的程序。
 - R4. Pi 全局配置、认证数据、会话等保存在宿主项目的 `.container-state/pi/`，绑定到 `/home/dev/.pi`；项目文件继续使用已有的 `/workspace` 绑定挂载。
@@ -35,7 +35,7 @@
 
 软件安装到镜像的系统目录，Pi 数据绑定宿主项目目录。两者分开，避免持久目录遮盖新镜像中的程序。使用现有 `/workspace` 挂载先保存数据，并将当前数据路径链接到该目录，使后续写入立即持久化，不需要现在重建容器。`.container-state/` 已排除在 Git 之外。
 
-使用官方 Node Docker 镜像提供 Node/npm，最终运行镜像仍继承 `agentlab-base:latest`。Pi 使用官网当前 npm 安装方式，并按照官网启用 `--ignore-scripts`。
+使用官方 Node Docker 镜像提供 Node/npm，最终运行镜像仍继承 `agentlab-base:latest`。Pi 使用官方 Release 独立二进制；其资源随发行包安装到镜像中，不依赖 Node/npm。
 
 调研依据见[汇总报告](../think-tank/2026-10-29-node-pi-container.md)，原始输出见[安装研究](../think-tank/raw/2026-10-29-node-pi-container-install.md)、[构建与存储研究](../think-tank/raw/2026-10-29-node-pi-container-storage.md)、[交付流程分析](../think-tank/raw/2026-10-29-node-pi-container-flow.md)。
 
@@ -44,6 +44,8 @@
 当前只读检查发现 `pi --version` 为 `1.4.0`，当前 shell 找不到 `node`、`npm`；这不影响按 R1、R2 准备镜像安装步骤，也不能据此断言用户未在其他环境安装过 Node。当前环境没有 Docker CLI 或引擎连接，新增持久目录采用宿主绑定方式，避免保存数据还依赖创建命名卷。实际迁移与检查结果见本功能日志。
 
 ## 5. 先预测，再实测，最后确认是否合格
+
+下表记录 2026-10-30 原 npm 方案的历史结果；独立二进制方案尚需重新构建和验收，不能沿用这些通过结论。
 
 | 场景 | 预计结果 | 实测 |
 |---|---|---|
