@@ -1,0 +1,87 @@
+[2026-11-04 05:27:34] == 0 容器核实 ==
+[2026-11-04 05:27:34] 写入协调（宿主执行者声明）: 两项任务 Agent 会话与宿主侧后台写入已停止；本脚本执行期间执行者不写 /workspace。写入控制主证据＝docker pause 冻结并经 inspect 证实；双读一致仅为辅助证据
+ID=b944a159ec468720c68dc9daf0824160c8ce6880d4498f932bafe81068e55d89 Name=/agentlab-demo-dev Status=running PidsLimit=<no value> Restart=no
+[2026-11-04 05:27:34] 挂载清单（bind 源与 /tmp 属性以此输出为准）:
+volume  /var/lib/docker/volumes/agentlab-demo_cache/_data  ->  /cache
+bind  D:/AgentLab/shared/Obsidian  ->  /vault
+bind  D:\AgentLab\projects\demo  ->  /workspace
+volume  /var/lib/docker/volumes/agentlab-demo_cargo-home/_data  ->  /home/dev/.cargo
+bind  D:\AgentLab\projects\demo\.container-state\cc-switch  ->  /home/dev/.cc-switch
+volume  /var/lib/docker/volumes/agentlab-demo_claude-home/_data  ->  /home/dev/.claude
+volume  /var/lib/docker/volumes/agentlab-demo_codex-home/_data  ->  /home/dev/.codex
+bind  D:\AgentLab\projects\demo\.container-state\pi  ->  /home/dev/.pi
+volume  /var/lib/docker/volumes/agentlab-demo_zcode-home/_data  ->  /home/dev/.zcode
+
+[2026-11-04 05:27:35] /workspace bind 源: inspect 原值=D:\AgentLab\projects\demo → 归一化=/mnt/d/AgentLab/projects/demo；脚本 SRC=/d/AgentLab/projects/demo
+[2026-11-04 05:27:35] 挂载源确认方式=canary
+[2026-11-04 05:27:37] pids 采样① = 35（重启前基线参考 23884；仅旁证，不作保全条件）
+[2026-11-04 05:27:37] == 0.5 提取语义自检（深层小归档：命名目录递归提取、排除生效、缺失成员退出码非 0）==
+[2026-11-04 05:27:37] 自检通过（本机 tar 语义与脚本提取参数一致，R2-1 固化）
+[2026-11-04 05:27:37] == 1 前置状态快照（仅作变更登记；读取失败登记缺口，不作为保全条件）==
+[2026-11-04 05:27:58] exec 通道可用；pre 快照落盘（含 .ok 标记者为有效）
+[2026-11-04 05:27:58] == 1.5 写入控制：协调停止＋双读辅助证据＋pids 采样（默认不用 pause——R3 第 5/6 轮对照实证：pause 后本容器 exec/cp 通道即刻失效；RECOVERY_PAUSE=1 可显式启用）===
+[2026-11-04 05:27:58] 写入控制模式＝协调停止（宿主执行者声明）＋双读逐字节比对（辅助证据）＋pids 采样；不使用 pause（对照实证其使 exec/cp 失效）
+[2026-11-04 05:27:58] == 2 保全 /tmp/wt-038-f1 与 /tmp/sec-test-038（overlay 可写层；两次独立捕获＝内容一致性证据）==
+[2026-11-04 05:28:01] wt 首次捕获通道=exec-tar
+d2ce1b1fb382cbf33261da529411ec87c2268c40cd3f382b4fe0fed5e971dde0 */c/Users/sry27/agentlab-recovery-20261104-052734/wt-038-f1.tgz
+[2026-11-04 05:28:26] wt 二次捕获通道=exec-tar
+[2026-11-04 05:28:26] wt 文件项计数: 首读=1913 二读=1913（下限 300，防空跑）
+[2026-11-04 05:28:47] PASS: wt 双读逐字节一致（含 .git 指针文件原文；备份窗口内容稳定）
+3ef8560e8827841205f8685dd7f1abd14cf7555351d03def36d57c004a0e243c */c/Users/sry27/agentlab-recovery-20261104-052734/sec-test-038.tgz
+[2026-11-04 05:28:51] PASS: sec-test-038 双读逐字节一致（7 项）
+[2026-11-04 05:28:51] == 3 保全 /workspace（第一次读取；含 .git；宿主侧直读，不经容器进程）==
+[2026-11-04 05:28:51] 排除（tar 流上排除，绝不先落盘完整包再删除凭据）: ./target、./.devcontainer/033-rollback（大体积）、.env/.env.*（任意深度；根目录 .env 实存含 1 个真实 API 密钥，值不记录）、./.container-state、./.claude、./.compound-engineering、./.context、./src/app/config、*.pem/*.key/*.p12/*.pfx（凭据扩展名信号；已跟踪测试夹具另按 2d 独立保全当前内容与删除状态）
+4a7ee26d1a45903a770e49bdf0bd78f953b137f0e02f2f5a452181112eab7595 */c/Users/sry27/agentlab-recovery-20261104-052734/workspace-full.tgz
+[2026-11-04 05:28:53] 排除泄漏断言通过（无 .env*／凭据扩展名／排除目录残留）
+[2026-11-04 05:28:53] == 3a 备份副本核验（HEAD、对象库 fsck——只读副本，不触碰原仓库）==
+[2026-11-04 05:28:55] 备份副本 HEAD=57d5408cf2c6e80689d1adbc9f9ce8aa1a5796c0（预期 57d5408cf2c6e80689d1adbc9f9ce8aa1a5796c0）
+[2026-11-04 05:29:51] 备份副本 git fsck --full 通过（dangling 提示不算失败，明细见 fsck-workspace-backup.txt）
+[2026-11-04 05:29:51] == 3b workspace 内容双读核验（保全条件主体：同一源两次独立读取逐字节比对）==
+[2026-11-04 05:29:54] 文件项计数: 首读=5195 二读=5195（下限 800，防空跑）
+[2026-11-04 05:31:12] PASS: workspace 双读逐字节一致（备份窗口内容稳定）
+[2026-11-04 05:31:12] == 3c 非敏感测试夹具：当前内容与删除状态独立保全（不回填副本、不宣称副本＝原工作目录备份）==
+[2026-11-04 05:31:14] 夹具当前内容已独立保全并逐字节复核（fixtures-current.tgz，26 项）
+[2026-11-04 05:31:15] 夹具删除状态登记: 0 项 deleted ／ 26 项 present（全表 fixtures-status.txt）
+[2026-11-04 05:31:15] 须人工判断的已跟踪排除项（未自动保全）: .env.example
+[2026-11-04 05:31:15] == 3d 备份副本 status（登记备份内容；被排除的已跟踪文件显示 ' D' 属排除策略真实结果，非原工作目录删除状态）==
+[2026-11-04 05:31:15] workspace 备份内容状态共 39 条（全文 status-ws-copy.txt）
+[2026-11-04 05:31:15] == 3e worktree 备份副本状态核验（副本两侧指针互相重定向；只读副本，不误查原仓库）==
+[2026-11-04 05:31:16] worktree .git 指针原文（仅记录，不据此查原仓库）: gitdir: /workspace/.git/worktrees/wt-038-f1
+[2026-11-04 05:31:16] worktree 备份副本 HEAD=57d5408cf2c6e80689d1adbc9f9ce8aa1a5796c0（预期 57d5408cf2c6e80689d1adbc9f9ce8aa1a5796c0）
+[2026-11-04 05:31:38] worktree 备份内容状态共 19 条（登记用，权威清单全文 status-wt-copy.txt）:
+ D .env.example
+ M docs/logs/038-github-actions-ci/2026-11-02-iteration32-status.md
+ M docs/specs/016-process-sessions-plan.md
+ M docs/specs/031-request-permissions.md
+ M docs/specs/033-tool-sandbox.md
+ M docs/specs/038-github-actions-ci.md
+ M src/app/src/apply_patch.rs
+ M src/app/src/mcp/transport.rs
+ M src/app/src/proc_session.rs
+ M src/app/src/sandbox.rs
+ M src/app/src/sandbox/tests.rs
+ M src/app/src/view_image.rs
+ D src/app/tests/fixtures/tls/server.key
+ M src/app/tests/memory_storage_files.rs
+ M src/app/tests/request_permissions_sandbox.rs
+ M src/app/tests/sandbox_lifecycle.rs
+ M src/app/tests/security_attack_031.rs
+?? docs/security/reports/2026-11-02-038-f1-isolation-security.md
+?? docs/solutions/testing/tautological-assertion-independent-expectation.md
+[2026-11-04 05:31:38] 参考清单交叉核对（安全报告快照仅补充，权威＝status-wt-copy.txt）:
+[2026-11-04 05:31:38]   命中: src/app/src/apply_patch.rs
+[2026-11-04 05:31:38]   命中: src/app/src/mcp/transport.rs
+[2026-11-04 05:31:38]   命中: src/app/src/proc_session.rs
+[2026-11-04 05:31:38]   命中: src/app/src/sandbox.rs
+[2026-11-04 05:31:38]   命中: src/app/src/view_image.rs
+[2026-11-04 05:31:38]   命中: src/app/tests/memory_storage_files.rs
+[2026-11-04 05:31:38]   命中: src/app/tests/request_permissions_sandbox.rs
+[2026-11-04 05:31:39]   命中: src/app/tests/sandbox_lifecycle.rs
+[2026-11-04 05:31:39]   命中: docs/specs/031-request-permissions.md
+[2026-11-04 05:31:39]   命中: docs/specs/033-tool-sandbox.md
+[2026-11-04 05:31:39]   命中: docs/security/reports/2026-11-02-038-f1-isolation-security.md
+[2026-11-04 05:31:39] == 4 一致性汇总（保全条件已在 3b/2 以内容双读承载；此处登记旁证与状态差异）==
+[2026-11-04 05:31:40] pids 采样② = 35（采样① = 35；仅旁证）
+[2026-11-04 05:31:41] 登记: wt pre/post status 一致（git status 仅登记变更，非保全条件）
+[2026-11-04 05:31:41] 【里程碑：备份完成】备份目录=/c/Users/sry27/agentlab-recovery-20261104-052734；保全条件证据=协调停止（宿主执行者声明）＋三组双读逐字节一致（辅助证据，pause 不可用）＋pids 采样＋文件项计数、fsck-workspace-backup.txt、HEAD 双核验、泄漏断言（leak-scan/wt-leak/fixtures-leak 均空）、fixtures-current.tgz＋fixtures-status.txt；登记类=status-*-copy.txt、pids-*.txt、tracked-excluded/review.txt
+[2026-11-04 05:31:41] 【保全完成（按指示跳过自动重启）】备份目录=/c/Users/sry27/agentlab-recovery-20261104-052734；容器保持运行、原地重启授权未消耗；核验: bash "/d/AgentLab/projects/demo/env-recovery-20261103/verify.sh" "/c/Users/sry27/agentlab-recovery-20261104-052734"

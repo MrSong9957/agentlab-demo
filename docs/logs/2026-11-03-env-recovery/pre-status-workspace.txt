@@ -1,0 +1,37 @@
+ M .devcontainer/033-seccomp.json
+ M .devcontainer/compose.yaml
+ M .devcontainer/deploy-033-host.sh
+ M AGENTS.md
+ M docs/logs/038-github-actions-ci/2026-11-02-iteration32-status.md
+ M docs/specs/038-github-actions-ci.md
+ M src/app/src/apply_patch.rs
+ M src/app/src/js_orchestration/runtime.rs
+ M src/app/src/js_orchestration/worker.rs
+ M src/app/src/mcp/transport.rs
+ M src/app/src/proc_session.rs
+ M src/app/src/sandbox.rs
+ M src/app/tests/apply_patch_sandbox.rs
+ M src/app/tests/exec_sandbox.rs
+ M src/app/tests/js_orchestration_security.rs
+ M src/app/tests/proc_session.rs
+?? docs/logs/033-tool-sandbox/2026-11-02-engine-2992-baseline-regen.md
+?? docs/plans/2026-11-01-next-three-features-plan.md
+?? docs/plans/2026-11-02-0044-feat-web-access-plan.md
+?? docs/records/2026-11-01-039-web-access-codex-comparison.md
+?? docs/think-tank/2026-11-01-039-web-access.md
+?? docs/think-tank/2026-11-02-039-stream-api-host.md
+?? docs/think-tank/2026-11-02-039-stream-sse-event-types.md
+?? "docs/think-tank/raw/2026-11-01-039-web-access-http\344\270\216ssrf.md"
+?? "docs/think-tank/raw/2026-11-01-039-web-access-\344\276\246\345\257\237\345\205\265.md"
+?? "docs/think-tank/raw/2026-11-01-039-web-access-\345\206\205\345\256\271\346\217\220\345\217\226.md"
+?? "docs/think-tank/raw/2026-11-01-039-web-access-\345\217\202\350\200\203\345\256\236\347\216\260\350\200\203\345\217\244.md"
+?? "docs/think-tank/raw/2026-11-01-039-web-access-\346\220\234\347\264\242\345\220\216\347\253\257.md"
+?? "docs/think-tank/raw/2026-11-01-039-web-access-\351\241\271\347\233\256\351\233\206\346\210\220.md"
+?? env-recovery-20261103/README.md
+?? env-recovery-20261103/STATUS.md
+?? env-recovery-20261103/recover.sh
+?? env-recovery-20261103/validate-result.txt
+?? env-recovery-20261103/validate-run-output.txt
+?? env-recovery-20261103/validate-summary.txt
+?? env-recovery-20261103/validate_recovery.sh
+?? env-recovery-20261103/verify.sh
