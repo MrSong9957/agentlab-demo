@@ -522,11 +522,36 @@ fn normalize_rejects_missing_and_accepts_dotdot() {
     .unwrap();
     assert!(permissions::normalize_request(&req, &root).unwrap_err().contains("不存在"));
     // .. 解析为实际路径（不自动扩父目录，逐组件存在）
-    let req2 = permissions::parse_request(&format!(
-        r#"{{"permissions": {{"file_system": {{"entries": [{{"path": {{"type": "path", "path": {:?}}}, "access": "read"}}]}}}}}}"#,
-        f.requestable.join("sub").join(".."),
-    ))
-    .unwrap();
+    let canonical_requestable = fs::canonicalize(&f.requestable).unwrap();
+    // Canonical Windows paths have a verbatim prefix, where PathBuf::join folds `..`.
+    // Append as text so the raw request reaches the parser unchanged.
+    #[cfg(windows)]
+    assert!(
+        canonical_requestable.to_string_lossy().starts_with(r"\\?\"),
+        "G2 requires the canonical Windows verbatim prefix: {canonical_requestable:?}"
+    );
+    let separator = std::path::MAIN_SEPARATOR;
+    let raw_path = format!(
+        "{}{separator}sub{separator}..",
+        canonical_requestable.display(),
+    );
+    let request_json = json!({
+        "permissions": {
+            "file_system": {
+                "entries": [{
+                    "path": { "type": "path", "path": &raw_path },
+                    "access": "read"
+                }]
+            }
+        }
+    })
+    .to_string();
+    eprintln!("G2 serialized request: {request_json}");
+    let req2 = permissions::parse_request(&request_json).unwrap();
+    assert_eq!(
+        req2.entries[0].path, raw_path,
+        "G2 sub{separator}.. path must reach parse_request unchanged"
+    );
     let norm = permissions::normalize_request(&req2, &root).unwrap();
     assert_eq!(norm.entries[0].path, ln(&f.requestable));
 }
