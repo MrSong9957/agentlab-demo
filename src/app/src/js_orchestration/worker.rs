@@ -106,7 +106,11 @@ fn outbox_push(outbox: &Outbox, frame: Value) -> bool {
 pub fn run_internal_js() -> i32 {
     // 受闸载荷在入口读 init 帧前停止。宿主按进程名识别入口，并确认 T 状态后放行。
     mark_gated_worker_entry();
-    crate::sandbox::internal_payload_self_stop_if_gated();
+    #[cfg(target_os = "linux")]
+    if let Err(error) = crate::sandbox::internal_payload_self_stop_if_gated() {
+        eprintln!("js-worker：启动闸失败：{error}");
+        return 2;
+    }
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout().lock();
     // init 帧（≤10 MiB）：源码＋工具目录。

@@ -186,6 +186,8 @@ pub struct StdioProcess {
     /// 与传输共享的 stdin 槽位（close＝取走并丢弃 → 对端收到 EOF）。
     stdin_slot: Arc<AsyncMutex<Option<ChildStdin>>>,
     child: Mutex<Option<Child>>,
+    #[cfg(target_os = "linux")]
+    sandbox_payload: Option<crate::sandbox::SandboxPayloadIdentity>,
     /// 有界 stderr 尾部（原始字节；展示／日志前必须先做凭证污染检查）。
     pub stderr_tail: Arc<Mutex<Vec<u8>>>,
     poisoned: Arc<AtomicBool>,
@@ -208,13 +210,12 @@ impl StdioProcess {
         // 连接不继承任何本轮临时授权（§1.6：需更宽范围由管理员改基线并重启）。
         let mut cmd_parts = vec![command.to_string()];
         cmd_parts.extend(args.iter().cloned());
-        // 038 方案 A：沙箱载荷自停包装——MCP 服务器是 mcp.json 指定的任意
-        // 命令（不经本产品代码，自停入口不可用），以 sh 自停＋execve 原位
-        // 替换形态实现「确认前零指令推进」：shell STOP 后 exec，同 pid 的
-        // 载荷首指令执行前即处 STOP；宿主确认后 SIGCONT（同 pid）。仅沙箱
-        // 分支包装（普通模式原样启动，行为零变化）。windows 无沙箱路径。
-        #[cfg(unix)]
-        if crate::sandbox::sandbox_requested() {
+        // 031 与 033 的所有沙箱分支都使用相同 gate。普通模式保持原 argv。
+        #[cfg(target_os = "linux")]
+        let sandbox_gate = crate::sandbox::sandbox_requested()
+            || crate::permissions::frozen().is_some();
+        #[cfg(target_os = "linux")]
+        if sandbox_gate {
             let (g_program, g_args) =
                 crate::sandbox::mcp_stdio_gate_wrap(&command.to_string(), args);
             // cmd_parts 结构＝[program, args...]（与未包装形态一致——031/033
@@ -226,19 +227,24 @@ impl StdioProcess {
         }
         let mut cmd;
         // 031 分支的快照/argv 构造失败＝Err（fail-closed：不回退 033 固定策略）。
-        let is_031_launch = crate::permissions::frozen().is_some();
         let permission_launch = match crate::permissions::frozen() {
             Some(f) => {
                 let snap = crate::permissions::baseline_snapshot(&f)
                     .map_err(|e| io::Error::other(format!("031 基线快照构建失败：{e}")))?;
-                let launch = crate::sandbox::permission_launch_argv(cmd_parts.clone(), &snap, cwd)?;
+                let launch = crate::sandbox::permission_launch_argv_with_payload_program(
+                    cmd_parts.clone(),
+                    &snap,
+                    cwd,
+                    Some(command),
+                )?;
                 Some(launch)
             }
             None => None,
         };
         // seccomp fd 守卫存活到下方 spawn 语句执行完毕（绑定保持所有权）。
         let _seccomp_guard;
-        let sandbox_requested_launch = crate::sandbox::sandbox_requested();
+        #[cfg(target_os = "linux")]
+        let sandbox_requested_launch = sandbox_gate;
         let sandbox_env = if let Some(launch) = permission_launch {
             _seccomp_guard = launch.seccomp;
             cmd = tokio::process::Command::new(&launch.program);
@@ -308,13 +314,17 @@ impl StdioProcess {
         // 本 spawn 在分离任务内执行（连接取消/超时丢弃 future 即杀），确认循
         // 环的 cancel 检查由任务丢弃语义承载（任务被丢＝句柄 kill_on_drop 回收
         // ＝不放行），无独立 cancel 参数。
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
+        let mut sandbox_payload = None;
+        #[cfg(target_os = "linux")]
         if sandbox_requested_launch {
             match crate::sandbox::confirm_sandbox_isolation_and_release(
                 child.id().ok_or_else(|| io::Error::other("MCP 进程已退出"))?,
                 None,
             ) {
-                Ok(crate::sandbox::SandboxConfirm::Released(_)) => {}
+                Ok(crate::sandbox::SandboxConfirm::Released(identity)) => {
+                    sandbox_payload = Some(identity);
+                }
                 Ok(crate::sandbox::SandboxConfirm::LeaderGone) => {
                     return Err(io::Error::other(
                         "MCP 服务器监督进程在确认前退出（载荷未执行）",
@@ -323,9 +333,6 @@ impl StdioProcess {
                 Err(e) => return Err(io::Error::other(format!("MCP 服务器隔离确认失败：{e}"))),
             }
         }
-        // 031 分支核验由确认闸承载（隔离成立＝载荷 ns≠调用者 ns，同点确认）；
-        // 非沙箱路径不设闸。
-        let _ = is_031_launch;
         let pid = child.id().ok_or_else(|| io::Error::other("MCP 进程已退出"))?;
         let stdin = child
             .stdin
@@ -349,6 +356,8 @@ impl StdioProcess {
                 pid,
                 stdin_slot,
                 child: Mutex::new(Some(child)),
+                #[cfg(target_os = "linux")]
+                sandbox_payload,
                 stderr_tail,
                 poisoned,
             },
@@ -368,8 +377,36 @@ impl StdioProcess {
             match tokio::time::timeout(CLOSE_GRACE, child.wait()).await {
                 Ok(Ok(_)) => {}
                 _ => {
-                    kill_process_group(self.pid);
-                    let _ = child.wait().await;
+                    #[cfg(target_os = "linux")]
+                    if let Some(payload) = self.sandbox_payload.as_ref() {
+                        let _ = crate::sandbox::signal_sandbox_payload_group(
+                            payload,
+                            libc::SIGKILL,
+                        );
+                        let ns = payload.ns_inode.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            crate::sandbox::sweep_sandbox_namespace(&ns)
+                        }).await;
+                        // Let the namespace PID 1 reap after the D2 sweep. If it does
+                        // not exit, retain the existing bounded process-group fallback.
+                        if tokio::time::timeout(CLOSE_GRACE, child.wait())
+                            .await
+                            .is_err()
+                        {
+                            kill_process_group(self.pid);
+                            let _ = child.start_kill();
+                            let _ =
+                                tokio::time::timeout(CLOSE_GRACE, child.wait()).await;
+                        }
+                    } else {
+                        kill_process_group(self.pid);
+                        let _ = child.wait().await;
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        kill_process_group(self.pid);
+                        let _ = child.wait().await;
+                    }
                 }
             }
         }
@@ -379,6 +416,10 @@ impl StdioProcess {
 impl Drop for StdioProcess {
     fn drop(&mut self) {
         // 后备回收：tokio Child 的 kill 只作用于直接子进程，孙进程需按组终止。
+        #[cfg(target_os = "linux")]
+        if let Some(payload) = self.sandbox_payload.as_ref() {
+            let _ = crate::sandbox::signal_sandbox_payload_group(payload, libc::SIGKILL);
+        }
         kill_process_group(self.pid);
     }
 }

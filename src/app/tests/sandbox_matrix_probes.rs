@@ -214,8 +214,8 @@ fn sandbox_env(work: &Path) -> Box<dyn FnOnce(&mut Command) + '_> {
 
 /// C-MCP：服务器经生产 transport（bwrap 包装）启动——沙箱内读锚定根 .env 被遮蔽
 /// （外部先证可读）；mcp.json 显式 env 保留；HOME＝锚定根、TERM 传递、污染 env
-/// 不进入（env_clear）；载荷＝新 PID ns 的 pid 1。普通模式对照：.env 可读、
-/// HOME＝主进程值、pid≠1——差异证明来自沙箱。
+/// 不进入（env_clear）；MCP 载荷位于新 PID namespace 的非 init 进程。普通模式
+/// 对照：.env 可读、HOME＝主进程值、PID 由宿主 namespace 分配——差异证明来自沙箱。
 #[cfg(target_os = "linux")]
 // 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
@@ -238,8 +238,8 @@ fn c_mcp_face_masks_env_and_keeps_explicit_env() {
         let rec2 = recs.path().join("fixture.jsonl");
         let fixture = common::mcp_fixtures::FIXTURE.replace('\\', "/");
         let anchor = work.path().display().to_string();
-        // 服务器包装脚本：记录自身环境与 .env 读取尝试后，转 exec 真实测试夹具
-        //（同一进程＝bwrap 直接载荷）。
+        // 服务器包装脚本：记录自身环境与 .env 读取尝试后，转 exec 真实测试夹具；
+        // 沙箱载荷由启动闸放行，不假设其 namespace PID 固定值。
         let wrapper = format!(
             r#"{{ echo "PID=$$"; echo "HOME=$HOME"; echo "TERM=$TERM"; echo "TOKEN=[$TCHAT_033_MCP_TOKEN]"; echo "POISON=[$TCHAT_033_POISON]"; echo "ENV_READ=$(cat '{anchor}/.env' 2>&1 | head -c 90)"; }} >> '{rec}'; exec python3 '{fixture}' --scenario echo --record '{rec2}'"#,
             anchor = anchor,
@@ -284,7 +284,10 @@ fn c_mcp_face_masks_env_and_keeps_explicit_env() {
                 val("ENV_READ").contains("denied"),
                 "遮蔽证据（open 被拒文本）：{rec_text}"
             );
-            assert_eq!(val("PID"), "1", "服务器＝新 ns pid 1：{rec_text}");
+            assert!(
+                val("PID").parse::<u32>().is_ok_and(|pid| pid > 1),
+                "服务器应是独立 gate 载荷，不是 PID 1 reaper：{rec_text}"
+            );
             assert_eq!(val("HOME"), anchor.as_str(), "HOME＝锚定根：{rec_text}");
         } else {
             assert!(rec_text.contains(&marker), "普通对照：.env 可读：{rec_text}");
@@ -525,8 +528,12 @@ fn d_fd_inheritance_sandbox_closed_normal_unchanged() {
                 "沙箱分支：无 CLOEXEC fd 应于 execve 时关闭（B2 加固）：{output}"
             );
             assert!(
-                output.lines().any(|l| l == "PID=1"),
-                "链路证据：exec 经 bwrap --as-pid-1：{output}"
+                output.lines().any(|line| {
+                    line.strip_prefix("PID=")
+                        .and_then(|pid| pid.parse::<u32>().ok())
+                        .is_some_and(|pid| pid > 1)
+                }),
+                "链路证据：exec 经真实启动闸运行在非 init namespace 载荷：{output}"
             );
         } else {
             assert!(

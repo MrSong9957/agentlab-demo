@@ -471,48 +471,26 @@ pub fn spawn_cell(
     let mut stdin = Some(child.stdin.take().expect("spawn 已 piped stdin"));
     // 沙箱确认闸在隔离和登记载荷身份后才放行。失败时不发送 init 帧。
     // LeaderGone 只确认本进程组和 bwrap 监督者，不能证明没有遗留载荷。
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     if crate::sandbox::sandbox_requested() {
         let leader_pid = child.id();
         match crate::sandbox::confirm_sandbox_with_release(
             leader_pid,
             None,
-            |pid, ns, start_time| {
-            #[cfg(target_os = "linux")]
-            {
+            |identity| {
                 let mut cleanup = worker_cleanup.borrow_mut();
-                cleanup.capture_and_verify_payload_identity(
-                    pid,
-                    leader_pid as libc::pid_t,
-                    ns,
-                    start_time,
-                    || {},
-                )?;
-                let group = inspect_worker_entry(
-                    pid,
-                    leader_pid as libc::pid_t,
+                cleanup.capture_sandbox_payload(identity)?;
+                let ready = inspect_worker_entry(
+                    identity,
                     cleanup.payload.as_ref().expect("已登记的 pidfd"),
                 )?;
-                let Some(group) = group else {
+                if !ready {
                     return Ok(crate::sandbox::SandboxRelease::Pending);
-                };
-                cleanup.payload_pgid = Some(group.process_group);
-                cleanup.payload_session_id = Some(group.session_id);
-                signal_pidfd(
-                    cleanup.payload.as_ref().expect("已登记的 pidfd"),
-                    libc::SIGCONT,
-                )?;
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                let _ = (ns, start_time);
-                if unsafe { libc::kill(pid, libc::SIGCONT) } != 0 {
-                    return Err(std::io::Error::last_os_error());
                 }
-            }
-            Ok(crate::sandbox::SandboxRelease::Released)
+                cleanup.sandbox_identity = Some(identity.clone());
+                Ok(crate::sandbox::SandboxRelease::Ready)
             },
-            |leader_pid| {
+            |leader_pid, _reaper_found| {
                 let cleanup = worker_cleanup.borrow();
                 abort_unreleased_worker(leader_pid, &mut child, &mut stdin, &cleanup)
             },
@@ -656,7 +634,7 @@ fn spawn_worker(exe: &std::path::Path) -> Result<std::process::Child, String> {
             ))
         }
     };
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     if crate::sandbox::sandbox_requested() {
         let separator = args
             .iter()
@@ -757,13 +735,41 @@ struct WorkerCleanup {
     #[cfg(target_os = "linux")]
     payload_identity_verified: bool,
     #[cfg(target_os = "linux")]
-    payload_pgid: Option<libc::pid_t>,
-    #[cfg(target_os = "linux")]
-    payload_session_id: Option<libc::pid_t>,
+    sandbox_identity: Option<crate::sandbox::SandboxPayloadIdentity>,
 }
 
 #[cfg(target_os = "linux")]
 impl WorkerCleanup {
+    fn capture_sandbox_payload(
+        &mut self,
+        identity: &crate::sandbox::SandboxPayloadIdentity,
+    ) -> std::io::Result<()> {
+        if self.payload.is_none() {
+            self.payload = Some(identity.pidfd.try_clone()?);
+            self.payload_pid = Some(identity.pid);
+            self.payload_ns = Some(identity.ns_inode.clone());
+            self.payload_start_time = Some(identity.start_time);
+        }
+        if self.payload_pid != Some(identity.pid)
+            || self.payload_ns.as_deref() != Some(identity.ns_inode.as_str())
+            || self.payload_start_time != Some(identity.start_time)
+        {
+            return Err(std::io::Error::other("沙箱载荷在确认期间改变身份"));
+        }
+        verify_payload_identity_with_snapshot_barrier(
+            identity.pid,
+            identity.reaper_pid,
+            &identity.ns_inode,
+            identity.start_time,
+            self.payload.as_ref().expect("登记后的 payload pidfd"),
+            || {},
+        )?;
+        self.sandbox_identity = Some(identity.clone());
+        self.payload_identity_verified = true;
+        Ok(())
+    }
+
+    #[cfg(test)]
     fn capture_and_verify_payload_identity(
         &mut self,
         pid: libc::pid_t,
@@ -856,18 +862,18 @@ fn ensure_pidfd_live(fd: &std::os::fd::OwnedFd) -> std::io::Result<()> {
 
 #[cfg(target_os = "linux")]
 fn inspect_worker_entry(
-    pid: libc::pid_t,
-    supervisor_pid: libc::pid_t,
+    expected: &crate::sandbox::SandboxPayloadIdentity,
     fd: &std::os::fd::OwnedFd,
-) -> std::io::Result<Option<crate::sandbox::ProcessIdentity>> {
+) -> std::io::Result<bool> {
+    let pid = expected.pid;
     let status = std::fs::read_to_string(format!("/proc/{pid}/status"))?;
-    let is_namespace_init = status
+    let is_namespace_payload = status
         .lines()
         .find_map(|line| line.strip_prefix("NSpid:"))
         .and_then(|ids| ids.split_whitespace().last())
-        == Some("1");
-    if !is_namespace_init {
-        return Err(std::io::Error::other("worker PID 命名空间身份已改变"));
+        .is_some_and(|inner_pid| inner_pid != "1");
+    if !is_namespace_payload {
+        return Err(std::io::Error::other("worker 不是 PID namespace 回收器的载荷"));
     }
     let identity = crate::sandbox::read_process_identity(pid)?;
     let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))?;
@@ -878,29 +884,21 @@ fn inspect_worker_entry(
             .find(|arg| !arg.is_empty())
             != Some(b"--internal-js".as_slice())
     {
-        return Ok(None);
+        return Ok(false);
     }
-    if !worker_entry_stopped(identity.state) {
-        // 入口名只在 worker 读 init 帧前设置；用固定 pidfd 停住它，
-        // 再下一轮确认 T 状态。
-        signal_pidfd(fd, libc::SIGSTOP)?;
-        return Ok(None);
-    }
-    let own_group = unsafe { libc::getpgrp() };
-    let own_session = unsafe { libc::getsid(0) };
-    if identity.parent_pid != supervisor_pid
+    if !worker_entry_stopped(identity.state)
+        || identity.parent_pid != expected.reaper_pid
+        || identity.process_group != expected.process_group
+        || identity.session_id != expected.session_id
         || identity.process_group != pid
         || identity.session_id != pid
-        || identity.process_group == supervisor_pid
-        || identity.process_group == own_group
-        || identity.session_id == own_session
     {
         return Err(std::io::Error::other(
             "worker 进程组或会话不独立，拒绝放行和组信号回退",
         ));
     }
     ensure_pidfd_live(fd)?;
-    Ok(Some(identity))
+    Ok(true)
 }
 
 #[cfg(target_os = "linux")]
@@ -928,23 +926,25 @@ fn abort_unreleased_worker(
         return wait_for_payload_exit_and_bwrap_wait(child, fd, deadline)
             .map_err(std::io::Error::other);
     }
-    if unsafe { libc::killpg(pgid, libc::SIGCONT) } != 0 {
+    let group_kill = if unsafe { libc::killpg(pgid, libc::SIGKILL) } == 0 {
+        Ok(())
+    } else {
         let error = std::io::Error::last_os_error();
-        let group_kill = if unsafe { libc::killpg(pgid, libc::SIGKILL) } == 0 {
-            Ok(())
-        } else {
-            let kill_error = std::io::Error::last_os_error();
-            (kill_error.raw_os_error() == Some(libc::ESRCH))
-                .then_some(())
-                .ok_or(kill_error)
-        };
-        let supervisor = wait_worker_supervisor(child, Instant::now() + Duration::from_secs(2));
-        return Err(std::io::Error::other(format!(
-            "未放行载荷恢复失败（SIGCONT={error}；进程组 SIGKILL={group_kill:?}；监督进程={supervisor:?}；载荷身份未捕获，回收未确认）"
-        )));
+        (error.raw_os_error() == Some(libc::ESRCH))
+            .then_some(())
+            .ok_or(error)
+    };
+    let supervisor = wait_worker_supervisor(child, Instant::now() + Duration::from_secs(2));
+    match (group_kill, supervisor) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(signal), Ok(())) => Err(std::io::Error::other(format!(
+            "未核验载荷组 SIGKILL 失败：{signal}"
+        ))),
+        (Ok(()), Err(wait)) => Err(std::io::Error::other(wait)),
+        (Err(signal), Err(wait)) => Err(std::io::Error::other(format!(
+            "未核验载荷组 SIGKILL 失败：{signal}；监督进程回收失败：{wait}"
+        ))),
     }
-    wait_worker_supervisor(child, Instant::now() + Duration::from_secs(2))
-        .map_err(std::io::Error::other)
 }
 
 /// 保留 bwrap 监督者，使其等待被终止的命名空间 PID 1。
@@ -955,11 +955,22 @@ fn kill_worker(child: &mut std::process::Child, cleanup: &WorkerCleanup) -> Resu
         if !cleanup.payload_identity_verified {
             return Err("worker 身份尚未验证，拒绝向未验证目标发信号".into());
         }
-        // PID 1 退出时内核终止该 PID 命名空间内的其余进程。
-        if let Err(e) = signal_pidfd(fd, libc::SIGKILL) {
-            if e.raw_os_error() != Some(libc::ESRCH) {
-                recover_after_pidfd_kill_denied(child, cleanup, fd, &e, deadline)?;
+        if let Some(identity) = cleanup.sandbox_identity.as_ref() {
+            if let Err(group_error) = crate::sandbox::signal_sandbox_payload_group(
+                identity,
+                libc::SIGKILL,
+            ) {
+                if group_error.raw_os_error() != Some(libc::ESRCH)
+                    && group_error.kind() != std::io::ErrorKind::NotFound
+                {
+                    if let Err(pidfd_error) = signal_pidfd(fd, libc::SIGKILL) {
+                        recover_after_pidfd_kill_denied(child, cleanup, fd, &pidfd_error, deadline)?;
+                    }
+                }
             }
+            crate::sandbox::sweep_sandbox_namespace(&identity.ns_inode);
+        } else {
+            signal_pidfd(fd, libc::SIGKILL).map_err(|e| e.to_string())?;
         }
         if let Err(error) = wait_for_payload_exit_and_bwrap_wait(child, fd, deadline) {
             if child.try_wait().map_err(|wait_error| wait_error.to_string())?.is_some() {
@@ -1108,24 +1119,17 @@ fn kill_worker_group_and_confirm(
     deadline: Instant,
 ) -> Result<(), String> {
     let payload = cleanup.payload.as_ref().expect("pidfd fallback requires payload");
-    let pgid = cleanup
-        .payload_pgid
-        .ok_or_else(|| format!("worker 进程组未验证，拒绝回退信号（{cause}）"))?;
-    if pgid == child.id() as libc::pid_t
-        || pgid == unsafe { libc::getpgrp() }
-        || cleanup.payload_session_id != Some(cleanup.payload_pid.unwrap_or_default())
+    let identity = cleanup.sandbox_identity.as_ref()
+        .ok_or_else(|| format!("worker 进程组身份未捕获，拒绝回退信号（{cause}）"))?;
+    if identity.process_group != identity.pid
+        || identity.session_id != identity.pid
+        || identity.process_group == child.id() as libc::pid_t
     {
         return Err(format!("worker 进程组身份不独立，拒绝回退信号（{cause}）"));
     }
-    let signal_error = if unsafe { libc::killpg(pgid, libc::SIGKILL) } == 0 {
-        None
-    } else {
-        let error = std::io::Error::last_os_error();
-        (error.raw_os_error() != Some(libc::ESRCH)).then_some(error)
-    };
-    if let Some(error) = signal_error {
-        return Err(format!("worker 进程组信号被拒（{cause}；killpg={error}）"));
-    }
+    crate::sandbox::signal_sandbox_payload_group(identity, libc::SIGKILL)
+        .map_err(|error| format!("worker 进程组信号被拒（{cause}；{error}）"))?;
+    crate::sandbox::sweep_sandbox_namespace(&identity.ns_inode);
     wait_for_payload_exit_and_bwrap_wait(child, payload, deadline)
         .map_err(|error| format!("worker 进程组回退未确认（{cause}；载荷 pidfd/bwrap={error}）"))?;
     Ok(())

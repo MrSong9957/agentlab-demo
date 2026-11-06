@@ -393,6 +393,27 @@ fn gate_applies_patch_after_release() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// 033 policy=None 路径也必须在确认前扣住补丁 stdin；短确认期限退出时不得写盘。
+#[test]
+fn gate_policy_none_timeout_does_not_write_patch() {
+    let _serial = SANDBOX_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !terminal_chat::sandbox::probe_available() {
+        return;
+    }
+    let root = temp_root("gate-policy-none-timeout");
+    let file = root.join("gate.txt");
+    std::fs::write(&file, "old\n").unwrap();
+    let exe = std::path::PathBuf::from(env!("CARGO_BIN_EXE_terminal-chat"));
+    std::env::set_var("TCHAT_SANDBOX", "1");
+    std::env::set_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", "0");
+    let (result, _) = run_sandboxed(&exe, &update_patch(&file, "old", "new"));
+    std::env::remove_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS");
+    std::env::remove_var("TCHAT_SANDBOX");
+    assert!(!result.ok, "确认超时必须拒绝 apply_patch：{result:?}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "old\n", "失败时补丁 stdin 未放行");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// 确认失败路径（载荷提前退出）：exe 不存在＝bwrap exec 载荷失败→确认闸
 /// LeaderGone（监督进程在确认前退出）→不放行＋Err；目标文件不被写。
 /// 注：超时分支（确认循环 deadline）的确定性复现需要「载荷永不出现」的监督

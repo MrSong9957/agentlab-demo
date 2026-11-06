@@ -2184,8 +2184,11 @@ fn c13_bwrap_owner_reap_matrix() {
     // ① owner 登记：运行中进程句柄按 assignment 归属登记
     assert!(!v["session_id"].as_str().unwrap_or("").is_empty(), "exec 有句柄：{v}");
     assert_eq!(v["exec_status"], json!("running"), "yield 1500ms 返回运行中：{v}");
-    // ② 真实 bwrap：沙箱 PID ns 内 shell 为 1（033 多信号之一）
-    assert_eq!(v["marker_pid"], json!("1"), "exec 真实进入沙箱（ns 内 pid=1）：{v}");
+    // ② 真实 bwrap：运行命令的 namespace PID 是独立载荷，不是 PID 1 回收器。
+    assert!(
+        v["marker_pid"].as_str().and_then(|pid| pid.parse::<u32>().ok()).is_some_and(|pid| pid > 1),
+        "exec 真实进入非 init 的沙箱载荷：{v}"
+    );
     // ③ assignment 回收：终态摘要＋无残留（宿主侧 argv 扫描）
     assert_eq!(v["reaped"], json!(true), "终态附回收摘要：{v}");
     assert_eq!(v["leftover_sleep"], json!(false), "回收后无残留进程：{v}");

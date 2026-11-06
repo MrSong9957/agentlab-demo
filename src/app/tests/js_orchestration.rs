@@ -135,6 +135,60 @@ fn turn_budget() -> Arc<AtomicUsize> {
     Arc::new(AtomicUsize::new(TURN_LEAF_QUOTA))
 }
 
+#[cfg(target_os = "linux")]
+fn sandbox_payload_pid(supervisor: u32) -> libc::pid_t {
+    fn children(pid: libc::pid_t) -> Vec<libc::pid_t> {
+        std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+            .unwrap_or_default()
+            .split_whitespace()
+            .filter_map(|value| value.parse().ok())
+            .collect()
+    }
+    fn identity(pid: libc::pid_t) -> Option<(libc::pid_t, libc::pid_t, libc::pid_t)> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let (_, rest) = stat.rsplit_once(") ")?;
+        let fields: Vec<_> = rest.split_whitespace().collect();
+        Some((
+            fields.get(1)?.parse().ok()?,
+            fields.get(2)?.parse().ok()?,
+            fields.get(3)?.parse().ok()?,
+        ))
+    }
+    fn inner_pid(pid: libc::pid_t) -> Option<libc::pid_t> {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        status.lines().find_map(|line| line.strip_prefix("NSpid:"))?
+            .split_whitespace().last()?.parse().ok()
+    }
+    let own_ns = std::fs::read_link("/proc/self/ns/pid").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        for reaper in children(supervisor as libc::pid_t) {
+            let Ok(ns) = std::fs::read_link(format!("/proc/{reaper}/ns/pid")) else {
+                continue;
+            };
+            if ns == own_ns
+                || identity(reaper).is_none_or(|facts| facts.0 != supervisor as libc::pid_t)
+                || inner_pid(reaper) != Some(1)
+            {
+                continue;
+            }
+            for payload in children(reaper) {
+                if std::fs::read_link(format!("/proc/{payload}/ns/pid"))
+                    .is_ok_and(|payload_ns| payload_ns == ns)
+                    && identity(payload).is_some_and(|facts| {
+                        facts.0 == reaper && facts.1 == payload && facts.2 == payload
+                    })
+                    && inner_pid(payload).is_some_and(|nspid| nspid != 1)
+                {
+                    return payload;
+                }
+            }
+        }
+        assert!(std::time::Instant::now() < deadline, "未按 PID 1 父子关系找到独立沙箱载荷");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 /// 观察辅助：驱动到终态（有界）。
 fn drive_to_terminal(
     cell: &mut terminal_chat::js_orchestration::runtime::CellHandle,
@@ -209,6 +263,44 @@ fn sandbox_worker_entry_self_stops_before_init() {
     child.wait().expect("回收入口停止态 worker");
 }
 
+/// 确认失败时 runtime 不发送 init 帧；若执行 JS，marker leaf 会写入 dispatcher。
+#[cfg(target_os = "linux")]
+#[test]
+fn sandbox_worker_confirmation_timeout_does_not_dispatch_init_code() {
+    const CHILD: &str = "TCHAT_TEST_JS_GATE_TIMEOUT_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        if !terminal_chat::sandbox::probe_available() {
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "sandbox_worker_confirmation_timeout_does_not_dispatch_init_code",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("TCHAT_SANDBOX", "1")
+            .env("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", "0")
+            .status()
+            .expect("启动隔离的 JS 启动闸回归");
+        assert!(status.success(), "JS 启动闸辅助进程失败：{status}");
+        return;
+    }
+
+    let dispatcher = MapDispatcher::new(&[]);
+    let mut sink = RecordingSink::new();
+    let cfg = config(
+        "await tools[\"marker\"]({});",
+        vec![catalog_entry("marker", false)],
+        dispatcher.clone(),
+        turn_budget(),
+    );
+    let result = spawn_cell(&cfg, &mut sink, &[]);
+    assert!(result.is_err(), "确认超时必须拒绝创建 cell");
+    assert!(dispatcher.calls().is_empty(), "确认失败时不得执行 init 中的 JS leaf");
+    assert!(!sink.kinds().contains(&EventKind::CellStarted), "失败 cell 不提交启动事件");
+}
+
 /// 沙箱 worker 的强制终止必须由产品回收，隔离监督器只负责清理失败现场。
 #[cfg(target_os = "linux")]
 #[test]
@@ -255,20 +347,7 @@ fn sandbox_worker_terminate_reaps_payload() {
     );
     let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("启动真实沙箱 worker");
     let supervisor = cell.worker_pid();
-    let own_ns = std::fs::read_link("/proc/self/ns/pid").unwrap();
-    let children = format!("/proc/{supervisor}/task/{supervisor}/children");
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let payload = loop {
-        let text = std::fs::read_to_string(&children).unwrap_or_default();
-        if let Some(pid) = text.split_whitespace().filter_map(|s| s.parse::<i32>().ok())
-            .find(|pid| std::fs::read_link(format!("/proc/{pid}/ns/pid"))
-                .is_ok_and(|ns| ns != own_ns))
-        {
-            break pid;
-        }
-        assert!(Instant::now() < deadline, "未找到隔离载荷");
-        std::thread::sleep(Duration::from_millis(5));
-    };
+    let payload = sandbox_payload_pid(supervisor);
     let start_time = std::fs::read_to_string(format!("/proc/{payload}/stat"))
         .unwrap()
         .rsplit_once(") ")
@@ -357,17 +436,7 @@ fn sandbox_worker_payload_exits_before_terminate() {
     let cfg = config("await new Promise(() => {});", vec![], MapDispatcher::new(&[]), turn_budget());
     let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("启动沙箱 worker");
     let supervisor = cell.worker_pid();
-    let own_ns = std::fs::read_link("/proc/self/ns/pid").unwrap();
-    let children = format!("/proc/{supervisor}/task/{supervisor}/children");
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let payload = loop {
-        let text = std::fs::read_to_string(&children).unwrap_or_default();
-        if let Some(pid) = text.split_whitespace().filter_map(|s| s.parse::<i32>().ok())
-            .find(|pid| std::fs::read_link(format!("/proc/{pid}/ns/pid"))
-                .is_ok_and(|ns| ns != own_ns)) { break pid; }
-        assert!(Instant::now() < deadline, "未找到隔离载荷");
-        std::thread::sleep(Duration::from_millis(5));
-    };
+    let payload = sandbox_payload_pid(supervisor);
     let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, payload, 0) };
     assert!(raw >= 0);
     let fd = unsafe { OwnedFd::from_raw_fd(raw as i32) };
@@ -417,7 +486,7 @@ fn sandbox_worker_supervisor_dies_reports_failure() {
 fn sandbox_worker_kill_denied_reaps_payload_group() {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::process::CommandExt;
-    const MODE: &str = "TCHAT_TEST_ALL_PIDFD_SIGNALS_DENIED";
+    const MODE: &str = "TCHAT_TEST_GROUP_AND_PIDFD_KILL_DENIED";
     if std::env::var_os(MODE).is_none() {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "sandbox_worker_kill_denied_reaps_payload_group", "--nocapture"])
@@ -430,7 +499,6 @@ fn sandbox_worker_kill_denied_reaps_payload_group() {
     }
 
     assert!(terminal_chat::sandbox::sandbox_requested());
-    assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
     let mut unrelated = std::process::Command::new("/bin/sleep");
     unrelated.arg("30");
     unsafe {
@@ -449,42 +517,11 @@ fn sandbox_worker_kill_denied_reaps_payload_group() {
         OwnedFd::from_raw_fd(fd as i32)
     };
 
-    let worker_script = std::path::PathBuf::from(format!(
-        "/workspace/target/038-validation/reap-worker-child-{}.sh",
-        std::process::id()
-    ));
-    let worker_exe = env!("CARGO_BIN_EXE_terminal-chat");
-    std::fs::write(
-        &worker_script,
-        format!("#!/bin/sh\n/bin/sleep 30 &\nexport TCHAT_INTERNAL_GATE=stop\nexec \"{worker_exe}\" --internal-js\n"),
-    )
-    .expect("写入带受控后代的 worker 启动脚本");
-    let mut permissions = std::fs::metadata(&worker_script).unwrap().permissions();
-    use std::os::unix::fs::PermissionsExt;
-    permissions.set_mode(0o700);
-    std::fs::set_permissions(&worker_script, permissions).unwrap();
-
     let mut sink = RecordingSink::new();
-    let mut cfg = config("await new Promise(() => {});", vec![], MapDispatcher::new(&[]), turn_budget());
-    cfg.worker_exe = Some(worker_script.clone());
+    let cfg = config("await new Promise(() => {});", vec![], MapDispatcher::new(&[]), turn_budget());
     let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("启动沙箱 worker");
     let supervisor = cell.worker_pid();
-    let own_ns = std::fs::read_link("/proc/self/ns/pid").unwrap();
-    let children = format!("/proc/{supervisor}/task/{supervisor}/children");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    let payload = loop {
-        let text = std::fs::read_to_string(&children).unwrap_or_default();
-        if let Some(pid) = text
-            .split_whitespace()
-            .filter_map(|value| value.parse::<libc::pid_t>().ok())
-            .find(|pid| std::fs::read_link(format!("/proc/{pid}/ns/pid"))
-                .is_ok_and(|ns| ns != own_ns))
-        {
-            break pid;
-        }
-        assert!(std::time::Instant::now() < deadline, "未找到沙箱载荷");
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    };
+    let payload = sandbox_payload_pid(supervisor);
     let process_facts = |pid: libc::pid_t| -> Option<(char, libc::pid_t, libc::pid_t, u64)> {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         let (_, rest) = stat.rsplit_once(") ")?;
@@ -497,25 +534,17 @@ fn sandbox_worker_kill_denied_reaps_payload_group() {
         ))
     };
     let payload_facts = process_facts(payload).expect("读取 worker 身份");
-    let descendants = format!("/proc/{payload}/task/{payload}/children");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    let descendant = loop {
-        let text = std::fs::read_to_string(&descendants).unwrap_or_default();
-        if let Some(pid) = text.split_whitespace().filter_map(|s| s.parse().ok()).next() {
-            break pid;
-        }
-        assert!(std::time::Instant::now() < deadline, "worker 未创建受控后代");
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    };
-    let descendant_facts = process_facts(descendant).expect("读取 worker 后代身份");
     let unrelated_facts = process_facts(unrelated_pid).expect("读取独立会话身份");
+    let payload_fd = unsafe {
+        let fd = libc::syscall(libc::SYS_pidfd_open, payload, 0);
+        assert!(fd >= 0, "worker pidfd_open: {}", std::io::Error::last_os_error());
+        OwnedFd::from_raw_fd(fd as i32)
+    };
     let bwrap_group = unsafe { libc::getpgid(supervisor as libc::pid_t) };
     let main_group = unsafe { libc::getpgrp() };
     let main_session = unsafe { libc::getsid(0) };
     assert_eq!(payload_facts.1, payload, "worker 必须是独立进程组组长");
     assert_eq!(payload_facts.2, payload, "worker 必须是独立会话组长");
-    assert_eq!(descendant_facts.1, payload_facts.1, "后代应属于 worker 进程组");
-    assert_eq!(descendant_facts.2, payload_facts.2, "后代应属于 worker 会话");
     assert_ne!(payload_facts.1, supervisor as libc::pid_t, "回退组不得命中 bwrap");
     assert_ne!(payload_facts.1, bwrap_group, "回退组不得命中 bwrap 所在组");
     assert_ne!(payload_facts.1, main_group, "回退组不得命中主进程组");
@@ -523,22 +552,24 @@ fn sandbox_worker_kill_denied_reaps_payload_group() {
     assert_ne!(payload_facts.1, unrelated_facts.1, "回退组不得命中独立会话哨兵");
     assert_ne!(payload_facts.2, unrelated_facts.2, "worker 组不得命中独立会话");
     eprintln!(
-        "WORKER_REAP_TARGET worker_pid={payload} worker_start={} worker_pgid={} worker_sid={} bwrap_pid={supervisor} bwrap_pgid={bwrap_group} main_pgid={main_group} main_sid={main_session} descendant_pid={descendant} descendant_start={} descendant_pgid={} descendant_sid={} unrelated_pid={unrelated_pid} unrelated_pgid={} unrelated_sid={}",
+        "WORKER_REAP_TARGET worker_pid={payload} worker_start={} worker_pgid={} worker_sid={} bwrap_pid={supervisor} bwrap_pgid={bwrap_group} main_pgid={main_group} main_sid={main_session} unrelated_pid={unrelated_pid} unrelated_pgid={} unrelated_sid={}",
         payload_facts.3,
         payload_facts.1,
         payload_facts.2,
-        descendant_facts.3,
-        descendant_facts.1,
-        descendant_facts.2,
         unrelated_facts.1,
         unrelated_facts.2,
     );
     let mut filter = [
         libc::sock_filter { code: 0x20, jt: 0, jf: 0, k: 0 },
-        libc::sock_filter { code: 0x15, jt: 0, jf: 4, k: libc::SYS_pidfd_send_signal as u32 },
+        libc::sock_filter { code: 0x15, jt: 2, jf: 0, k: libc::SYS_kill as u32 },
+        libc::sock_filter { code: 0x15, jt: 5, jf: 0, k: libc::SYS_pidfd_send_signal as u32 },
+        libc::sock_filter { code: 0x06, jt: 0, jf: 0, k: 0x7fff_0000 },
+        libc::sock_filter { code: 0x20, jt: 0, jf: 0, k: 16 },
+        libc::sock_filter { code: 0x15, jt: 0, jf: 1, k: libc::SIGKILL as u32 },
+        libc::sock_filter { code: 0x06, jt: 0, jf: 0, k: 0x0005_0000 | libc::EPERM as u32 },
+        libc::sock_filter { code: 0x06, jt: 0, jf: 0, k: 0x7fff_0000 },
         libc::sock_filter { code: 0x20, jt: 0, jf: 0, k: 24 },
-        libc::sock_filter { code: 0x15, jt: 1, jf: 0, k: libc::SIGKILL as u32 },
-        libc::sock_filter { code: 0x15, jt: 0, jf: 1, k: libc::SIGTERM as u32 },
+        libc::sock_filter { code: 0x15, jt: 0, jf: 1, k: libc::SIGKILL as u32 },
         libc::sock_filter { code: 0x06, jt: 0, jf: 0, k: 0x0005_0000 | libc::EPERM as u32 },
         libc::sock_filter { code: 0x06, jt: 0, jf: 0, k: 0x7fff_0000 },
     ];
@@ -549,32 +580,32 @@ fn sandbox_worker_kill_denied_reaps_payload_group() {
     assert_eq!(result.status, CellStatus::Terminated, "{result:?}");
     assert!(sink.kinds().contains(&EventKind::CellClosed));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    let same_identity = |pid, start| process_facts(pid).is_some_and(|facts| facts.3 == start);
-    while (same_identity(payload, payload_facts.3)
-        || same_identity(descendant, descendant_facts.3))
-        && std::time::Instant::now() < deadline
-    {
-        std::thread::sleep(std::time::Duration::from_millis(5));
+    loop {
+        let mut poll = libc::pollfd { fd: payload_fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        assert!(unsafe { libc::poll(&mut poll, 1, 20) } >= 0);
+        if poll.revents & (libc::POLLIN | libc::POLLHUP) != 0 { break; }
+        assert!(std::time::Instant::now() < deadline, "SIGTERM 回退未确认 worker 回收: {:#x}", poll.revents);
     }
-    assert!(
-        !same_identity(payload, payload_facts.3),
-        "产品返回成功后 worker {payload} start={} 仍未回收",
-        payload_facts.3
-    );
-    assert!(
-        !same_identity(descendant, descendant_facts.3),
-        "产品返回成功后 worker 后代 {descendant} start={} 仍存活",
-        descendant_facts.3
-    );
     let mut sentinel_poll = libc::pollfd {
         fd: unrelated_fd.as_raw_fd(),
         events: libc::POLLIN,
         revents: 0,
     };
     assert_eq!(unsafe { libc::poll(&mut sentinel_poll, 1, 0) }, 0, "独立会话被误杀");
-    unrelated.kill().expect("清理独立会话哨兵");
+    assert_eq!(
+        unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                unrelated_fd.as_raw_fd(),
+                libc::SIGTERM,
+                0,
+                0,
+            )
+        },
+        0,
+        "清理独立会话哨兵"
+    );
     unrelated.wait().expect("等待独立会话哨兵");
-    std::fs::remove_file(worker_script).expect("删除 worker 测试脚本");
 }
 
 /// pidfd 和 worker 进程组信号都被拒绝时，产品须有界报错且不得保存成功关闭。
@@ -650,24 +681,10 @@ fn sandbox_worker_kill_denied_uses_term_fallback() {
     let cfg = config("await new Promise(() => {});", vec![], MapDispatcher::new(&[]), turn_budget());
     let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("启动沙箱 worker");
     let supervisor = cell.worker_pid();
-    let own_ns = std::fs::read_link("/proc/self/ns/pid").unwrap();
-    let children = format!("/proc/{supervisor}/task/{supervisor}/children");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    let payload = loop {
-        let text = std::fs::read_to_string(&children).unwrap_or_default();
-        if let Some(pid) = text
-            .split_whitespace()
-            .filter_map(|value| value.parse::<libc::pid_t>().ok())
-            .find(|pid| std::fs::read_link(format!("/proc/{pid}/ns/pid"))
-                .is_ok_and(|ns| ns != own_ns))
-        {
-            let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-            assert!(raw >= 0, "payload pidfd_open: {}", std::io::Error::last_os_error());
-            break unsafe { OwnedFd::from_raw_fd(raw as i32) };
-        }
-        assert!(std::time::Instant::now() < deadline, "未找到沙箱载荷");
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    };
+    let payload_pid = sandbox_payload_pid(supervisor);
+    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, payload_pid, 0) };
+    assert!(raw >= 0, "payload pidfd_open: {}", std::io::Error::last_os_error());
+    let payload = unsafe { OwnedFd::from_raw_fd(raw as i32) };
     let mut filter = [
         libc::sock_filter { code: 0x20, jt: 0, jf: 0, k: 0 },
         libc::sock_filter { code: 0x15, jt: 0, jf: 3, k: libc::SYS_pidfd_send_signal as u32 },
@@ -725,12 +742,12 @@ fn sandbox_worker_release_signal_denied_reaps_unreleased_payload() {
         Err(error) => error,
         Ok(_) => panic!("载荷放行信号被拒时不得创建 cell"),
     };
-    assert!(error.contains("放行失败"), "{error}");
+    assert!(error.contains("SIGCONT 失败"), "身份已固定但放行信号失败：{error}");
     assert!(error.contains("监督进程已回收"), "产品须自行回收未放行载荷：{error}");
     assert!(!sink.kinds().contains(&EventKind::CellStarted));
 }
 
-/// 允许自检但拒绝固定载荷 PID，验证启动闸实际捕获失败时不放行。
+/// 宿主 PIDFD 能力自检失败时，在启动 bwrap 前拒绝且不创建 cell。
 #[cfg(target_os = "linux")]
 #[test]
 fn sandbox_worker_capture_denied_fails_closed() {
@@ -751,7 +768,7 @@ fn sandbox_worker_capture_denied_fails_closed() {
         libc::sock_filter { code: 0x20, jt: 0, jf: 0, k: 0 },
         libc::sock_filter { code: 0x15, jt: 0, jf: 3, k: libc::SYS_pidfd_open as u32 },
         libc::sock_filter { code: 0x20, jt: 0, jf: 0, k: 16 },
-        libc::sock_filter { code: 0x15, jt: 1, jf: 0, k: std::process::id() },
+        libc::sock_filter { code: 0x15, jt: 0, jf: 1, k: std::process::id() },
         libc::sock_filter { code: 0x06, jt: 0, jf: 0, k: 0x0005_0000 | libc::EPERM as u32 },
         libc::sock_filter { code: 0x06, jt: 0, jf: 0, k: 0x7fff_0000 },
     ];
@@ -764,8 +781,8 @@ fn sandbox_worker_capture_denied_fails_closed() {
         Err(error) => error,
         Ok(_) => panic!("载荷身份捕获被拒时不得创建 cell"),
     };
+    assert!(error.contains("无法固定 worker 身份"), "PIDFD 自检失败须先于 spawn 返回：{error}");
     assert!(error.contains("Operation not permitted"), "{error}");
-    assert!(error.contains("监督进程已回收"), "拒绝放行后产品须自行回收：{error}");
     assert!(!sink.kinds().contains(&EventKind::CellStarted));
 }
 

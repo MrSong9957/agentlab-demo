@@ -1,6 +1,7 @@
 # 规格：一键全量测试接入 GitHub Actions（Windows/Linux/macOS 三平台）
 
 - 状态：**038 未完成（2026-11-02 迭代轮 33–35 实际问题修复中，未满足本规格验收，不宣告功能完成）**。迭代 32 收口口径修正见 `2026-11-02-iteration32-status.md`；迭代 33–35（同文件）记录 Windows 失败 54→32→21（41373539854→41387309164→41392289704 三轮完整归因）、macOS 全集 92→42（41396503997）与逐族修复：**ConPTY 已实现**（ChildHandle 抽象＋CreatePseudoConsole＋PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE＋CreateProcessW，作业挂接与拆除顺序对齐 016——PTY 族 5→0 的 CI 实证）、Windows 锁 ReleaseMutex owner 线程契约、sandbox fail-open 闭合、mcp 夹具 -X utf8（cp1252）、mac finish()/pty.rs 等待期排干（E 态泄漏级联根因）、D2 ns 成员补杀（v2＝载荷 ns 精确圈定；v1 读组长 ns 有容器级连坐缺陷——41398734625 ubuntu「runner lost communication」实证，修正随迭代 35 入库）。ubuntu 维持 D1–D3 四项（D1＝产品链 bwrap 未调 seccomp＋AppArmor 限 userns 的诊断工件已归档）。**本地 HEAD（批次七）L3 全量执行中**；推送凭据（gh/credential）随环境重置丢失，批次六/七/D2 修正待凭据恢复后推送。六项未决更新：①Windows 21 项（proc_session 容差族＋G2 join 折叠＋c15/t18 取证中）；②macOS 42 项（/proc 族已修待 CI 验证；e2e s 系/tls/attack01 待 mac 日志归因）；③D1 产品链收敛（seccomp fd 传递方向）；④ConPTY 已闭合（待 Windows CI 全绿确认）；⑤continue-on-error 未移除（平台未全绿）；⑥origin/main 误推处置仍待用户决定。原状态行（迭代 31）存档：**038 未完成（2026-11-01 迭代轮 31 实际问题修复中，未满足本规格验收，不宣告功能完成）**。迭代 30 收口数据（commit 9a1e65c，run 41255654319：ubuntu 3852/4；windows 3110/219；macOS 2812/28 后卡死）与本地 3854/2/6（commit 5f98508）仍按提交/运行分开归因；**迭代 31 起以 Windows 219 失败逐条报文为证据按根因族修复**（轨迹与产品级根因清单见 `docs/logs/038-github-actions-ci/2026-11-01-iteration31-status.md`，提交序列 915acb2→7705010→998ed0d→c59fe0b→4de41a3）：windows 失败 219→152→80→77（4 轮实测，修复含会话锁句柄访问权、memory 根锁命名互斥体、MCP 夹具 JSON 路径转义、normalize_request/absolute_lexical 盘符前缀、checkout eol=lf、cmd_builder 夹具迁移、D-mac 有界写）；ubuntu 恒定 4 失败＝D1–D3（**诊断 job 已取得证据**：D1 seccomp 机制在 runner 正常、差异在产品启动链；D2＝PID 命名空间 init 存活致级联销毁未触发；D3＝fd 传递链丢失——修复为产品设计项）；macOS：D-mac 写侧有界写修复后，run 41274163407 实测 e2e_acceptance 仍挂死（04:50 进入该目标后零输出直至 150 分钟上限被回收，孤儿进程转储证实；其余 33 个目标正常完成、2 失败）——挂点在读路径更深处或产品侧，写侧修复不充分。**Linux 本地全量（commit 5f98508，2026-10-31 phase3）**：**3854 通过/2 失败/6 忽略**（2 失败＝proc_session 管道 Ctrl-C、session_perf 预算，存量复现证据见 `docs/logs/038-github-actions-ci/2026-10-30-local-verification.md` 与 `2026-10-31-phase3-status.md`）。**收口 HEAD（4fbe84a 及其后修正提交）：未重新执行完整验证**——9a1e65c 之后仅文档提交（无产品代码变更），现有验证仍含失败与未完成部分，最终候选未通过完整验收。**六项未决全部保留**：①Windows 219 失败（测试夹具跨平台命令助手＝下一轮主工作，方案见 `2026-11-01-iteration30-status.md`）；②macOS PTY 读路径卡死（D-mac 诊断方案同上；run 41243615999 曾以同入口 150 分钟上限截断）；③Ubuntu D1–D3＝GH runner 上复现、根因未证实的异常族（诊断方案 `2026-10-31-runner-diagnosis-plan.md`）；④ConPTY＝008 A6 未闭合（4b85ce8 的 Windows PTY 路径为显式 fail-closed，"ConPTY 为已登记里程碑"，待 Windows 实现）；⑤Windows/macOS job 仍置 `continue-on-error`（失败可见但不阻塞，workflow 第 43 行）——按本规格属**未满足状态**，非验收放宽依据；⑥origin/main 误推处置待用户决定——事故记录：第二阶段平台层提交 4b85ce8 被直接推送到 origin/main 绕过 PR（独立于任务分支开发，经合并提交 138ae4e 才进入本分支；main 上无对应 CI 运行记录），经用户裁决 A 以合并恢复审批流，origin/main 现含 4b85ce8 的回退需用户决定
+- 历史状态（截至 2026-11-02，保留原记录）：**038 未完成（2026-11-02 迭代轮 33–35 实际问题修复中，未满足本规格验收，不宣告功能完成）**。迭代 32 收口口径修正见 `2026-11-02-iteration32-status.md`；迭代 33–35（同文件）记录 Windows 失败 54→32→21（41373539854→41387309164→41392289704 三轮完整归因）、macOS 全集 92→42（41396503997）与逐族修复：**ConPTY 已实现**（ChildHandle 抽象＋CreatePseudoConsole＋PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE＋CreateProcessW，作业挂接与拆除顺序对齐 016——PTY 族 5→0 的 CI 实证）、Windows 锁 ReleaseMutex owner 线程契约、sandbox fail-open 闭合、mcp 夹具 -X utf8（cp1252）、mac finish()/pty.rs 等待期排干（E 态泄漏级联根因）、D2 ns 成员补杀（v2＝载荷 ns 精确圈定；v1 读组长 ns 有容器级连坐缺陷——41398734625 ubuntu「runner lost communication」实证，修正随迭代 35 入库）。ubuntu 维持 D1–D3 四项（D1＝产品链 bwrap 未调 seccomp＋AppArmor 限 userns 的诊断工件已归档）。**本地 HEAD（批次七）L3 全量执行中**；推送凭据（gh/credential）随环境重置丢失，批次六/七/D2 修正待凭据恢复后推送。六项未决更新：①Windows 21 项（proc_session 容差族＋G2 join 折叠＋c15/t18 取证中）；②macOS 42 项（/proc 族已修待 CI 验证；e2e s 系/tls/attack01 待 mac 日志归因）；③D1 产品链收敛（seccomp fd 传递方向）；④ConPTY 已闭合（待 Windows CI 全绿确认）；⑤continue-on-error 未移除（平台未全绿）；⑥origin/main 误推处置仍待用户决定。原状态行（迭代 31）存档：**038 未完成（2026-11-01 迭代轮 31 实际问题修复中，未满足本规格验收，不宣告功能完成）**。迭代 30 收口数据（commit 9a1e65c，run 41255654319：ubuntu 3852/4；windows 3110/219；macOS 2812/28 后卡死）与本地 3854/2/6（commit 5f98508）仍按提交/运行分开归因；**迭代 31 起以 Windows 219 失败逐条报文为证据按根因族修复**（轨迹与产品级根因清单见 `docs/logs/038-github-actions-ci/2026-11-01-iteration31-status.md`，提交序列 915acb2→7705010→998ed0d→c59fe0b→4de41a3）：windows 失败 219→152→80→77（4 轮实测，修复含会话锁句柄访问权、memory 根锁命名互斥体、MCP 夹具 JSON 路径转义、normalize_request/absolute_lexical 盘符前缀、checkout eol=lf、cmd_builder 夹具迁移、D-mac 有界写）；ubuntu 恒定 4 失败＝D1–D3（**诊断 job 已取得证据**：D1 seccomp 机制在 runner 正常、差异在产品启动链；D2＝PID 命名空间 init 存活致级联销毁未触发；D3＝fd 传递链丢失——修复为产品设计项）；macOS：D-mac 写侧有界写修复后，run 41274163407 实测 e2e_acceptance 仍挂死（04:50 进入该目标后零输出直至 150 分钟上限被回收，孤儿进程转储证实；其余 33 个目标正常完成、2 失败）——挂点在读路径更深处或产品侧，写侧修复不充分。**Linux 本地全量（commit 5f98508，2026-10-31 phase3）**：**3854 通过/2 失败/6 忽略**（2 失败＝proc_session 管道 Ctrl-C、session_perf 预算，存量复现证据见 `docs/logs/038-github-actions-ci/2026-10-30-local-verification.md` 与 `2026-10-31-phase3-status.md`）。**收口 HEAD（4fbe84a 及其后修正提交）：未重新执行完整验证**——9a1e65c 之后仅文档提交（无产品代码变更），现有验证仍含失败与未完成部分，最终候选未通过完整验收。**六项未决全部保留**：①Windows 219 失败（测试夹具跨平台命令助手＝下一轮主工作，方案见 `2026-11-01-iteration30-status.md`）；②macOS PTY 读路径卡死（D-mac 诊断方案同上；run 41243615999 曾以同入口 150 分钟上限截断）；③Ubuntu D1–D3＝GH runner 上复现、根因未证实的异常族（诊断方案 `2026-10-31-runner-diagnosis-plan.md`）；④ConPTY＝008 A6 未闭合（4b85ce8 的 Windows PTY 路径为显式 fail-closed，"ConPTY 为已登记里程碑"，待 Windows 实现）；⑤Windows/macOS job 仍置 `continue-on-error`（失败可见但不阻塞，workflow 第 43 行）——按本规格属**未满足状态**，非验收放宽依据；⑥origin/main 误推处置待用户决定——事故记录：第二阶段平台层提交 4b85ce8 被直接推送到 origin/main 绕过 PR（独立于任务分支开发，经合并提交 138ae4e 才进入本分支；main 上无对应 CI 运行记录），经用户裁决 A 以合并恢复审批流，origin/main 现含 4b85ce8 的回退需用户决定
 - 提交统计（2026-11-01 核实）：038 原始基线＝`e6e3662`（036-037 收口文档提交，首个 038 提交 0b86159 的父提交）；基线起至收口 HEAD 共 **43 个提交**——42 个在任务分支（origin/main 之外）＋1 个为误推入 main 的 4b85ce8（经 138ae4e 合并进入本分支）；43 个中含 1 个合并提交与 9 个 [skip ci] 提交
 - 本轮已落实（同日第二阶段）：①5 个环境开关提前 return 全部移除（attack06/c13/b2_mcp/e_reaping 恢复真实检查；sec7 以既有 GateChild 闸门机制确定性重做——容量契约断言原样、轮级结果为闸门下未收尾错误，三连稳定）；②runner 三异常的版本假设被本地实证排除（bwrap 0.11.1 与 runner 同版本下 attack06/c13/e_reaping/b2_mcp 全部通过）——根因收敛到内核/运行上下文，runner 侧 strace 诊断方案已成文（docs/logs/038-github-actions-ci/2026-10-31-runner-diagnosis-plan.md），CI 恢复真实检查后如复现即如实失败并供诊断；③macOS：internal-apply 写回平台化（/proc/self/fd→/dev/fd，ReOpenFile 语义注记）、AGENTS.md 链发现根因修复（Darwin 系统前缀重解，用户可控组件防护不降级）、session 两用例夹具跨平台化（只读句柄失败注入）、sandbox policy 测试断言对齐产品规范化、apply_patch 集成/context_injection/context_management/e2e_acceptance 门控解除；④PTY 测试装置写侧有界化（poll＋看门狗＋证据转储）——卡死转为可定位失败；⑤Windows：apply_patch 句柄层（ReOpenFile/句柄身份核验）、session flock（LockFileEx）、memory 锁族平台统一、workspace 进程组、proc_session 作业对象树终止——**未经编译验证**（本容器无法安装 windows 目标，静态审计＋API 签名逐一对照 windows-sys 0.59 源码），待授权 CI 首验。
 - 本轮范围确认（用户指令同步）：①Linux 恢复 attack06/c13/b2_mcp/e_reaping/sec7 真实检查，修复实际缺陷，不得以提前 return/ignore/环境开关/削弱断言替代；②macOS 修复 /proc 依赖、AGENTS.md 链发现、符号链接与真实设备处理、PTY 卡死定位（低成本原因优先）；③Windows 补齐进程启动/树回收/交互终端平台实现，不再整文件排除隐藏缺口；④采样不得冒充阈值验证，各预算的实际通过环境如实记录；⑤验证分层 L1→L2→L3，卡死诊断用有限超时；⑥本轮不提交/推送/合并——远端三平台验证需推送授权，作为权限阻断返回
@@ -54,6 +55,32 @@ execve 持续；args 经 "$@" 传递不展开）。宿主侧统一经
 由 /dev/shm argv 转储定位并修复（mcp_stdio 35/0、mcp_resources 37/0、
 mcp_turn 26/0、mcp_stdio_sandbox 1/0 全绿后）。
 
+### §0-A 实现状态复核（2026-11-06，修复前历史记录）
+
+**修复前本要求未满足。**该结论记录修复候选之前的状态：当时 bwrap 使用 `--as-pid-1`，受闸 shell 在新 PID namespace 中为 PID 1。真实 bwrap 复现显示，PID 1 执行 `kill -STOP $$; echo RESUMED` 后仍打印 `RESUMED` 并成功退出；因此 `kill` 的零返回码不能证明载荷已停止，`|| kill -KILL $$` 也不会触发。Linux [pid_namespaces(7)](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html) 说明，对 namespace init 的 SIGSTOP 只有从祖先 PID namespace 发送时才会强制递送。
+
+这项证据否定当前方案的“自停即零竞态”前提。现有确认闸在发现异 namespace 子进程后可发送 SIGCONT，但未证明用户命令尚未执行。需求保持不变；实现和接线测试须在重新设计 PID 1/载荷启动关系后复核。具体命令、`NSpid` 观察及本轮未扩展到进程组/回收重设计的依据见 [`2026-11-06-windows-g2-path.md`](../logs/038-github-actions-ci/2026-11-06-windows-g2-path.md) §“038 §0-A 门控核验补记”。
+
+
+#### §0-A 启动闸复现与修复方向（2026-11-06）
+
+确定性 real-bwrap 复现观察到：当前受闸载荷是 namespace PID 1；用户 marker 在产品确认函数调用前出现，载荷状态为 S 而非 T。诊断器只在记录后终止并 wait 自己的 bwrap 子进程，该清理不计作产品回收。
+
+另一个有界 real-bwrap 拓扑探针在不传 --as-pid-1 时观察到 bubblewrap PID 1 reaper 和 PID 2 gate payload。PID 2 经 setsid 后处于 T，宿主核验 PID namespace、父子关系、start time、PGID/SID 并发送 SIGCONT 后，marker 才出现。此为机制探针，不是产品修复验收。
+
+当前入口源码审计还确认两个独立缺口：MCP stdio gate wrapper 实际没有 STOP；apply_patch 在 TCHAT_SANDBOX=1 且 policy=None 时跳过 gate 与确认，并直接写入补丁 stdin。031 policy apply_patch 路径会确认，但当前 PID 1 自停未能提供停止态证据。JS worker 另有 host PIDFD SIGSTOP 与 init 帧屏障；exec 仍依赖 PID 1 自停。该差异已纳入修复计划，不改变 §0-A 目标。
+
+推荐修复方向、四入口差异、原 wait owner 与定向验收见 [038 启动闸计划](../plans/2026-11-06-1106-code-038-sandbox-start-gate-plan.md) 和 [复现记录](../logs/038-github-actions-ci/2026-11-06-sandbox-start-gate.md)。此处的“未满足”结论为修复前状态，后由下方实现候选记录更新；计划不改变契约。
+
+#### §0-A 实现候选复核（2026-11-06）
+
+**Linux 四入口启动闸通过本地定向验收，038 整体仍未完成。**exec、MCP、apply_patch 与 JS worker 现在使用同一确认机制：bwrap 使用内建 PID 1 回收器，载荷建立独立 session/进程组并停在 T；宿主按 PID namespace、直接父子关系、start time/PIDFD、PGID/SID 和 `NSpid` 动态发现载荷。PID 数值不构成产品假设。宿主在 SIGCONT 前再次核验同一 PIDFD 身份和取消标志。apply_patch 的 policy=None 沙箱路径也先确认再写入 stdin，JS 只在确认后发送 init 帧。
+
+最终真实 bwrap 回归记录到 payload host PID 34、reaper host PID 33、payload `NSpid` 末项 2、State T、PGID=SID=34、namespace `pid:[4026532466]`；marker 只在宿主放行后出现。该 PID 2 是该次观测，不是实现假设。确认回调期间到达的取消不会放行。管理器确认时不持有全局状态锁；close 与在途启动通过独立启动锁协调，确认已放行时先终止已记录的载荷组、执行跳过 PID 1 的 D2 sweep，再等待原有 bwrap 子进程。031 MCP gate 保留原服务器程序单文件挂载。自然退出与 Ctrl+C 竞态继续返回自然终态。四入口 marker/stdin/init 屏障、取消、超时、启动失败、身份异常、worker 回收、pipe Ctrl+C、C13、CPU 与墙钟终止的结果见 [启动闸验收记录](../logs/038-github-actions-ci/2026-11-06-sandbox-start-gate.md)。
+
+既有 network-disabled 031 D2 测试在当前容器中受环境阻断：bwrap 在建立 namespace 前返回 `loopback: Failed to create NETLINK_ROUTE socket: Operation not permitted`，载荷未启动，启动闸没有放行。相同 031 受限挂载与回收用例的 network-enabled 变体通过；原测试配置已恢复。该限制不改变规格、不要求修改 workflow 或部署依赖。Windows 编译候选和 Windows G2 仍待验证；本候选未验证 macOS/Windows，不能据此宣告 038 整体完成。
+
+
 
 ### JS worker 回收修复验证（2026-11-05，未提交候选）
 
@@ -66,6 +93,14 @@ mcp_turn 26/0、mcp_stdio_sandbox 1/0 全绿后）。
 身份快照期间退出、worker 入口未就绪、取消确认、确认超时和放行后终止均有定向回归。C13 与 gate03 另外观察到 016 测试 shell 被外层 subreaper 接管；该现象不属于 JS worker，本次不修改 016 wait owner。
 
 本轮未运行 L3 或 038 全量验证。038 整体保持未完成。PID、start time、PGID/SID、命令和原始输出见 [`2026-11-05-process-reaping-closeout.md`](../logs/038-github-actions-ci/2026-11-05-process-reaping-closeout.md)。
+
+## 0-B 沙箱管道 Ctrl+C 与显式终止（2026-11-06）
+
+修复 016 进程会话契约在真实 bwrap 沙箱中的偏差：管道模式的 `\u0003` 只向用户载荷进程组发送 SIGINT，不得因命中 bwrap 监督进程而让仍忽略 SIGINT 的载荷提前结束。SIGINT 忽略的载荷必须继续运行并写入日志；同一会话句柄的 `terminate=true` 必须在 3 秒内报告已终止、完成回收并停止写入。SIGINT 无法发送且会话仍运行时，返回错误并保留原句柄。并行的独立会话在中断和终止目标会话后必须仍运行。
+
+普通模式和真实 `TCHAT_SANDBOX=1` 模式都用 `pipe_ctrl_c_interrupts_and_terminate_kills_ignoring_process` 精确用例验收。测试用 READY 文件同步信号处置和运行状态，不以固定延时猜测启动完成。本轮不改变监督线程的 wait/reap 所有权、bwrap 容器配置或 MCP 行为。实现与验收证据见 [`2026-11-06-pipe-ctrl-c.md`](../logs/038-github-actions-ci/2026-11-06-pipe-ctrl-c.md)。
+
+SIGINT handler 与退出码 `130` 的用例仅在 Unix 编译；Windows 保留既有整树终止分支。本次在 Linux 容器中分别显式运行普通模式和真实沙箱模式。当前 CI 不设置 `TCHAT_SANDBOX`，所以 CI 全量入口只覆盖该用例的普通模式；沙箱模式结果记为本地实测，本轮不修改 CI 工作流。
 
 ## 1. 要做什么，有哪些要求
 

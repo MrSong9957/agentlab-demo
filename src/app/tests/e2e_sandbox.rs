@@ -43,7 +43,7 @@ pub(crate) struct HostFacts {
 /// 探针输出的证据行（`KEY=VALUE`，构造见 [`matrix_a_full_chain_multi_tool`]）；
 /// 以下四项**全部满足**才返回 `Ok(())`，任何缺失/不符汇入 `Err`（注明期望与实际）：
 /// 1. `PROBE_NS` 存在、格式有效（`pid:[<inode>]`）且不同于主进程（沙箱外）ns；
-/// 2. `PROBE_PID` 为有效数字且＝1（bwrap `--as-pid-1`：直接载荷＝新 ns 的 pid 1）；
+/// 2. `PROBE_PID` 为正整数且不等于 1（避免将载荷与 namespace init 混淆）；
 /// 3. `HOST_SENTINEL_VISIBLE=no`（探针检查的 /proc/<pid> 即 `facts.sentinel_pid`，
 ///    其沙箱外存在性由调用侧前置断言保证）；
 /// 4. `PROBE_HOME` 与 `facts.anchor` 按路径口径一致（环境配置证据，仅辅助——
@@ -64,10 +64,10 @@ fn sandbox_evidence(output: &str, facts: &HostFacts) -> Result<(), String> {
         None => failed.push("PROBE_NS：证据行缺失（探针未运行或输出被截断）".to_string()),
     }
 
-    // 2. 载荷 pid：--as-pid-1 语义＝新 PID ns 中的 pid 1。
+    // 2. 载荷必须与 namespace init 区分；不依赖其具体 namespace PID。
     match probe_val(output, "PROBE_PID") {
-        Some(pid) if pid.parse::<u32>().is_ok_and(|p| p == 1) => {}
-        Some(pid) => failed.push(format!("PROBE_PID：期望 1（--as-pid-1 直接载荷），实际 {pid:?}")),
+        Some(pid) if pid.parse::<u32>().is_ok_and(|p| p > 1) => {}
+        Some(pid) => failed.push(format!("PROBE_PID：期望大于 1 的 namespace 载荷 PID，实际 {pid:?}")),
         None => failed.push("PROBE_PID：证据行缺失（探针未运行或输出被截断）".to_string()),
     }
 
@@ -463,7 +463,7 @@ echo "DEL_GONE=$( [ ! -e del-target.txt ] && echo yes || echo no )""#,
 ///
 /// 预期（B2 加固后目标行为）：沙箱分支经 pre_exec `close_range(CLOSE_RANGE_
 /// CLOEXEC)` 把继承 fd ≥3 标记为 execve 时关闭——`/proc/self/fd/N` 不再可读
-/// （且 `PID=1` 链路证据仍在＝工具确实经 bwrap 执行）；普通对照分支保持可读
+/// （且载荷 PID 大于 namespace init＝工具经启动闸运行）；普通对照分支保持可读
 /// （普通模式行为零变化）。
 #[cfg(target_os = "linux")]
 // 038-CI：本用例要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
@@ -577,8 +577,12 @@ fn b2_real_cli_fd_chain_full_path() {
                 "沙箱分支：fd 正文不得再可读（execve 时应已关闭）：{output}"
             );
             assert!(
-                output.lines().any(|l| l == "PID=1"),
-                "链路证据：exec 经 bwrap --as-pid-1：{output}"
+                output.lines().any(|line| {
+                    line.strip_prefix("PID=")
+                        .and_then(|pid| pid.parse::<u32>().ok())
+                        .is_some_and(|pid| pid > 1)
+                }),
+                "链路证据：exec 经真实启动闸运行在非 init namespace 载荷：{output}"
             );
         } else {
             assert!(
@@ -606,10 +610,10 @@ mod evidence_tests {
         }
     }
 
-    /// 完整有效证据：ns 不同且格式有效、载荷 pid=1、哨兵不可见、HOME=锚定根。
+    /// 完整有效证据：ns 不同且格式有效、载荷 PID 不固定且非 1、哨兵不可见、HOME=锚定根。
     fn valid_output() -> String {
         [
-            "PROBE_PID=1",
+            "PROBE_PID=4242",
             "PROBE_NS=pid:[4026532999]",
             "PROBE_HOME=/tmp/tchat-test-anchor/work",
             "PROBE_PATH_SET=yes",
@@ -629,7 +633,7 @@ mod evidence_tests {
     #[test]
     fn evidence_normal_mode_output_rejected() {
         let normal = [
-            "PROBE_PID=4242",
+            "PROBE_PID=1",
             "PROBE_NS=pid:[4026531836]",
             "PROBE_HOME=/tmp/tchat-test-home",
             "HOST_SENTINEL_VISIBLE=yes",

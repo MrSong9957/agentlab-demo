@@ -191,17 +191,17 @@ pub fn apply_patch_sandboxed_with_exe(
     }
     // 审查 #27（§1.6 逐启动确认）：031 分支 spawn 后核验载荷确在新 PID ns
     //（033 分支不适用——033 验收契约不含该检查）。
-    let is_031 = policy.is_some();
-    let child = spawn_cmd
+    let spawn_cmd = spawn_cmd
         .env_clear() // 033：凭据环境不进补丁子进程（027 R1 环境面防线保留）
-        .envs(child_env)
-        // 038 方案 A：受闸载荷自停标记——env_clear **之后**注入（清空会抹掉
-        // 先行 env()）；入口读任何输入前 SIGSTOP（确认前零指令推进），宿主
-        // 确认后 SIGCONT。普通非沙箱路径不设闸。
-        .env(
-            crate::sandbox::INTERNAL_GATE_ENV,
-            policy.map(|_| "stop").unwrap_or("off"),
-        )
+        .envs(child_env);
+    // 038 §0-A：载荷在入口读取前自停，宿主确认隔离后再放行，见
+    // [`038`](../../../docs/specs/038-github-actions-ci.md)。
+    #[cfg(target_os = "linux")]
+    let spawn_cmd = spawn_cmd.env(
+        crate::sandbox::INTERNAL_GATE_ENV,
+        if policy.is_some() || crate::sandbox::sandbox_requested() { "stop" } else { "off" },
+    );
+    let child = spawn_cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -210,7 +210,8 @@ pub fn apply_patch_sandboxed_with_exe(
         Ok(c) => c,
         Err(e) => return err(format!("沙箱执行启动失败：{e}"), false),
     };
-    if is_031 {
+    #[cfg(target_os = "linux")]
+    if policy.is_some() || crate::sandbox::sandbox_requested() {
         // 038 方案 A：确认闸（隔离＋载荷 ns 标识确认后放行；载荷自停入口使
         // 「确认前不执行」零竞态成立）。本接口无取消参数（同步等待），取消
         // 由上层 turn 取消门控——确认循环无 cancel 检查（None）。
@@ -254,7 +255,11 @@ pub fn apply_patch_sandboxed_with_exe(
 pub fn run_internal_apply() -> i32 {
     // 038 方案 A：受闸载荷自停（宿主确认隔离＋登记清理标识后 SIGCONT 放行
     // ——确认前零指令推进，读任何输入之前）。
-    crate::sandbox::internal_payload_self_stop_if_gated();
+    #[cfg(target_os = "linux")]
+    if let Err(error) = crate::sandbox::internal_payload_self_stop_if_gated() {
+        eprintln!("internal-apply：启动闸失败：{error}");
+        return 2;
+    }
     use std::io::Read;
     // 流式限量：至多读 MAX_PATCH_BYTES+1 字节，超限即拒（先于整段入内存/转字符串）
     let mut bytes = Vec::new();

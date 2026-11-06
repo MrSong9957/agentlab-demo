@@ -39,7 +39,6 @@ fn policy_argv_binds_root_writable_and_masks_env() {
     )
     .unwrap();
     let expected = vec![
-        "--as-pid-1".to_string(),
         "--new-session".to_string(),
         "--die-with-parent".to_string(),
         "--ro-bind".to_string(),
@@ -229,7 +228,7 @@ fn probe_with_nonexistent_bwrap_reports_error() {
 }
 
 /// T9（G4-R1/G3 修复回归，先 RED 后 GREEN）：PID 命名空间与新 procfs 成对恢复——
-/// `--unshare-pid`＋`--as-pid-1`（上游 launcher 语义：bwrap 为子 ns 的 pid 1）
+/// `--unshare-pid`（bwrap 内建 PID 1 回收器等待初始载荷）
 /// ＋`--proc /proc`（新 procfs 保留 `/proc/self/fd`，apply_patch Update 的 F2
 /// 写绑定恢复；主进程从沙箱 /proc 视图消失＝G3 读/kill 面关闭）。成对语义下
 /// 不再有 `--tmpfs /proc`（上游：tmpfs 仅在未挂新 procfs 时遮蔽继承视图）。
@@ -240,9 +239,9 @@ fn pid_namespace_and_proc_paired() {
     fs::write(ws.join(".env"), "FAKE-TEST-TOKEN=7\n").unwrap();
     let policy = policy_for(&ws);
     let args = create_bwrap_command_args(vec!["sh".into()], &policy, &ws, false).unwrap();
-    assert_eq!(
-        args[0], "--as-pid-1",
-        "bwrap 应为子 PID 命名空间的 pid 1（上游 launcher 语义）：{args:?}"
+    assert!(
+        !args.iter().any(|arg| arg == "--as-pid-1"),
+        "应由 bubblewrap 内建 PID 1 回收器等待载荷：{args:?}"
     );
     assert!(
         args.windows(2).any(|w| w == ["--unshare-pid", "--unshare-ipc"]),
@@ -782,6 +781,40 @@ fn permission_layout_runtime_and_carveouts() {
     );
     // 网络关闭在 flags 层（此处只验证布局函数不含网络项）
     fs::remove_dir_all(&root).ok();
+}
+
+/// The 031 MCP gate launches setsid first, but still mounts the original server binary.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn mcp_gate_permission_launch_mounts_original_server_program() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tmp_ws("mcp-gate-program");
+    let server = dir.join("mcp-server");
+    fs::write(&server, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&server, fs::Permissions::from_mode(0o755)).unwrap();
+    let server = server.canonicalize().unwrap();
+    let server_str = server.to_string_lossy().into_owned();
+    let (program, args) = mcp_stdio_gate_wrap(&server_str, &[]);
+    let command = std::iter::once(program).chain(args).collect();
+    let snapshot = PolicySnapshot {
+        read_paths: vec![],
+        write_paths: vec![],
+        deny_paths: vec![],
+        network: false,
+        poison: None,
+    };
+    let launch = permission_launch_argv_with_payload_program(
+        command,
+        &snapshot,
+        &dir,
+        Some(&server_str),
+    )
+    .expect("031 MCP gate launch arguments");
+    assert!(launch.args.windows(3).any(|window| {
+        window[0] == "--ro-bind" && window[1] == server_str && window[2] == server_str
+    }), "原 MCP 可执行文件必须保留单文件只读挂载：{:?}", launch.args);
+    fs::remove_dir_all(dir).unwrap();
 }
 
 /// 毒丸快照：启动入口显式拒绝（不产出 argv）。

@@ -10,11 +10,14 @@ use std::sync::atomic::AtomicBool;
 
 use common::mcp_fixtures::{read_record, setup_no_prepare, CANARY_VALUE};
 
+static SANDBOX_GATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 033：沙箱模式下 stdio 服务器经 bwrap 包装启动；mcp.json 显式 env（契约
 /// 注入）在沙箱白名单环境之后保留；主进程污染 env 不进入服务器。无 bwrap＝
 /// 显式失败且服务器不启动（failIfUnavailable，不静默回退）。
 #[test]
 fn a033_sandboxed_stdio_keeps_explicit_env_or_fails_closed() {
+    let _serial = SANDBOX_GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (_env, _dir, record_dir, record_path, manager) =
         setup_no_prepare("echo", r#", "env_vars": ["TCHAT_MCP_TOKEN_A"]"#);
     {
@@ -90,5 +93,33 @@ fn a033_sandboxed_stdio_keeps_explicit_env_or_fails_closed() {
     assert!(
         !env.contains_key("TCHAT_POISON_KEY"),
         "主进程污染 env 不得进入服务器"
+    );
+}
+
+/// MCP 载荷在确认超时前不能启动；startup 记录是 server 入口的可观察 marker。
+#[test]
+fn a038_mcp_gate_timeout_does_not_start_server() {
+    let _serial = SANDBOX_GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !terminal_chat::sandbox::probe_available() {
+        return;
+    }
+    let (_env, _dir, _record_dir, record_path, manager) =
+        setup_no_prepare("echo", r#", "env_vars": ["TCHAT_MCP_TOKEN_A"]"#);
+    std::env::set_var("TCHAT_SANDBOX", "1");
+    std::env::set_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", "0");
+    let snapshot = manager.prepare_for_turn(&AtomicBool::new(false));
+    manager.close();
+    std::env::remove_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS");
+    std::env::remove_var("TCHAT_SANDBOX");
+    assert!(
+        snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.entry("mcp__fx__echo"))
+            .is_none(),
+        "确认超时后 MCP 工具不得进入本轮快照"
+    );
+    assert!(
+        read_record(&record_path).is_empty(),
+        "确认前 MCP server 不得产生 startup marker"
     );
 }

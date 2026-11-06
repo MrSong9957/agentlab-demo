@@ -423,31 +423,34 @@ fn pipe_ctrl_c_interrupts_and_terminate_kills_ignoring_process() {
     let log = dir.join("log");
     let mgr = ProcessManager::new();
 
-    // ① 可中断：while 循环进程组收到 SIGINT 后退出。
-    // 038 归因（本地全量并行失败实证）：spawn→trap 生效存在窗口——并行负载
-    // 下 250ms 内 trap 语句可能未执行，SIGINT 按默认处置杀死 sh＝Completed。
-    // 确定性时序：cmd 先写 READY 文件（trap 语句之后），测试等文件出现
-    // （trap 已生效）再发 \x03。
-    let ready_mark = dir.join("ctrlc-ready");
-    let out = mgr.start(
-        &exec_args(
-            &format!(
-                "trap '' INT; echo READY > {ready}; while true; do echo x; sleep 0.1; done",
-                ready = ready_mark.display()
+    #[cfg(unix)]
+    {
+        // ① 可中断：载荷安装 SIGINT handler，再写 READY 并等待信号。
+        let ready_mark = dir.join("ctrlc-ready");
+        let out = mgr.start(
+            &exec_args(
+                &format!(
+                    "exec python3 -c 'import os,signal,time; signal.signal(signal.SIGINT, lambda *_: os._exit(130)); open(\"{ready}\", \"w\").write(\"READY\\n\"); time.sleep(30)'",
+                    ready = ready_mark.display()
+                ),
+                250,
             ),
-            250,
-        ),
-        None,
-    );
-    let sid = out.result.session_id.unwrap();
-    wait_until_true(|| ready_mark.exists(), "trap 生效标记（READY 文件）");
-    let int = WriteStdinArgs::from_value(&json!({
-        "session_id": sid, "chars": "\u{0003}", "yield_time_ms": 5000
-    }))
-    .unwrap();
-    let r = mgr.interact(&int, None).result;
-    assert_eq!(r.status, ExecStatus::Completed, "SIGINT 退出按自然结束：{r:?}");
-    assert_eq!(r.exit_code, None, "信号退出无整数退出码，不编造 0");
+            None,
+        );
+        let sid = out
+            .result
+            .session_id
+            .clone()
+            .unwrap_or_else(|| panic!("进程启动失败：{:?}", out.result));
+        wait_until_true(|| ready_mark.exists(), "SIGINT handler 生效标记（READY 文件）");
+        let int = WriteStdinArgs::from_value(&json!({
+            "session_id": sid, "chars": "\u{0003}", "yield_time_ms": 5000
+        }))
+        .unwrap();
+        let r = mgr.interact(&int, None).result;
+        assert_eq!(r.status, ExecStatus::Completed, "SIGINT 退出按自然结束：{r:?}");
+        assert_eq!(r.exit_code, Some(130), "handler 的实际退出码不得丢失");
+    }
 
     // ② 忽略中断：trap '' INT 的循环不退出；terminate 仍能终止并停止写入。
     // 038 Windows 分科：中断档＝整树终止（产品文档化残差——SIGINT 温和
@@ -476,6 +479,21 @@ fn pipe_ctrl_c_interrupts_and_terminate_kills_ignoring_process() {
     } else {
         // ②同①的确定性时序：trap 生效标记（READY2 文件）出现后才发 \x03
         //——并行负载下 spawn→trap 执行存在窗口（038 本地全量实证）。
+        let other_ready = dir.join("ctrlc-other-ready");
+        let other_log = dir.join("other-log");
+        let other_args = ExecArgs::from_value(&json!({
+            "cmd": format!(
+                "trap '' INT; echo READY3 > {ready}; while true; do echo x >> {log}; sleep 0.05; done",
+                ready = other_ready.display(),
+                log = other_log.display()
+            ),
+            "yield_time_ms": 250,
+        }))
+        .unwrap();
+        let other_out = mgr.start(&other_args, None);
+        let other_sid = other_out.result.session_id.unwrap();
+        wait_until_true(|| other_ready.exists(), "独立会话 trap 生效标记（READY3）");
+
         let ready2 = dir.join("ctrlc-ready2");
         let args = ExecArgs::from_value(&json!({
             "cmd": format!(
@@ -511,14 +529,73 @@ fn pipe_ctrl_c_interrupts_and_terminate_kills_ignoring_process() {
         .unwrap();
         let r = mgr.interact(&int2, None).result;
         assert_eq!(r.status, ExecStatus::Running, "忽略中断＝仍在运行：{r:?}");
-        wait_until_true(|| log_size(&log) > 20, "忽略中断后仍写日志");
-        let term = WriteStdinArgs::from_value(&json!({ "session_id": sid2, "terminate": true })).unwrap();
+        let after_interrupt_log_size = log_size(&log);
+        wait_until_true(
+            || log_size(&log) > after_interrupt_log_size,
+            "忽略中断后仍写日志",
+        );
+        let other_running = mgr
+            .interact(
+                &WriteStdinArgs::from_value(&json!({
+                    "session_id": other_sid, "yield_time_ms": 5000
+                }))
+                .unwrap(),
+                None,
+            )
+            .result;
+        assert_eq!(
+            other_running.status,
+            ExecStatus::Running,
+            "中断不得影响独立会话：{other_running:?}"
+        );
+
+        let term =
+            WriteStdinArgs::from_value(&json!({ "session_id": sid2, "terminate": true })).unwrap();
+        let term_started = std::time::Instant::now();
         let r = mgr.interact(&term, None).result;
+        assert!(
+            term_started.elapsed() <= Duration::from_secs(3),
+            "terminate=true 必须在 3 秒内完成回收"
+        );
         assert_eq!(r.status, ExecStatus::Terminated, "{r:?}");
-        assert!(r.error.as_deref().unwrap().contains("终止"), "清理结果如实说明");
+        assert!(
+            r.error.as_deref().unwrap().contains("终止"),
+            "清理结果如实说明"
+        );
         let s1 = log_size(&log);
         std::thread::sleep(Duration::from_millis(350));
         assert_eq!(log_size(&log), s1, "终止后整个进程组停止写入（含后台孙进程）");
+
+        let other_before = log_size(&other_log);
+        let other_after = mgr
+            .interact(
+                &WriteStdinArgs::from_value(&json!({
+                    "session_id": other_sid, "yield_time_ms": 5000
+                }))
+                .unwrap(),
+                None,
+            )
+            .result;
+        assert_eq!(
+            other_after.status,
+            ExecStatus::Running,
+            "终止目标会话不得影响独立会话：{other_after:?}"
+        );
+        wait_until_true(|| log_size(&other_log) > other_before, "独立会话在目标终止后继续写日志");
+
+        let other_term = WriteStdinArgs::from_value(&json!({
+            "session_id": other_sid, "terminate": true
+        }))
+        .unwrap();
+        let other_result = mgr.interact(&other_term, None).result;
+        assert_eq!(
+            other_result.status,
+            ExecStatus::Terminated,
+            "独立会话测试清理：{other_result:?}"
+        );
+        let other_stopped = log_size(&other_log);
+        std::thread::sleep(Duration::from_millis(350));
+        assert_eq!(log_size(&other_log), other_stopped, "独立会话测试清理后停止写入");
     }
     let _ = fs::remove_dir_all(&dir);
 }
