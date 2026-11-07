@@ -8,6 +8,8 @@ use std::process::{Command, Stdio};
 
 use serde_json::json;
 
+mod common;
+
 fn temp_root(tag: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -404,10 +406,10 @@ fn gate_policy_none_timeout_does_not_write_patch() {
     let file = root.join("gate.txt");
     std::fs::write(&file, "old\n").unwrap();
     let exe = std::path::PathBuf::from(env!("CARGO_BIN_EXE_terminal-chat"));
+    let _timeout_env = common::SandboxConfirmTimeoutEnvRestore::capture_after_test_lock();
     std::env::set_var("TCHAT_SANDBOX", "1");
     std::env::set_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", "0");
     let (result, _) = run_sandboxed(&exe, &update_patch(&file, "old", "new"));
-    std::env::remove_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS");
     std::env::remove_var("TCHAT_SANDBOX");
     assert!(!result.ok, "确认超时必须拒绝 apply_patch：{result:?}");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "old\n", "失败时补丁 stdin 未放行");

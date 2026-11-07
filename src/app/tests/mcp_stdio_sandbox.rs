@@ -105,11 +105,11 @@ fn a038_mcp_gate_timeout_does_not_start_server() {
     }
     let (_env, _dir, _record_dir, record_path, manager) =
         setup_no_prepare("echo", r#", "env_vars": ["TCHAT_MCP_TOKEN_A"]"#);
+    let _timeout_env = common::SandboxConfirmTimeoutEnvRestore::capture_after_test_lock();
     std::env::set_var("TCHAT_SANDBOX", "1");
     std::env::set_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", "0");
     let snapshot = manager.prepare_for_turn(&AtomicBool::new(false));
     manager.close();
-    std::env::remove_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS");
     std::env::remove_var("TCHAT_SANDBOX");
     assert!(
         snapshot

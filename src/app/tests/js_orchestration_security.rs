@@ -209,7 +209,7 @@ fn forged_tool_names_and_dispatch_bridge_zero_execution() {
         dispatcher: dispatcher.clone(),
         worker_exe: real_worker(),
     };
-    let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
+    let mut cell = spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn");
     let obs = drive(&mut cell, &mut sink);
     assert_eq!(obs.status, CellStatus::Completed, "{obs:?}");
     let report: Value = serde_json::from_str(&obs.output[0]).unwrap();
@@ -262,7 +262,7 @@ fn catalog_surface_frozen_and_minimal() {
         dispatcher,
         worker_exe: real_worker(),
     };
-    let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
+    let mut cell = spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn");
     let obs = drive(&mut cell, &mut sink);
     assert_eq!(obs.status, CellStatus::Completed, "{obs:?}");
     let v: Value = serde_json::from_str(&obs.output[0]).unwrap();
@@ -281,6 +281,15 @@ fn catalog_surface_frozen_and_minimal() {
 
 /// 进程级环境变量读写串行锁（并行测试共用 environ，读者与写者共锁）。
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn spawn_cell_with_env_lock(
+    config: &CellConfig<'_>,
+    sink: &mut dyn OrchestrationSink,
+    history: &[terminal_chat::prompt::HistoryItem],
+) -> Result<terminal_chat::js_orchestration::runtime::CellHandle, String> {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    spawn_cell(config, sink, history)
+}
 
 /// worker 必须零宿主环境（env_clear：哨兵不进 /proc/<pid>/environ）且关闭
 /// 无关继承 fd（ planted 非 CLOEXEC 哨兵 fd 不进 /proc/<pid>/fd）。
@@ -411,7 +420,7 @@ fn spawn_with_worker(
         dispatcher,
         worker_exe: Some(worker),
     };
-    spawn_cell(&cfg, &mut sink, &[]).expect("spawn 假 worker cell")
+    spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn 假 worker cell")
 }
 
 /// 未知帧类型＝坏帧：cell 关闭（failed），主进程存活、后续 cell 正常。
@@ -443,7 +452,7 @@ fn fake_worker_unknown_frame_closes_cell_host_survives() {
         dispatcher: dispatcher.clone(),
         worker_exe: real_worker(),
     };
-    let mut cell2 = spawn_cell(&cfg, &mut sink2, &[]).expect("后续 spawn");
+    let mut cell2 = spawn_cell_with_env_lock(&cfg, &mut sink2, &[]).expect("后续 spawn");
     let obs2 = drive(&mut cell2, &mut sink2);
     assert_eq!(obs2.status, CellStatus::Completed, "{obs2:?}");
 }
@@ -466,7 +475,7 @@ fn fake_worker_oversize_frame_closes_cell() {
         dispatcher: dispatcher.clone(),
         worker_exe: Some(worker),
     };
-    let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
+    let mut cell = spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn");
     let obs = drive(&mut cell, &mut sink);
     assert_eq!(obs.status, CellStatus::Failed, "{obs:?}");
     assert!(dispatcher.calls().is_empty(), "断开前零业务执行");
@@ -490,7 +499,7 @@ fn fake_worker_bad_json_frame_closes_cell() {
         dispatcher: dispatcher.clone(),
         worker_exe: Some(worker),
     };
-    let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
+    let mut cell = spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn");
     let obs = drive(&mut cell, &mut sink);
     assert_eq!(obs.status, CellStatus::Failed, "{obs:?}");
     assert!(dispatcher.calls().is_empty());
@@ -526,7 +535,7 @@ fn fake_worker_forged_call_frames_zero_execution() {
         dispatcher: dispatcher.clone(),
         worker_exe: Some(worker),
     };
-    let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
+    let mut cell = spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn");
     let obs = drive(&mut cell, &mut sink);
     // 核心安全断言：伪造调用帧零业务执行（受理门拒绝全部伪造资格）
     assert!(
@@ -556,7 +565,7 @@ fn pending_output_overflow_marks_truncated() {
         dispatcher,
         worker_exe: real_worker(),
     };
-    let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
+    let mut cell = spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn");
     let obs = cell.observe(3_000, 64 * 1024, &mut sink, None, &[]);
     assert_eq!(obs.status, CellStatus::Running, "{obs:?}");
     assert!(obs.output_truncated, "缓冲溢出必须标记 truncated：{obs:?}");
@@ -578,7 +587,7 @@ fn total_output_flood_closes_cell_host_continues() {
         dispatcher: dispatcher.clone(),
         worker_exe: real_worker(),
     };
-    let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
+    let mut cell = spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn");
     let obs = drive(&mut cell, &mut sink);
     assert_eq!(obs.status, CellStatus::Failed, "{obs:?}");
     assert_eq!(obs.error.as_ref().expect("错误必带")["code"], "OUTPUT_LIMIT", "{obs:?}");
@@ -594,7 +603,7 @@ fn total_output_flood_closes_cell_host_continues() {
         dispatcher: dispatcher.clone(),
         worker_exe: real_worker(),
     };
-    let mut cell2 = spawn_cell(&cfg2, &mut sink2, &[]).expect("后续 spawn");
+    let mut cell2 = spawn_cell_with_env_lock(&cfg2, &mut sink2, &[]).expect("后续 spawn");
     let obs2 = drive(&mut cell2, &mut sink2);
     assert_eq!(obs2.status, CellStatus::Completed, "{obs2:?}");
 }
@@ -629,7 +638,7 @@ fn quota_charged_for_invalid_args_and_unknown_tools() {
         dispatcher: dispatcher.clone(),
         worker_exe: real_worker(),
     };
-    let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
+    let mut cell = spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn");
     let obs = drive(&mut cell, &mut sink);
     assert_eq!(obs.status, CellStatus::Completed, "{obs:?}");
     assert_eq!(dispatcher.calls().len(), 1, "试探零执行、合格调用执行：{:?}", dispatcher.calls());
@@ -662,7 +671,7 @@ fn quota_charged_for_invalid_args_and_unknown_tools() {
         dispatcher: dispatcher.clone(),
         worker_exe: real_worker(),
     };
-    let mut cell2 = spawn_cell(&cfg2, &mut sink2, &[]).expect("spawn2");
+    let mut cell2 = spawn_cell_with_env_lock(&cfg2, &mut sink2, &[]).expect("spawn2");
     let obs2 = drive(&mut cell2, &mut sink2);
     assert_eq!(obs2.status, CellStatus::Completed, "{obs2:?}");
     assert_eq!(
@@ -695,7 +704,7 @@ fn cpu_limit_kills_spin_worker_host_continues() {
         dispatcher: dispatcher.clone(),
         worker_exe: real_worker(),
     };
-    let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
+    let mut cell = spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn");
     #[cfg(target_os = "linux")]
     let worker_fd = pidfd_for_test(cell.worker_pid() as libc::pid_t);
     let obs = cell.observe(20_000, 1024, &mut sink, None, &[]);
@@ -719,7 +728,7 @@ fn cpu_limit_kills_spin_worker_host_continues() {
         dispatcher: dispatcher.clone(),
         worker_exe: real_worker(),
     };
-    let mut cell2 = spawn_cell(&cfg2, &mut sink2, &[]).expect("后续 spawn");
+    let mut cell2 = spawn_cell_with_env_lock(&cfg2, &mut sink2, &[]).expect("后续 spawn");
     let obs2 = drive(&mut cell2, &mut sink2);
     assert_eq!(obs2.status, CellStatus::Completed, "{obs2:?}");
 }
@@ -729,10 +738,6 @@ fn cpu_limit_kills_spin_worker_host_continues() {
 #[test]
 fn wall_clock_limit_terminates_pending_sandbox_worker() {
     use std::time::{Duration, Instant};
-    assert!(terminal_chat::sandbox::sandbox_requested());
-    assert!(terminal_chat::sandbox::probe_available(), "真实 bwrap 是本用例前置");
-
-    let started = Instant::now();
     let mut sink = RecordingSink::new();
     let cfg = CellConfig {
         code: "await new Promise(() => {});",
@@ -743,7 +748,28 @@ fn wall_clock_limit_terminates_pending_sandbox_worker() {
         dispatcher: MapDispatcher::new(&[]),
         worker_exe: real_worker(),
     };
-    let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("启动真实沙箱 worker");
+    let (mut cell, started) = {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        struct SandboxEnvRestore(Option<std::ffi::OsString>);
+        impl Drop for SandboxEnvRestore {
+            fn drop(&mut self) {
+                if let Some(value) = self.0.take() {
+                    std::env::set_var("TCHAT_SANDBOX", value);
+                } else {
+                    std::env::remove_var("TCHAT_SANDBOX");
+                }
+            }
+        }
+        let _sandbox_env = SandboxEnvRestore(std::env::var_os("TCHAT_SANDBOX"));
+        let _timeout_env = common::SandboxConfirmTimeoutEnvRestore::capture_after_test_lock();
+        std::env::set_var("TCHAT_SANDBOX", "1");
+        std::env::set_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", "2000");
+        assert!(terminal_chat::sandbox::sandbox_requested());
+        assert!(terminal_chat::sandbox::probe_available(), "真实 bwrap 是本用例前置");
+        let started = Instant::now();
+        let cell = spawn_cell(&cfg, &mut sink, &[]).expect("启动真实沙箱 worker");
+        (cell, started)
+    };
     let supervisor_fd = pidfd_for_test(cell.worker_pid() as libc::pid_t);
     let payload_fd = sandbox_payload_pidfd(cell.worker_pid());
 
@@ -1370,6 +1396,7 @@ fn gate_timeout_worker_startup_fails_closed() {
     if !terminal_chat::sandbox::probe_available() {
         return; // 无 bwrap 环境：闸随沙箱后端分支
     }
+    let _timeout_env = common::SandboxConfirmTimeoutEnvRestore::capture_after_test_lock();
     std::env::set_var("TCHAT_SANDBOX", "1");
     std::env::set_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", "0");
 
@@ -1383,7 +1410,6 @@ fn gate_timeout_worker_startup_fails_closed() {
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let cfg = crate_js_cfg(script.to_str().unwrap(), dispatcher.clone());
     let outcome = spawn_cell(&cfg, &mut sink, &[]);
-    std::env::remove_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS");
     std::env::remove_var("TCHAT_SANDBOX");
     match outcome {
         Err(msg) => assert!(

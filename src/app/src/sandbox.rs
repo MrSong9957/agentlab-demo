@@ -1372,6 +1372,43 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    static GATE_CONFIRM_TRACE_START: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) struct GateConfirmTraceGuard;
+
+#[cfg(all(test, target_os = "linux"))]
+impl Drop for GateConfirmTraceGuard {
+    fn drop(&mut self) {
+        GATE_CONFIRM_TRACE_START.with(|start| start.set(None));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn gate_confirm_trace_start() -> GateConfirmTraceGuard {
+    GATE_CONFIRM_TRACE_START.with(|start| start.set(Some(Instant::now())));
+    GateConfirmTraceGuard
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn gate_confirm_trace(event: std::fmt::Arguments<'_>) {
+    GATE_CONFIRM_TRACE_START.with(|start| {
+        if let Some(start) = start.get() {
+            eprintln!("GATE_CONFIRM_TRACE +{:?} {event}", start.elapsed());
+        }
+    });
+}
+
+macro_rules! gate_confirm_trace {
+    ($($arg:tt)*) => {{
+        #[cfg(all(test, target_os = "linux"))]
+        crate::sandbox::gate_confirm_trace(format_args!($($arg)*));
+    }};
+}
+
 #[cfg(target_os = "linux")]
 pub fn confirm_sandbox_isolation_and_release(
     leader_pid: u32,
@@ -1419,11 +1456,16 @@ pub(crate) fn confirm_sandbox_with_release(
             ));
         }
     };
-    let deadline = Instant::now() + Duration::from_millis(sandbox_confirm_timeout_ms());
+    let timeout_ms = sandbox_confirm_timeout_ms();
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    gate_confirm_trace!("confirm.deadline.started leader_pid={leader_pid} timeout_ms={timeout_ms}");
     let mut fixed: Option<SandboxPayloadIdentity> = None;
+    #[cfg(all(test, target_os = "linux"))]
+    let mut trace_discovery_state = None;
     loop {
         match pidfd_is_exited(&leader_pidfd) {
             Ok(true) => {
+                gate_confirm_trace!("leader_pidfd=exited stage=loop_top");
                 return Ok(SandboxConfirm::LeaderGone);
             }
             Ok(false) => {}
@@ -1443,6 +1485,10 @@ pub(crate) fn confirm_sandbox_with_release(
             ));
         }
         if Instant::now() >= deadline {
+            gate_confirm_trace!(
+                "deadline.expired stage=before_discovery leader_pidfd=live fixed_payload={}",
+                fixed.is_some()
+            );
             return Err(abort_sandbox_confirmation(
                 &mut abort,
                 leader_pid,
@@ -1452,8 +1498,29 @@ pub(crate) fn confirm_sandbox_with_release(
         }
 
         let discovered = match discover_gate_payload(leader_pid as libc::pid_t, &self_ns) {
-            Ok(discovered) => discovered,
+            Ok(discovered) => {
+                #[cfg(all(test, target_os = "linux"))]
+                {
+                    let found = discovered.is_some();
+                    if trace_discovery_state != Some(found) {
+                        trace_discovery_state = Some(found);
+                        if let Some(identity) = discovered.as_ref() {
+                            gate_confirm_trace!(
+                                "payload.discovery found pid={} reaper_pid={} start_time={} ns_inode={}",
+                                identity.pid,
+                                identity.reaper_pid,
+                                identity.start_time,
+                                identity.ns_inode
+                            );
+                        } else {
+                            gate_confirm_trace!("payload.discovery none");
+                        }
+                    }
+                }
+                discovered
+            }
             Err(error) => {
+                gate_confirm_trace!("payload.discovery error={error}");
                 return Err(abort_sandbox_confirmation(
                     &mut abort,
                     leader_pid,
@@ -1480,16 +1547,30 @@ pub(crate) fn confirm_sandbox_with_release(
 
         if let Some(identity) = fixed.as_ref() {
             if let Err(error) = verify_sandbox_payload(leader_pid as libc::pid_t, identity) {
+                gate_confirm_trace!("payload.verify error pid={} error={error}", identity.pid);
                 return Err(abort_sandbox_confirmation(
                     &mut abort, leader_pid, fixed.as_ref(),
                     &format!("沙箱载荷身份或停止状态核验失败：{error}"),
                 ));
             }
+            gate_confirm_trace!("payload.verified pid={} state=T; validate.enter", identity.pid);
             let validation = validate(identity);
+            gate_confirm_trace!(
+                "validate.return kind={}",
+                match &validation {
+                    Ok(SandboxRelease::Pending) => "pending",
+                    Ok(SandboxRelease::Ready) => "ready",
+                    Err(_) => "error",
+                }
+            );
             match pidfd_is_exited(&leader_pidfd) {
-                Ok(true) => return Ok(SandboxConfirm::LeaderGone),
-                Ok(false) => {}
+                Ok(true) => {
+                    gate_confirm_trace!("leader_pidfd=exited stage=after_validate");
+                    return Ok(SandboxConfirm::LeaderGone);
+                }
+                Ok(false) => gate_confirm_trace!("leader_pidfd=live stage=after_validate"),
                 Err(error) => {
+                    gate_confirm_trace!("leader_pidfd=error stage=after_validate error={error}");
                     return Err(abort_sandbox_confirmation(
                         &mut abort,
                         leader_pid,
@@ -1516,6 +1597,10 @@ pub(crate) fn confirm_sandbox_with_release(
                 ));
             }
             if Instant::now() >= deadline {
+                gate_confirm_trace!(
+                    "deadline.expired stage=after_validate leader_pidfd=live payload_pid={}",
+                    identity.pid
+                );
                 return Err(abort_sandbox_confirmation(
                     &mut abort,
                     leader_pid,
@@ -1859,6 +1944,7 @@ fn abort_sandbox_confirmation(
     identity: Option<&SandboxPayloadIdentity>,
     reason: &str,
 ) -> std::io::Error {
+    gate_confirm_trace!("abort.begin leader_pid={leader_pid} reason={reason}");
     let (payload_cleanup, reaper_found) = if let Some(identity) = identity {
         let result = signal_sandbox_payload_group(identity, libc::SIGKILL);
         sweep_sandbox_namespace(&identity.ns_inode);
@@ -1880,12 +1966,18 @@ fn abort_sandbox_confirmation(
         }
     };
     match abort(leader_pid, reaper_found) {
-        Ok(()) => std::io::Error::other(format!(
-            "{reason}（载荷未放行；载荷组清理：{payload_cleanup:?}；监督进程已回收）"
-        )),
-        Err(cleanup) => std::io::Error::other(format!(
-            "{reason}（载荷未放行；载荷组清理：{payload_cleanup:?}；监督进程回收未确认：{cleanup}）"
-        )),
+        Ok(()) => {
+            gate_confirm_trace!("abort.callback.return=Ok; error_suffix=监督进程已回收");
+            std::io::Error::other(format!(
+                "{reason}（载荷未放行；载荷组清理：{payload_cleanup:?}；监督进程已回收）"
+            ))
+        }
+        Err(cleanup) => {
+            gate_confirm_trace!("abort.callback.return=Err error={cleanup}");
+            std::io::Error::other(format!(
+                "{reason}（载荷未放行；载荷组清理：{payload_cleanup:?}；监督进程回收未确认：{cleanup}）"
+            ))
+        }
     }
 }
 

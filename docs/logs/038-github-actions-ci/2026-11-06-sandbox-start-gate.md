@@ -166,4 +166,128 @@ exec /bin/sleep 30
 - 简化检查没有发现可合并的生产逻辑、代码质量或效率项；删除四条重复测试名称或断言的新增说明注释，保留解释 namespace 局部 PID 分配与 `start_time` tick 精度的注释。测试价值审查没有建议删除或合并本轮回归。
 - Standards 审查未发现规范违规；Spec 审查未发现 §0-A 缺项、范围扩张或错误实现。审查仅覆盖本候选差异。
 - 交付候选范围为三项代码文件和本验收记录：生产修复 `sandbox.rs`；直接回归 `proc_session.rs`、`sandbox/tests.rs`；配套验收记录为本文件。主工作区 `/workspace` 及其其他任务差异不属于候选范围。
-- 本地确认和真实 bwrap 验证通过；GitHub Actions 尚未验证本次未提交修改。run #79 仍是失败结果，未重跑 CI。本地结果不代表 038 整体完成。
+- 提交前状态记录：本地确认和真实 bwrap 验证通过；当时 GitHub Actions 尚未验证该修改，run #79 为失败。本次新 SHA 的远端结果见下方；本地结果不代表 038 整体完成。
+
+## 新 SHA 三平台 CI 验收（2026-11-07）
+
+- 提交：`40a6d98288261721e501f86481ac6635ef1adb1f`，父提交 `63ca1d2cfa0485b665907c492e8d41d9396bee9e`；仅含本节所述四文件候选。PR #1 head 与 Actions run head 均为该 SHA。
+- 运行：[CI run #42338650474](https://github.com/MrSong9957/agentlab-demo/actions/runs/42338650474)，事件 `pull_request`，终态 `failure`。PR 检查使用的合并快照为 `0d73ff3e7b124a3da8ce1805928fd069f0995078`。
+- 三个平台的 `cargo check` 均通过；三平台的全量 `cargo test` 均实际失败。Windows/macOS job 标记了 `continue-on-error`，但各自 job 结论仍为 `failure`，不能视作测试通过。各 job 日志：[Ubuntu](https://github.com/MrSong9957/agentlab-demo/actions/runs/42338650474/job/128301210963)、[Windows](https://github.com/MrSong9957/agentlab-demo/actions/runs/42338650474/job/128301210887)、[macOS](https://github.com/MrSong9957/agentlab-demo/actions/runs/42338650474/job/128301210684)。
+
+### 平台结果
+
+| 平台 | 编译 | 全量测试 | 日志结论 |
+|---|---|---|---|
+| Ubuntu | `cargo check` 通过 | 失败；5 个 target 失败：`--lib`、`--test js_orchestration`、`--test js_orchestration_security`、`--test sandbox_matrix_probes`、`--test security_attack_031` | exit 101 |
+| Windows | `cargo check` 通过 | 失败；10 个 target 失败：`--lib`、`--test apply_patch_sandbox`、`--test exec_command`、`--test mcp_tls`、`--test mcp_turn`、`--test memory_retention`、`--test memory_storage_files`、`--test multi_agent`、`--test proc_session`、`--test tool_loop`。其中 31 个测试报告失败 | exit 1；`normalize_rejects_missing_and_accepts_dotdot` 在 38-test target 中实际执行并通过 |
+| macOS | `cargo check` 通过 | 失败；58 个测试报告失败，12 个 target 失败：`--lib`、`--test e2e_acceptance`、`--test e2e_sandbox`、`--test exec_command`、`--test js_orchestration_security`、`--test llm_flow`、`--test mcp_tls`、`--test memory_retention`、`--test proc_session`、`--test security_attack_031`、`--test session_cli`、`--test session_perf` | exit 101 |
+
+Windows 日志中的 31 个失败用例为：`sandbox::tests::non_canonical_writable_root_fails_closed`、`internal_apply_entry_reads_stdin_and_writes_result`、`cancel_keeps_process_then_terminate_stops_writes`、`exec_p01_huge_timeout_accepted_then_terminate_reaps_group`、`exec_b07_concurrent_groups_isolated`、`min_timeout_accepted_and_expires_as_one_millisecond`、`timeout_kills_process_group_and_stops_writes`、`tls_https_round_trip_with_injected_root`、`a10_mixed_native_and_mcp_batch_runs_serially_and_pairs_in_order`、`a17_mcp_with_view_image_batch_pairs_then_image_projection`、`resources_filename_boundary_instructions_and_notes`、`m4_a13_m3_parse_store_export_redacts_body_and_exact_slug_projection`、`c15_persist_failure_spawn_rejected`、`blocked_input_is_cancellable_and_session_kept`、`cancel_wait_keeps_process_alive_and_queryable`、`capacity_64_rejects_65th_without_eviction`、`close_kills_all_and_rejects_new_starts`、`deadline_survives_cancel`、`explicit_timeout_kills_without_any_query`、`handles_scoped_to_manager_instance`、`input_limit_exact_passes_over_limit_rejects_with_zero_write`、`pipe_ctrl_c_interrupts_and_terminate_kills_ignoring_process`、`big_dual_stream_completes_and_truncates`、`pty_cancel_stops_further_input_submission`、`pty_child_sees_terminal`、`pipe_rejects_text_input_session_still_queryable`、`oversized_pending_stays_bounded`、`pty_interactive_read_answer`、`pty_write_window_expiry_returns_running_for_nonreading_program`、`read_does_not_reset_deadline`、`t18_cancelled_batch_skips_plan_as_two_field_failure`。
+
+### 监督者退出与指定回归
+
+| 用例 | 远端实际结果 | 证据与判定 |
+|---|---|---|
+| `gate_confirm_supervisor_dies_before_release_does_not_report_released` | 失败 | CI 断言收到 `TimedOut`，错误为“沙箱隔离/载荷停止状态确认超时……监督进程已回收”；原日志没有回调计数或 PIDFD 状态，不能证明确认回调执行，也不能证明监督进程已被等待回收。该远端验收未通过；时序复核见下节。 |
+| `gate_confirm_supervisor_pid_reuse_does_not_abort_or_signal_replacement` | 环境阻断，未验证产品断言 | 子进程中的 `unshare --user --map-root-user --pid --fork` 因 `write failed /proc/self/uid_map: Operation not permitted` 退出。不能计为通过或产品行为失败。 |
+| `gate_confirm_callback_exhausting_deadline_does_not_release` | 通过 | Ubuntu 测试日志显示该用例行以 `... ok` 结束。 |
+| `leader_pidfd_exit_check_preserves_wait_owner` | 通过 | Ubuntu 测试日志显示该用例行以 `... ok` 结束。 |
+| `gate_confirm_supervisor_dies_before_release_ready_does_not_release`、`gate_release_observes_stopped_payload_before_marker` | 未得到独立结果 | 两者均在单元测试锁已 poisoned 后因 `PoisonError` 失败，未进入各自行为断言。 |
+
+原 `TEST_ENV_LOCK` 锁中毒级联未消失：核心退出测试先失败，随后 Ready、停止载荷放行和 sandbox 环境单测报告 `PoisonError`。同一 `--lib` 目标还出现两条已有进程终止 seam 失败：`seam_killpg_injection_deadline_not_fake_timeout` 得到 `Timeout`（断言要求不是伪造 timeout），`seam_killpg_injection_terminate_reports_failure_keeps_session` 得到 `Terminated`（断言要求 `Error`）。
+
+其他 Ubuntu 失败：
+
+- JS worker 的取消、payload 退出、监督者退出、会话隔离和墙钟终止测试在 `assert!(sandbox_requested())` 失败。Actions job 环境未设置 `TCHAT_SANDBOX`，故这些用例没有进入沙箱行为验证。
+- `b2_mcp_face_fd_closed` 失败：断言期望 `tools=1`，实际 `tools=0`；记录 `FDSCAN=cat: /proc/self/fd/10: No such`。这是实际失败，不能据此宣称 FD 验收通过。
+- `attack06_seccomp_allows_toolchain_blocks_privileged_syscalls` 失败：其他被测 syscall 返回 `Operation not permitted`，但 `clone3` 返回 `Invalid argument`；断言要求 `ENOSYS`。
+
+### 结论
+
+- 新 SHA 的 CI 已完成，但监督者退出判定没有通过远端验收；PID 重用回归受 runner user namespace 权限阻断。停止载荷放行回归因锁中毒没有独立验证。
+- Windows G2 用例 `normalize_rejects_missing_and_accepts_dotdot` 在此提交快照上实际执行并通过；Windows 其他全量测试仍失败。
+- macOS 和 Windows 的失败结果是其 `continue-on-error` job 中的真实测试结果。此 CI 不证明 038 整体完成，也不能关闭失败或环境阻断的验收项。本节只记录旧 SHA 的结果。
+
+## 监督者退出 CI 时序复核与本地候选（2026-11-07）
+
+### CI 日志能确认的事实
+
+- 仍是 CI run [#42338650474](https://github.com/MrSong9957/agentlab-demo/actions/runs/42338650474)，Ubuntu job [日志](https://github.com/MrSong9957/agentlab-demo/actions/runs/42338650474/job/128301210963)，合并检出 SHA `0d73ff3e7b124a3da8ce1805928fd069f0995078`，PR head 为 `40a6d98288261721e501f86481ac6635ef1adb1f`。
+- 目标测试在 `src/app/src/proc_session.rs:2804` 因 `expect("bwrap 消失应返回 LeaderGone")` 收到确认超时错误而 panic。原测试在此 `expect` 后才检查 `release_calls` 和 `abort_calls`，所以 CI 日志没有回调计数。
+- 文案“监督进程已回收”由 `abort_sandbox_confirmation` 在传入的 abort 回调返回 `Ok(())` 时生成。目标测试的 abort 回调只增加 `abort_calls` 并返回 `Ok(())`；它不杀死、不等待 Child。该文案不是 wait 证据，也不能证明验证回调已运行。
+- 成功执行验证回调时，回调会杀死 bwrap 并用 `child.try_wait()` 取得退出状态。确认函数随后立即轮询固定的原监督者 PIDFD；若原 Child 已由回调 wait，PIDFD 应报告已退出并返回 `LeaderGone`，再到超时分支的路径不成立。CI 结果表明验证回调未成功返回；旧 CI 日志没有事件跟踪，不能判断是首次扫描前超时还是另一个阶段。
+- CI 日志将 `gate_confirm_timeout_does_not_release` 记为通过。该测试在同一单元测试进程内把 `TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS` 设为 `1`，但未取得 `TEST_ENV_LOCK`；目标测试持有该锁，却不能阻止未持锁测试改写进程环境。确认函数读取的是该全局环境变量。这是与错误时序相符的竞态来源，但旧 CI 日志未记录目标用例实际读到的期限，故不能声称已从远端日志直接观测到该值。
+
+### 单调时钟复现
+
+改动前以 1 ms 注入值串行运行目标用例，并临时加测试诊断。原监督者 PIDFD 由目标测试另开一个观察句柄；该观察不调用 `Child::wait`：
+
+| 相对确认开始时间 | 事件 | 观察 |
+|---:|---|---|
+| 0.000 ms | 测试启动 | leader PIDFD 未退出；注入期限 1 ms |
+| 0.020 ms | 确认开始 | 同一期限 1 ms |
+| 0.028 ms | 首次 leader PIDFD 轮询 | live |
+| 0.187 ms | 首次 payload 扫描 | 未发现载荷 |
+| 2.339 ms | 确认循环再次检查期限 | `before_discovery` 超时；尚未调用 validate |
+| 153.181 ms | 测试 abort 回调 | leader PIDFD 仍未退出；这是 abort 路径，不是 Child wait |
+| 153.260 ms | 确认返回 | `release_calls=0`、`abort_calls=1`、leader PIDFD 未退出；错误带有“监督进程已回收”后缀 |
+
+临时诊断已从候选代码移除，原始本地输出保存在 `target/038-validation/2026-11-07-supervisor-timeout-race/forced-one-ms-before-fix.log`。默认环境下同一目标在基线代码上串行通过，耗时 0.01 秒。受控复现证明未同步的 1 ms 全局期限可产生与 CI 相同错误；它不伪称为 CI 运行本身的内部事件日志。
+
+### 最小测试修复与验证边界
+
+- `gate_confirm_timeout_does_not_release` 现在与其他沙箱环境测试共用 `TEST_ENV_LOCK`，并用同一个 `TestEnvRestore` 在持锁期间恢复原期限。产品的 2000 ms 默认值、确认截止逻辑和错误契约未变。候选只修复测试环境共享竞态，没有产品逻辑修改。
+- 真实 PID 重用测试仍保留原 `unshare`/`ns_last_pid` 场景，但标记为显式 ignored，避免无权限 runner 把环境错误报成产品失败。Cargo 测试清单显示 ignored 原因。具备所需 namespace 权限时，运行 `cargo test --locked --offline -p terminal-chat --lib proc_session::tests::gate_confirm_supervisor_pid_reuse_does_not_abort_or_signal_replacement -- --exact --ignored --test-threads=1` 执行原真实 PID 重用断言。它不计通过。基础 CI 回归仍执行确认回调杀死并 wait 原 bwrap 的测试、停止态放行观察和 PIDFD wait-owner 测试。
+- 当前远端 CI 没有诊断事件。只有新提交 SHA 的 Ubuntu 回归结果可以确认本地锁修复消除了该远端失败；本节不关闭该 CI 阻断。PID 重用覆盖在有权限环境下仍须实际执行并通过。
+- 本轮候选范围：`src/app/src/proc_session.rs` 中全局期限测试隔离和显式标注受权限限制的真实 PID 重用测试；本验收记录中的 CI 证据修正和时序记录。`src/app/src/sandbox.rs` 没有最终差异。所有改动均未提交或推送。
+
+### 本地候选验证（基线仍为 40a6d98）
+
+所有测试分别以 `--test-threads=1` 执行；启动前 `pids.current` 分别为 242、241、241，低于 500。Cargo 使用 `CARGO_TARGET_DIR=/tmp/038-start-gate-final-target` 和 `CARGO_BUILD_JOBS=1`，每项有 `timeout` 硬上限。输出副本保存在 `/workspace/target/038-validation/2026-11-07-supervisor-timeout-race/`。
+
+| 检查 | 实际结果 | 证据 |
+|---|---|---|
+| `cargo check --locked --offline -p terminal-chat` | 通过，退出码 0；1.56 秒 | `cargo-check.log` |
+| `proc_session::tests::gate_confirm_` | 6 通过，0 失败，1 ignored，297 filtered；2.24 秒 | `gate-confirm.log`。目标 supervisor-death 回归、Ready 变体、超时和取消均实际执行并通过；真实 PID 重用未执行，ignored 原因和精确命令出现在测试清单。 |
+| `proc_session::tests::gate_release_observes_stopped_payload_before_marker` | 1/1 通过；放行前观察 payload host PID 23、reaper PID 22、NSpid 2、State T、PGID=SID=23、namespace `pid:[4026532486]`、start time 30451117、固定 PIDFD | `stopped-release.log` |
+| `sandbox::tests::leader_pidfd_exit_check_preserves_wait_owner` | 1/1 通过；PIDFD 检查退出后原 `Child::try_wait()` 仍能取得退出状态 | `wait-owner.log` |
+
+旧 CI 失败时的“回调是否进入”没有原始远端事件记录。当前候选本地测试证明已修正环境变量争用；它尚未在 GitHub Actions 新 SHA 上验证。CI run #42338650474 的其他失败没有纳入本轮修改。
+
+## timeout 测试隔离与失败诊断候选（2026-11-07）
+
+### 已确认缺陷与证据边界
+
+- 源码核对确认：旧版 `gate_confirm_timeout_does_not_release` 在单元测试进程中写入全局 `TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS=1`，没有取得与其他 gate 测试共用的 `TEST_ENV_LOCK`，并在测试结束时直接删除变量。另一个目标用例持有锁并不能阻止该无锁写入。这是已证实的测试隔离缺陷。
+- 改动前的本地受控复现使用 1 ms 注入值：确认循环在载荷发现前耗尽期限，validate 未进入，监督者 PIDFD 仍 live，随后进入 abort。输出保存在 `/workspace/target/038-validation/2026-11-07-timeout-isolation-final/pre-fix-forced-one-ms.log`。它证明该环境值可产生超时路径，不证明旧 CI 使用了同一读值或阶段顺序。
+- CI run [#42338650474](https://github.com/MrSong9957/agentlab-demo/actions/runs/42338650474) 没有记录目标测试读到的期限、payload discovery、validate 回调或 PIDFD 状态。因此旧 CI 的实际时序仍未证实；新候选尚未推送，本地证据不能代替新 SHA 的远端验收。
+
+### 最小差异
+
+- `proc_session.rs`：所有直接写入确认期限的 lib 测试持有 `TEST_ENV_LOCK`，并通过 Drop 恢复原始 `OsString`。监督者退出 Pending/Ready 回归显式使用 2000 ms，避免继承外部期限。既有“回调耗尽期限”回归启用测试 trace，用于实际观察 `after_validate` 期限和 abort 顺序。
+- `tests/common/mod.rs`：新增仅保存/恢复确认期限的窄型 RAII guard；调用者必须先取得本测试二进制既有互斥锁。
+- `apply_patch_sandbox.rs`、`mcp_stdio_sandbox.rs`、`js_orchestration_security.rs`：timeout 写入均在各自已有锁内执行并恢复旧值。JS worker 测试的普通启动统一经窄 helper 持 `ENV_LOCK` 至 `spawn_cell` 完成；墙钟回归把沙箱前置检查、期限固定和启动放入同一锁区，避免并行 timeout 测试改变其读取与启动视图。子进程 `.env(...)`/`.env_remove(...)` 仅设置子进程环境，不修改测试进程环境。
+- `sandbox.rs`：新增仅在 `cfg(test, target_os = "linux")` 生效的线程局部 trace；仅显式启用该 trace 的测试会输出。事件使用 `Instant` 单调时间，覆盖读到的期限、leader PIDFD、载荷发现和 State T、validate 进入与结果、期限耗尽阶段、abort 起止及回调结果。目标监督者回归另记录回调前 PIDFD、kill 结果、`Child::try_wait()`、等待后的 PIDFD、最终结果和回调计数。未修改产品确认、等待、终止或失败逻辑。
+- 唯一 ignored 用例为真实数字 PID 重用回归 `gate_confirm_supervisor_pid_reuse_does_not_abort_or_signal_replacement`，其 `unshare --user --map-root-user --pid --fork` 需要 runner 未提供的可写 user/PID namespace。原用例和断言保留，普通 CI 不计此项通过；测试注解中的完整命令已用 `--exact --ignored --list` 核实，只列出这一用例，日志保存在 `/workspace/target/038-validation/2026-11-07-timeout-isolation-final/ignored-list.log`。
+- 普通 runner 仍实际运行稳定 PIDFD 身份观察、Supervisor `LeaderGone` Pending/Ready、确认期限顺序以及原 `Child` wait owner 回归。真实 PID 数值重用是单独补充覆盖，不从普通 runner 结果推断。
+
+### 最终候选本地验证（适用基线 `40a6d98288261721e501f86481ac6635ef1adb1f`）
+
+命令按序单线程运行，每个重进程启动前读取 `/sys/fs/cgroup/pids.current`，记录值均低于 500；使用 `CARGO_TARGET_DIR=/tmp/038-start-gate-final-target`、`CARGO_BUILD_JOBS=1` 和硬超时。完整输出与补丁保存在 `/workspace/target/038-validation/2026-11-07-timeout-isolation-final/`。
+
+| 检查 | 实际结果 |
+|---|---|
+| `cargo check --locked --offline -p terminal-chat` | 通过；测试编译另由各直接测试命令完成。保留仓库既有编译 warning。 |
+| `proc_session::tests::gate_confirm_` | 6 通过、0 失败、1 ignored、297 filtered；2.23 秒。实际目标 trace 观察到期限 2000 ms、payload 从未发现转为 PID 312、reaper PID 311、State T、回调进入；回调 SIGKILL 原 bwrap 并 `Child::try_wait()` 得到 SIGKILL，原 PIDFD 随后为 exited，Pending/Ready 均返回 `LeaderGone`、`abort_calls=0`。 |
+| `gate_confirm_callback_exhausting_deadline_does_not_release`（包含于上项） | 实际执行并通过；单调时间日志记录 `validate.return=ready`、leader PIDFD live、`deadline.expired stage=after_validate`、`abort.begin` 及 abort callback `Ok`。这是当前诊断代码对期限和 abort 路径的受控验证。 |
+| `gate_release_observes_stopped_payload_before_marker` | 1/1 通过；实际执行。 |
+| `leader_pidfd_exit_check_preserves_wait_owner` | 1/1 通过；实际执行，PIDFD 检查没有消费原 `Child` 等待状态。 |
+| `a038_mcp_gate_timeout_does_not_start_server` | 1/1 通过；实际执行。 |
+| `gate_policy_none_timeout_does_not_write_patch` | 1/1 通过；实际执行，补丁目标文件未被写入。 |
+| `gate_timeout_worker_startup_fails_closed` | 1/1 通过；实际执行。 |
+| `wall_clock_limit_terminates_pending_sandbox_worker` | 1/1 通过，120.16 秒；沙箱前置、固定期限与 worker 启动使用同一测试锁。 |
+| `git diff --check` | 通过。 |
+
+简化检查复用了 `tests/common` 的期限恢复 guard，移除了 apply_patch 测试中的重复实现；JS 启动互斥仅覆盖 worker 启动读取环境的临界区。独立规格审查未发现阻断项；标准审查找到并促成修复 JS worker 环境读取者未参与互斥的问题，复核后无剩余锁重入或覆盖缺口。没有改变生产契约或代码路径。
+
+最终本地候选改动 7 个文件：`src/app/src/sandbox.rs`、`src/app/src/proc_session.rs`、`src/app/tests/common/mod.rs`、`src/app/tests/apply_patch_sandbox.rs`、`src/app/tests/mcp_stdio_sandbox.rs`、`src/app/tests/js_orchestration_security.rs` 和本验收记录。候选补丁适用上述 `40a6d98` 基线。新候选远端 CI 未验证；监督者退出 CI 阻断仍未关闭。没有提交、推送或触发 CI。

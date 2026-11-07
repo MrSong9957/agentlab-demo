@@ -2444,6 +2444,19 @@ fn spawn_reader<R: Read + AsRawFd + Send + 'static>(session: Arc<Session>, mut p
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    struct TestEnvRestore(&'static str, Option<std::ffi::OsString>);
+    #[cfg(target_os = "linux")]
+    impl Drop for TestEnvRestore {
+        fn drop(&mut self) {
+            if let Some(value) = self.1.take() {
+                std::env::set_var(self.0, value);
+            } else {
+                std::env::remove_var(self.0);
+            }
+        }
+    }
+
     /// A sandbox payload can exit after the session phase check but before SIGINT.
     /// Its pidfd reports NotFound; continue collecting its natural exit status.
     #[cfg(target_os = "linux")]
@@ -2701,6 +2714,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn gate_confirm_timeout_does_not_release() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let _timeout_env = TestEnvRestore(
+            "TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS",
+            std::env::var_os("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS"),
+        );
         std::env::set_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", "1");
         let mut leader = std::process::Command::new("sleep")
             .arg("30")
@@ -2708,7 +2726,6 @@ mod tests {
             .spawn()
             .expect("sleep 启动");
         let r = crate::sandbox::confirm_sandbox_isolation_and_release(leader.id(), None);
-        std::env::remove_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS");
         let err = r.expect_err("无载荷监督进程必须确认超时");
         assert!(err.to_string().contains("超时"), "{err}");
         // 016 有界清理：监督者已被终止回收（confirm 内联 waitpid 已收尸）。
@@ -2743,13 +2760,18 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn assert_gate_confirm_supervisor_dies_before_release(callback_ready: bool) {
-        use std::os::fd::AsRawFd;
+        use std::os::fd::{AsRawFd, FromRawFd};
         use std::os::unix::process::{CommandExt, ExitStatusExt};
 
         if !crate::sandbox::probe_available() {
             return;
         }
         let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let _timeout_env = TestEnvRestore(
+            "TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS",
+            std::env::var_os("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS"),
+        );
+        std::env::set_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", "2000");
         std::env::set_var("TCHAT_SANDBOX", "1");
         let launch = crate::sandbox::tool_launch_argv(
             crate::sandbox::exec_gate_argv("/bin/sleep 30"),
@@ -2763,6 +2785,46 @@ mod tests {
             .envs(launch.2.iter().cloned())
             .process_group(0);
         let mut child = command.spawn().expect("启动 bwrap");
+        let supervisor_pidfd_raw = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_open,
+                child.id() as libc::pid_t,
+                0 as libc::c_uint,
+            )
+        };
+        let supervisor_pidfd_open_error = (supervisor_pidfd_raw < 0)
+            .then(|| std::io::Error::last_os_error().to_string());
+        let supervisor_pidfd = (supervisor_pidfd_raw >= 0).then(|| unsafe {
+            std::os::fd::OwnedFd::from_raw_fd(supervisor_pidfd_raw as i32)
+        });
+        let supervisor_pidfd_state = || match supervisor_pidfd.as_ref() {
+            Some(pidfd) => {
+                let mut pfd = libc::pollfd {
+                    fd: pidfd.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let ready = unsafe { libc::poll(&mut pfd, 1, 0) };
+                if ready < 0 {
+                    format!("poll_error={}", std::io::Error::last_os_error())
+                } else if ready == 0 {
+                    "live".to_string()
+                } else if pfd.revents & libc::POLLIN != 0 {
+                    "exited".to_string()
+                } else {
+                    format!("revents={:#x}", pfd.revents)
+                }
+            }
+            None => format!(
+                "unavailable={}",
+                supervisor_pidfd_open_error.as_deref().unwrap_or("unknown")
+            ),
+        };
+        let _trace = crate::sandbox::gate_confirm_trace_start();
+        crate::sandbox::gate_confirm_trace(format_args!(
+            "test.child.spawned leader_pid={} callback_ready={callback_ready}",
+            child.id()
+        ));
         let mut payload_pidfd = None;
         let mut payload_pid = None;
         let mut release_calls = 0;
@@ -2771,16 +2833,40 @@ mod tests {
             child.id(),
             None,
             |identity| {
+                crate::sandbox::gate_confirm_trace(format_args!(
+                    "test.validate.enter leader_pid={} payload_pid={} supervisor_pidfd={}",
+                    child.id(),
+                    identity.pid,
+                    supervisor_pidfd_state()
+                ));
                 release_calls += 1;
                 payload_pid = Some(identity.pid);
                 payload_pidfd = Some(identity.pidfd.try_clone()?);
-                assert_eq!(unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGKILL) }, 0);
+                let kill_result = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGKILL) };
+                crate::sandbox::gate_confirm_trace(format_args!(
+                    "test.validate.kill_supervisor result={} error={}",
+                    kill_result,
+                    if kill_result < 0 {
+                        std::io::Error::last_os_error().to_string()
+                    } else {
+                        "none".to_string()
+                    }
+                ));
+                assert_eq!(kill_result, 0);
                 let deadline = Instant::now() + Duration::from_secs(2);
                 let status = loop {
                     if let Some(status) = child.try_wait()? {
+                        crate::sandbox::gate_confirm_trace(format_args!(
+                            "test.validate.child.try_wait=Some code={:?} signal={:?}",
+                            status.code(),
+                            status.signal()
+                        ));
                         break status;
                     }
                     if Instant::now() >= deadline {
+                        crate::sandbox::gate_confirm_trace(format_args!(
+                            "test.validate.child.try_wait=TimedOut"
+                        ));
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
                             "bwrap 外力终止后未在 2 秒内退出",
@@ -2789,6 +2875,14 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(2));
                 };
                 assert_eq!(status.signal(), Some(libc::SIGKILL));
+                crate::sandbox::gate_confirm_trace(format_args!(
+                    "test.validate.supervisor_pidfd.after_child_wait={}",
+                    supervisor_pidfd_state()
+                ));
+                crate::sandbox::gate_confirm_trace(format_args!(
+                    "test.validate.return kind={}",
+                    if callback_ready { "ready" } else { "pending" }
+                ));
                 Ok(if callback_ready {
                     crate::sandbox::SandboxRelease::Ready
                 } else {
@@ -2797,11 +2891,18 @@ mod tests {
             },
             |_leader_pid, _reaper_found| {
                 abort_calls += 1;
+                crate::sandbox::gate_confirm_trace(format_args!(
+                    "test.abort.callback invoked leader_pid={_leader_pid} reaper_found={_reaper_found}; Child wait is owned by validate callback"
+                ));
                 // The callback already reaped this Child. Do not signal its numeric PID here.
                 Ok(())
             },
-        )
-        .expect("bwrap 消失应返回 LeaderGone");
+        );
+        crate::sandbox::gate_confirm_trace(format_args!(
+            "test.confirm.return result={result:?} release_calls={release_calls} abort_calls={abort_calls} supervisor_pidfd={}",
+            supervisor_pidfd_state()
+        ));
+        let result = result.expect("bwrap 消失应返回 LeaderGone");
         assert!(matches!(result, crate::sandbox::SandboxConfirm::LeaderGone));
         assert_eq!(release_calls, 1, "只允许在载荷已定位后触发一次屏障");
         assert_eq!(abort_calls, 0, "监督进程已退出时不伪造清理成功");
@@ -2844,6 +2945,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[ignore = "requires writable user/PID namespaces; run `cargo test --locked --offline -p terminal-chat --lib proc_session::tests::gate_confirm_supervisor_pid_reuse_does_not_abort_or_signal_replacement -- --exact --ignored --test-threads=1` on a capable Linux host"]
     fn gate_confirm_supervisor_pid_reuse_does_not_abort_or_signal_replacement() {
         const INNER_MODE: &str = "TCHAT_GATE_PID_REUSE_INNER";
         if std::env::var_os(INNER_MODE).is_some() {
@@ -2892,6 +2994,10 @@ mod tests {
 
         assert!(crate::sandbox::probe_available(), "PID 重用回归需要真实 bwrap");
         let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let _timeout_env = TestEnvRestore(
+            "TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS",
+            std::env::var_os("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS"),
+        );
         std::env::set_var("TCHAT_SANDBOX", "1");
         std::env::set_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", "2000");
 
@@ -3030,7 +3136,6 @@ mod tests {
             replacement.kill().expect("清理 PID 替代进程");
         }
         let _ = replacement.wait();
-        std::env::remove_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS");
         std::env::remove_var("TCHAT_SANDBOX");
 
         assert!(
@@ -3050,18 +3155,8 @@ mod tests {
             return;
         }
         let _g = crate::TEST_ENV_LOCK.lock().unwrap();
-        struct EnvRestore(&'static str, Option<std::ffi::OsString>);
-        impl Drop for EnvRestore {
-            fn drop(&mut self) {
-                if let Some(value) = self.1.take() {
-                    std::env::set_var(self.0, value);
-                } else {
-                    std::env::remove_var(self.0);
-                }
-            }
-        }
-        let _sandbox_env = EnvRestore("TCHAT_SANDBOX", std::env::var_os("TCHAT_SANDBOX"));
-        let _timeout_env = EnvRestore(
+        let _sandbox_env = TestEnvRestore("TCHAT_SANDBOX", std::env::var_os("TCHAT_SANDBOX"));
+        let _timeout_env = TestEnvRestore(
             "TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS",
             std::env::var_os("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS"),
         );
@@ -3092,6 +3187,7 @@ mod tests {
         let mut child = command.spawn().expect("启动 bwrap");
         let started = Instant::now();
         let callback_deadline = started + Duration::from_millis(2_050);
+        let _trace = crate::sandbox::gate_confirm_trace_start();
         let mut callback_calls = 0;
         let mut abort_calls = 0;
         let result = crate::sandbox::confirm_sandbox_with_release(

@@ -12,6 +12,24 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// 串行化使用进程级环境变量的测试，避免并行竞态。
 pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Save and restore the process timeout while the caller holds its test env lock.
+pub struct SandboxConfirmTimeoutEnvRestore(Option<std::ffi::OsString>);
+
+impl SandboxConfirmTimeoutEnvRestore {
+    pub fn capture_after_test_lock() -> Self {
+        Self(std::env::var_os("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS"))
+    }
+}
+
+impl Drop for SandboxConfirmTimeoutEnvRestore {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(value) => std::env::set_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", value),
+            None => std::env::remove_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS"),
+        }
+    }
+}
+
 /// 011：PTY 尺寸常量（e2e 沟位列/行号断言与 PtySession 建立共用单一事实源）。
 // 038-CI：pty 模块基于 posix_openpt（POSIX 语义），Windows 不编译；唯一消费方
 // e2e_acceptance 同为 unix 门控。
