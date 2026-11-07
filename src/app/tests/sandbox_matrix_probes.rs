@@ -137,6 +137,7 @@ fn apply_patch_probe(spec: &Value) -> Value {
 fn mcp_probe(spec: &Value) -> Value {
     // B2：launcher 角色 fd——清除 CLOEXEC 并跨 spawn 保持（子进程退出即关闭）。
     // 038：unix 设施探针（fcntl 语义），Windows 不执行。
+    let mut fd_number: Option<i32> = None;
     #[cfg(unix)]
     if let Some(path) = spec["fd_path"].as_str() {
         use std::os::fd::AsRawFd;
@@ -144,22 +145,61 @@ fn mcp_probe(spec: &Value) -> Value {
         let n = f.as_raw_fd();
         unsafe { assert_eq!(libc::fcntl(n, libc::F_SETFD, 0), 0, "清除 CLOEXEC 失败"); }
         std::mem::forget(f);
+        fd_number = Some(n);
     }
+    let diag = &spec["diag"];
+    let mut probe_stages = vec![format!(
+        "prepare.begin pid={} fd={fd_number:?}",
+        std::process::id()
+    )];
     let manager = McpManager::new();
     let prepared = manager.prepare_for_turn(&AtomicBool::new(false));
-    let Some(snapshot) = prepared else {
-        manager.close();
-        return json!({"started": false, "tools": 0, "call": null, "probe_rec": ""});
-    };
-    let tools = snapshot.len();
-    let call = snapshot.entry("mcp__fx__echo").map(|entry| {
-        let (result, failed) = manager.call(entry, json!({"text": "iso"}), &AtomicBool::new(false));
-        json!({"result": result, "failed": failed})
+    let status_after_prepare = manager.status_lines();
+    let started = prepared.is_some();
+    let tools = prepared.as_ref().map_or(0, |snapshot| snapshot.len());
+    let call = prepared.and_then(|snapshot| {
+        snapshot.entry("mcp__fx__echo").map(|entry| {
+            let (result, failed) = manager.call(entry, json!({"text": "iso"}), &AtomicBool::new(false));
+            json!({"result": result, "failed": failed})
+        })
     });
+    probe_stages.push(format!(
+        "prepare.return started={started} tools={tools} status={}",
+        status_after_prepare.join(" | ")
+    ));
+    probe_stages.push("manager.close.begin".to_string());
     manager.close();
-    let probe_rec =
-        fs::read_to_string(spec["rec"].as_str().expect("rec 路径")).unwrap_or_default();
-    json!({"started": true, "tools": tools, "call": call, "probe_rec": probe_rec})
+    probe_stages.push("manager.close.return".to_string());
+    let status_after_close = manager.status_lines();
+    let (probe_rec, probe_rec_read_error) =
+        match fs::read_to_string(spec["rec"].as_str().expect("rec 路径")) {
+            Ok(content) => (content, None),
+            Err(error) => (String::new(), Some(error.to_string())),
+        };
+    let read_diag = |name: &str| {
+        match fs::read_to_string(diag[name].as_str().expect("B2 诊断路径")) {
+            Ok(content) => json!({"content": content}),
+            Err(error) => json!({"read_error": error.to_string()}),
+        }
+    };
+    json!({
+        "started": started,
+        "tools": tools,
+        "call": call,
+        "probe_rec": probe_rec,
+        "diagnostic": {
+            "fd_number": fd_number,
+            "manager_status_after_prepare": status_after_prepare,
+            "manager_status_after_close": status_after_close,
+            "probe_stages": probe_stages,
+            "probe_rec_read_error": probe_rec_read_error,
+            "fixture_record": read_diag("fixture_record"),
+            "protocol_stdin": read_diag("protocol_stdin"),
+            "protocol_stdout": read_diag("protocol_stdout"),
+            "server_stderr": read_diag("server_stderr"),
+            "server_exit_status": read_diag("server_exit_status"),
+        }
+    })
 }
 
 // ---------- 父侧：子进程派生（显式环境构造，看门狗） ----------
@@ -687,6 +727,7 @@ fn b2_mcp_face_fd_closed() {
     // GH runner 实测的沙箱内 MCP 服务器未应答差异（tools=0）根因待 runner 侧
     // 诊断（见 docs/logs/038-github-actions-ci/2026-10-31-runner-diagnosis-plan.md）；
     // 该用例不再提前 return——runner 上若复现即如实失败，为诊断提供信号。
+    let mut scenario_failures = Vec::new();
     for sandbox in [true, false] {
         let work = TempDir::new("033b2m-work");
         let user = TempDir::new("033b2m-user");
@@ -696,17 +737,27 @@ fn b2_mcp_face_fd_closed() {
         fs::write(work.path().join(".env"), "TCHAT_033_FAKE_ENV_SECRET=b2m-fake\n").unwrap();
         let fd_file = recs.path().join("fd-secret.txt");
         fs::write(&fd_file, "FAKE-FD-MCP-033").unwrap();
+        let diag = recs.path().join("b2-diagnostics");
+        fs::create_dir_all(&diag).unwrap();
+        let protocol_stdin = diag.join("protocol.stdin");
+        let protocol_stdout = diag.join("protocol.stdout");
+        let server_stderr = diag.join("server.stderr");
+        let server_exit_status = diag.join("server.exit-status");
 
         let rec = recs.path().join("probe.txt");
         let rec2 = recs.path().join("fixture.jsonl");
         let fixture = common::mcp_fixtures::FIXTURE.replace('\\', "/");
-        // 包装脚本：扫描 fd ≥3 内容（跳过 0/1/2＝stdio 管道，防阻塞）后转真实
-        // 夹具——泄漏时假凭据正文会出现在 FDSCAN 行。
+        // 诊断写入独立文件；MCP stdout 仍只承载协议帧。FDMETA 读取扫描
+        // shell 自身的 fd 目标，FDSCAN 在 cat 子进程中读取 /proc/self/fd。
         let wrapper = format!(
-            r#"{{ for f in /proc/self/fd/*; do case "$f" in */0|*/1|*/2) ;; *) echo "FDSCAN=$(cat "$f" 2>&1 | head -c 30)";; esac; done; }} >> '{rec}'; exec python3 '{fixture}' --scenario echo --record '{rec2}'"#,
+            r#"{{ printf 'stage=wrapper_scan pid=%s\n' "$$" >> '{rec}'; for f in /proc/self/fd/*; do case "$f" in */0|*/1|*/2) ;; *) _fd=${{f##*/}}; _target=$(readlink "/proc/$$/fd/$_fd" 2>&1 || true); printf 'FDMETA pid=%s fd=%s target=%s\n' "$$" "$_fd" "$_target" >> '{rec}'; echo "FDSCAN=$(cat "$f" 2>&1 | head -c 30)" >> '{rec}';; esac; done; printf 'stage=fixture_launch pid=%s\n' "$$" >> '{rec}'; python3 '{fixture}' --scenario echo --record '{rec2}' --trace-stdin '{protocol_stdin}' --trace-stdout '{protocol_stdout}' 2>>'{server_stderr}'; _status=$?; printf 'stage=fixture_exit status=%s\n' "$_status" >> '{rec}'; printf '%s\n' "$_status" > '{server_exit_status}'; exit "$_status"; }}"#,
             rec = rec.display(),
             fixture = fixture,
             rec2 = rec2.display(),
+            protocol_stdin = protocol_stdin.display(),
+            protocol_stdout = protocol_stdout.display(),
+            server_stderr = server_stderr.display(),
+            server_exit_status = server_exit_status.display(),
         );
         let mcp = json!({"mcp_servers": {"fx": {
             "enabled": true, "command": "sh", "args": ["-c", wrapper],
@@ -717,6 +768,13 @@ fn b2_mcp_face_fd_closed() {
             "kind": "mcp",
             "rec": rec.display().to_string(),
             "fd_path": fd_file.display().to_string(),
+            "diag": {
+                "fixture_record": rec2.display().to_string(),
+                "protocol_stdin": protocol_stdin.display().to_string(),
+                "protocol_stdout": protocol_stdout.display().to_string(),
+                "server_stderr": server_stderr.display().to_string(),
+                "server_exit_status": server_exit_status.display().to_string(),
+            },
         });
         let outcome = run_probe("b2m", &spec, |cmd| {
             cmd.env("TCHAT_USER_DIR", user.path())
@@ -728,27 +786,40 @@ fn b2_mcp_face_fd_closed() {
                 cmd.env("TCHAT_SANDBOX", "1");
             }
         });
-        // 服务器应正常启动并完成往返（fd 收口不破坏 MCP 面）
-        assert_eq!(outcome["started"], json!(true), "服务器应启动：{outcome}");
-        assert_eq!(outcome["tools"], json!(1), "应发现工具：{outcome}");
-        assert_eq!(outcome["call"]["failed"], json!(false), "调用往返成功：{outcome}");
+        // 沙箱分支即使失败也执行普通正向对照，单次 CI 日志保留两侧证据。
+        let mut failures = Vec::new();
+        if outcome["started"] != json!(true) {
+            failures.push(format!("服务器应启动：{outcome}"));
+        }
+        if outcome["tools"] != json!(1) {
+            failures.push(format!("应发现工具：{outcome}"));
+        }
+        if outcome["call"]["failed"] != json!(false) {
+            failures.push(format!("调用往返成功：{outcome}"));
+        }
         let rec_text = outcome["probe_rec"].as_str().unwrap_or_default();
         println!(
             "==== 033 B2 MCP 面（{}）====\n{rec_text}",
             if sandbox { "沙箱" } else { "普通对照" }
         );
         if sandbox {
-            assert!(
-                !rec_text.contains("FAKE-FD-MCP-033"),
-                "MCP 面：沙箱分支不得读出 fd 正文（tokio 注入点回归）：{rec_text}"
-            );
+            if rec_text.contains("FAKE-FD-MCP-033") {
+                failures.push(format!("MCP 面：沙箱分支读出宿主 fd 假凭据：{rec_text}"));
+            }
         } else {
-            assert!(
-                rec_text.contains("FAKE-FD-MCP-033"),
-                "MCP 面：普通对照 fd 可读（零变化承诺）：{rec_text}"
-            );
+            if !rec_text.contains("FAKE-FD-MCP-033") {
+                failures.push(format!("MCP 面：普通对照未读取 fd 假凭据：{rec_text}"));
+            }
+        }
+        if !failures.is_empty() {
+            scenario_failures.push(format!(
+                "B2 MCP 面（{}）失败：{}\n完整阶段、协议与子进程证据：{outcome}",
+                if sandbox { "沙箱" } else { "普通对照" },
+                failures.join("；")
+            ));
         }
     }
+    assert!(scenario_failures.is_empty(), "{}", scenario_failures.join("\n"));
 }
 
 // ---------- 矩阵 E：取消/超时/正常完成的整批回收（管道＋PTY，重复时序） ----------

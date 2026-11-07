@@ -356,3 +356,71 @@ Windows 日志中的 31 个失败用例为：`sandbox::tests::non_canonical_writ
 - 最终本地直接回归通过，真实 bwrap 和载荷身份检查均实际执行；原行为断言没有放宽。简化审阅确认没有可替换的现成隔离辅助，也未发现资源效率问题；审阅发现并修正了测试名漂移可导致零用例子进程假通过的风险。测试名现在来自当前测试线程。
 - 新差异对应 `src/app/tests/js_orchestration.rs` 与本验收记录。此记录还保留本候选开始前已有的 CI #81 验收证据更新，须按差异块选择。
 - 本地结果不能代替新 SHA 的远端 CI。CI #81 原始失败仍是提交 `f6e803e` 的事实；该环境前提修复尚未提交、推送或由 GitHub Actions 验证。其他平台和独立失败不在本次处理范围。
+
+## JS worker 沙箱前提修复远端 CI（2026-11-07，运行后未提交记录）
+
+- 提交 `544a8e7db262fad50ddef2b2ffc5faa3c0ef1fb1` 基于 `f6e803ee5a81145e8a6890406eed7759ee1d4c62`，只包含 `src/app/tests/js_orchestration.rs` 与本验收记录。PR #1 仍开放，head SHA 为 `544a8e7db262fad50ddef2b2ffc5faa3c0ef1fb1`。
+- [CI run #82](https://github.com/MrSong9957/agentlab-demo/actions/runs/42364810143) 的提交关联与 PR head 均指向该 SHA。事件为 `pull_request`，整体终态为 `failure`。三个平台的 `cargo check` 都通过；三个全量 `cargo test` 作业都实际执行并失败。Windows/macOS 的 `continue-on-error` 没有改变各自真实失败结果。D1–D3 诊断 job 按工作流设置跳过。
+- 作业日志：[Ubuntu](https://github.com/MrSong9957/agentlab-demo/actions/runs/42364810143/job/128380519893)、[Windows](https://github.com/MrSong9957/agentlab-demo/actions/runs/42364810143/job/128380519915)、[macOS](https://github.com/MrSong9957/agentlab-demo/actions/runs/42364810143/job/128380519786)。
+
+### 四个 JS worker 用例
+
+四个用例只在 Linux 编译和执行（源码有 `#[cfg(target_os = "linux")]`）。Ubuntu 日志显示每个用例的隔离子进程均出现 `running 1 test`，精确筛选结果为 `1 passed; 0 failed; 0 ignored; 0 measured; 41 filtered out`；父测试也以 `... ok` 结束。整体 `js_orchestration` 目标为 42 通过、0 失败。用例进入原测试体：测试进程要求 `TCHAT_SANDBOX=1`，启动真实 worker，并调用 `sandbox_payload_pid` 验证实际载荷身份；各自原有行为断言均通过。Windows 与 macOS 因平台门控未运行这四项，不计为通过。
+
+| 精确用例 | Ubuntu | 环境前提失败 | 行为断言失败 |
+|---|---|---|---|
+| `sandbox_worker_payload_exits_before_terminate` | 隔离子进程 1/1 通过，父测试通过 | 否 | 否 |
+| `sandbox_worker_supervisor_dies_reports_failure` | 隔离子进程 1/1 通过，父测试通过 | 否 | 否 |
+| `sandbox_worker_timeout_and_session_isolation` | 隔离子进程 1/1 通过，父测试通过 | 否 | 否 |
+| `sandbox_worker_cancel_inflight_leaf` | 隔离子进程 1/1 通过，父测试通过 | 否 | 否 |
+
+这些日志证明 CI #82 在该提交快照上实际进入真实沙箱并通过四个既有行为回归；它们不代表 Windows/macOS 执行了 Linux 专用用例，也不代表 038 整体验收完成。
+
+### 三平台其余结果
+
+| 平台 | cargo check | 全量测试 | 实际失败 target 与失败数 |
+|---|---|---|---|
+| Ubuntu | 通过 | 失败，exit 101 | `sandbox_matrix_probes` 1 项；`security_attack_031` 1 项。`js_orchestration` 42/42 通过。 |
+| Windows | 通过 | 失败，exit 1 | 10 个 target、30 项：`--lib` 1、`apply_patch_sandbox` 1、`exec_command` 5、`mcp_tls` 1、`mcp_turn` 2、`memory_retention` 1、`memory_storage_files` 1、`multi_agent` 1、`proc_session` 16、`tool_loop` 1；`multi_agent` 另有 3 项 ignored。 |
+| macOS | 通过 | 失败，exit 101 | 13 个 target、60 项：`--lib` 6、`e2e_acceptance` 27、`e2e_sandbox` 1、`exec_command` 5、`js_orchestration_security` 1、`llm_flow` 1、`mcp_stdio` 1、`mcp_tls` 1、`memory_retention` 1、`proc_session` 12、`security_attack_031` 3、`session_cli` 1、`session_perf` 1。 |
+
+Ubuntu 的两个独立失败为：`b2_mcp_face_fd_closed` 期望 `tools=1`、实际 `tools=0`，探针含 `cat: /proc/self/fd/10: No such`；`attack06_seccomp_allows_toolchain_blocks_privileged_syscalls` 期望 `clone3=ENOSYS`、实际为 `Invalid argument`。同一安全目标中的 `attack07_setsid_daemon_reaped_at_turn_end` 通过。
+
+Windows 与 macOS 的完整失败用例和断言见各自 Actions 日志。本次没有重试、修复这些独立失败，也没有把 `continue-on-error` 当作平台测试通过。
+
+### 验收结论与工作区状态
+
+- 本次 JS worker 测试前提修复已在新 SHA 的 Ubuntu Actions 上通过四个目标用例；隔离子进程不是零用例运行，环境前提断言和原行为断言均已实际覆盖。
+- 038 的三平台全量 CI 仍失败：Ubuntu 有 MCP FD 探针和 attack06 失败；Windows 与 macOS 有各自多项失败。故本结果只关闭该提交快照上的四个 JS worker 用例，不关闭 038 整体或其他平台/功能验收项。
+- 此节仅为 Actions 运行后的证据更新；提交仍为 `544a8e7db262fad50ddef2b2ffc5faa3c0ef1fb1`，本节保持未提交。没有修改生产代码、测试代码或工作流，也没有再次运行测试。
+
+## B2 MCP 工具发现失败定位（2026-11-07，待一次远端取证）
+
+### 规格与现有 CI 证据
+
+- B2 契约见 [`033-tool-sandbox.md` 的 B1/B2 加固记录](../../specs/033-tool-sandbox.md)：沙箱启动子进程时，用 `close_range(CLOSE_RANGE_CLOEXEC)` 标记继承的 fd ≥3；stdio 0/1/2 保留；普通模式的继承行为不变。现有目标 `sandbox_matrix_probes.rs::b2_mcp_face_fd_closed` 仍断言沙箱分支发现 1 个工具、成功往返、假凭据不可读，普通对照发现 1 个工具且假凭据可读。
+- CI [run #82](https://github.com/MrSong9957/agentlab-demo/actions/runs/42364810143) 的 Ubuntu 日志显示目标只失败在 `tools=0`；`started=true`，包装脚本已把 `FDSCAN=cat: /proc/self/fd/10: No such` 写入探针记录。工具数量断言在假凭据内容断言之前失败，所以该次日志没有给出后续 FD 内容判断。
+- CI 没有保存 fixture 的 `tools/list` 输入／输出、McpManager 的连接错误、MCP server stderr 或 server 退出状态。现有日志只能确认分支进入包装脚本和目录快照为空；不能定位进程启动、启动闸、握手、工具发现中的具体阶段。
+- CI runner 安装的是 bubblewrap `0.11.1-1ubuntu0.3`；当前容器为 bubblewrap `0.9.0`。这是已观察到的环境差异，不足以单独证明它导致失败。
+
+### 本地复现
+
+在当前基线 `544a8e7db262fad50ddef2b2ffc5faa3c0ef1fb1`，以 `CARGO_TARGET_DIR=/tmp/038-b2-mcp-target`、`CARGO_BUILD_JOBS=1` 和 `--test-threads=1` 执行精确目标。第一次离线冷构建在 180 秒上限内未完成且未进入测试体；续编后测试实际执行并通过，耗时 0.18 秒。沙箱和普通对照均启动 MCP、发现 1 个工具并完成调用；假凭据仅在普通对照可读，沙箱断言保持通过。日志分别是 `/workspace/target/038-validation/2026-11-07-b2-mcp-fd/initial-compile-timeout.log` 与 `local-exact-pass.log`。
+
+本地两种模式的扫描记录都出现了 `cat: /proc/self/fd/N: No such`，但普通对照仍读出假凭据，沙箱分支没有读出。原脚本枚举的是扫描 shell 的 `/proc/self/fd/*`，随后由 `cat` 子进程读取 `/proc/self/fd/N`；路径中的 `self` 指向 `cat` 自身。因而该错误本身既不证明宿主 fd 泄漏，也不证明枚举竞态。CI 的 `fd=10` 是否为假凭据、shell 扫描时该 fd 指向什么，现有输出没有记录。
+
+结论：本地未复现工具发现失败；本地通过不推翻 runner 上的失败。没有证据支持修改生产 MCP 启动、握手或 FD 收口代码。
+
+### 一次性测试诊断候选
+
+仅修改 B2 测试与其 Python 测试夹具；没有生产逻辑变化：
+
+- 探针记录注入的假凭据 fd 编号，以及 `McpManager` prepare 前后状态、工具数和关闭状态。
+- 包装脚本记录启动阶段，并对每个枚举 fd 记录扫描 shell 的 PID 与 `/proc/<shell-pid>/fd/N` 链接目标；保留原有 `cat /proc/self/fd/N` 内容扫描及宿主 FD 标记断言。
+- Python 夹具把收到的协议 stdin 和发出的协议 stdout 原样复制到独立文件；服务 stderr 与退出码也写入独立文件。诊断数据不写入 MCP stdout，协议 stdout 仍只由夹具发送的 JSON-RPC 帧组成。
+- 即使沙箱场景的 `tools=1` 断言失败，也先执行普通模式正向对照，再报告两边结果。`tools=1`、调用成功、沙箱无标记、普通模式可读四项断言均保留。
+- 简化审阅未发现可删除、合并或削弱的 B2 断言。审阅发现缺失的记录文件会被 `unwrap_or_default()` 混同为空文件；现已让每个记录读取明确返回内容或 `read_error`，并为主探针记录保留单独读取错误。只改测试诊断，不改产品逻辑或原断言。
+
+定向检查：Python fixture 语法解析通过；诊断记录读取调整后，经 `cargo test --locked --offline -p terminal-chat --test sandbox_matrix_probes --no-run` 再次编译通过；编译前核实 `pids.current=244`（低于 500），日志为 `/workspace/target/038-validation/2026-11-07-b2-mcp-fd/diagnostic-compile-final.log`。随后以 `--test-threads=1`、60 秒上限运行诊断候选的精确用例；启动前 `pids.current=258`，用例实际执行并通过（1 passed，0.11 秒），日志为 `/workspace/target/038-validation/2026-11-07-b2-mcp-fd/diagnostic-exact-pass.log`。本地仍未复现工具发现失败；沙箱扫描观察到 FD 3 是管道且未读到假标记，普通对照 FD 3 指向假凭据并读出标记，夹具启动和退出状态为 0。通过路径没有打印完整 MCP 帧诊断对象；该对象会在目标断言失败时随 outcome 一并输出。此结果验证诊断候选没有破坏本地正常路径，不能代表 runner 根因已知或 CI 已关闭。
+
+完整候选补丁（含本节验收记录更新）与仅测试代码的诊断补丁分别保存在 `/workspace/target/038-validation/2026-11-07-b2-mcp-fd/candidate.patch` 和 `diagnostic-code.patch`。一次远端取证需要将该测试诊断候选更新到现有 PR 分支；现有 `pull_request` 工作流会启动 Ubuntu、Windows、macOS 全量 job，不更改 workflow，也不需要手动诊断 job。只用 Ubuntu B2 日志判断根因和 FD 断言；其余平台结果不在本问题范围。当前未提交、未推送、未触发 CI；等待用户授权该一次诊断发布与 CI 运行。
