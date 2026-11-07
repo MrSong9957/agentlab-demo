@@ -136,6 +136,27 @@ fn turn_budget() -> Arc<AtomicUsize> {
 }
 
 #[cfg(target_os = "linux")]
+fn run_in_sandbox_test_process() -> bool {
+    const CHILD: &str = "TCHAT_TEST_JS_SANDBOX_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        return false;
+    }
+
+    let current_thread = std::thread::current();
+    let test_name = current_thread
+        .name()
+        .expect("Rust 测试线程应具备用例名称");
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        .env(CHILD, "1")
+        .env("TCHAT_SANDBOX", "1")
+        .status()
+        .expect("启动隔离的真实沙箱 worker 测试");
+    assert!(status.success(), "{test_name} 沙箱回归子进程失败：{status}");
+    true
+}
+
+#[cfg(target_os = "linux")]
 fn sandbox_payload_pid(supervisor: u32) -> libc::pid_t {
     fn children(pid: libc::pid_t) -> Vec<libc::pid_t> {
         std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
@@ -431,6 +452,9 @@ fn sandbox_worker_pidfd_denial_fails_closed() {
 fn sandbox_worker_payload_exits_before_terminate() {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::time::{Duration, Instant};
+    if run_in_sandbox_test_process() {
+        return;
+    }
     assert!(terminal_chat::sandbox::sandbox_requested());
     let mut sink = RecordingSink::new();
     let cfg = config("await new Promise(() => {});", vec![], MapDispatcher::new(&[]), turn_budget());
@@ -459,10 +483,14 @@ fn sandbox_worker_payload_exits_before_terminate() {
 fn sandbox_worker_supervisor_dies_reports_failure() {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::time::{Duration, Instant};
+    if run_in_sandbox_test_process() {
+        return;
+    }
     assert!(terminal_chat::sandbox::sandbox_requested());
     let mut sink = RecordingSink::new();
     let cfg = config("await new Promise(() => {});", vec![], MapDispatcher::new(&[]), turn_budget());
     let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("启动沙箱 worker");
+    let _payload = sandbox_payload_pid(cell.worker_pid());
     let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, cell.worker_pid(), 0) };
     assert!(raw >= 0);
     let fd = unsafe { OwnedFd::from_raw_fd(raw as i32) };
@@ -790,6 +818,9 @@ fn sandbox_worker_capture_denied_fails_closed() {
 #[cfg(target_os = "linux")]
 #[test]
 fn sandbox_worker_timeout_and_session_isolation() {
+    if run_in_sandbox_test_process() {
+        return;
+    }
     assert!(terminal_chat::sandbox::sandbox_requested());
     let mut first_sink = RecordingSink::new();
     let mut second_sink = RecordingSink::new();
@@ -797,6 +828,8 @@ fn sandbox_worker_timeout_and_session_isolation() {
     let second_cfg = config("text('other-session');", vec![], MapDispatcher::new(&[]), turn_budget());
     let mut first = spawn_cell(&first_cfg, &mut first_sink, &[]).expect("启动第一个 cell");
     let mut second = spawn_cell(&second_cfg, &mut second_sink, &[]).expect("启动第二个 cell");
+    let _payload = sandbox_payload_pid(first.worker_pid());
+    let _second_payload = sandbox_payload_pid(second.worker_pid());
     let timed = first.observe(40, 4096, &mut first_sink, None, &[]);
     assert_eq!(timed.status, CellStatus::Running, "{timed:?}");
     assert_eq!(first.terminate(&mut first_sink, &[]).status, CellStatus::Terminated);
@@ -825,6 +858,9 @@ fn sandbox_worker_cancel_inflight_leaf() {
                 execution: terminal_chat::js_orchestration::runtime::LeafExecution::Unknown }
         }
     }
+    if run_in_sandbox_test_process() {
+        return;
+    }
     assert!(terminal_chat::sandbox::sandbox_requested());
     let started = Arc::new(AtomicBool::new(false));
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -832,6 +868,7 @@ fn sandbox_worker_cancel_inflight_leaf() {
     let cfg = config("await tools.slow({});", vec![catalog_entry("slow", false)], dispatcher, turn_budget());
     let mut sink = RecordingSink::new();
     let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("启动沙箱 worker");
+    let _payload = sandbox_payload_pid(cell.worker_pid());
     let deadline = Instant::now() + Duration::from_secs(5);
     while !started.load(Ordering::SeqCst) && Instant::now() < deadline {
         cell.observe(25, 4096, &mut sink, None, &[]);

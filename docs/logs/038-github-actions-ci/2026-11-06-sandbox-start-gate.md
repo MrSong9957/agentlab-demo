@@ -291,3 +291,68 @@ Windows 日志中的 31 个失败用例为：`sandbox::tests::non_canonical_writ
 简化检查复用了 `tests/common` 的期限恢复 guard，移除了 apply_patch 测试中的重复实现；JS 启动互斥仅覆盖 worker 启动读取环境的临界区。独立规格审查未发现阻断项；标准审查找到并促成修复 JS worker 环境读取者未参与互斥的问题，复核后无剩余锁重入或覆盖缺口。没有改变生产契约或代码路径。
 
 最终本地候选改动 7 个文件：`src/app/src/sandbox.rs`、`src/app/src/proc_session.rs`、`src/app/tests/common/mod.rs`、`src/app/tests/apply_patch_sandbox.rs`、`src/app/tests/mcp_stdio_sandbox.rs`、`src/app/tests/js_orchestration_security.rs` 和本验收记录。候选补丁适用上述 `40a6d98` 基线。新候选远端 CI 未验证；监督者退出 CI 阻断仍未关闭。没有提交、推送或触发 CI。
+
+## timeout 隔离候选远端 CI（2026-11-07，未提交证据更新）
+
+- 已发布提交：`f6e803ee5a81145e8a6890406eed7759ee1d4c62`，父提交 `40a6d98288261721e501f86481ac6635ef1adb1f`；提交范围为上方列出的七文件。
+- 推送分支、PR #1 head 与 Actions run head 均为 `f6e803ee5a81145e8a6890406eed7759ee1d4c62`。PR #1 仍开放，base 为 `main`。
+- [CI run #81](https://github.com/MrSong9957/agentlab-demo/actions/runs/42356537594)（`pull_request`）已完成，整体结论 `failure`。三个平台的 `cargo check` 均通过；三个全量测试均实际执行并失败。Windows/macOS 的 `continue-on-error` 不改变各自的真实测试失败结论。D1–D3 诊断 job 按工作流设置跳过。
+- Actions 使用 `cargo test --workspace --no-fail-fast --locked`，没有 `--nocapture`。因此通过测试捕获的 `eprintln!` 时序诊断没有出现在 CI 日志；CI 可确认对应测试实际通过，详细单调时钟事件顺序仍引用前述本地 `gate-confirm.log`，不把它描述为远端日志观察。
+
+| 平台 | 编译 | 全量测试 | 实际失败 target |
+|---|---|---|---|
+| Ubuntu | `cargo check --locked` 通过 | 失败，exit 101 | `js_orchestration`、`sandbox_matrix_probes`、`security_attack_031`（3 个 target） |
+| Windows | `cargo check --locked` 通过 | 失败，exit 1；31 个测试失败 | `--lib`、`apply_patch_sandbox`、`exec_command`、`mcp_tls`、`mcp_turn`、`memory_retention`、`memory_storage_files`、`multi_agent`、`proc_session`、`tool_loop`（10 个 target） |
+| macOS | `cargo check --locked` 通过 | 失败，exit 101 | `--lib`、`e2e_acceptance`、`e2e_sandbox`、`exec_command`、`js_orchestration_security`、`llm_flow`、`mcp_stdio`、`mcp_tls`、`memory_retention`、`proc_session`、`security_attack_031`、`session_cli`、`session_perf`（13 个 target） |
+
+作业日志：[Ubuntu](https://github.com/MrSong9957/agentlab-demo/actions/runs/42356537594/job/128355745442)、[Windows](https://github.com/MrSong9957/agentlab-demo/actions/runs/42356537594/job/128355745297)、[macOS](https://github.com/MrSong9957/agentlab-demo/actions/runs/42356537594/job/128355745523)。
+
+### 本轮关键验收
+
+| 用例或检查 | 远端结果 | 证据与限制 |
+|---|---|---|
+| `gate_confirm_supervisor_dies_before_release_does_not_report_released` | Ubuntu 实际执行并通过 | 同一个 Ubuntu `--lib` 测试目标还实际执行并通过 `gate_confirm_supervisor_dies_before_release_ready_does_not_release`。通过用例的 trace 被 Cargo 捕获，CI 日志没有逐事件 trace 行。 |
+| `gate_confirm_callback_exhausting_deadline_does_not_release` | Ubuntu 实际执行并通过 | 本地 `gate-confirm.log` 保留 deadline、validate、PIDFD、abort 的单调时钟顺序；远端绿色用例只证明断言通过。 |
+| `gate_release_observes_stopped_payload_before_marker` | Ubuntu 实际执行并通过 | 通过。 |
+| `leader_pidfd_exit_check_preserves_wait_owner` | Ubuntu 实际执行并通过 | 通过；没有消费原 `Child` 的 wait 状态。 |
+| 真实 PID 数值重用回归 | Ubuntu ignored，未验证 | 日志说明 writable user/PID namespace 不可用；忽略状态不计为通过。 |
+| `attack07_setsid_daemon_reaped_at_turn_end` | Ubuntu 实际执行并通过 | 在 `security_attack_031` 同一目标中通过；该目标因 attack06 失败而整体失败。 |
+| Windows `normalize_rejects_missing_and_accepts_dotdot` | 实际执行并通过 | Windows `proc_session` 测试日志明确记录 `... ok`；不能据此推断完整 Windows 测试通过。 |
+
+### CI 失败事实
+
+- Ubuntu 的 `js_orchestration` 有 4 个失败：`sandbox_worker_cancel_inflight_leaf`、`sandbox_worker_payload_exits_before_terminate`、`sandbox_worker_supervisor_dies_reports_failure`、`sandbox_worker_timeout_and_session_isolation`。四者都在测试文件内的 `assert!(terminal_chat::sandbox::sandbox_requested())` 失败；这次日志没有给出该断言失败的更深原因。
+- Ubuntu 的 `b2_mcp_face_fd_closed` 失败于工具发现断言：期望 `tools=1`，实际 `tools=0`；探针记录 `FDSCAN=cat: /proc/self/fd/10: No such`。这是实际失败；该输出不足以单独证明存在 FD 泄漏或确定根因。
+- Ubuntu 的 `attack06_seccomp_allows_toolchain_blocks_privileged_syscalls` 失败：断言期望 `clone3=ENOSYS`，实际为 `Invalid argument`。同一目标中的 attack07 通过。
+- Windows 有 31 个失败用例分布于上表 10 个 target。`exec_command` 有 5 个、`proc_session` 有 17 个失败；另有 `sandbox::tests::non_canonical_writable_root_fails_closed`、`internal_apply_entry_reads_stdin_and_writes_result`、两项 MCP turn、memory、multi-agent 和 tool-loop 用例失败。完整用例与断言见 Windows 作业日志。
+- macOS 的失败跨越上表 13 个 target，包括 `proc_session` 的超时/终止回收断言和 `e2e_acceptance` 的进程清理断言；`session_perf::perf_tiers_baseline_driven` 也因实测峰值离散 119.4 MiB 超限而失败。完整用例与断言见 macOS 作业日志。
+- 检查三平台作业日志，没有发现 `TEST_ENV_LOCK`、`PoisonError` 或由该锁中毒引发的级联。上述其余失败仍按各自日志事实记录，不归并为锁中毒问题。
+
+### 结论和边界
+
+- 监督者退出判定及普通 runner 可执行的期限、停止态放行和 Child wait-owner 回归在 Ubuntu 新 SHA 上通过；真实 PID 重用仍未验证。通过测试的远端时序 trace 不可见，已由本地证据补充记录。
+- 该结果不能证明旧 CI 曾读取 1 ms，也不能关闭真实 PID 重用覆盖、B2 MCP 失败或本轮发现的其他三平台 CI 失败。
+- 当前 CI 仅验证提交 `f6e803e` 的代码快照。038 整体未完成。
+- 本节是运行后验收证据，仅追加于隔离候选工作区；未追加提交或推送。
+
+## JS worker 沙箱回归环境前提（2026-11-07，本地未提交候选）
+
+- CI #81 的 Ubuntu `js_orchestration` 日志中，以下四个用例都在启动 worker 前的 `sandbox_requested()` 断言失败：`sandbox_worker_payload_exits_before_terminate`（该 CI 版本第 434 行）、`sandbox_worker_supervisor_dies_reports_failure`（第 462 行）、`sandbox_worker_timeout_and_session_isolation`（第 793 行）、`sandbox_worker_cancel_inflight_leaf`（第 828 行）。失败发生在 `spawn_cell` 之前，原有退出、取消、超时及会话断言没有执行；本记录不沿用其他失败数量。
+- 在本地显式移除 `TCHAT_SANDBOX` 与 `TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS` 后，`sandbox_worker_payload_exits_before_terminate` 按原用例前提失败于 `sandbox_requested()`，尚未启动 worker。完整红测日志：`/workspace/target/038-validation/2026-11-07-js-worker-sandbox-env/baseline-unset.log`。这确认 runner 默认未设置沙箱变量会使回归前提缺失。
+- 修复只改测试：父测试进程通过 `current_exe()` 重启当前精确用例；子进程在测试框架和库初始化前得到 `TCHAT_SANDBOX=1`，再运行原测试体。测试名取自当前测试线程，避免过滤名拼错时子进程零用例运行造成假通过。父测试进程环境不被修改，因此不需要跨线程环境锁或恢复 guard；生产环境和整个 CI job 都没有被改动。
+- 四个用例均调用 `sandbox_payload_pid` 检查 bwrap 的 PID namespace、reaper 与实际载荷关系；会话隔离用例检查两个 cell 的载荷。原有行为断言保留。测试启动路径仍经 `spawn_cell` 和生产沙箱启动实现，不回退普通模式。
+
+| 精确用例 | 结果 | 测试体耗时 | `pids.current` 启动门禁 | 日志 |
+|---|---|---:|---:|---|
+| `sandbox_worker_payload_exits_before_terminate` | 1 passed；实际载荷检查及退出后终止断言执行 | 0.18 s | 245 | `sandbox_worker_payload_exits_before_terminate.log` |
+| `sandbox_worker_supervisor_dies_reports_failure` | 1 passed；实际载荷检查、监督者死亡及失败结果断言执行 | 0.18 s | 245 | `sandbox_worker_supervisor_dies_reports_failure.log` |
+| `sandbox_worker_timeout_and_session_isolation` | 1 passed；两个载荷均检查，超时、终止和会话隔离断言执行 | 0.38 s | 245 | `sandbox_worker_timeout_and_session_isolation.log` |
+| `sandbox_worker_cancel_inflight_leaf` | 1 passed；实际载荷检查、取消及终止断言执行 | 0.20 s | 246 | `sandbox_worker_cancel_inflight_leaf.log` |
+
+四条最终命令均在外层环境移除上述两个变量后运行，使用 `cargo test --locked --offline -p terminal-chat --test js_orchestration <用例> -- --exact --nocapture --test-threads=1`，`CARGO_BUILD_JOBS=1`、每条 75 秒上限，并在运行前检查 `pids.current < 500`。Cargo 输出同时显示隔离子进程中的测试通过和父包装测试通过。四个日志均在上表所列独立文件中。
+
+### 本地候选边界
+
+- 最终本地直接回归通过，真实 bwrap 和载荷身份检查均实际执行；原行为断言没有放宽。简化审阅确认没有可替换的现成隔离辅助，也未发现资源效率问题；审阅发现并修正了测试名漂移可导致零用例子进程假通过的风险。测试名现在来自当前测试线程。
+- 新差异对应 `src/app/tests/js_orchestration.rs` 与本验收记录。此记录还保留本候选开始前已有的 CI #81 验收证据更新，须按差异块选择。
+- 本地结果不能代替新 SHA 的远端 CI。CI #81 原始失败仍是提交 `f6e803e` 的事实；该环境前提修复尚未提交、推送或由 GitHub Actions 验证。其他平台和独立失败不在本次处理范围。
