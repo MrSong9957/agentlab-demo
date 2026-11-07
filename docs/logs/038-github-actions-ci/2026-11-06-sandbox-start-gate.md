@@ -131,3 +131,39 @@ exec /bin/sleep 30
 独立审查提出的事项已逐项复核并处理：SIGCONT 前最终检查取消；读取 `/proc/self/ns/pid` 失败也进入中止清理；确认等待不再持有管理器状态锁；close 在途启动时按已保存身份定向杀 payload、D2 sweep 后再给 PID 1 回收机会；031 MCP gate 包装保留原服务器单文件挂载；普通与沙箱 Ctrl+C 在 payload 已自然退出时继续收集终态；MCP close 对 sandbox kill 后等待有界并保留监督进程后备。MCP close 仍沿用原有 `()` 返回接口；若 payload signal、组后备和直接 child kill 全部被宿主拒绝，最终有限等待不能证明回收，未新增不同于既有接口的失败结果。
 
 原 network-disabled 031 D2 测试仍受当前容器网络命名空间限制：bwrap 返回 `loopback: Failed to create NETLINK_ROUTE socket: Operation not permitted`，没有载荷或用户代码；该项为环境阻断，不计通过。对应 network-enabled 变体已通过。Windows 编译、Windows G2、macOS、全量与 L3 仍未验证；038 整体仍未完成。
+
+## 监督者退出判定复核（2026-11-07，未提交候选）
+
+候选工作区：`/tmp/038-start-gate-YcOITR/repo`；分支 `debug/038-ubuntu-start-gate-ci`；HEAD 与适用基线均为 `63ca1d2cfa0485b665907c492e8d41d9396bee9e`。候选仅修改 `src/app/src/sandbox.rs`、`src/app/src/proc_session.rs`、`src/app/src/sandbox/tests.rs` 和本验收记录；未提交。
+
+### 根因与修复
+
+基线 `sandbox.rs` 的确认循环以 `/proc/<leader_pid>` 是否存在判断监督者是否退出（基线第 1416–1425 行）。回调杀死 bwrap 并通过 `child.try_wait()` 确认回收后，若内核将相同数字 PID 分配给新进程，`/proc/<leader_pid>` 仍存在。回调耗尽确认期限并返回 `Pending` 后，旧逻辑将替代进程当作原监督者，进入超时 abort 路径。
+
+这一因果链已在基线复现，不再只是 PID 重用假设：隔离 user/PID namespace 中，回归确认原 bwrap 已收到 SIGKILL 并被 `try_wait()` 回收，随后确定性重用 PID 5；回调等到确认期限后返回 `Pending`。基线结果为确认超时、`abort_calls=1`，替代进程仍存活。精确输出见本节证据目录中的 `baseline-red-pid-reuse-deadline.log`。CI run [#79](https://github.com/MrSong9957/agentlab-demo/actions/runs/42300882693) 的监督者退出确认失败与该结果一致。
+
+候选在确认开始时固定原监督者 PIDFD，并在确认循环入口及 `validate` 回调返回后检查该 PIDFD（当前 `sandbox.rs` 第 1406、1425、1489 行）。确认原监督者退出后立即返回 `LeaderGone`，不处理回调结果、不进入超时 abort，也不向复用旧数字 PID 的进程发送信号。存活监督者的回调若耗尽期限，仍按既有超时路径失败。PIDFD 退出轮询不消费原 `Child` 的等待状态，原调用者仍负责 wait。
+
+回归曾短暂使用 `start_time` 必须变化来证明新旧进程身份；一次快速 PID 重用在相同内核时钟 tick 内完成，该断言失败。`start_time` 以 tick 计数，不能单独作为身份唯一性证明。最终回归以原 `Child` 已回收、替代 `Child` 获得同一 PID 且仍存活来固定身份关系；不依赖 tick 差值。
+
+### 本地验证
+
+下列命令均在隔离候选工作区运行，`CARGO_TARGET_DIR=/tmp/038-start-gate-final-target`、`CARGO_BUILD_JOBS=1`。每项重进程验证启动前检查 `/sys/fs/cgroup/pids.current < 500`；实际值为 240–248。命令均设置硬超时。
+
+| 检查 | 实际结果 | 日志 |
+|---|---|---|
+| `cargo check --locked --offline -p terminal-chat`（90 秒上限） | 通过，1.05 秒 | `candidate-cargo-check.log` |
+| `cargo test --locked --offline -p terminal-chat --lib --no-run`（60 秒上限） | 通过，4.12 秒；测试二进制已生成 | `candidate-test-compile.log` |
+| `cargo test --locked --offline -p terminal-chat --lib proc_session::tests::gate_confirm_ -- --test-threads=1 --nocapture`（70 秒上限） | 7/7 通过，4.31 秒。覆盖回调耗尽期限、取消、监督者退出的 Pending/Ready、PID 重用及既有超时 | `candidate-confirm-regressions.log` |
+| `gate_release_observes_stopped_payload_before_marker`（35 秒上限） | 1/1 通过；放行前 payload 状态 T，PGID=SID=23，PIDFD 已固定 | `candidate-release-gate.log` |
+| `sandbox::tests::leader_pidfd_exit_check_preserves_wait_owner`（35 秒上限） | 1/1 通过；PIDFD 显示退出后，原 `Child::try_wait()` 仍取得状态 | `candidate-wait-owner.log` |
+| `git diff --check` | 通过 | 命令输出无差异错误 |
+
+最终 PID 重用实测：监督者与替代进程均使用 host PID 5；结果 `LeaderGone`、`abort_calls=0`、`replacement_alive=true`。确认和放行前身份日志、构建日志、修复前红测及当前基线补丁均保存在 `/workspace/target/038-validation/2026-11-07-start-gate-supervisor-exit/`，目录清单和 SHA-256 见其中 `README.md`。
+
+### 简化、审查与交付状态
+
+- 简化检查没有发现可合并的生产逻辑、代码质量或效率项；删除四条重复测试名称或断言的新增说明注释，保留解释 namespace 局部 PID 分配与 `start_time` tick 精度的注释。测试价值审查没有建议删除或合并本轮回归。
+- Standards 审查未发现规范违规；Spec 审查未发现 §0-A 缺项、范围扩张或错误实现。审查仅覆盖本候选差异。
+- 交付候选范围为三项代码文件和本验收记录：生产修复 `sandbox.rs`；直接回归 `proc_session.rs`、`sandbox/tests.rs`；配套验收记录为本文件。主工作区 `/workspace` 及其其他任务差异不属于候选范围。
+- 本地确认和真实 bwrap 验证通过；GitHub Actions 尚未验证本次未提交修改。run #79 仍是失败结果，未重跑 CI。本地结果不代表 038 整体完成。

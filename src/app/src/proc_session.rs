@@ -2732,6 +2732,17 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn gate_confirm_supervisor_dies_before_release_does_not_report_released() {
+        assert_gate_confirm_supervisor_dies_before_release(false);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gate_confirm_supervisor_dies_before_release_ready_does_not_release() {
+        assert_gate_confirm_supervisor_dies_before_release(true);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_gate_confirm_supervisor_dies_before_release(callback_ready: bool) {
         use std::os::fd::AsRawFd;
         use std::os::unix::process::{CommandExt, ExitStatusExt};
 
@@ -2778,16 +2789,15 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(2));
                 };
                 assert_eq!(status.signal(), Some(libc::SIGKILL));
-                Ok(crate::sandbox::SandboxRelease::Pending)
+                Ok(if callback_ready {
+                    crate::sandbox::SandboxRelease::Ready
+                } else {
+                    crate::sandbox::SandboxRelease::Pending
+                })
             },
-            |leader_pid, _reaper_found| {
+            |_leader_pid, _reaper_found| {
                 abort_calls += 1;
-                if unsafe { libc::kill(leader_pid as libc::pid_t, libc::SIGKILL) } != 0 {
-                    let error = std::io::Error::last_os_error();
-                    if error.raw_os_error() != Some(libc::ESRCH) {
-                        return Err(error);
-                    }
-                }
+                // The callback already reaped this Child. Do not signal its numeric PID here.
                 Ok(())
             },
         )
@@ -2830,6 +2840,303 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         std::env::remove_var("TCHAT_SANDBOX");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gate_confirm_supervisor_pid_reuse_does_not_abort_or_signal_replacement() {
+        const INNER_MODE: &str = "TCHAT_GATE_PID_REUSE_INNER";
+        if std::env::var_os(INNER_MODE).is_some() {
+            gate_confirm_supervisor_pid_reuse_inner();
+            return;
+        }
+
+        let executable = std::env::current_exe().expect("获取测试执行文件");
+        let output = Command::new("timeout")
+            .args([
+                "12s",
+                "unshare",
+                "--user",
+                "--map-root-user",
+                "--pid",
+                "--fork",
+                "--mount-proc",
+                "--",
+            ])
+            .arg(executable)
+            .args([
+                "--exact",
+                "proc_session::tests::gate_confirm_supervisor_pid_reuse_does_not_abort_or_signal_replacement",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(INNER_MODE, "1")
+            .env_remove("TCHAT_SANDBOX")
+            .env_remove("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS")
+            .output()
+            .expect("在临时 user/PID namespace 启动回归");
+        eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "PID 重用回归子进程失败：status={:?}\nstdout={}\nstderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn gate_confirm_supervisor_pid_reuse_inner() {
+        use std::os::unix::process::ExitStatusExt;
+
+        assert!(crate::sandbox::probe_available(), "PID 重用回归需要真实 bwrap");
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        std::env::set_var("TCHAT_SANDBOX", "1");
+        std::env::set_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", "2000");
+
+        let launch = crate::sandbox::tool_launch_argv(crate::sandbox::exec_gate_argv(
+            "/bin/sleep 30",
+        ))
+        .unwrap()
+        .expect("沙箱可用时必须包装");
+        let mut command = Command::new(&launch.0);
+        command
+            .args(&launch.1)
+            .env_clear()
+            .envs(launch.2.iter().cloned())
+            .process_group(0);
+        let mut child = command.spawn().expect("启动 bwrap");
+        let leader_pid = child.id() as libc::pid_t;
+        assert!(leader_pid > 1, "PID namespace init 必须不是 bwrap");
+        let leader_start_time = crate::sandbox::read_process_identity(leader_pid)
+            .expect("读取原监督进程身份")
+            .start_time;
+        let mut replacement = None;
+        let mut replacement_start_time = None;
+        let mut payload = None;
+        let mut validate_calls = 0;
+        let mut abort_calls = 0;
+
+        let result = crate::sandbox::confirm_sandbox_with_release(
+            child.id(),
+            None,
+            |identity| {
+                validate_calls += 1;
+                payload = Some(identity.clone());
+                if validate_calls == 1 {
+                    assert_eq!(unsafe { libc::kill(leader_pid, libc::SIGKILL) }, 0);
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    let status = loop {
+                        if let Some(status) = child.try_wait()? {
+                            break status;
+                        }
+                        if Instant::now() >= deadline {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "bwrap 外力终止后未在 2 秒内退出",
+                            ));
+                        }
+                        std::thread::sleep(Duration::from_millis(2));
+                    };
+                    assert_eq!(status.signal(), Some(libc::SIGKILL));
+                    assert!(
+                        crate::sandbox::read_process_identity(leader_pid)
+                            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+                        "wait 后原监督进程必须已离开 /proc"
+                    );
+
+                    // ns_last_pid 是当前临时 PID namespace 的局部状态；把下一 PID
+                    // 设为原值，确定性创建复用该数字 PID 的新进程。start_time 以
+                    // 时钟 tick 计数，快速退出并重用时可能相同，不能单独判定身份。
+                    std::fs::write(
+                        "/proc/sys/kernel/ns_last_pid",
+                        format!("{}\n", leader_pid - 1),
+                    )?;
+                    let replacement_child = Command::new("/bin/sleep")
+                        .arg("30")
+                        .process_group(0)
+                        .spawn()?;
+                    assert_eq!(
+                        replacement_child.id(),
+                        leader_pid as u32,
+                        "必须重用原监督进程的 PID"
+                    );
+                    let current = crate::sandbox::read_process_identity(leader_pid)?;
+                    assert_eq!(current.process_group, leader_pid);
+                    replacement_start_time = Some(current.start_time);
+                    replacement = Some(replacement_child);
+
+                    let callback_deadline = Instant::now()
+                        + Duration::from_millis(crate::sandbox::sandbox_confirm_timeout_ms())
+                        + Duration::from_millis(50);
+                    while Instant::now() < callback_deadline {
+                        std::thread::park_timeout(
+                            callback_deadline.saturating_duration_since(Instant::now()),
+                        );
+                    }
+                }
+                Ok(crate::sandbox::SandboxRelease::Pending)
+            },
+            |_leader_pid, _reaper_found| {
+                abort_calls += 1;
+                // 不在测试回调中按已复用的 PID 清理；产品不应调用到此处。
+                Ok(())
+            },
+        );
+
+        let product_result = matches!(
+            &result,
+            Ok(crate::sandbox::SandboxConfirm::LeaderGone)
+        );
+        let product_validate_calls = validate_calls;
+        let product_abort_calls = abort_calls;
+        if let Some(identity) = payload.as_ref() {
+            if !crate::sandbox::sandbox_payload_has_exited(identity).unwrap_or(true) {
+                eprintln!(
+                    "DIAGNOSTIC_CLEANUP_AFTER_PRODUCT_RESULT payload_pid={}",
+                    identity.pid
+                );
+                let _ = crate::sandbox::signal_sandbox_payload_group(identity, libc::SIGKILL);
+                crate::sandbox::sweep_sandbox_namespace(&identity.ns_inode);
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while !crate::sandbox::sandbox_payload_has_exited(identity)
+                    .expect("检查诊断清理后的载荷")
+                {
+                    assert!(Instant::now() < deadline, "诊断清理后载荷仍存活");
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+        }
+        let replacement = replacement.as_mut().expect("已创建 PID 替代进程");
+        let replacement_alive = replacement
+            .try_wait()
+            .expect("检查 PID 替代进程")
+            .is_none();
+        let current = crate::sandbox::read_process_identity(leader_pid)
+            .expect("替代进程仍占用原 PID");
+        let replacement_identity_kept =
+            Some(current.start_time) == replacement_start_time && current.process_group == leader_pid;
+        eprintln!(
+            "PID_REUSE_EVIDENCE leader_pid={leader_pid} old_start_time={leader_start_time} replacement_start_time={:?} result={result:?} abort_calls={product_abort_calls} replacement_alive={replacement_alive}",
+            replacement_start_time
+        );
+
+        if let Ok(crate::sandbox::SandboxConfirm::Released(identity)) = &result {
+            let _ = crate::sandbox::signal_sandbox_payload_group(identity, libc::SIGKILL);
+            crate::sandbox::sweep_sandbox_namespace(&identity.ns_inode);
+        }
+        if replacement.try_wait().expect("复核替代进程状态").is_none() {
+            replacement.kill().expect("清理 PID 替代进程");
+        }
+        let _ = replacement.wait();
+        std::env::remove_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS");
+        std::env::remove_var("TCHAT_SANDBOX");
+
+        assert!(
+            product_result,
+            "原监督进程已 wait，数字 PID 已重用，仍须返回 LeaderGone：{result:?}"
+        );
+        assert_eq!(product_validate_calls, 1, "回调只在原载荷身份固定后运行一次");
+        assert_eq!(product_abort_calls, 0, "不得进入超时 abort 清理");
+        assert!(replacement_alive, "不得向复用旧 PID 的替代进程发送信号");
+        assert!(replacement_identity_kept, "替代进程 PID/start time 应保持不变");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gate_confirm_callback_exhausting_deadline_does_not_release() {
+        if !crate::sandbox::probe_available() {
+            return;
+        }
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        struct EnvRestore(&'static str, Option<std::ffi::OsString>);
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                if let Some(value) = self.1.take() {
+                    std::env::set_var(self.0, value);
+                } else {
+                    std::env::remove_var(self.0);
+                }
+            }
+        }
+        let _sandbox_env = EnvRestore("TCHAT_SANDBOX", std::env::var_os("TCHAT_SANDBOX"));
+        let _timeout_env = EnvRestore(
+            "TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS",
+            std::env::var_os("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS"),
+        );
+        std::env::set_var("TCHAT_SANDBOX", "1");
+        std::env::set_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", "2000");
+
+        let dir = std::env::temp_dir().join(format!(
+            "tchat-gate-callback-deadline-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("after-release");
+        let launch = crate::sandbox::tool_launch_argv(crate::sandbox::exec_gate_argv(
+            &format!("touch {}; exec sleep 30", marker.display()),
+        ))
+        .unwrap()
+        .expect("沙箱可用时必须包装");
+        let mut command = Command::new(&launch.0);
+        command
+            .args(&launch.1)
+            .env_clear()
+            .envs(launch.2.iter().cloned())
+            .process_group(0);
+        let mut child = command.spawn().expect("启动 bwrap");
+        let started = Instant::now();
+        let callback_deadline = started + Duration::from_millis(2_050);
+        let mut callback_calls = 0;
+        let mut abort_calls = 0;
+        let result = crate::sandbox::confirm_sandbox_with_release(
+            child.id(),
+            None,
+            |identity| {
+                callback_calls += 1;
+                assert!(
+                    Instant::now() < started + Duration::from_secs(2),
+                    "确认期限应仍有剩余时间时进入 validate"
+                );
+                assert_eq!(crate::sandbox::read_process_identity(identity.pid)?.state, 'T');
+                assert!(!marker.exists(), "载荷放行前 marker 不存在");
+                while Instant::now() < callback_deadline {
+                    std::thread::park_timeout(
+                        callback_deadline.saturating_duration_since(Instant::now()),
+                    );
+                }
+                Ok(crate::sandbox::SandboxRelease::Ready)
+            },
+            |leader_pid, reaper_found| {
+                abort_calls += 1;
+                crate::sandbox::kill_sandbox_group_and_wait(leader_pid, reaper_found)
+            },
+        );
+
+        if let Ok(crate::sandbox::SandboxConfirm::Released(identity)) = &result {
+            let _ = crate::sandbox::signal_sandbox_payload_group(identity, libc::SIGKILL);
+            crate::sandbox::sweep_sandbox_namespace(&identity.ns_inode);
+            let _ = crate::sandbox::kill_sandbox_group_and_wait(child.id(), true);
+        }
+        assert_eq!(callback_calls, 1, "必须实际进入一次 validate");
+        assert!(
+            result.as_ref().is_err_and(|error| error.to_string().contains("超时")),
+            "回调耗尽确认期限后必须超时且不放行：{result:?}"
+        );
+        assert_eq!(abort_calls, 1, "超时只执行一次既有清理");
+        assert!(!marker.exists(), "超时后用户代码不得执行");
+        match child.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("超时清理后 bwrap 仍存活"),
+            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {}
+            Err(error) => panic!("检查 bwrap 等待状态失败：{error}"),
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn sink_run(chunks: &[&[u8]]) -> PendingBuffer {

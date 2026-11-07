@@ -934,4 +934,35 @@ fn deny_aliases_cross_mount_projection() {
     fs::remove_dir_all(&t).ok();
 }
 
+#[test]
+#[cfg(target_os = "linux")]
+fn leader_pidfd_exit_check_preserves_wait_owner() {
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("启动短命监督进程");
+    let pidfd = open_pidfd(child.id() as libc::pid_t).expect("固定监督进程 PIDFD");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !pidfd_is_exited(&pidfd).expect("轮询监督进程 PIDFD") {
+        assert!(std::time::Instant::now() < deadline, "监督进程未在 2 秒内退出");
+        let mut pfd = libc::pollfd {
+            fd: std::os::fd::AsRawFd::as_raw_fd(&pidfd),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let timeout = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+        let result = unsafe { libc::poll(&mut pfd, 1, timeout) };
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            panic!("等待 PIDFD 退出事件失败：{error}");
+        }
+    }
+
+    assert!(child.try_wait().expect("原 Child 仍可 wait").is_some());
+    assert!(pidfd_is_exited(&pidfd).expect("再次查询原进程退出状态"));
+}
+
 

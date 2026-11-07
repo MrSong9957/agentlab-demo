@@ -1392,7 +1392,6 @@ pub(crate) fn confirm_sandbox_with_release(
     mut validate: impl FnMut(&SandboxPayloadIdentity) -> std::io::Result<SandboxRelease>,
     mut abort: impl FnMut(u32, bool) -> std::io::Result<()>,
 ) -> std::io::Result<SandboxConfirm> {
-    use std::path::Path;
     let self_ns = match std::fs::read_link("/proc/self/ns/pid") {
         Ok(ns) => ns,
         Err(error) => {
@@ -1404,17 +1403,44 @@ pub(crate) fn confirm_sandbox_with_release(
             ));
         }
     };
+    let leader_pidfd = match open_pidfd(leader_pid as libc::pid_t) {
+        Ok(pidfd) => pidfd,
+        Err(error) => {
+            if read_process_identity(leader_pid as libc::pid_t)
+                .is_err_and(|process_error| process_error.kind() == std::io::ErrorKind::NotFound)
+            {
+                return Ok(SandboxConfirm::LeaderGone);
+            }
+            return Err(abort_sandbox_confirmation(
+                &mut abort,
+                leader_pid,
+                None,
+                &format!("固定沙箱监督进程身份失败：{error}"),
+            ));
+        }
+    };
     let deadline = Instant::now() + Duration::from_millis(sandbox_confirm_timeout_ms());
     let mut fixed: Option<SandboxPayloadIdentity> = None;
     loop {
+        match pidfd_is_exited(&leader_pidfd) {
+            Ok(true) => {
+                return Ok(SandboxConfirm::LeaderGone);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                return Err(abort_sandbox_confirmation(
+                    &mut abort,
+                    leader_pid,
+                    fixed.as_ref(),
+                    &format!("核验沙箱监督进程状态失败：{error}"),
+                ));
+            }
+        }
         if cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
             return Err(abort_sandbox_confirmation(
                 &mut abort, leader_pid, fixed.as_ref(),
                 "沙箱启动确认期间被用户取消：用户代码未执行",
             ));
-        }
-        if !Path::new(&format!("/proc/{leader_pid}")).exists() {
-            return Ok(SandboxConfirm::LeaderGone);
         }
         if Instant::now() >= deadline {
             return Err(abort_sandbox_confirmation(
@@ -1459,9 +1485,47 @@ pub(crate) fn confirm_sandbox_with_release(
                     &format!("沙箱载荷身份或停止状态核验失败：{error}"),
                 ));
             }
-            match validate(identity) {
-                Ok(SandboxRelease::Pending) => {}
-                Ok(SandboxRelease::Ready) => {
+            let validation = validate(identity);
+            match pidfd_is_exited(&leader_pidfd) {
+                Ok(true) => return Ok(SandboxConfirm::LeaderGone),
+                Ok(false) => {}
+                Err(error) => {
+                    return Err(abort_sandbox_confirmation(
+                        &mut abort,
+                        leader_pid,
+                        fixed.as_ref(),
+                        &format!("核验沙箱监督进程状态失败：{error}"),
+                    ));
+                }
+            }
+            let release = match validation {
+                Ok(release) => release,
+                Err(error) => {
+                    return Err(abort_sandbox_confirmation(
+                        &mut abort, leader_pid, fixed.as_ref(),
+                        &format!("沙箱载荷身份确认失败：{error}"),
+                    ));
+                }
+            };
+            if cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
+                return Err(abort_sandbox_confirmation(
+                    &mut abort,
+                    leader_pid,
+                    fixed.as_ref(),
+                    "沙箱启动确认期间被用户取消：用户代码未执行",
+                ));
+            }
+            if Instant::now() >= deadline {
+                return Err(abort_sandbox_confirmation(
+                    &mut abort,
+                    leader_pid,
+                    fixed.as_ref(),
+                    "沙箱隔离/载荷停止状态确认超时：用户代码未执行",
+                ));
+            }
+            match release {
+                SandboxRelease::Pending => {}
+                SandboxRelease::Ready => {
                     if cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
                         return Err(abort_sandbox_confirmation(
                             &mut abort,
@@ -1491,12 +1555,6 @@ pub(crate) fn confirm_sandbox_with_release(
                         ));
                     }
                     return Ok(SandboxConfirm::Released(identity.clone()));
-                }
-                Err(error) => {
-                    return Err(abort_sandbox_confirmation(
-                        &mut abort, leader_pid, fixed.as_ref(),
-                        &format!("沙箱载荷身份确认失败：{error}"),
-                    ));
                 }
             }
         }
@@ -1584,10 +1642,24 @@ fn pidfd_send_signal(fd: &std::os::fd::OwnedFd, signal: libc::c_int) -> std::io:
 #[cfg(target_os = "linux")]
 fn pidfd_is_exited(fd: &std::os::fd::OwnedFd) -> std::io::Result<bool> {
     use std::os::fd::AsRawFd;
-    let mut pfd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-    let result = unsafe { libc::poll(&mut pfd, 1, 0) };
-    if result < 0 { return Err(std::io::Error::last_os_error()); }
-    Ok(result > 0 && (pfd.revents & libc::POLLIN) != 0)
+
+    // POLLIN reports exit for the original task without consuming Child's wait status.
+    loop {
+        let mut pfd = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let result = unsafe { libc::poll(&mut pfd, 1, 0) };
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(error);
+        }
+        return Ok(result > 0 && (pfd.revents & libc::POLLIN) != 0);
+    }
 }
 
 #[cfg(target_os = "linux")]
