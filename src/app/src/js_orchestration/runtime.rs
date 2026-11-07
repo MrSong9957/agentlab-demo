@@ -18,7 +18,7 @@
 use super::protocol::{
     init_frame, leaf_frame, read_frame, shutdown_frame, write_frame,
     MAX_BRIDGE_RESULT_BYTES, MAX_FRAME_BYTES, MAX_INIT_FRAME_BYTES, MAX_LEAF_ARGS_BYTES,
-    WORKER_AS_LIMIT, WORKER_CPU_LIMIT_SECS,
+    WORKER_AS_LIMIT, WORKER_CPU_LIMIT_SECS, WORKER_WALL_LIMIT_MS,
 };
 use crate::prompt::ToolDisplay;
 use serde_json::{json, Value};
@@ -375,7 +375,7 @@ impl Drop for CellHandle {
     fn drop(&mut self) {
         if !self.closed {
             self.cancel_flag.store(true, Ordering::SeqCst);
-            let _ = kill_worker(&mut self.child);
+            let _ = kill_worker(&mut self.child, &self.worker_cleanup);
         }
     }
 }
@@ -384,6 +384,9 @@ pub struct CellHandle {
     pub id: String,
     exec_call_id: String,
     child: std::process::Child,
+    worker_cleanup: WorkerCleanup,
+    wall_deadline: Instant,
+    cleanup_error: Option<String>,
     stdin: Option<std::process::ChildStdin>,
     reader_rx: mpsc::Receiver<Msg>,
     /// 事件通道发送端（叶子执行线程回送 LeafDone）。
@@ -457,13 +460,64 @@ pub fn spawn_cell(
         .worker_exe
         .clone()
         .unwrap_or_else(|| std::env::current_exe().expect("定位自身可执行文件失败"));
+    let worker_cleanup = std::cell::RefCell::new(WorkerCleanup::default());
+    #[cfg(target_os = "linux")]
+    if crate::sandbox::sandbox_requested() {
+        // 在启动前确认宿主支持安全句柄；拒绝时不创建沙箱进程。
+        let self_fd = open_pidfd(std::process::id() as libc::pid_t)?;
+        signal_pidfd(&self_fd, 0).map_err(|e| format!("无法验证 worker 清理能力：{e}"))?;
+    }
     let mut child = spawn_worker(&worker_exe)?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .expect("spawn 已 piped stdin");
+    let mut stdin = Some(child.stdin.take().expect("spawn 已 piped stdin"));
+    // 沙箱确认闸在隔离和登记载荷身份后才放行。失败时不发送 init 帧。
+    // LeaderGone 只确认本进程组和 bwrap 监督者，不能证明没有遗留载荷。
+    #[cfg(target_os = "linux")]
+    if crate::sandbox::sandbox_requested() {
+        let leader_pid = child.id();
+        match crate::sandbox::confirm_sandbox_with_release(
+            leader_pid,
+            None,
+            |identity| {
+                let mut cleanup = worker_cleanup.borrow_mut();
+                cleanup.capture_sandbox_payload(identity)?;
+                let ready = inspect_worker_entry(
+                    identity,
+                    cleanup.payload.as_ref().expect("已登记的 pidfd"),
+                )?;
+                if !ready {
+                    return Ok(crate::sandbox::SandboxRelease::Pending);
+                }
+                cleanup.sandbox_identity = Some(identity.clone());
+                Ok(crate::sandbox::SandboxRelease::Ready)
+            },
+            |leader_pid, _reaper_found| {
+                let cleanup = worker_cleanup.borrow();
+                abort_unreleased_worker(leader_pid, &mut child, &mut stdin, &cleanup)
+            },
+        ) {
+            Ok(crate::sandbox::SandboxConfirm::Released(_)) => {}
+            Ok(crate::sandbox::SandboxConfirm::LeaderGone) => {
+                let pid = child.id() as libc::pid_t;
+                unsafe { libc::killpg(pid, libc::SIGKILL); }
+                let cleanup = wait_worker_supervisor(
+                    &mut child,
+                    Instant::now() + Duration::from_secs(2),
+                );
+                return Err(format!(
+                    "编排 worker 监督进程在放行前退出（用户代码未执行；进程组终止已请求，载荷回收未确认；监督进程等待：{cleanup:?}）"
+                ));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "编排 worker 隔离确认失败：{e}（用户代码未执行）"
+                ))
+            }
+        }
+    }
+    let worker_cleanup = worker_cleanup.into_inner();
+    let mut stdin = stdin.take().expect("确认成功后仍持有 worker stdin");
     if let Err(e) = write_frame(&mut stdin, &init, MAX_INIT_FRAME_BYTES) {
-        let _ = kill_worker(&mut child);
+        let _ = kill_worker(&mut child, &worker_cleanup);
         return Err(format!("发送初始化帧失败：{e}"));
     }
     let stdout = child
@@ -495,7 +549,7 @@ pub fn spawn_cell(
             }
         })
         .map_err(|e| {
-            let _ = kill_worker(&mut child);
+            let _ = kill_worker(&mut child, &worker_cleanup);
             format!("启动 worker 读线程失败：{e}")
         })?;
     // cell_started 保存成功才算创建成功（§1.2）。
@@ -513,9 +567,13 @@ pub fn spawn_cell(
     match sink.commit(&event, history) {
         Ok(()) => {}
         Err(reason) => {
-            let _ = kill_worker(&mut child);
+            let cleanup = kill_worker(&mut child, &worker_cleanup);
+            let cleanup_note = match cleanup {
+                Ok(()) => "worker 已回收".to_string(),
+                Err(error) => format!("worker 回收未确认：{error}"),
+            };
             return Err(format!(
-                "cell_started 保存失败：{reason}（cell 未创建，worker 已回收）"
+                "cell_started 保存失败：{reason}（cell 未创建，{cleanup_note}）"
             ));
         }
     }
@@ -524,6 +582,9 @@ pub fn spawn_cell(
         id,
         exec_call_id: config.exec_call_id.to_string(),
         child,
+        worker_cleanup,
+        wall_deadline: Instant::now() + Duration::from_millis(WORKER_WALL_LIMIT_MS),
+        cleanup_error: None,
         stdin: Some(stdin),
         reader_rx: rx,
         event_tx,
@@ -560,7 +621,7 @@ fn spawn_worker(exe: &std::path::Path) -> Result<std::process::Child, String> {
         exe.to_string_lossy().into_owned(),
         "--internal-js".to_string(),
     ];
-    let (program, args, env) = match crate::sandbox::tool_launch_argv(argv.clone()) {
+    let (program, mut args, env) = match crate::sandbox::tool_launch_argv(argv.clone()) {
         Ok(Some((program, args, env))) => (program, args, env),
         Ok(None) => (
             argv[0].clone(),
@@ -573,6 +634,22 @@ fn spawn_worker(exe: &std::path::Path) -> Result<std::process::Child, String> {
             ))
         }
     };
+    #[cfg(target_os = "linux")]
+    if crate::sandbox::sandbox_requested() {
+        let separator = args
+            .iter()
+            .position(|arg| arg == "--")
+            .ok_or_else(|| "bwrap worker 参数缺少命令分隔符".to_string())?;
+        args.splice(
+            separator..separator,
+            [
+                "--setenv".to_string(),
+                crate::sandbox::INTERNAL_GATE_ENV.to_string(),
+                "stop".to_string(),
+            ],
+        );
+    }
+    #[cfg(not(target_os = "macos"))]
     let as_limit = WORKER_AS_LIMIT;
     let cpu_limit = WORKER_CPU_LIMIT_SECS;
     let mut command = std::process::Command::new(&program);
@@ -583,6 +660,8 @@ fn spawn_worker(exe: &std::path::Path) -> Result<std::process::Child, String> {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
+    // 038 方案 A：bwrap 必须把自停标记放进载荷环境；只设置 bwrap 自身环境
+    // 不会可靠地传给它启动的命令。worker 入口 SIGSTOP 后再由确认回调放行。
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -599,21 +678,33 @@ fn spawn_worker(exe: &std::path::Path) -> Result<std::process::Child, String> {
                 // 纪律继续，不因卫生失败阻断启动。系统调用号 436 在
                 // x86_64/aarch64/riscv64 通用表一致；其他架构跳过（依赖
                 // CLOEXEC 纪律）。libc 0.2.189 未导出 SYS_close_range 常量。
-                #[cfg(any(
-                    target_arch = "x86_64",
-                    target_arch = "aarch64",
-                    target_arch = "riscv64"
+                // 038-CI：close_range(436) 为 Linux 专属 syscall——macOS 等其他
+                // unix 上 436 号语义不同，必须一并跳过（同 CLOEXEC 纪律理由）。
+                #[cfg(all(
+                    target_os = "linux",
+                    any(
+                        target_arch = "x86_64",
+                        target_arch = "aarch64",
+                        target_arch = "riscv64"
+                    )
                 ))]
                 {
                     // best-effort：失败（ENOSYS/EINVAL）不阻断 worker 启动
                     let _ = libc::syscall(436 as libc::c_long, 3u64, u64::MAX, 0u64);
                 }
-                let as_lim = libc::rlimit {
-                    rlim_cur: as_limit,
-                    rlim_max: as_limit,
-                };
-                if libc::setrlimit(libc::RLIMIT_AS, &as_lim) != 0 {
-                    return Err(std::io::Error::last_os_error());
+                // 038 macOS CI 实证：Darwin 不实现 RLIMIT_AS——setrlimit 恒
+                // EINVAL＝worker 全部启动失败（os error 22）。macOS 跳过 AS
+                // 上限（登记的平台能力边界），CPU 上限与宿主侧墙钟观察兜底
+                // 保留；Linux 的 AS/CPU 双上限不变。
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let as_lim = libc::rlimit {
+                        rlim_cur: as_limit,
+                        rlim_max: as_limit,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_AS, &as_lim) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
                 }
                 let cpu_lim = libc::rlimit {
                     rlim_cur: cpu_limit,
@@ -631,18 +722,429 @@ fn spawn_worker(exe: &std::path::Path) -> Result<std::process::Child, String> {
         .map_err(|e| format!("启动编排 worker 失败：{e}"))
 }
 
-/// 组杀回收 worker 进程组（setsid 后 pgid＝pid）。
-fn kill_worker(child: &mut std::process::Child) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        let pid = child.id() as libc::pid_t;
-        let _ = unsafe { libc::killpg(pid, libc::SIGKILL) };
+#[derive(Default)]
+struct WorkerCleanup {
+    #[cfg(target_os = "linux")]
+    payload: Option<std::os::fd::OwnedFd>,
+    #[cfg(target_os = "linux")]
+    payload_pid: Option<libc::pid_t>,
+    #[cfg(target_os = "linux")]
+    payload_ns: Option<String>,
+    #[cfg(target_os = "linux")]
+    payload_start_time: Option<u64>,
+    #[cfg(target_os = "linux")]
+    payload_identity_verified: bool,
+    #[cfg(target_os = "linux")]
+    sandbox_identity: Option<crate::sandbox::SandboxPayloadIdentity>,
+}
+
+#[cfg(target_os = "linux")]
+impl WorkerCleanup {
+    fn capture_sandbox_payload(
+        &mut self,
+        identity: &crate::sandbox::SandboxPayloadIdentity,
+    ) -> std::io::Result<()> {
+        if self.payload.is_none() {
+            self.payload = Some(identity.pidfd.try_clone()?);
+            self.payload_pid = Some(identity.pid);
+            self.payload_ns = Some(identity.ns_inode.clone());
+            self.payload_start_time = Some(identity.start_time);
+        }
+        if self.payload_pid != Some(identity.pid)
+            || self.payload_ns.as_deref() != Some(identity.ns_inode.as_str())
+            || self.payload_start_time != Some(identity.start_time)
+        {
+            return Err(std::io::Error::other("沙箱载荷在确认期间改变身份"));
+        }
+        verify_payload_identity_with_snapshot_barrier(
+            identity.pid,
+            identity.reaper_pid,
+            &identity.ns_inode,
+            identity.start_time,
+            self.payload.as_ref().expect("登记后的 payload pidfd"),
+            || {},
+        )?;
+        self.sandbox_identity = Some(identity.clone());
+        self.payload_identity_verified = true;
+        Ok(())
     }
+
+    #[cfg(test)]
+    fn capture_and_verify_payload_identity(
+        &mut self,
+        pid: libc::pid_t,
+        expected_parent: libc::pid_t,
+        expected_ns: &str,
+        expected_start_time: u64,
+        after_snapshot: impl FnOnce(),
+    ) -> std::io::Result<()> {
+        if self.payload.is_none() {
+            self.payload = Some(open_pidfd(pid).map_err(std::io::Error::other)?);
+            self.payload_pid = Some(pid);
+            self.payload_ns = Some(expected_ns.to_string());
+            self.payload_start_time = Some(expected_start_time);
+        }
+        if self.payload_pid != Some(pid)
+            || self.payload_ns.as_deref() != Some(expected_ns)
+            || self.payload_start_time != Some(expected_start_time)
+        {
+            return Err(std::io::Error::other("沙箱载荷在确认期间改变身份"));
+        }
+        verify_payload_identity_with_snapshot_barrier(
+            pid,
+            expected_parent,
+            expected_ns,
+            expected_start_time,
+            self.payload.as_ref().expect("登记后的 payload pidfd"),
+            after_snapshot,
+        )?;
+        self.payload_identity_verified = true;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_pidfd(pid: libc::pid_t) -> Result<std::os::fd::OwnedFd, String> {
+    use std::os::fd::FromRawFd;
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    if fd < 0 {
+        return Err(format!("无法固定 worker 身份：{}", std::io::Error::last_os_error()));
+    }
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) })
+}
+
+#[cfg(target_os = "linux")]
+fn signal_pidfd(fd: &std::os::fd::OwnedFd, signal: i32) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let rc = unsafe {
+        libc::syscall(libc::SYS_pidfd_send_signal, fd.as_raw_fd(), signal, 0, 0)
+    };
+    if rc < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn verify_payload_identity_with_snapshot_barrier(
+    pid: libc::pid_t,
+    expected_parent: libc::pid_t,
+    expected_ns: &str,
+    expected_start_time: u64,
+    fd: &std::os::fd::OwnedFd,
+    after_snapshot: impl FnOnce(),
+) -> std::io::Result<()> {
+    ensure_pidfd_live(fd)?;
+    let actual_ns = std::fs::read_link(format!("/proc/{pid}/ns/pid"))?;
+    let identity = crate::sandbox::read_process_identity(pid)?;
+    if actual_ns != std::path::Path::new(expected_ns)
+        || identity.parent_pid != expected_parent
+        || identity.start_time != expected_start_time
+    {
+        return Err(std::io::Error::other("worker PID 已改变身份"));
+    }
+    // /proc 是多次读取的快照；复查同一 pidfd，覆盖读取期间的退出竞态。
+    after_snapshot();
+    ensure_pidfd_live(fd)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_pidfd_live(fd: &std::os::fd::OwnedFd) -> std::io::Result<()> {
+    if pidfd_has_exited(fd)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "worker 在身份捕获期间已退出",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn inspect_worker_entry(
+    expected: &crate::sandbox::SandboxPayloadIdentity,
+    fd: &std::os::fd::OwnedFd,
+) -> std::io::Result<bool> {
+    let pid = expected.pid;
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status"))?;
+    let is_namespace_payload = status
+        .lines()
+        .find_map(|line| line.strip_prefix("NSpid:"))
+        .and_then(|ids| ids.split_whitespace().last())
+        .is_some_and(|inner_pid| inner_pid != "1");
+    if !is_namespace_payload {
+        return Err(std::io::Error::other("worker 不是 PID namespace 回收器的载荷"));
+    }
+    let identity = crate::sandbox::read_process_identity(pid)?;
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))?;
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))?;
+    if comm.trim() != "tchat-js-ready"
+        || cmdline
+            .rsplit(|byte| *byte == 0)
+            .find(|arg| !arg.is_empty())
+            != Some(b"--internal-js".as_slice())
+    {
+        return Ok(false);
+    }
+    if !worker_entry_stopped(identity.state)
+        || identity.parent_pid != expected.reaper_pid
+        || identity.process_group != expected.process_group
+        || identity.session_id != expected.session_id
+        || identity.process_group != pid
+        || identity.session_id != pid
+    {
+        return Err(std::io::Error::other(
+            "worker 进程组或会话不独立，拒绝放行和组信号回退",
+        ));
+    }
+    ensure_pidfd_live(fd)?;
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn worker_entry_stopped(state: char) -> bool {
+    state == 'T'
+}
+
+#[cfg(unix)]
+fn abort_unreleased_worker(
+    leader_pid: u32,
+    child: &mut std::process::Child,
+    stdin: &mut Option<std::process::ChildStdin>,
+    cleanup: &WorkerCleanup,
+) -> std::io::Result<()> {
+    stdin.take();
+    let pgid = leader_pid as libc::pid_t;
+    #[cfg(target_os = "linux")]
+    if let Some(fd) = cleanup.payload.as_ref() {
+        if cleanup.payload_identity_verified {
+            return kill_worker(child, cleanup).map_err(std::io::Error::other);
+        }
+        // 身份快照期间目标可能已退出。只等待同一个 pidfd 和仍存活的 bwrap；
+        // 若句柄指向不同身份且目标仍活着，不向未验证进程发信号。
+        let deadline = Instant::now() + Duration::from_secs(2);
+        return wait_for_payload_exit_and_bwrap_wait(child, fd, deadline)
+            .map_err(std::io::Error::other);
+    }
+    let group_kill = if unsafe { libc::killpg(pgid, libc::SIGKILL) } == 0 {
+        Ok(())
+    } else {
+        let error = std::io::Error::last_os_error();
+        (error.raw_os_error() == Some(libc::ESRCH))
+            .then_some(())
+            .ok_or(error)
+    };
+    let supervisor = wait_worker_supervisor(child, Instant::now() + Duration::from_secs(2));
+    match (group_kill, supervisor) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(signal), Ok(())) => Err(std::io::Error::other(format!(
+            "未核验载荷组 SIGKILL 失败：{signal}"
+        ))),
+        (Ok(()), Err(wait)) => Err(std::io::Error::other(wait)),
+        (Err(signal), Err(wait)) => Err(std::io::Error::other(format!(
+            "未核验载荷组 SIGKILL 失败：{signal}；监督进程回收失败：{wait}"
+        ))),
+    }
+}
+
+/// 保留 bwrap 监督者，使其等待被终止的命名空间 PID 1。
+fn kill_worker(child: &mut std::process::Child, cleanup: &WorkerCleanup) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    #[cfg(target_os = "linux")]
+    if let Some(fd) = cleanup.payload.as_ref() {
+        if !cleanup.payload_identity_verified {
+            return Err("worker 身份尚未验证，拒绝向未验证目标发信号".into());
+        }
+        if let Some(identity) = cleanup.sandbox_identity.as_ref() {
+            if let Err(group_error) = crate::sandbox::signal_sandbox_payload_group(
+                identity,
+                libc::SIGKILL,
+            ) {
+                if group_error.raw_os_error() != Some(libc::ESRCH)
+                    && group_error.kind() != std::io::ErrorKind::NotFound
+                {
+                    if let Err(pidfd_error) = signal_pidfd(fd, libc::SIGKILL) {
+                        recover_after_pidfd_kill_denied(child, cleanup, fd, &pidfd_error, deadline)?;
+                    }
+                }
+            }
+            crate::sandbox::sweep_sandbox_namespace(&identity.ns_inode);
+        } else {
+            signal_pidfd(fd, libc::SIGKILL).map_err(|e| e.to_string())?;
+        }
+        if let Err(error) = wait_for_payload_exit_and_bwrap_wait(child, fd, deadline) {
+            if child.try_wait().map_err(|wait_error| wait_error.to_string())?.is_some() {
+                return Err(format!("bwrap 在 payload 等待期间退出（{error}）"));
+            }
+            return kill_worker_group_and_confirm(child, cleanup, &error, deadline);
+        }
+        return Ok(());
+    } else {
+        unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL); }
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL); }
     #[cfg(not(unix))]
-    {
-        let _ = child.kill();
+    { let _ = child.kill(); }
+
+    wait_worker_supervisor(child, deadline)
+}
+
+#[cfg(target_os = "linux")]
+fn recover_after_pidfd_kill_denied(
+    child: &mut std::process::Child,
+    cleanup: &WorkerCleanup,
+    fd: &std::os::fd::OwnedFd,
+    kill_error: &std::io::Error,
+    deadline: Instant,
+) -> Result<(), String> {
+    match signal_pidfd(fd, libc::SIGTERM) {
+        Ok(()) => {
+            let grace = Instant::now() + Duration::from_millis(250);
+            if let Err(wait_error) = wait_for_payload_exit_and_bwrap_wait(child, fd, grace) {
+                if child.try_wait().map_err(|error| error.to_string())?.is_some() {
+                    return Err(format!("bwrap 在 payload 等待期间退出（{wait_error}）"));
+                }
+                return kill_worker_group_and_confirm(
+                    child,
+                    cleanup,
+                    &format!("SIGKILL 被拒：{kill_error}；SIGTERM 后未退出：{wait_error}"),
+                    deadline,
+                );
+            }
+        }
+        Err(term_error) if term_error.raw_os_error() == Some(libc::ESRCH) => {}
+        Err(term_error) => {
+            return kill_worker_group_and_confirm(
+                child,
+                cleanup,
+                &format!("SIGKILL 被拒：{kill_error}；SIGTERM 被拒：{term_error}"),
+                deadline,
+            );
+        }
     }
-    child.wait().map(|_| ()).map_err(|e| format!("回收 worker 失败：{e}"))
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_payload_exit_and_bwrap_wait(
+    child: &mut std::process::Child,
+    fd: &std::os::fd::OwnedFd,
+    deadline: Instant,
+) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::ExitStatusExt;
+    loop {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            if status.signal().is_some() {
+                return Err("bwrap 被外力终止，payload wait 责任未确认".into());
+            }
+            if !pidfd_has_exited(fd).map_err(|error| error.to_string())? {
+                return Err("bwrap 在 payload 退出前结束".into());
+            }
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("worker 回收确认超时".into());
+        }
+        let timeout_ms = remaining.as_millis().clamp(1, 20) as i32;
+        let mut pfd = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if rc < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(format!("检查 worker 回收失败：{error}"));
+        }
+        if pfd.revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+            return wait_for_bwrap_exit(child, deadline);
+        }
+        if pfd.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+            return Err(format!("worker pidfd poll 返回异常：{:#x}", pfd.revents));
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_bwrap_exit(
+    child: &mut std::process::Child,
+    deadline: Instant,
+) -> Result<(), String> {
+    use std::os::unix::process::ExitStatusExt;
+    loop {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            if status.signal().is_some() {
+                return Err("bwrap 被外力终止，payload wait 责任未确认".into());
+            }
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("bwrap 完成 payload wait 超时".into());
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn pidfd_has_exited(fd: &std::os::fd::OwnedFd) -> std::io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    let mut pfd = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    if unsafe { libc::poll(&mut pfd, 1, 0) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if pfd.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+        return Err(std::io::Error::other(format!(
+            "worker pidfd poll 返回异常：{:#x}",
+            pfd.revents
+        )));
+    }
+    Ok(pfd.revents & (libc::POLLIN | libc::POLLHUP) != 0)
+}
+
+#[cfg(target_os = "linux")]
+fn kill_worker_group_and_confirm(
+    child: &mut std::process::Child,
+    cleanup: &WorkerCleanup,
+    cause: &str,
+    deadline: Instant,
+) -> Result<(), String> {
+    let payload = cleanup.payload.as_ref().expect("pidfd fallback requires payload");
+    let identity = cleanup.sandbox_identity.as_ref()
+        .ok_or_else(|| format!("worker 进程组身份未捕获，拒绝回退信号（{cause}）"))?;
+    if identity.process_group != identity.pid
+        || identity.session_id != identity.pid
+        || identity.process_group == child.id() as libc::pid_t
+    {
+        return Err(format!("worker 进程组身份不独立，拒绝回退信号（{cause}）"));
+    }
+    crate::sandbox::signal_sandbox_payload_group(identity, libc::SIGKILL)
+        .map_err(|error| format!("worker 进程组信号被拒（{cause}；{error}）"))?;
+    crate::sandbox::sweep_sandbox_namespace(&identity.ns_inode);
+    wait_for_payload_exit_and_bwrap_wait(child, payload, deadline)
+        .map_err(|error| format!("worker 进程组回退未确认（{cause}；载荷 pidfd/bwrap={error}）"))?;
+    Ok(())
+}
+
+fn wait_worker_supervisor(child: &mut std::process::Child, deadline: Instant) -> Result<(), String> {
+    loop {
+        if child.try_wait().map_err(|e| format!("回收 worker 失败：{e}"))?.is_some() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("worker 监督进程回收超时".into());
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
 }
 
 /// 叶子拒绝错误帧：{code, message, execution}（§1.3）。
@@ -667,6 +1169,9 @@ impl CellHandle {
         history: &[crate::prompt::HistoryItem],
     ) -> Observation {
         if self.closed {
+            if let Some(error) = self.cleanup_error.clone() {
+                return self.cleanup_failed_observation(budget, error);
+            }
             return self.terminal_observation(budget, Some(leaf_error(
                 "CELL_CLOSED",
                 "cell 已关闭，句柄已释放",
@@ -675,24 +1180,57 @@ impl CellHandle {
         }
         let deadline = Instant::now() + Duration::from_millis(yield_ms);
         loop {
+            if self.terminal.is_some() && self.inflight.is_empty() && self.queue.is_empty() {
+                break; // 终态且收尾完成
+            }
+            let now = Instant::now();
+            if now >= self.wall_deadline {
+                let message = format!(
+                    "worker 超过 {} 秒墙钟时限",
+                    WORKER_WALL_LIMIT_MS / 1000
+                );
+                self.terminal = Some(Terminal {
+                    ok: false,
+                    error: Some(message.clone()),
+                    unawaited: self.inflight.len(),
+                });
+                let mut observation = self.observation_for(
+                    budget,
+                    CellStatus::Failed,
+                    Some(leaf_error("WALL_TIME_LIMIT", message, LeafExecution::Unknown)),
+                );
+                self.close(CellCloseReason::Terminated, sink, history);
+                self.add_cleanup_failure(&mut observation);
+                return observation;
+            }
             self.pump_queue(sink, history);
             if self.terminal.is_some() && self.inflight.is_empty() && self.queue.is_empty() {
                 break; // 终态且收尾完成
             }
             let now = Instant::now();
+            if now >= self.wall_deadline {
+                continue;
+            }
             if now >= deadline || turn_cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
                 break;
             }
+            let wait_until = deadline.min(self.wall_deadline);
             match self
                 .reader_rx
-                .recv_timeout(deadline.saturating_duration_since(now))
+                .recv_timeout(wait_until.saturating_duration_since(now))
             {
                 Ok(Msg::Worker(frame)) => {
+                    if Instant::now() >= self.wall_deadline {
+                        continue;
+                    }
                     if !self.handle_worker_frame(frame, sink, history) {
                         break;
                     }
                 }
                 Ok(Msg::LeafDone { call_id, outcome }) => {
+                    if Instant::now() >= self.wall_deadline {
+                        continue;
+                    }
                     self.harvest_leaf(call_id, outcome, sink, history);
                 }
                 Ok(Msg::ReaderDead(reason)) => {
@@ -719,21 +1257,23 @@ impl CellHandle {
         }
         // 输出累计超限：关闭失败（不能靠频繁 wait 绕过，§1.7）。
         if self.buffer.total_over_limit {
-            let observation = self.observation_for(budget, CellStatus::Failed, Some(leaf_error(
+            let mut observation = self.observation_for(budget, CellStatus::Failed, Some(leaf_error(
                 "OUTPUT_LIMIT",
                 "cell 累计输出超过 1 MiB 上限，已关闭",
                 LeafExecution::Unknown,
             )));
             self.close(CellCloseReason::OutputLimit, sink, history);
+            self.add_cleanup_failure(&mut observation);
             return observation;
         }
         let status = self.current_status();
         let error = self.terminal_error();
-        let observation = self.observation_for(budget, status, error);
+        let mut observation = self.observation_for(budget, status, error);
         // 终态已交付且输出取尽：关闭释放句柄（§1.4「终态被交付后释放句柄」）。
         if status != CellStatus::Running && self.buffer.pending.is_empty() {
             self.close(CellCloseReason::TerminalConsumed, sink, history);
         }
+        self.add_cleanup_failure(&mut observation);
         observation
     }
 
@@ -746,6 +1286,9 @@ impl CellHandle {
         history: &[crate::prompt::HistoryItem],
     ) -> Observation {
         if self.closed {
+            if let Some(error) = self.cleanup_error.clone() {
+                return self.cleanup_failed_observation(0, error);
+            }
             return self.terminal_observation(0, None);
         }
         // 完成先于终止且已提交（无未结算）：返回 completed。
@@ -754,15 +1297,31 @@ impl CellHandle {
             .as_ref()
             .is_some_and(|t| t.ok && self.inflight.is_empty() && self.queue.is_empty());
         if completed {
-            let observation = self.observation_for(0, CellStatus::Completed, None);
+            let mut observation = self.observation_for(0, CellStatus::Completed, None);
             self.close(CellCloseReason::TerminalConsumed, sink, history);
+            self.add_cleanup_failure(&mut observation);
             return observation;
         }
         // 取消在途等待：置 cell 取消标志（dispatch 沿既有取消语义返回真实状态）。
         self.cancel_flag.store(true, Ordering::SeqCst);
-        let observation = self.observation_for(0, CellStatus::Terminated, None);
+        let mut observation = self.observation_for(0, CellStatus::Terminated, None);
         self.close(CellCloseReason::Terminated, sink, history);
+        self.add_cleanup_failure(&mut observation);
         observation
+    }
+
+    fn cleanup_failed_observation(&mut self, budget: usize, error: String) -> Observation {
+        self.observation_for(budget, CellStatus::Failed, Some(leaf_error(
+            "WORKER_REAP_FAILED", &error, LeafExecution::Unknown,
+        )))
+    }
+
+    fn add_cleanup_failure(&self, observation: &mut Observation) {
+        if let Some(error) = &self.cleanup_error {
+            observation.ok = false;
+            observation.status = CellStatus::Failed;
+            observation.error = Some(leaf_error("WORKER_REAP_FAILED", error, LeafExecution::Unknown));
+        }
     }
 
     /// 轮出口统一收尾（宿主退出/取消/模型终文/第 8 次请求；M4 接入）。
@@ -784,7 +1343,10 @@ impl CellHandle {
         history: &[crate::prompt::HistoryItem],
     ) {
         loop {
-            if self.inflight.len() >= MAX_INFLIGHT_LEAVES || self.terminal.is_some() {
+            if self.inflight.len() >= MAX_INFLIGHT_LEAVES
+                || self.terminal.is_some()
+                || Instant::now() >= self.wall_deadline
+            {
                 break;
             }
             let index = self
@@ -977,6 +1539,10 @@ impl CellHandle {
         };
         let can_start =
             self.inflight.len() < MAX_INFLIGHT_LEAVES && !(serial && self.serial_busy);
+        if can_start && Instant::now() >= self.wall_deadline {
+            self.queue.push_back(call);
+            return;
+        }
         if can_start {
             if serial {
                 self.serial_busy = true;
@@ -1207,7 +1773,7 @@ impl CellHandle {
         }
         // 在途收割：取消置位后 dispatch 尽快返回（沿既有取消语义收取真实
         // 结果）；有界等待后仍未返回的留给孤儿 start（结果未知，§1.6）。
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = (Instant::now() + Duration::from_secs(5)).min(self.wall_deadline);
         while !self.inflight.is_empty() && Instant::now() < deadline {
             match self
                 .reader_rx
@@ -1252,7 +1818,10 @@ impl CellHandle {
             let _ = write_frame(stdin, &shutdown_frame(reason.as_str()), MAX_FRAME_BYTES);
         }
         self.stdin = None;
-        let _ = kill_worker(&mut self.child);
+        if let Err(error) = kill_worker(&mut self.child, &self.worker_cleanup) {
+            self.cleanup_error = Some(error);
+            return;
+        }
         let seq = self.event_seq;
         let event = Event {
             kind: EventKind::CellClosed,
@@ -1327,5 +1896,71 @@ mod tests {
         let b = format!("cell-{}", CELL_SEQ.fetch_add(1, Ordering::SeqCst));
         assert_ne!(a, b);
         assert!(a.starts_with("cell-"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn payload_identity_capture_rejects_exit_during_snapshot() {
+        use std::os::fd::AsRawFd;
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("启动身份捕获测试子进程");
+        let pid = child.id() as libc::pid_t;
+        let namespace = std::fs::read_link(format!("/proc/{pid}/ns/pid"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let start_time = crate::sandbox::read_process_identity(pid).unwrap().start_time;
+        let mut cleanup = WorkerCleanup::default();
+        let error = cleanup.capture_and_verify_payload_identity(
+            pid,
+            std::process::id() as libc::pid_t,
+            &namespace,
+            start_time,
+            || {
+                child.kill().expect("在身份快照后终止目标");
+                child.wait().expect("在身份快照后回收目标");
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
+        let fd = cleanup.payload.as_ref().expect("失败收尾仍持有已登记的 pidfd");
+        let mut pfd = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert!(unsafe { libc::poll(&mut pfd, 1, 0) } > 0);
+        assert!(pfd.revents & libc::POLLIN != 0);
+        assert!(!cleanup.payload_identity_verified);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn worker_entry_is_not_ready_before_sigstop() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("启动未就绪载荷");
+        let pid = child.id() as libc::pid_t;
+        assert!(!worker_entry_stopped(
+            crate::sandbox::read_process_identity(pid).unwrap().state
+        ));
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if worker_entry_stopped(crate::sandbox::read_process_identity(pid).unwrap().state) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "测试载荷未进入 T 停止态");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(worker_entry_stopped(
+            crate::sandbox::read_process_identity(pid).unwrap().state
+        ));
+        child.kill().expect("终止测试载荷");
+        child.wait().expect("回收测试载荷");
     }
 }

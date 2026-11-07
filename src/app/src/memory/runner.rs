@@ -69,9 +69,39 @@ fn write_epoch(root: &Path, v: u64) -> Result<(), String> {
     std::fs::rename(&tmp, &path).map_err(|e| format!("重置代数落位失败：{e}"))
 }
 
-/// 根目录 flock（跨进程互斥；Unix 目录 fd 可 flock）。
+/// 根目录锁句柄：Unix＝目录 fd（flock 随 fd 存活）。
 #[cfg(unix)]
-fn flock_root(root: &Path, exclusive: bool) -> Option<std::fs::File> {
+type RootLock = std::fs::File;
+
+/// Windows 根锁句柄：RAII 释放（ReleaseMutex＋CloseHandle）。
+#[cfg(windows)]
+struct RootLock {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    /// 取得所有权（WaitForSingleObject 返回）的线程。ReleaseMutex 契约要求
+    /// 由拥有互斥体的线程释放；守卫跨线程 Drop（如在共享锁临界区内产生的
+    /// 守卫随返回值移动到其他线程）时跳过 ReleaseMutex——互斥体由拥有线程
+    /// 退出时废弃（WAIT_ABANDONED＝flock「进程死即释放」同语义），临界区内
+    /// 的代数复核兜底一致性。
+    owner: std::thread::ThreadId,
+}
+
+#[cfg(windows)]
+impl Drop for RootLock {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::ReleaseMutex;
+        unsafe {
+            if self.owner == std::thread::current().id() {
+                ReleaseMutex(self.handle);
+            }
+            CloseHandle(self.handle);
+        }
+    }
+}
+
+/// 根目录锁（跨进程互斥；Unix 目录 fd 可 flock）。
+#[cfg(unix)]
+fn flock_root(root: &Path, exclusive: bool) -> Option<RootLock> {
     use std::os::unix::io::AsRawFd;
     let f = std::fs::File::open(root).ok()?;
     let ok = unsafe {
@@ -91,61 +121,60 @@ fn flock_root(root: &Path, exclusive: bool) -> Option<std::fs::File> {
     }
 }
 
-/// Windows 版：LockFileEx（共享/独占由 exclusive 决定，立即失败模式）。
-/// 锁随句柄存活（SharedWriteGuard 持有至临界区结束），句柄关闭＝释放。
+/// Windows 版：命名互斥体（`Local\<root 路径哈希>`，随登录会话隔离，不产生
+/// 文件系统痕迹）。Windows 不能对目录句柄 LockFileEx/加字节 range 锁——
+/// 038 CI 实测 flock_root 因此恒失败，全部共享锁静默返回 None、写入临界区
+/// 全部中止（memory 管线零产出）。命名互斥体是 flock-on-directory 的标准
+/// 等价物：独占/共享共用一把（互斥关系保持；共享方彼此串行——写临界区为
+/// 短临界区，且各临界区内有代数复核，串行化不改变契约语义）；阻塞等待与
+/// Unix 阻塞 flock 对齐；WAIT_ABANDONED 视为取得（持有进程已死＝flock 的
+/// 「进程死即释放」，临界区内代数复核兜底一致性）。
 #[cfg(windows)]
-fn flock_root(root: &Path, exclusive: bool) -> Option<std::fs::File> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
-    };
-    let f = std::fs::File::open(root).ok()?;
-    let mut ov: windows_sys::Win32::System::IO::OVERLAPPED = unsafe { std::mem::zeroed() };
-    let flags = if exclusive {
-        LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY
-    } else {
-        LOCKFILE_FAIL_IMMEDIATELY
-    };
-    let ok = unsafe { LockFileEx(f.as_raw_handle() as _, flags as u32, 0, 1, 0, &mut ov) };
-    if ok != 0 {
-        Some(f)
-    } else {
-        None
+fn flock_root(root: &Path, _exclusive: bool) -> Option<RootLock> {
+    use sha2::{Digest, Sha256};
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{CreateMutexW, INFINITE, WaitForSingleObject};
+
+    let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
+    let name: String = format!(
+        "Local\\tchat-memory-{}\0",
+        digest.iter().take(16).map(|b| format!("{b:02x}")).collect::<String>()
+    );
+    let wide: Vec<u16> = name.encode_utf16().collect();
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };
+    if handle.is_null() {
+        return None;
     }
+    let wait = unsafe { WaitForSingleObject(handle, INFINITE) };
+    if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED {
+        unsafe { CloseHandle(handle) };
+        return None;
+    }
+    Some(RootLock { handle, owner: std::thread::current().id() })
 }
 
 /// 共享写守卫（RAII）：持有期间 reset 的排他清空被互斥——「检查代数＋
 /// 实际修改」由此构成原子域（任务凭据绑定/prepare/同步/Git 收尾共用）。
 pub struct SharedWriteGuard {
-    _file: std::fs::File,
+    _lock: RootLock,
 }
 
 /// 取得根目录共享锁（写入临界区入口；跨进程有效）。失败返回 None——
 /// 调用方按无法进入临界区处理（中止该次写入）。
-#[cfg(unix)]
 pub fn lock_shared(root: &Path) -> Option<SharedWriteGuard> {
-    flock_root(root, false).map(|_file| SharedWriteGuard { _file })
+    flock_root(root, false).map(|lock| SharedWriteGuard { _lock: lock })
 }
 
 /// 首次建库守卫：共享锁内「检查代数＋建库」同临界区（防检查-建库窗口内
-/// reset）；代际失配返回 None（调用方中止）。Windows 无 flock——退化为
-/// 仅检查（登记限制，见记录）。
+/// reset）；代际失配返回 None（调用方中止）。
 fn open_store_if_valid(root: &Path, epoch: u64, clock: crate::memory::Clock) -> Option<MemoryStore> {
-    #[cfg(unix)]
-    {
-        let _lock = flock_root(root, false);
-        if read_epoch(root) != epoch {
-            return None;
-        }
-        MemoryStore::open(root, clock).ok()
+    let _lock = flock_root(root, false);
+    if read_epoch(root) != epoch {
+        return None;
     }
-    #[cfg(not(unix))]
-    {
-        if read_epoch(root) != epoch {
-            return None;
-        }
-        MemoryStore::open(root, clock).ok()
-    }
+    MemoryStore::open(root, clock).ok()
 }
 
 // ---------- 013-M7 收口：后台触发直接计数 ----------
@@ -579,7 +608,6 @@ pub fn memory_reset(user_dir: &Path, args: &str) -> String {
     }
     // 排他锁内：清空＋代数自增（与一切写入者的共享锁互斥——返回后旧任务
     // 的配对凭据必然失配，写入入口一律拒绝）
-    #[cfg(unix)]
     let _excl = flock_root(&root, true);
     let next_epoch = read_epoch(&root) + 1;
     let mut cleared = 0usize;
@@ -587,13 +615,51 @@ pub fn memory_reset(user_dir: &Path, args: &str) -> String {
         Ok(e) => e,
         Err(e) => return format!("错误：读取记忆根失败：{e}"),
     };
+    let db_path = crate::memory::store::memories_db_path(&root);
+    let mut db_drop_failed = false;
     for entry in entries.flatten() {
         let path = entry.path();
-        let ok = match entry.file_type() {
+        let mut ok = match entry.file_type() {
             Ok(t) if t.is_dir() => std::fs::remove_dir_all(&path).is_ok(),
             Ok(_) => std::fs::remove_file(&path).is_ok(),
             Err(_) => false,
         };
+        // Windows：在途连接持有的 memories.sqlite 不可删除（unix unlink 语义
+        // 差异）——降级为内容重置（DROP 全部用户表），生成内容同样清空＝
+        // 「重置后无生成记忆」的外部契约不变；文件作为基础设施保留（同 .epoch）
+        if !ok && path == db_path {
+            if let Ok(conn) =
+                rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            {
+                // 事务包裹＋表名引号转义（038 安全测试 D2：中途失败不得以
+                // 「已清理」掩盖）
+                let drop_all = |conn: &rusqlite::Connection| -> rusqlite::Result<()> {
+                    let tables: Vec<String> = {
+                        let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?;
+                        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+                        rows.collect::<rusqlite::Result<Vec<String>>>()?
+                    };
+                    conn.execute_batch("BEGIN IMMEDIATE")?;
+                    let r = (|| {
+                        for t in &tables {
+                            let escaped = t.replace('"', "\"\"");
+                            conn.execute(&format!("DROP TABLE IF EXISTS \"{escaped}\""), [])?;
+                        }
+                        Ok::<(), rusqlite::Error>(())
+                    })();
+                    match r {
+                        Ok(()) => conn.execute_batch("COMMIT").map(|_| ()),
+                        Err(e) => {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            Err(e)
+                        }
+                    }
+                };
+                let dropped = drop_all(&conn).is_ok();
+                ok = dropped;
+                db_drop_failed = !dropped;
+            }
+        }
         if ok {
             cleared += 1;
         }
@@ -609,7 +675,13 @@ pub fn memory_reset(user_dir: &Path, args: &str) -> String {
                 e.as_ref()
                     .ok()
                     .and_then(|e| e.file_name().into_string().ok())
-                    .is_some_and(|n| n != EPOCH_FILE)
+                    // DROP 失败的 DB 计回残留（安全测试 D2：不得以「已清理」掩盖）
+            .is_some_and(|n| {
+                n != EPOCH_FILE && {
+                    let p = root.join(&n);
+                    p != db_path || db_drop_failed
+                }
+            })
             })
             .count()
         })

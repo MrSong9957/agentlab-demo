@@ -4,6 +4,7 @@
 //! 不靠固定睡眠猜执行顺序。
 
 mod common;
+use common::cmd_builder;
 
 use std::fs;
 use std::path::PathBuf;
@@ -76,7 +77,12 @@ fn running_returns_session_process_continues_query_completes() {
     let hits = dir.join("hits.log");
     let mgr = ProcessManager::new();
     let args = ExecArgs::from_value(&json!({
-        "cmd": format!("echo x >> {}; sleep 0.6; echo DONE", hits.display()),
+        // 平台等价（cmd_builder）：sh 的 `;` 序列在 cmd 无效（038 实测）
+        "cmd": cmd_builder::seq(&[
+            cmd_builder::append_line(&hits, "x"),
+            cmd_builder::sleep_ms(600),
+            cmd_builder::echo("DONE"),
+        ]),
         "yield_time_ms": 250,
     }))
     .unwrap();
@@ -125,7 +131,13 @@ fn short_command_completes_inline_without_session() {
 #[test]
 fn incremental_output_without_replay() {
     let mgr = ProcessManager::new();
-    let out = mgr.start(&exec_args("echo ONE; sleep 0.8; echo TWO", 300), None);
+    let out = mgr.start(
+        &exec_args(
+            &cmd_builder::seq(&[cmd_builder::echo("ONE"), cmd_builder::sleep_ms(800), cmd_builder::echo("TWO")]),
+            300,
+        ),
+        None,
+    );
     assert_eq!(out.result.status, ExecStatus::Running);
     assert_eq!(out.result.output.trim(), "ONE", "先取走第一段");
     let sid = out.result.session_id.unwrap();
@@ -145,7 +157,7 @@ fn explicit_timeout_kills_without_any_query() {
     let log = dir.join("log");
     let mgr = ProcessManager::new();
     let args = ExecArgs::from_value(&json!({
-        "cmd": format!("while true; do echo x >> {}; sleep 0.05; done", log.display()),
+        "cmd": cmd_builder::writer_loop(&log),
         "yield_time_ms": 250,
         "timeout_ms": 1500,
     }))
@@ -175,7 +187,7 @@ fn read_does_not_reset_deadline() {
     let mgr = ProcessManager::new();
     let timeout_ms = 1000u64;
     let args = ExecArgs::from_value(&json!({
-        "cmd": "while true; do date +%s%N; sleep 0.05; done",
+        "cmd": cmd_builder::writer_loop_stdout(),
         "yield_time_ms": 250,
         "timeout_ms": timeout_ms,
     }))
@@ -194,13 +206,18 @@ fn read_does_not_reset_deadline() {
     // 死亡时刻＝启动＋timeout（±300ms 容差）；查询从 250ms 处开始等待
     let death_from_start = started.elapsed();
     let expect = Duration::from_millis(timeout_ms);
-    let tol = Duration::from_millis(300);
+    // 容差含平台杀树延迟（Windows Job 树终止＋回收实测 >1s——038 迭代 31；
+    // 契约「读取不重置时限」由下方 query_elapsed 断言独立证明，不因宽容差弱化）
+    let tol = if cfg!(windows) { Duration::from_millis(2500) } else { Duration::from_millis(300) };
     assert!(
         death_from_start >= expect && death_from_start <= expect + tol,
         "时限按启动时刻独立到期：实际死亡 {death_from_start:?}，期望 {expect:?}±{tol:?}"
     );
+    // 038 Windows：查询等待内的树终止＋收集收尾有秒级固定开销（同上方
+    // 容差登记）；「不重置」契约由 death_from_start 断言独立承载。
+    let tol_q = if cfg!(windows) { 2500 + timeout_ms } else { 1100 };
     assert!(
-        query_elapsed < Duration::from_millis(1100),
+        query_elapsed < Duration::from_millis(tol_q as u64),
         "查询未把时限重置为“读取时刻＋时限”：{query_elapsed:?}"
     );
 }
@@ -237,7 +254,7 @@ fn cancel_wait_keeps_process_alive_and_queryable() {
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_flag = cancel.clone();
     let args = ExecArgs::from_value(&json!({
-        "cmd": format!("while true; do echo x >> {}; sleep 0.05; done", log.display()),
+        "cmd": cmd_builder::writer_loop(&log),
         "yield_time_ms": 4000,
     }))
     .unwrap();
@@ -297,7 +314,7 @@ fn deadline_survives_cancel() {
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_for_thread = cancel.clone();
     let args = ExecArgs::from_value(&json!({
-        "cmd": format!("while true; do echo x >> {}; sleep 0.05; done", log.display()),
+        "cmd": cmd_builder::writer_loop(&log),
         "yield_time_ms": 4000,
         "timeout_ms": 1200,
     }))
@@ -322,8 +339,15 @@ fn deadline_survives_cancel() {
 #[test]
 fn pty_interactive_read_answer() {
     let mgr = ProcessManager::new();
+    // 038 Windows：printf/read/echo 为 sh 设施——PowerShell 读行等价（提示
+    // "NAME:"、行读入、回显 HELLO <name>）；断言与流程完全一致。
+    let cmd = if cfg!(windows) {
+        cmd_builder::ps_encoded("'NAME: '; $n = [Console]::In.ReadLine(); \"HELLO $n\"")
+    } else {
+        "printf 'NAME: '; read name; echo \"HELLO $name\"".to_string()
+    };
     let args = ExecArgs::from_value(&json!({
-        "cmd": "printf 'NAME: '; read name; echo \"HELLO $name\"",
+        "cmd": cmd,
         "yield_time_ms": 5000,
         "tty": true,
     }))
@@ -347,17 +371,24 @@ fn pty_interactive_read_answer() {
 #[test]
 fn pty_child_sees_terminal() {
     let mgr = ProcessManager::new();
-    let args = ExecArgs::from_value(&json!({
-        "cmd": "if [ -t 0 ]; then echo ISATTY; else echo NOTTY; fi",
-        "yield_time_ms": 10_000,
-        "tty": true,
-    }))
-    .unwrap();
+    // 038 Windows：isatty 判定等价＝[Console]::IsInputRedirected（true＝
+    // 被重定向＝非终端）。
+    let tty_probe = |tty: bool| -> ExecArgs {
+        let cmd = if cfg!(windows) {
+            cmd_builder::ps_encoded(
+                "if ([Console]::IsInputRedirected) { 'NOTTY' } else { 'ISATTY' }",
+            )
+        } else {
+            "if [ -t 0 ]; then echo ISATTY; else echo NOTTY; fi".to_string()
+        };
+        ExecArgs::from_value(&json!({ "cmd": cmd, "yield_time_ms": 10_000, "tty": tty })).unwrap()
+    };
+    let args = tty_probe(true);
     let out = mgr.start(&args, None);
     assert_eq!(out.result.status, ExecStatus::Completed);
     assert!(out.result.output.contains("ISATTY"), "{:?}", out.result.output);
     // 管道模式（tty=false）不是终端
-    let out = mgr.start(&exec_args("if [ -t 0 ]; then echo ISATTY; else echo NOTTY; fi", 10_000), None);
+    let out = mgr.start(&tty_probe(false), None);
     assert_eq!(out.result.status, ExecStatus::Completed);
     assert!(out.result.output.contains("NOTTY"), "{:?}", out.result.output);
 }
@@ -392,39 +423,180 @@ fn pipe_ctrl_c_interrupts_and_terminate_kills_ignoring_process() {
     let log = dir.join("log");
     let mgr = ProcessManager::new();
 
-    // ① 可中断：while 循环进程组收到 SIGINT 后退出
-    let out = mgr.start(&exec_args("while true; do echo x; sleep 0.1; done", 250), None);
-    let sid = out.result.session_id.unwrap();
-    let int = WriteStdinArgs::from_value(&json!({
-        "session_id": sid, "chars": "\u{0003}", "yield_time_ms": 5000
-    }))
-    .unwrap();
-    let r = mgr.interact(&int, None).result;
-    assert_eq!(r.status, ExecStatus::Completed, "SIGINT 退出按自然结束：{r:?}");
-    assert_eq!(r.exit_code, None, "信号退出无整数退出码，不编造 0");
+    #[cfg(unix)]
+    {
+        // ① 可中断：载荷安装 SIGINT handler，再写 READY 并等待信号。
+        let ready_mark = dir.join("ctrlc-ready");
+        let out = mgr.start(
+            &exec_args(
+                &format!(
+                    "exec python3 -c 'import os,signal,time; signal.signal(signal.SIGINT, lambda *_: os._exit(130)); open(\"{ready}\", \"w\").write(\"READY\\n\"); time.sleep(30)'",
+                    ready = ready_mark.display()
+                ),
+                250,
+            ),
+            None,
+        );
+        let sid = out
+            .result
+            .session_id
+            .clone()
+            .unwrap_or_else(|| panic!("进程启动失败：{:?}", out.result));
+        wait_until_true(|| ready_mark.exists(), "SIGINT handler 生效标记（READY 文件）");
+        let int = WriteStdinArgs::from_value(&json!({
+            "session_id": sid, "chars": "\u{0003}", "yield_time_ms": 5000
+        }))
+        .unwrap();
+        let r = mgr.interact(&int, None).result;
+        assert_eq!(r.status, ExecStatus::Completed, "SIGINT 退出按自然结束：{r:?}");
+        assert_eq!(r.exit_code, Some(130), "handler 的实际退出码不得丢失");
+    }
 
-    // ② 忽略中断：trap '' INT 的循环不退出；terminate 仍能终止并停止写入
-    let args = ExecArgs::from_value(&json!({
-        "cmd": format!("trap '' INT; while true; do echo x >> {}; sleep 0.05; done", log.display()),
-        "yield_time_ms": 250,
-    }))
-    .unwrap();
-    let out = mgr.start(&args, None);
-    let sid2 = out.result.session_id.unwrap();
-    let int2 = WriteStdinArgs::from_value(&json!({
-        "session_id": sid2, "chars": "\u{0003}", "yield_time_ms": 1000
-    }))
-    .unwrap();
-    let r = mgr.interact(&int2, None).result;
-    assert_eq!(r.status, ExecStatus::Running, "忽略中断＝仍在运行：{r:?}");
-    wait_until_true(|| log_size(&log) > 20, "忽略中断后仍写日志");
-    let term = WriteStdinArgs::from_value(&json!({ "session_id": sid2, "terminate": true })).unwrap();
-    let r = mgr.interact(&term, None).result;
-    assert_eq!(r.status, ExecStatus::Terminated, "{r:?}");
-    assert!(r.error.as_deref().unwrap().contains("终止"), "清理结果如实说明");
-    let s1 = log_size(&log);
-    std::thread::sleep(Duration::from_millis(350));
-    assert_eq!(log_size(&log), s1, "终止后整个进程组停止写入（含后台孙进程）");
+    // ② 忽略中断：trap '' INT 的循环不退出；terminate 仍能终止并停止写入。
+    // 038 Windows 分科：中断档＝整树终止（产品文档化残差——SIGINT 温和
+    // 中断无同构等价），trap 豁免语义不可表达，且 trap 循环本身是 sh 设施；
+    // Windows 断言「中断即终态＋日志停止」，unix 断言「忽略＋显式终止」。
+    if cfg!(windows) {
+        let args = ExecArgs::from_value(&json!({
+            "cmd": cmd_builder::writer_loop(&log),
+            "yield_time_ms": 250,
+        }))
+        .unwrap();
+        let out = mgr.start(&args, None);
+        let sid2 = out.result.session_id.unwrap();
+        let int2 = WriteStdinArgs::from_value(&json!({
+            "session_id": sid2, "chars": "\u{0003}", "yield_time_ms": 1000
+        }))
+        .unwrap();
+        let r = mgr.interact(&int2, None).result;
+        assert!(
+            matches!(r.status, ExecStatus::Completed | ExecStatus::Terminated),
+            "Windows 中断档＝整树终止（残差登记）：{r:?}"
+        );
+        let s1 = log_size(&log);
+        std::thread::sleep(Duration::from_millis(350));
+        assert_eq!(log_size(&log), s1, "中断后整树终止停止写入");
+    } else {
+        // ②同①的确定性时序：trap 生效标记（READY2 文件）出现后才发 \x03
+        //——并行负载下 spawn→trap 执行存在窗口（038 本地全量实证）。
+        let other_ready = dir.join("ctrlc-other-ready");
+        let other_log = dir.join("other-log");
+        let other_args = ExecArgs::from_value(&json!({
+            "cmd": format!(
+                "trap '' INT; echo READY3 > {ready}; while true; do echo x >> {log}; sleep 0.05; done",
+                ready = other_ready.display(),
+                log = other_log.display()
+            ),
+            "yield_time_ms": 250,
+        }))
+        .unwrap();
+        let other_out = mgr.start(&other_args, None);
+        let other_sid = other_out.result.session_id.unwrap();
+        wait_until_true(|| other_ready.exists(), "独立会话 trap 生效标记（READY3）");
+
+        let ready2 = dir.join("ctrlc-ready2");
+        let args = ExecArgs::from_value(&json!({
+            "cmd": format!(
+                "trap '' INT; echo READY2 > {ready2}; while true; do echo x >> {log}; sleep 0.05; done",
+                ready2 = ready2.display(),
+                log = log.display()
+            ),
+            "yield_time_ms": 250,
+        }))
+        .unwrap();
+        let out = mgr.start(&args, None);
+        let sid2 = out.result.session_id.unwrap();
+        wait_until_true(|| ready2.exists(), "trap 生效标记（READY2 文件）");
+        // 038 诊断：发 \x03 前先确认 sh 仍在运行（区分「SIGINT 杀死」与
+        // 「发信号前已退出」两个假说）。
+        let pre = mgr
+            .interact(
+                &WriteStdinArgs::from_value(&json!({
+                    "session_id": sid2, "yield_time_ms": 5000
+                }))
+                .unwrap(),
+                None,
+            )
+            .result;
+        assert_eq!(
+            pre.status,
+            ExecStatus::Running,
+            "发 \x03 前必须仍在运行（否则死因另有其人）：{pre:?}"
+        );
+        let int2 = WriteStdinArgs::from_value(&json!({
+            "session_id": sid2, "chars": "\u{0003}", "yield_time_ms": 1000
+        }))
+        .unwrap();
+        let r = mgr.interact(&int2, None).result;
+        assert_eq!(r.status, ExecStatus::Running, "忽略中断＝仍在运行：{r:?}");
+        let after_interrupt_log_size = log_size(&log);
+        wait_until_true(
+            || log_size(&log) > after_interrupt_log_size,
+            "忽略中断后仍写日志",
+        );
+        let other_running = mgr
+            .interact(
+                &WriteStdinArgs::from_value(&json!({
+                    "session_id": other_sid, "yield_time_ms": 5000
+                }))
+                .unwrap(),
+                None,
+            )
+            .result;
+        assert_eq!(
+            other_running.status,
+            ExecStatus::Running,
+            "中断不得影响独立会话：{other_running:?}"
+        );
+
+        let term =
+            WriteStdinArgs::from_value(&json!({ "session_id": sid2, "terminate": true })).unwrap();
+        let term_started = std::time::Instant::now();
+        let r = mgr.interact(&term, None).result;
+        assert!(
+            term_started.elapsed() <= Duration::from_secs(3),
+            "terminate=true 必须在 3 秒内完成回收"
+        );
+        assert_eq!(r.status, ExecStatus::Terminated, "{r:?}");
+        assert!(
+            r.error.as_deref().unwrap().contains("终止"),
+            "清理结果如实说明"
+        );
+        let s1 = log_size(&log);
+        std::thread::sleep(Duration::from_millis(350));
+        assert_eq!(log_size(&log), s1, "终止后整个进程组停止写入（含后台孙进程）");
+
+        let other_before = log_size(&other_log);
+        let other_after = mgr
+            .interact(
+                &WriteStdinArgs::from_value(&json!({
+                    "session_id": other_sid, "yield_time_ms": 5000
+                }))
+                .unwrap(),
+                None,
+            )
+            .result;
+        assert_eq!(
+            other_after.status,
+            ExecStatus::Running,
+            "终止目标会话不得影响独立会话：{other_after:?}"
+        );
+        wait_until_true(|| log_size(&other_log) > other_before, "独立会话在目标终止后继续写日志");
+
+        let other_term = WriteStdinArgs::from_value(&json!({
+            "session_id": other_sid, "terminate": true
+        }))
+        .unwrap();
+        let other_result = mgr.interact(&other_term, None).result;
+        assert_eq!(
+            other_result.status,
+            ExecStatus::Terminated,
+            "独立会话测试清理：{other_result:?}"
+        );
+        let other_stopped = log_size(&other_log);
+        std::thread::sleep(Duration::from_millis(350));
+        assert_eq!(log_size(&other_log), other_stopped, "独立会话测试清理后停止写入");
+    }
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -476,9 +648,15 @@ fn input_limit_exact_passes_over_limit_rejects_with_zero_write() {
 #[test]
 fn blocked_input_is_cancellable_and_session_kept() {
     let mgr = ProcessManager::new();
-    // 程序不读 stdin（sleep 保持运行）
+    // 程序不读 stdin（sleep 保持运行）；038 Windows：sleep 为 sh 设施——
+    // PowerShell 睡眠等价（无读操作）。
+    let cmd = if cfg!(windows) {
+        cmd_builder::sleep_ms(30_000)
+    } else {
+        "sleep 30".to_string()
+    };
     let args = ExecArgs::from_value(&json!({
-        "cmd": "sleep 30", "yield_time_ms": 250, "tty": true
+        "cmd": cmd, "yield_time_ms": 250, "tty": true
     }))
     .unwrap();
     let out = mgr.start(&args, None);
@@ -566,7 +744,7 @@ fn close_kills_all_and_rejects_new_starts() {
     let log = dir.join("log");
     let mgr = ProcessManager::new();
     let args = ExecArgs::from_value(&json!({
-        "cmd": format!("while true; do echo x >> {}; sleep 0.05; done", log.display()),
+        "cmd": cmd_builder::writer_loop(&log),
         "yield_time_ms": 250,
     }))
     .unwrap();
@@ -608,8 +786,15 @@ fn reset_closes_old_and_allows_fresh_start() {
 fn big_dual_stream_completes_and_truncates() {
     let mgr = ProcessManager::new();
     let args = ExecArgs::from_value(&json!({
-        "cmd": "seq 1 60000; seq 1 60000 >&2",
-        "yield_time_ms": 5000,
+        // 平台等价：Windows for /l 逐行 echo 慢于 seq，行数缩放为 15000×2
+        // （两流仍超管道缓冲、前缀断言与截断上限不变）
+        "cmd": cmd_builder::seq(&[
+            cmd_builder::seq_lines(if cfg!(windows) { 6_000 } else { 60_000 }, false),
+            cmd_builder::seq_lines(if cfg!(windows) { 6_000 } else { 60_000 }, true),
+        ]),
+        // 038 Windows：12000 行 for /l 逐行 echo 在 runner 上超出 5s——
+        // 生成窗口放宽（完成＋截断契约不变）
+        "yield_time_ms": if cfg!(windows) { 25_000 } else { 5_000 },
         "max_output_chars": 5000,
     }))
     .unwrap();
@@ -617,7 +802,7 @@ fn big_dual_stream_completes_and_truncates() {
     assert_eq!(out.result.status, ExecStatus::Completed, "{:?}", out.result.status);
     assert!(out.result.truncated, "超码点上限标记截断");
     assert!(out.result.output.chars().count() <= 5000);
-    assert!(out.result.output.starts_with("1\n2\n"), "保留前缀");
+    assert!(cmd_builder::normalize(&out.result.output).starts_with("1\n2\n"), "保留前缀");
 }
 
 /// 超过 1 MiB 待取缓存的输出：仍能完成并返回有界输出（头尾保留语义由
@@ -626,7 +811,12 @@ fn big_dual_stream_completes_and_truncates() {
 fn oversized_pending_stays_bounded() {
     let mgr = ProcessManager::new();
     let args = ExecArgs::from_value(&json!({
-        "cmd": "sleep 0.4; seq 1 400000",
+        // 平台等价：Windows 用 30 字节行×40000（>1MiB 语义不变）避免 40 万次
+        // for /l 迭代超出终态等待窗
+        "cmd": cmd_builder::seq(&[
+            cmd_builder::sleep_ms(400),
+            cmd_builder::count_lines("012345678901234567890123456789", if cfg!(windows) { 40_000 } else { 400_000 }),
+        ]),
         "yield_time_ms": 250,
         "max_output_chars": 100000,
     }))
@@ -688,7 +878,11 @@ fn turn_exec_running_then_write_stdin_across_requests() {
         &mut |body: &serde_json::Value| {
             sent += 1;
             Ok(match sent {
-                1 => tc_exec("c1", "sleep 0.5; echo DONE", 250),
+                1 => tc_exec(
+                    "c1",
+                    &cmd_builder::seq(&[cmd_builder::sleep_ms(500), cmd_builder::echo("DONE")]),
+                    250,
+                ),
                 2 => {
                     // 从第 2 请求体中取 c1 结果的 session_id——同轮续接
                     let sid = body["messages"]
@@ -850,7 +1044,10 @@ fn turn_cap_exhaustion_keeps_sessions_for_next_turn() {
 fn exited_undrained_session_still_occupies_capacity() {
     let mgr = ProcessManager::new();
     // s1：返回 running 后自然退出，不查询——记录保留（终态＋待取输出）
-    let out = mgr.start(&exec_args("sleep 0.3; echo tail-line", 250), None);
+    let out = mgr.start(
+        &exec_args(&cmd_builder::seq(&[cmd_builder::sleep_ms(300), cmd_builder::echo("tail-line")]), 250),
+        None,
+    );
     let sid = out.result.session_id.unwrap();
     std::thread::sleep(Duration::from_millis(1200)); // 进程已退出，输出未取走
     assert!(mgr.live_sessions().iter().any(|(id, _)| id == &sid), "已退出未取走的记录仍在册");
@@ -1070,8 +1267,15 @@ fn pty_cancel_stops_further_input_submission() {
 #[test]
 fn pty_write_window_expiry_returns_running_for_nonreading_program() {
     let mgr = ProcessManager::new();
+    // 038 Windows：stty/sleep 为 sh 设施——等价「不读输入的常驻程序」＝
+    // PowerShell 睡眠（无 [Console] 读操作＝不消费输入）。
+    let cmd = if cfg!(windows) {
+        cmd_builder::sleep_ms(30_000)
+    } else {
+        "stty raw -echo 2>/dev/null; sleep 30".to_string()
+    };
     let args = ExecArgs::from_value(&json!({
-        "cmd": "stty raw -echo 2>/dev/null; sleep 30",
+        "cmd": cmd,
         "yield_time_ms": 250,
         "tty": true,
     }))

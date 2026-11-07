@@ -1,0 +1,159 @@
+# 038 标准环境全量基线（2026-10-30，节选）
+# 命令：cargo check --locked && cargo test --workspace --no-fail-fast --locked（容器 /workspace，TCHAT_SANDBOX=1 继承态）
+# 完整原始输出约 9k 行，此处节选结果行与失败详情；结论 3852 通过 / 4 失败 / 6 忽略，失败均为存量或机器敏感项（见 2026-10-30-local-verification.md）
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.32s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 165 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 2163 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 9.08s
+     Running tests/security_untrusted_text.rs (target/debug/deps/security_untrusted_text-0d2ae79a5e712509)
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+test result: ok. 289 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 43.27s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/apply_patch.rs (target/debug/deps/apply_patch-e92fc3830d979ffd)
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.54s
+     Running tests/apply_patch_sandbox.rs (target/debug/deps/apply_patch_sandbox-7d71e1ea0b8d46ef)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.90s
+     Running tests/context_injection.rs (target/debug/deps/context_injection-f033bf2a7e4df871)
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+     Running tests/context_management.rs (target/debug/deps/context_management-6fb682a92bd7fc0b)
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.25s
+     Running tests/context_perf.rs (target/debug/deps/context_perf-10e66bebc302d8c7)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 58.28s
+     Running tests/e2e_acceptance.rs (target/debug/deps/e2e_acceptance-329bccb781faf2ff)
+test result: ok. 150 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 30.87s
+     Running tests/e2e_sandbox.rs (target/debug/deps/e2e_sandbox-dd950885ba617924)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.48s
+     Running tests/exec_command.rs (target/debug/deps/exec_command-aa18a6de82049be6)
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.16s
+     Running tests/exec_sandbox.rs (target/debug/deps/exec_sandbox-2d3992db6e5dc0df)
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.49s
+     Running tests/js_orchestration.rs (target/debug/deps/js_orchestration-af746bcd027a6714)
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.59s
+     Running tests/js_orchestration_perf.rs (target/debug/deps/js_orchestration_perf-50ec2c06bf69bd3f)
+test c18_leaf_counts_1_4_31 ... FAILED
+test c18_cold_start_pure_js ... FAILED
+thread 'c18_leaf_counts_1_4_31' (88370) panicked at src/app/tests/js_orchestration_perf.rs:176:9:
+leaf1 p95 中位 367154µs 超过冻结阈值 250000µs（机器/构建变化须重新冻结）
+thread 'c18_cold_start_pure_js' (88368) panicked at src/app/tests/js_orchestration_perf.rs:176:9:
+cold-js p95 中位 346401µs 超过冻结阈值 300000µs（机器/构建变化须重新冻结）
+test result: FAILED. 5 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 264.61s
+error: test failed, to rerun pass `-p terminal-chat --test js_orchestration_perf`
+     Running tests/js_orchestration_security.rs (target/debug/deps/js_orchestration_security-82045da41d1f7d0e)
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.77s
+     Running tests/llm_flow.rs (target/debug/deps/llm_flow-a6b77c6906a02c54)
+test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.59s
+     Running tests/mcp_config.rs (target/debug/deps/mcp_config-39949720b91cf8e8)
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running tests/mcp_http.rs (target/debug/deps/mcp_http-7fef29ead04790da)
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.22s
+     Running tests/mcp_l1.rs (target/debug/deps/mcp_l1-1b99f53e239c0d40)
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/mcp_resources.rs (target/debug/deps/mcp_resources-50c9806c9840532e)
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.18s
+     Running tests/mcp_stdio.rs (target/debug/deps/mcp_stdio-43319d4d6b340d3a)
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 42.48s
+     Running tests/mcp_stdio_sandbox.rs (target/debug/deps/mcp_stdio_sandbox-f7f36b0745fe8a2a)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+     Running tests/mcp_tls.rs (target/debug/deps/mcp_tls-754a8607f60a4106)
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+     Running tests/mcp_turn.rs (target/debug/deps/mcp_turn-f0ca7095db9ffc31)
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.64s
+     Running tests/memory_candidates.rs (target/debug/deps/memory_candidates-4ff5cd6f56dc2528)
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.93s
+     Running tests/memory_feedback.rs (target/debug/deps/memory_feedback-36371ab51452dd4f)
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+     Running tests/memory_inject.rs (target/debug/deps/memory_inject-937ee5d1b8cb518e)
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+     Running tests/memory_lifecycle.rs (target/debug/deps/memory_lifecycle-ab4af6887342e20f)
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.96s
+     Running tests/memory_phase1.rs (target/debug/deps/memory_phase1-39d8109024a6678b)
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.77s
+     Running tests/memory_phase2.rs (target/debug/deps/memory_phase2-94232e27ac6feb1c)
+test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.19s
+     Running tests/memory_retention.rs (target/debug/deps/memory_retention-e97cade75e4a250d)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.78s
+     Running tests/memory_runner.rs (target/debug/deps/memory_runner-c73a79df0a9d32d0)
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.75s
+     Running tests/memory_storage_files.rs (target/debug/deps/memory_storage_files-8cdafdb697959317)
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.67s
+     Running tests/memory_store.rs (target/debug/deps/memory_store-1f0261cb8af794f8)
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s
+     Running tests/message_to_user.rs (target/debug/deps/message_to_user-b80c751f0c45e087)
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+     Running tests/multi_agent.rs (target/debug/deps/multi_agent-f6f09393a2d4e6be)
+test result: ok. 22 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 17.50s
+     Running tests/multi_agent_security_probe.rs (target/debug/deps/multi_agent_security_probe-c69e7de60bb5e332)
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.62s
+     Running tests/native_model_apis.rs (target/debug/deps/native_model_apis-341dbb5188a02331)
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.89s
+     Running tests/proc_session.rs (target/debug/deps/proc_session-d291dc5a5858726d)
+test pipe_ctrl_c_interrupts_and_terminate_kills_ignoring_process ... FAILED
+thread 'pipe_ctrl_c_interrupts_and_terminate_kills_ignoring_process' (100706) panicked at src/app/tests/proc_session.rs:419:5:
+  left: Completed
+ right: Running
+test result: FAILED. 27 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.95s
+error: test failed, to rerun pass `-p terminal-chat --test proc_session`
+     Running tests/prompt_assembly.rs (target/debug/deps/prompt_assembly-54bbdaf81469bd83)
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+     Running tests/request_permissions.rs (target/debug/deps/request_permissions-e54fa196b587be54)
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+     Running tests/request_permissions_sandbox.rs (target/debug/deps/request_permissions_sandbox-c5b102e856f084c1)
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 87.34s
+     Running tests/sandbox_lifecycle.rs (target/debug/deps/sandbox_lifecycle-26ab799f35fa3ced)
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.19s
+     Running tests/sandbox_matrix_probes.rs (target/debug/deps/sandbox_matrix_probes-c91cfed8f73431cf)
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 28.83s
+     Running tests/security_attack_031.rs (target/debug/deps/security_attack_031-4c719e43b4c33a03)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.01s
+     Running tests/session.rs (target/debug/deps/session-2710ba118cfd4fb5)
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.13s
+     Running tests/session_cli.rs (target/debug/deps/session_cli-e37f202f7d7b862f)
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.63s
+     Running tests/session_perf.rs (target/debug/deps/session_perf-ad2084daf1014646)
+test perf_tiers_baseline_driven ... FAILED
+thread 'perf_tiers_baseline_driven' (106899) panicked at src/app/tests/session_perf.rs:371:5:
+/sessions 百文件列出耗时 271 ms 超过 50 ms
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 49.90s
+error: test failed, to rerun pass `-p terminal-chat --test session_perf`
+     Running tests/tool_loop.rs (target/debug/deps/tool_loop-a80b691e6f716078)
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.25s
+     Running tests/tool_search.rs (target/debug/deps/tool_search-21cc5ec65c11ff91)
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.37s
+     Running tests/tool_search_perf.rs (target/debug/deps/tool_search_perf-09a891ba2a4d294d)
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.78s
+     Running tests/user_images.rs (target/debug/deps/user_images-19be071729d84f32)
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.05s
+     Running tests/user_input.rs (target/debug/deps/user_input-a46795a317aab3a7)
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+     Running tests/user_input_async.rs (target/debug/deps/user_input_async-b3e6cf7cbbe1bf1e)
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+     Running tests/user_input_security.rs (target/debug/deps/user_input_security-fe7e6211769277a2)
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.44s
+     Running tests/view_image.rs (target/debug/deps/view_image-258b5817855447be)
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.08s
+   Doc-tests terminal_chat
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+error: 3 targets failed:

@@ -1,0 +1,83 @@
+PASS S01 未验证拒跑（退出码≠0）
+PASS S01 提示先运行模拟验证
+PASS S02 正常路径恢复成功
+PASS S02 备份完成里程碑
+PASS S02 重启完成里程碑（ID 未变且 running）
+PASS S02 全程无阻断
+PASS S02 restart 恰好执行一次
+PASS S02 workspace 排除 .env
+PASS S02 workspace 排除 target/
+PASS S02 workspace 排除已跟踪夹具（不回填）
+PASS S02 夹具当前内容独立保全
+PASS S02 夹具删除状态登记
+PASS S02 副本如实显示排除（未宣称回填后＝原目录备份）
+PASS S02 wt 备份排除敏感文件
+PASS S02 三组内容双读证据落盘
+PASS S02 核验通过（退出码 0）
+PASS S02 核验完成里程碑
+PASS S02 默认不用 pause（对照实证其使通道失效），协调停止＋双读在案
+PASS S02 内容回归 PASS（不只看 status 行）
+PASS S02 verify 缺参数拒绝（显式目录要求）
+PASS S02 verify 无效目录拒绝
+PASS S03 干净树恢复成功
+PASS S03 备份副本 status 为空（干净树）
+PASS S03 核验通过
+PASS S03 成功执行且输出为空的 git status 是有效结果
+PASS S04 写入者被内容双读检出（非零退出）
+PASS S04 双读检出 M 状态文件的内容变化（status 行不变仍检出）
+PASS S04 未登记备份完成
+PASS S04 未重启
+PASS S05 exec 不可用时经 cp 通道完成保全+重启
+PASS S05 cp 通道（不在容器内建进程）
+PASS S05 重启完成
+PASS S05 重启后 exec 仍不可用→核验不得判完成
+PASS S05 未误报核验完成
+PASS S06 cp/exec 均不可用时经 export 完成保全
+PASS S06 export 通道启用
+PASS S06 命名目录递归提取含深层文件
+PASS S06 重启后 exec 不可用→核验不判完成
+PASS S07 状态读取失败不阻断保全（内容双读承载，缺口登记）
+PASS S07 状态缺口如实登记
+PASS S07 核验端状态读取失败→不得判完成
+PASS S07 必要检查缺失如实报告
+PASS S08 fsck 失败被阻断（非零退出）
+PASS S08 fsck 阻断信息
+PASS S08 未登记备份完成
+PASS S08 未重启
+PASS S09 必要取证文件缺失被阻断
+PASS S09 /tmp 枚举清单落盘
+PASS S09 未重启
+PASS S10 关键文件缺失被阻断
+PASS S10 关键项断言触发
+PASS S10 未重启
+PASS S11 HEAD 与基线不符被阻断
+PASS S11 阻断原因可读（die 走 stdout）
+PASS S11 未重启
+PASS S12 挂载源无法确认被阻断
+PASS S12 阻断原因（金丝雀与路径核对均未通过）
+PASS S12 未重启
+PASS S13 源路径形式不同、金丝雀证实对应→放行
+PASS S13 金丝雀确认方式登记
+PASS S14 重启后 ID 变化被判异常（非零退出）
+PASS S14 restart 已执行（如实记录）
+PASS S14 不登记重启完成
+PASS S15 人工冻结期间保全＋unpause 后重启
+PASS S15 unpause 至重启的处理过程在案
+PASS S15 重启完成
+PASS S16 预置恢复成功
+PASS S16 重启后漂移被检出（非零退出）
+PASS S16 漂移差异报告
+PASS S16 不误报核验完成
+PASS S17 pause 不可用时降级继续（不阻断）
+PASS S17 降级声明在案
+PASS S17 保全条件证据按降级口径登记
+PASS S17 备份完成
+PASS S17 重启完成
+PASS S18 预置恢复成功
+PASS S18 M 状态文件内容漂移被内容回归检出（非零退出）
+PASS S18 status 行比较通过（证明漂移不在 status 层）
+PASS S18 workspace M 文件内容差异检出
+PASS S18 wt M 文件内容差异检出
+PASS S18 不误报核验完成
+
+===== 汇总: 场景=18 通过=81 失败=0 =====

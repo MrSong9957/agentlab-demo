@@ -122,9 +122,9 @@ pub fn deny_context_for(anchor: &Path, policy_path: &Path) -> DenyContext {
 pub fn verify_exe_deployment(anchor: &Path, temp_root: &Path) -> Result<PathBuf, String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("定位自身二进制失败（{e}）：拒绝启动 031 模式"))?;
-    let canon = exe.canonicalize().unwrap_or(exe);
-    let anchor_canon = anchor.canonicalize().unwrap_or_else(|_| anchor.to_path_buf());
-    let temp_canon = temp_root.canonicalize().unwrap_or_else(|_| temp_root.to_path_buf());
+    let canon = canonical_long(&exe);
+    let anchor_canon = canonical_long(&anchor);
+    let temp_canon = canonical_long(&temp_root);
     if canon.starts_with(&anchor_canon) {
         return Err(format!(
             "应用二进制 {} 位于工作区 {} 之内：031 不从可被模型覆盖的工作区产物自再执行\
@@ -159,9 +159,9 @@ pub fn verify_bwrap_backend(
                 .to_string(),
         );
     };
-    let canon = bwrap.canonicalize().unwrap_or_else(|_| bwrap.to_path_buf());
-    let anchor_canon = anchor.canonicalize().unwrap_or_else(|_| anchor.to_path_buf());
-    let temp_canon = temp_root.canonicalize().unwrap_or_else(|_| temp_root.to_path_buf());
+    let canon = canonical_long(&bwrap);
+    let anchor_canon = canonical_long(&anchor);
+    let temp_canon = canonical_long(&temp_root);
     if canon.starts_with(&anchor_canon) {
         return Err(format!(
             "沙箱后端 {} 位于工作区 {} 之内：不通过模型可写位置查找后端（拒绝启动 031）",
@@ -429,9 +429,7 @@ impl Policy {
         })?;
         // 审查 #5：信任来源检查必须用 canonical 路径——`..`/符号链接的词法
         // 形态可绕过组件前缀比较（与 verify_exe_deployment 对 exe 的处理一致）。
-        let path = &path.canonicalize().map_err(|e| {
-            format!("策略路径 {} 无法规范化（{e}）：拒绝启动 031 模式", path.display())
-        })?;
+        let path = &canonical_long(path);
         if !meta.is_file() {
             return Err(format!("策略路径 {} 不是常规文件", path.display()));
         }
@@ -441,8 +439,8 @@ impl Policy {
                 meta.len()
             ));
         }
-        let anchor_canon = anchor.canonicalize().unwrap_or_else(|_| anchor.to_path_buf());
-        let temp_canon = temp_root.canonicalize().unwrap_or_else(|_| temp_root.to_path_buf());
+        let anchor_canon = canonical_long(&anchor);
+        let temp_canon = canonical_long(&temp_root);
         if path.starts_with(&anchor_canon) {
             return Err(format!(
                 "策略文件 {} 位于工作区 {} 之下：策略不能来自 cwd 项目配置（拒绝启动 031）",
@@ -490,7 +488,7 @@ impl Policy {
             // 存在性三分类（fail-closed 语义在挂载层；此处 missing＝无对象）
             let Ok(md) = std::fs::metadata(&p) else { continue };
             let _ = md;
-            let canon = p.canonicalize().unwrap_or(p);
+            let canon = canonical_long(&p);
             if !out.contains(&canon) {
                 out.push(canon);
             }
@@ -541,9 +539,8 @@ fn parse_path_spec(v: &Value, ctx: &str) -> Result<PathBuf, String> {
     }
     // 已存在的绝对实际路径（§1.3）：加载即验证存在并固定 canonical 形态。
     match std::fs::metadata(p) {
-        Ok(_) => p
-            .canonicalize()
-            .map_err(|e| format!("{ctx}.path {} 无法规范化（{e}）", p.display())),
+        Ok(_) => canonical_long_checked(p)
+            .map_err(|e| format!("{ctx}.path {} 无法规范化（{e}）：拒绝", p.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(format!(
             "{ctx}.path {} 不存在：策略路径必须是已存在的绝对实际路径",
             p.display()
@@ -576,8 +573,8 @@ fn parse_deny_paths(v: &Value) -> Result<Vec<PathBuf>, String> {
             ));
         }
         match std::fs::metadata(p) {
-            Ok(_) => out.push(p.canonicalize().map_err(|e| {
-                format!("deny_paths[{i}] {} 无法规范化（{e}）", p.display())
+            Ok(_) => out.push(canonical_long_checked(&p).map_err(|e| {
+                format!("deny_paths[{i}] {} 无法规范化（{e}）：拒绝", p.display())
             })?),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 return Err(format!(
@@ -701,6 +698,84 @@ pub fn parse_request(raw: &str) -> Result<RawRequest, String> {
     Ok(RawRequest { reason, entries, network })
 }
 
+/// 形态统一的 canonical 路径：canonicalize 后剥离 Windows verbatim 前缀。
+/// 策略（base/requestable/deny）、自动敏感边界与请求 lex 三侧统一存储同一
+/// 长路径形态——否则 `starts_with`/`==` 边界判定因 `\\?\` 与 8.3 短名形态
+/// 差异全部失配（038 Windows 实测：合法请求被误判「超出 requestable」）。
+/// 授权对象不变（同一真实路径的等价文本形态）；unix 上 canonicalize＝
+/// realpath（逐组件符号链接校验已先行），形态恒等＝零行为漂移。
+fn canonical_long(p: &Path) -> PathBuf {
+    canonical_long_checked(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// fail-closed 变体（038 安全测试 B4）：canonicalize 失败时返回错误而非静默
+/// 保留原形态——策略装载路径用它恢复「拒绝启动」语义。
+fn canonical_long_checked(p: &Path) -> std::io::Result<PathBuf> {
+    let canon = std::fs::canonicalize(p)?;
+    #[cfg(windows)]
+    {
+        let s = canon.to_string_lossy().into_owned();
+        // UNC 特判（038 安全测试 B2）：\\?\UNC\srv\share 剥离后是「服务器名
+        // 为 UNC」的畸形形态——还原为原生 \\srv\share 形态
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return Ok(std::path::PathBuf::from(format!("\\\\\\{rest}")));
+        }
+        Ok(std::path::PathBuf::from(
+            s.strip_prefix(r"\\?\").map(String::from).unwrap_or(s),
+        ))
+    }
+    #[cfg(not(windows))]
+    Ok(canon)
+}
+
+/// 「p 位于 prefix 之下（或相等）」的真实对象判定：先做文本前缀快路径；
+/// 文本失配时按「最长已存在祖先的 canonicalize＋词法余部」比较真实对象。
+/// - Windows：尾组件不存在时 canonicalize 回退原形态（8.3 短名／verbatim
+///   前缀残留）（038 Windows CI 实测：install\bin 形态逃过目录级 deny）；
+/// - macOS：/var→private/var 符号链接使词法形态与 canonical 形态分叉
+///  （038 macOS CI 实测：write /var/... 与 deny /private/var/... 失配）；
+/// - Linux：canonicalize 恒成功、形态恒一，快路径即终局＝零行为漂移。
+fn path_covers(p: &Path, prefix: &Path) -> bool {
+    if p == prefix || p.starts_with(prefix) {
+        return true;
+    }
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        let p_real = canonical_long(&existing_ancestor_form(p));
+        let prefix_real = canonical_long(&existing_ancestor_form(prefix));
+        return p_real == prefix_real || p_real.starts_with(&prefix_real);
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    false
+}
+
+/// 辅助：p 本身 canonicalize 失败（尾组件不存在/词法形态分叉）时，改用
+/// 最长的已存在祖先的 canonicalize 结果＋词法余部重建等价形态。
+#[cfg(any(windows, target_os = "macos"))]
+fn existing_ancestor_form(p: &Path) -> PathBuf {
+    if std::fs::canonicalize(p).is_ok() {
+        return p.to_path_buf();
+    }
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    let mut anc = p.to_path_buf();
+    loop {
+        match (anc.parent(), anc.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+                rest.push(name.to_os_string());
+                anc = parent.to_path_buf();
+                if std::fs::canonicalize(&anc).is_ok() {
+                    let mut out = canonical_long(&anc);
+                    for part in rest.into_iter().rev() {
+                        out.push(part);
+                    }
+                    return out;
+                }
+            }
+            _ => return p.to_path_buf(),
+        }
+    }
+}
+
 /// 路径规范化（§1.4）：相对路径基于会话 cwd 解析（不基于上一条 shell 的
 /// cd）；词法消除 `.`/`..` 后**逐组件**验证存在且无符号链接；不做 URL
 /// 解码、Unicode 归一化或环境展开；重复项去重、同路径 write 覆盖 read。
@@ -714,9 +789,38 @@ pub fn normalize_request(req: &RawRequest, cwd: &Path) -> Result<NormalizedReque
             cwd.join(p)
         };
         let lex = crate::sandbox::absolute_lexical(&joined);
-        let mut cur = PathBuf::from("/");
-        for comp in lex.components() {
+        // 逐组件起点＝真实前缀＋根：Windows 绝对路径含盘符前缀（C:）——从 "/" 起步
+        // 会丢弃盘符、按进程当前盘解析组件（runner 仓库在 D:、临时目录在 C: →
+        // 组件 NotFound 误报「路径组件不存在」——038 Windows CI 实测）。
+        // 038 macOS CI 实证：会话 cwd 落在 /var→private/var 这类系统级符号
+        // 链接之下时，从根起走会把信任锚自身拒掉（「含符号链接组件 /var」），
+        // cwd 之内的一切请求恒失败。锚定走查：请求（词法消解后）位于会话
+        // cwd 之内时，锚内组件以**解析后的 cwd** 起步（一次性解析＝会话建立
+        // 时已判定，非逐请求 TOCTTOU 面），只逐组件验证锚外余部；越出 cwd
+        // 的请求（绝对出界/.. 回溯出界）维持从根起走的既有严格语义。
+        let cwd_lex = crate::sandbox::absolute_lexical(cwd);
+        let cwd_comps: Vec<_> = cwd_lex.components().collect();
+        let lex_comps: Vec<_> = lex.components().collect();
+        let common = lex_comps
+            .iter()
+            .zip(cwd_comps.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let anchored = common == cwd_comps.len();
+        let mut cur = if anchored {
+            std::fs::canonicalize(cwd)
+                .map_err(|_| "路径组件状态不可判定：拒绝（会话 cwd 解析失败）".to_string())?
+        } else {
+            PathBuf::new()
+        };
+        for comp in lex_comps.into_iter().skip(if anchored { common } else { 0 }) {
             match comp {
+                std::path::Component::Prefix(prefix) => {
+                    cur.push(prefix.as_os_str());
+                }
+                std::path::Component::RootDir => {
+                    cur.push(std::path::MAIN_SEPARATOR.to_string());
+                }
                 std::path::Component::Normal(part) => {
                     cur.push(part);
                     match std::fs::symlink_metadata(&cur) {
@@ -739,18 +843,18 @@ pub fn normalize_request(req: &RawRequest, cwd: &Path) -> Result<NormalizedReque
                         }
                     }
                 }
-                std::path::Component::RootDir => {}
                 _ => {}
             }
         }
-        match entries.iter_mut().find(|e| e.path == lex) {
+        match entries.iter_mut().find(|e| e.path == canonical_long(&lex)) {
             Some(existing) => {
                 if raw.access == Access::Write {
                     existing.access = Access::Write;
                 }
             }
             None => entries.push(NormalizedEntry {
-                path: lex,
+                // 形态统一：与策略/边界侧同为 canonical_long（长路径、无 verbatim）
+                path: canonical_long(&lex),
                 access: raw.access,
             }),
         }
@@ -988,7 +1092,7 @@ pub fn build_snapshot(
 ) -> Result<crate::sandbox::PolicySnapshot, String> {
     for g in &grants.entries {
         let ok = policy.requestable.entries.iter().any(|r| {
-            g.path.starts_with(&r.path) && r.access.covers(g.access)
+            path_covers(&g.path, &r.path) && r.access.covers(g.access)
         });
         if !ok {
             return Err(format!(
@@ -1034,7 +1138,7 @@ pub fn build_snapshot(
     // 有效 deny（含自动敏感边界）与内容面矛盾：内容路径位于 deny 之下＝保护
     // 的内容又被授权暴露（解析层已拒显式组合；此处覆盖自动边界与部署拓扑）。
     for p in read_paths.iter().chain(write_paths.iter()) {
-        if deny_paths.iter().any(|d| p == d || p.starts_with(d)) {
+        if deny_paths.iter().any(|d| path_covers(p, d)) {
             return Err(format!(
                 "策略矛盾：内容路径 {} 位于永久拒绝路径之下（deny 优先，拒绝启动）",
                 p.display()
@@ -1072,7 +1176,7 @@ pub fn base_covers(policy: &Policy, req: &NormalizedRequest) -> bool {
             .base
             .entries
             .iter()
-            .any(|b| e.path.starts_with(&b.path) && b.access.covers(e.access))
+            .any(|b| path_covers(&e.path, &b.path) && b.access.covers(e.access))
     }) && (!req.network || policy.base.network)
 }
 

@@ -14,7 +14,7 @@ docker compose -f .devcontainer/compose.yaml up -d --build
 
 ## Node.js、Pi 与 CC-Switch CLI
 
-Dockerfile 使用官方 Node.js 24 LTS 镜像提供 Node/npm，构建时安装 `@earendil-works/pi-coding-agent@latest`；CC-Switch 使用官方 Release 的 latest 安装脚本。程序安装到镜像系统目录，最终仍以 `dev` 运行。
+Dockerfile 使用官方 Node.js 24 LTS 镜像提供 Node/npm；Pi 使用官方 Release 的独立二进制并校验 SHA256，CC-Switch 使用官方 Release 的 latest 安装脚本。程序安装到镜像系统目录，最终仍以 `dev` 运行。
 
 Pi 数据保存在宿主项目的 `.container-state/pi/`，CC-Switch 数据保存在 `.container-state/cc-switch/`，分别挂载到 `/home/dev/.pi` 和 `/home/dev/.cc-switch`。该目录已被 Git 和 Docker 构建上下文排除，可能含密钥、数据库和会话，不要提交或分享其内容。Windows 宿主上的访问权限由目录的 NTFS ACL 管理。
 

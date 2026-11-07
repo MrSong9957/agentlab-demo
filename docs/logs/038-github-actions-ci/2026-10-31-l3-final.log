@@ -1,0 +1,13 @@
+# 038 第二阶段 L3 全量验证（2026-10-31，跨平台修复轮）
+# 命令：cargo check --locked && cargo test --workspace --no-fail-fast --locked（容器标准环境，TCHAT_SANDBOX=1）
+# 结果：3854 通过 / 2 失败 / 6 忽略（对比修复前基线 3852/4/6）
+# 2 个失败均为已登记存量（干净 HEAD 复现）：
+thread 'pipe_ctrl_c_interrupts_and_terminate_kills_ignoring_process' (380791) panicked at src/app/tests/proc_session.rs:419:5:
+assertion `left == right` failed: 忽略中断＝仍在运行：ExecResult { status: Completed, exit_code: None, output: "", truncated: false, error: None, session_id: None }
+  left: Completed
+ right: Running
+thread 'perf_tiers_baseline_driven' (387045) panicked at src/app/tests/session_perf.rs:371:5:
+/sessions 百文件列出耗时 318 ms 超过 50 ms
+# 本轮修复验证：sec7 确定性重做三连通过；attack06/c13/b2_mcp/e_reaping 真实检查恢复且通过
+# （含 bwrap 0.11.1＝runner 同版本的复验）；e2e_acceptance 150/150；apply_patch 55/55＋lib 37/37；
+# context_injection 15/15；session lib 16/16（跨平台夹具）；sandbox lib 37/37。

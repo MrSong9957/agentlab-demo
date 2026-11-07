@@ -1,6 +1,8 @@
 //! 007 CLI E2E：自动保存/恢复闭环、命令面、双进程锁降级、权限与凭证边界、
 //! 确认流（PTY）。全部真实 CLI（CARGO_BIN_EXE）＋本地 mock＋独立临时目录；
 //! 时间戳注入固定（TCHAT_SESSION_TS）；所有等待 poll＋截止时间。
+#![cfg(unix)]
+// 038-CI：本文件依赖 POSIX 语义（PTY/Unix fd/文件权限位），Windows 不编译；
 
 mod common;
 

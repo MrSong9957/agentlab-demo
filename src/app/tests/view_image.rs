@@ -1,6 +1,8 @@
 //! 019 view_image E2E 验收：管道驱动真实 CLI（CARGO_BIN_EXE）＋本地 mock，
 //! 固定图片夹具与隔离临时目录。核对真实请求 JSON 的图片字节（base64 解码后
 //! 重新打开验证格式/尺寸/像素）、批次投影顺序、能力开关、限额与生命周期。
+#![cfg(unix)]
+// 038-CI：本文件依赖 POSIX 语义（PTY/Unix fd/文件权限位），Windows 不编译；
 
 mod common;
 

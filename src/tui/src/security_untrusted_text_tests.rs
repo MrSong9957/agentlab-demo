@@ -15,9 +15,9 @@
 use std::io::Write as _;
 use std::sync::Arc;
 
-use tchat_tui::chat_driver::HostHistoryItem;
-use tchat_tui::history_cell::HistoryCell;
-use tchat_tui::test_backend::VT100Backend;
+use crate::chat_driver::HostHistoryItem;
+use crate::history_cell::HistoryCell;
+use crate::test_backend::VT100Backend;
 
 /// A7 唯一攻击标记：渲染器合法的光标／样式／超链接控制不含该标记——以此
 /// 区分外来载荷与合法控制，不对全部 ESC 一律拒绝。
@@ -155,7 +155,7 @@ fn cell_screen_text(cell: &dyn HistoryCell, width: u16) -> String {
 #[test]
 fn a7_csi_clear_screen_injected_via_markdown_cell_is_neutralized() {
     let payload = "前\x1b[2J中\x1b[1;1H已清除后";
-    let cell = tchat_tui::history_cell::AgentMarkdownCell::new_with_inline_visualizations(
+    let cell = crate::history_cell::AgentMarkdownCell::new_with_inline_visualizations(
         payload.to_string(),
         std::path::Path::new("/tmp"),
         None,
@@ -170,10 +170,10 @@ fn a7_csi_clear_screen_injected_via_markdown_cell_is_neutralized() {
 fn a7_osc_clipboard_write_via_stream_controller_is_neutralized() {
     // 流式尾区行经 Paragraph 渲染（与驱动 draw 的 sync_live_tail→渲染同一边界）后断言
     use ratatui::widgets::Widget as _;
-    let mut controller = tchat_tui::streaming::controller::StreamController::new_with_inline_visualizations(
+    let mut controller = crate::streaming::controller::StreamController::new_with_inline_visualizations(
         None,
         std::path::Path::new("/tmp"),
-        tchat_tui::history_cell::HistoryRenderMode::Rich,
+        crate::history_cell::HistoryRenderMode::Rich,
         None,
     );
     controller.push("ok-before\x1b]52;c;aGVsbG8=\x07ok-after"); // 无换行：留在活动尾区
@@ -199,7 +199,7 @@ fn a7_cr_overwrite_via_insert_history_bytes_is_neutralized() {
     // insert_history 路径（inline 模式）最终写字节流；此处直接验证 cell 的行文本
     // 无 CR——cell 管线是字节流的唯一来源。
     let payload = "金额：100 元\r已被替换-PWNED";
-    let cell = tchat_tui::history_cell::AgentMarkdownCell::new_with_inline_visualizations(
+    let cell = crate::history_cell::AgentMarkdownCell::new_with_inline_visualizations(
         payload.to_string(),
         std::path::Path::new("/tmp"),
         None,
@@ -217,7 +217,7 @@ fn a7_full_pipeline_writes_no_injected_control_sequences_to_terminal() {
     //（进入 VT100 解析器之前）→ 原始字节断言＋解析后屏幕断言。
     // 屏幕不含 ESC 不能作为原始字节安全证据——解析器消费的序列必须先在此拦截。
     use ratatui::widgets::Widget as _;
-    let cell = tchat_tui::history_cell::AgentMarkdownCell::new_with_inline_visualizations(
+    let cell = crate::history_cell::AgentMarkdownCell::new_with_inline_visualizations(
         ATTACK_PAYLOAD.to_string(),
         std::path::Path::new("/tmp"),
         None,
@@ -252,7 +252,7 @@ fn a7_full_pipeline_writes_no_injected_control_sequences_to_terminal() {
 #[test]
 fn a7_resume_projection_of_tool_output_with_payload_is_neutralized() {
     // /resume 投影路径：exec 输出含注入序列
-    let cells = tchat_tui::chat_driver::project_history(vec![HostHistoryItem::Exec {
+    let cells = crate::chat_driver::project_history(vec![HostHistoryItem::Exec {
         command: "echo x".into(),
         output: "line1\x1b[2Jline2\x1b]52;c;evil\x07line3".into(),
         exit_code: Some(0),
@@ -279,7 +279,7 @@ fn a7_resume_projection_of_tool_output_with_payload_is_neutralized() {
 fn a7_error_message_cell_with_payload_is_neutralized() {
     // 错误消息入口：驱动 Failed 路径的 PlainHistoryCell（错误文本来自服务端响应，
     // 属不可信来源——003 redact 后仍需渲染边界等价强度）
-    let cell = tchat_tui::history_cell::PlainHistoryCell::new(vec![ratatui::text::Line::from(
+    let cell = crate::history_cell::PlainHistoryCell::new(vec![ratatui::text::Line::from(
         "错误：remote said \x1b[2J\x1b]0;pwn\x07C1-\u{9b}2Jdone",
     )]);
     let text = cell_screen_text(&cell, 80);
@@ -294,7 +294,7 @@ fn a7_startup_audit_notice_with_hostile_path_is_neutralized() {
     // 启动审计通知入口（008 P2-7）：路径来自 TCHAT_CONFIG_DIR 等环境（不可信面），
     // 经 PlainHistoryCell→Paragraph→Buffer 渲染，注入序列零直通
     let hostile = "/tmp/x\x1b[2Jpwn\x1b]52;c;evil\x07\u{9b}2Jdir";
-    let cell = tchat_tui::history_cell::PlainHistoryCell::new(vec![ratatui::text::Line::from(
+    let cell = crate::history_cell::PlainHistoryCell::new(vec![ratatui::text::Line::from(
         format!("已将 {hostile} 权限收紧为 0600"),
     )]);
     let text = cell_screen_text(&cell, 100);
@@ -311,7 +311,7 @@ fn a7_byte_level_writer_passthrough_check() {
     // 记录、再进入 VT100 解析器——draw 产生的**合法**光标/样式控制序列（含 ESC）
     // 必须存在（正向对照，证明捕获边界看到了真实渲染输出、检查并非一刀切拒绝
     // ESC），而带唯一标记的外来载荷序列不得出现。
-    let cell = tchat_tui::history_cell::AgentMarkdownCell::new_with_inline_visualizations(
+    let cell = crate::history_cell::AgentMarkdownCell::new_with_inline_visualizations(
         ATTACK_PAYLOAD.to_string(),
         std::path::Path::new("/tmp"),
         None,
@@ -319,7 +319,14 @@ fn a7_byte_level_writer_passthrough_check() {
     let mut cap = CapturingParser { parser: vt100::Parser::new(10, 80, 0), raw: Vec::new() };
     {
         let backend = ratatui::prelude::CrosstermBackend::new(&mut cap);
-        let mut term = tchat_tui::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        // 038-CI：原 with_options 会查询环境终端尺寸（CI 无 TTY＋tput 不可用时
+        // EAGAIN 失败）——本测试要的是确定性 80×10 内存终端，改用显式尺寸的
+        // 测试构造器，断言本体不变。
+        let mut term = crate::custom_terminal::Terminal::with_screen_size_and_cursor_position_for_test(
+            backend,
+            ratatui::layout::Size { width: 80, height: 10 },
+            ratatui::layout::Position::ORIGIN,
+        );
         term.set_viewport_area(ratatui::layout::Rect::new(0, 0, 80, 10)); // 008-ADAPT：同上
         term.draw(|frame| {
             use ratatui::widgets::Widget as _;
@@ -349,7 +356,7 @@ fn a7_byte_level_writer_passthrough_check() {
 /// 断言在 e2e S33 钉住）。
 #[test]
 fn a7_exec_cell_command_payload_is_neutralized() {
-    let cells = tchat_tui::chat_driver::project_history(vec![HostHistoryItem::Exec {
+    let cells = crate::chat_driver::project_history(vec![HostHistoryItem::Exec {
         command: "echo \u{1b}[2Jclear\u{1b}]52;c;evil\u{07}clip\u{1b}(Bn".into(),
         output: String::new(),
         exit_code: Some(0),
@@ -370,9 +377,9 @@ fn a7_exec_cell_command_payload_is_neutralized() {
 /// 012 A7 扩展：统一 diff 载体携带注入序列，经 PatchHistoryCell 渲染零动作。
 #[test]
 fn a7_patch_cell_diff_payload_is_neutralized() {
-    use tchat_tui::chat_driver::HostPatchChange;
-    use tchat_tui::chat_driver::HostPatchKind;
-    let cells = tchat_tui::chat_driver::project_history(vec![HostHistoryItem::Patch {
+    use crate::chat_driver::HostPatchChange;
+    use crate::chat_driver::HostPatchKind;
+    let cells = crate::chat_driver::project_history(vec![HostHistoryItem::Patch {
         ok: true,
         cancelled: false,
         state_known: true,
@@ -396,7 +403,7 @@ fn a7_patch_cell_diff_payload_is_neutralized() {
 /// 012 A7 扩展：取消态 cell 的命令与错误消息载荷同样零动作。
 #[test]
 fn a7_cancelled_cell_payload_is_neutralized() {
-    let cells = tchat_tui::chat_driver::project_history(vec![HostHistoryItem::Exec {
+    let cells = crate::chat_driver::project_history(vec![HostHistoryItem::Exec {
         command: "run \u{1b}[2Jx".into(),
         output: "partial \u{1b}]52;c;evil\u{07}".into(),
         exit_code: None,
@@ -417,7 +424,7 @@ fn a7_cancelled_cell_payload_is_neutralized() {
 /// 经降级渲染（PlainHistoryCell 文本行）零动作，PTY 输出继续被过滤。
 #[test]
 fn a7_running_session_cell_payload_is_neutralized() {
-    let cells = tchat_tui::chat_driver::project_history(vec![HostHistoryItem::Exec {
+    let cells = crate::chat_driver::project_history(vec![HostHistoryItem::Exec {
         command: "srv \u{1b}[2Jx".into(),
         output: "boot \u{1b}]52;c;evil\u{07} ready".into(),
         exit_code: None,

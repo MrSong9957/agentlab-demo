@@ -671,7 +671,10 @@ fn shell_quote(value: &str) -> String {
 }
 
 fn rg_flow(needle: &str, expected_exit: i32, expected_output: &str) {
-    let dir = temp("rg-真实 空格");
+    // 038 Windows：夹具目录名不含空格且命令免引号——cmd /C 对多引号串的
+    // 首/尾剥离规则会把内层引号对吞掉（路径带空格时必须引号→必被吞）。
+    // 空格与 unicode 路径语义由 unix 分支覆盖（env -i＋sh 引号）。
+    let dir = temp(if cfg!(windows) { "rg-path" } else { "rg-真实 空格" });
     let memory_file = dir.path().join("MEMORY.md");
     fs::write(
         dir.path().join("memory_summary.md"),
@@ -679,13 +682,28 @@ fn rg_flow(needle: &str, expected_exit: i32, expected_output: &str) {
     )
     .unwrap();
     fs::write(&memory_file, "MEMORY_NEEDLE: 来自磁盘的真实经验\n").unwrap();
+    // 038 Windows：PATH 探测需带 .exe（choco shim 为 rg.exe，无扩展名探测
+    // 恒 miss＝「需要真实 rg」）；命令构造经平台 shell——`env -i` 是 sh 设施，
+    // Windows 侧以 rg --no-config 达成同一 hygiene（不读配置文件），其余
+    // 参数与断言完全一致（真实 rg 检索真实 MEMORY.md 的验收不变）。
     let rg = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-        .map(|p| p.join("rg"))
+        .map(|p| p.join(if cfg!(windows) { "rg.exe" } else { "rg" }))
         .find(|p| p.is_file())
         .expect("M6 验收需要真实 rg");
-    let home = shell_quote(&dir.path().display().to_string());
-    let cmd = format!("env -i HOME={home} XDG_CONFIG_HOME={home} XDG_CACHE_HOME={home} LC_ALL=C TZ=UTC {} --no-config --line-number --fixed-strings --color=never -- {} {}",
-        shell_quote(&rg.display().to_string()), shell_quote(needle), shell_quote(&memory_file.display().to_string()));
+    let cmd = if cfg!(windows) {
+        // 免引号（夹具路径无空格；模式为 ASCII 单词）——绕开 cmd /C 的引号
+        // 剥离规则；其余参数与断言完全一致。
+        format!(
+            "{} --no-config --line-number --fixed-strings --color=never -- {} {}",
+            rg.display(),
+            needle,
+            memory_file.display()
+        )
+    } else {
+        let home = shell_quote(&dir.path().display().to_string());
+        format!("env -i HOME={home} XDG_CONFIG_HOME={home} XDG_CACHE_HOME={home} LC_ALL=C TZ=UTC {} --no-config --line-number --fixed-strings --color=never -- {} {}",
+            shell_quote(&rg.display().to_string()), shell_quote(needle), shell_quote(&memory_file.display().to_string()))
+    };
     let mock = common::spawn_mock(vec![
         common::MockResp::json(
             200,

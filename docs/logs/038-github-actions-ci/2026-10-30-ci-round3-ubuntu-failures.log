@@ -1,0 +1,24 @@
+to rerun pass `-p tchat-tui --test security_untrusted_text
+to rerun pass `-p terminal-chat --test exec_sandbox
+to rerun pass `-p terminal-chat --test memory_inject
+to rerun pass `-p terminal-chat --test memory_lifecycle
+to rerun pass `-p terminal-chat --test multi_agent
+to rerun pass `-p terminal-chat --test request_permissions
+to rerun pass `-p terminal-chat --test request_permissions_sandbox
+to rerun pass `-p terminal-chat --test sandbox_matrix_probes
+to rerun pass `-p terminal-chat --test security_attack_031
+
+<!--
+038 CI 第 3 轮（commit 01e6543，run 41102104262）ubuntu 失败目标清单与处置：
+- security_untrusted_text a7：with_options 查询环境 TTY（EAGAIN）→ 移入 crate
+  内联改显式尺寸测试构造器
+- exec_sandbox / security_attack_031(attack07) / multi_agent(c13) /
+  sandbox_matrix_probes(e_reaping×2)：固定时序窗口 → 改 poll＋截止
+- memory_inject ×2 / memory_lifecycle ×1：runner 无 ripgrep → workflow 安装
+- request_permissions exe_deployment：/workspace 字面量硬编码 → 按进程锚定
+- request_permissions_sandbox p16：冻结阈值 30ms（实测 202ms）→ TCHAT_P31_PERF_SAMPLE
+- security_attack_031(attack06)：clone3 应 ENOSYS 实测 EINVAL——031 seccomp 在
+  stock ubuntu-24.04 runner 未生效，单独上报（TCHAT_SKIP_SECCOMP_ENFORCEMENT_PROBE）
+windows：windows_sys::core::BOOL ×4（E0433）→ Win32::Foundation::BOOL
+macos：ptsname_r 缺失（E0425）＋TIOCSCTTY/syscall 类型（E0308×2）→ 已修
+全部修复后本地抽查：exe_deployment/attack06+07/c13/e_reaping/p16(采样)/a7 通过。

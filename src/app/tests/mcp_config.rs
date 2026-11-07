@@ -17,12 +17,34 @@ use terminal_chat::mcp::config::{
 fn user_dir_with(content: &str) -> (TempDir, std::path::PathBuf) {
     let dir = TempDir::new("mcp-config");
     let path = dir.path().join("mcp.json");
-    std::fs::write(&path, content).expect("写入 mcp.json");
+    std::fs::write(&path, with_abs(content)).expect("写入 mcp.json");
     (dir, path.parent().expect("父目录").to_path_buf())
 }
 
+/// 平台等价夹具锚点：unix 绝对路径在 Windows 不成立（无盘符判非绝对，
+/// 解析按「相对路径拒绝」报错——038 CI 实测）。校验只查绝对性（cwd 另查
+/// 存在性），替换不改变被验证的校验行为。
+#[cfg(windows)]
+const ABS_PROG: &str = "C:/Windows/System32/whoami.exe";
+#[cfg(not(windows))]
+const ABS_PROG: &str = "/bin/true";
+#[cfg(windows)]
+const ABS_TMP: &str = "C:/Windows/Temp";
+#[cfg(not(windows))]
+const ABS_TMP: &str = "/tmp";
+#[cfg(windows)]
+const ABS_NOEXIST: &str = "C:/nonexistent-tchat-mcp-cwd-0x1";
+#[cfg(not(windows))]
+const ABS_NOEXIST: &str = "/nonexistent-tchat-mcp-cwd-0x1";
+
+fn with_abs(content: &str) -> String {
+    content
+        .replace("/bin/true", ABS_PROG)
+        .replace("\"/tmp\"", &format!("\"{ABS_TMP}\""))
+}
+
 fn parse_ok(content: &str) -> terminal_chat::mcp::config::McpFile {
-    parse_mcp_file(content).expect("应解析成功")
+    parse_mcp_file(&with_abs(content)).expect("应解析成功")
 }
 
 fn parse_ok_str(content: String) -> terminal_chat::mcp::config::McpFile {
@@ -30,7 +52,7 @@ fn parse_ok_str(content: String) -> terminal_chat::mcp::config::McpFile {
 }
 
 fn parse_err(content: &str) -> String {
-    parse_mcp_file(content).expect_err("应解析失败").0
+    parse_mcp_file(&with_abs(content)).expect_err("应解析失败").0
 }
 
 // ---------- A01：缺文件／空集合／关闭 ----------
@@ -147,7 +169,7 @@ fn a02_relative_command_with_path_rejected_bare_name_and_absolute_allowed() {
 
     let file = parse_ok(r#"{"mcp_servers": {"a": {"enabled": true, "command": "/bin/true"}}}"#);
     match &file.servers[0].1.transport {
-        McpTransport::Stdio(s) => assert_eq!(s.command, "/bin/true"),
+        McpTransport::Stdio(s) => assert_eq!(s.command, ABS_PROG),
         other => panic!("应为 stdio：{other:?}"),
     }
 }
@@ -157,14 +179,15 @@ fn a02_cwd_must_be_existing_absolute_directory() {
     let e = parse_err(r#"{"mcp_servers": {"a": {"command": "p", "cwd": "rel/dir"}}}"#);
     assert!(e.contains("绝对路径"), "实际：{e}");
 
-    let e = parse_err(
-        r#"{"mcp_servers": {"a": {"command": "p", "cwd": "/nonexistent-tchat-mcp-cwd-0x1"}}}"#,
-    );
+    let e = parse_err(&format!(
+        r#"{{"mcp_servers": {{"a": {{"command": "p", "cwd": "{}"}}}}}}"#,
+        ABS_NOEXIST
+    ));
     assert!(e.contains("已存在的目录"), "实际：{e}");
 
     let ok = parse_ok_str(format!(
         r#"{{"mcp_servers": {{"a": {{"command": "p", "cwd": "{}"}}}}}}"#,
-        std::env::temp_dir().display()
+        std::env::temp_dir().display().to_string().replace('\\', "/")
     ))
     .servers;
     match &ok[0].1.transport {

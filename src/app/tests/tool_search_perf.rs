@@ -103,13 +103,48 @@ fn run_query<'a>(
 }
 
 fn vm_hwm_kb() -> u64 {
-    let status = std::fs::read_to_string("/proc/self/status").expect("读取 /proc/self/status");
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("VmHWM:") {
-            return rest.trim().trim_end_matches("kB").trim().parse().expect("kB 数值");
+    // 038 macOS/Windows：无 /proc——mac 经 `ps -o rss=` 取当前 RSS（峰值
+    // 不可得，边界已登记）；Windows 经 GetProcessMemoryInfo WorkingSetSize
+    // （同 c18_host_rss 模式）；Linux 维持 /proc HWM 精读。
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .expect("ps 采样失败");
+        return String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("ps rss 数值");
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::ProcessStatus::{
+            GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+        };
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        unsafe {
+            let handle = GetCurrentProcess();
+            let mut pmc: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+            pmc.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+            if GetProcessMemoryInfo(handle, &mut pmc, pmc.cb) != 0 {
+                return pmc.WorkingSetSize as u64 / 1024;
+            }
+            return 0;
         }
     }
-    0
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").expect("读取 /proc/self/status");
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("VmHWM:") {
+                return rest.trim().trim_end_matches("kB").trim().parse().expect("kB 数值");
+            }
+        }
+        0
+    }
 }
 
 fn p95(samples: &mut [u128]) -> u128 {

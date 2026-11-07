@@ -75,7 +75,7 @@ fi
 note "2/6 镜像入口与卷内阴影"
 PI_REAL=$(realpath "$(command -v pi)")
 case "$PI_REAL" in
-  /usr/local/lib/node_modules/*) pass "pi 实体来自镜像 npm 全局目录：$PI_REAL" ;;
+  /usr/local/lib/pi/pi) pass "pi 实体来自镜像独立发行包：$PI_REAL" ;;
   *) fail "pi 实体不在镜像内：$PI_REAL" ;;
 esac
 NPM_REAL=$(realpath "$(command -v npm)")

@@ -31,13 +31,32 @@ use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+// 038 ConPTY：ChildHandle::Raw 的句柄级 wait/退出码读取与伪终端拆除。
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+#[cfg(windows)]
+use windows_sys::Win32::System::Console::{ClosePseudoConsole, HPCON};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+#[cfg(windows)]
+use std::os::windows::process::ExitStatusExt;
+
 use crate::exec::{
     cap_output, resolve_workdir, ExecArgs, ExecResult, ExecStatus, WriteStdinArgs,
     MAX_SESSIONS,
 };
 
-/// 运行时固定的 Shell。
+/// 运行时固定的 Shell：unix＝/bin/sh -c；Windows＝cmd /C（标准平台等价，
+/// 038——exec 契约＝经平台 shell 执行命令字符串，退出码经 shell 传递）。
+#[cfg(unix)]
 const SHELL: &str = "/bin/sh";
+#[cfg(windows)]
+const SHELL: &str = "cmd";
+/// unix＝"-c"；windows＝"/C"（cmd 的执行开关）。
+#[cfg(unix)]
+const SHELL_EXEC_FLAG: &str = "-c";
+#[cfg(windows)]
+const SHELL_EXEC_FLAG: &str = "/C";
 /// 监控线程轮询子进程退出／终止请求的间隔。
 const MONITOR_POLL: Duration = Duration::from_millis(10);
 /// 等待循环的单次等待上限（取消标志响应粒度）。
@@ -95,6 +114,8 @@ pub struct ProcessManager {
 
 struct MgrInner {
     state: Mutex<MgrState>,
+    /// 启动至会话登记期间串行化；确认闸等待时释放 state 锁，close 先标记关闭再等此锁。
+    start_gate: Mutex<()>,
     /// 工具进程创建线程的请求通道（033 生命周期修复，见 [`ProcessManager::new`]
     /// 内线程注释）。Mutex 仅弥补 std mpsc Sender 非 Sync（发送为 O(1) 入队）；
     /// 接收端为专属长寿线程，退出条件＝全部管理器克隆 Drop（通道关闭）。
@@ -162,6 +183,7 @@ impl ProcessManager {
                     sessions: HashMap::new(),
                     reap_failed: None,
                 }),
+                start_gate: Mutex::new(()),
                 spawner_tx: Mutex::new(spawner_tx),
             }),
         }
@@ -225,6 +247,9 @@ impl ProcessManager {
             st.closed = true;
             st.sessions.drain().map(|(_, s)| s).collect()
         };
+        // A start may be waiting for the sandbox identity gate outside `state`.
+        // Wait until it has either registered its session or cleaned up its child.
+        drop(self.inner.start_gate.lock().unwrap_or_else(|e| e.into_inner()));
         for sess in taken {
             sess.request_kill(KillReq::Terminate);
             if !sess.wait_collected(Instant::now() + TERMINATE_GRACE) {
@@ -469,9 +494,10 @@ impl ProcessManager {
         if let Some(r) = cancelled_before_start(cancel) {
             return r.into();
         }
+        let start_guard = self.inner.start_gate.lock().unwrap_or_else(|e| e.into_inner());
 
-        // 持管理器锁完成容量检查＋启动＋登记：退出与在途启动并发时不漏管
-        //（close 持同一锁取走全部记录，此后启动见 closed 拒绝）。
+        // 启动至登记保持串行和现有容量检查顺序；确认闸轮询 /proc 时释放全局状态锁，
+        // 让其他会话仍可查询、终止。
         let (session, sp, deadline) = {
             let mut st = self.lock_mgr();
             if st.closed {
@@ -518,7 +544,62 @@ impl ProcessManager {
                 }
             };
             match spawned {
-                Ok(sp) => {
+                Ok(mut sp) => {
+                    // 038 方案 A：沙箱启动确认闸——在调用线程内同步执行（cancel
+                    // 引用仅此处可用）。载荷由自停前缀停在首条用户命令之前；
+                    // 确认「隔离成立＋本会话清理标识（载荷 pid ns）已取得」后
+                    // 放行（SIGCONT）。超时/失败/取消＝不放行：确认函数内整组
+                    // 终止＋有界回收（016），本调用返回 Error；monitor 尚未
+                    // 启动，无收尸竞争。确认失败路径的 child 对象随 sp drop
+                    // （已死无僵尸）。
+                    #[cfg(target_os = "linux")]
+                    if policy.is_some() || crate::sandbox::sandbox_requested() {
+                        drop(st);
+                        let confirmation = crate::sandbox::confirm_sandbox_isolation_and_release(
+                            sp.child.id(),
+                            cancel,
+                        );
+                        match confirmation {
+                            Ok(crate::sandbox::SandboxConfirm::Released(identity)) => {
+                                sp.interrupt_pgid = Some(identity.process_group as GroupId);
+                                sp.sandbox_payload = Some(identity);
+                            }
+                            Ok(crate::sandbox::SandboxConfirm::LeaderGone) => {
+                                // --die-with-parent 级联已终止载荷：按 016 自然
+                                // 退出收尾（monitor 启动后立即收到退出状态）。
+                            }
+                            Err(e) => {
+                                return ExecResult::error(format!("进程启动失败：{e}")).into();
+                            }
+                        }
+                        st = self.lock_mgr();
+                        if st.closed {
+                            let pid = sp.child.id();
+                            drop(st);
+                            let cleanup = if let Some(payload) = sp.sandbox_payload.as_ref() {
+                                let payload_cleanup = crate::sandbox::signal_sandbox_payload_group(
+                                    payload,
+                                    libc::SIGKILL,
+                                );
+                                crate::sandbox::sweep_sandbox_namespace(&payload.ns_inode);
+                                let supervisor_cleanup =
+                                    crate::sandbox::kill_sandbox_group_and_wait(pid, true);
+                                match (payload_cleanup, supervisor_cleanup) {
+                                    (Ok(_), result) => result,
+                                    (Err(signal), Err(wait)) => Err(std::io::Error::other(
+                                        format!("载荷组终止失败：{signal}；监督进程回收失败：{wait}"),
+                                    )),
+                                    (Err(signal), Ok(())) => Err(signal),
+                                }
+                            } else {
+                                crate::sandbox::kill_sandbox_group_and_wait(pid, false)
+                            };
+                            return ExecResult::error(format!(
+                                "执行会话已关闭，拒绝登记新启动；启动进程清理：{cleanup:?}"
+                            ))
+                            .into();
+                        }
+                    }
                     // 启动成功——此刻起计算总运行时限（单调时钟；可表示性已预检）
                     let deadline = args
                         .timeout_ms
@@ -528,15 +609,23 @@ impl ProcessManager {
                     let id = format!("s{}", st.next_id);
                     st.next_id += 1;
                     let readers_total = if args.tty { 1 } else { 2 };
-                    let session = Arc::new(Session::new(
+                    let pgid = sp.child.id() as GroupId;
+                    let interrupt_pgid = sp.interrupt_pgid.unwrap_or(pgid);
+                    let mut new_session = Session::new(
                         id,
                         args.cmd.clone(),
-                        sp.child.id() as GroupId,
+                        pgid,
+                        interrupt_pgid,
                         sp.master.clone(),
                         readers_total,
                         extra,
                         owner,
-                    ));
+                    );
+                    #[cfg(target_os = "linux")]
+                    {
+                        new_session.sandbox_payload = sp.sandbox_payload.clone();
+                    }
+                    let session = Arc::new(new_session);
                     st.sessions.insert(session.id.clone(), session.clone());
                     (session, sp, deadline)
                 }
@@ -545,11 +634,16 @@ impl ProcessManager {
                 }
             }
         };
+        drop(start_guard);
 
         // 后台线程：监控（退出回收／时限终止）＋ 读取（持续收集输出）。
         #[cfg(windows)]
         {
-            win::assign_child_to_job(sp.child.id(), &sp.child)?;
+            // 作业挂接失败＝失去树终止能力（016 契约）——显式 panic，不静默。
+            let (job_pid, job_handle) = sp.child.raw_process();
+            if let Err(e) = win::assign_raw_process(job_pid, job_handle) {
+                panic!("作业对象挂接失败（Windows 树终止不可用）：{e}");
+            }
         }
         let monitor_session = session.clone();
         std::thread::spawn(move || {
@@ -561,7 +655,12 @@ impl ProcessManager {
         if let Some(err) = sp.stderr {
             spawn_reader(session.clone(), err);
         }
-        if let Some(master) = &sp.master {
+        if let Some(pty_reader) = &sp.pty_reader {
+            // 038 ConPTY：输入/输出双句柄——读取线程接 ConPTY 输出通道。
+            if let Ok(reader) = pty_reader.try_clone() {
+                spawn_reader(session.clone(), reader);
+            }
+        } else if let Some(master) = &sp.master {
             if let Ok(reader) = master.try_clone() {
                 spawn_reader(session.clone(), reader);
             }
@@ -757,7 +856,24 @@ impl ProcessManager {
                 }
             } else {
                 // 管道会话的 Ctrl+C：向进程组发送 SIGINT（只请求中断，不保证退出）。
-                session.interrupt();
+                if let Err(error) = session.interrupt() {
+                    #[cfg(unix)]
+                    let already_exited = error.raw_os_error() == Some(libc::ESRCH);
+                    #[cfg(windows)]
+                    let already_exited = false;
+                    if !already_exited && matches!(session.phase(), Phase::Running { .. }) {
+                        return attach(
+                            ExecResult::error_with_session(
+                                format!(
+                                    "会话 {} 的 SIGINT 请求失败：{error}；进程仍在运行，句柄保留",
+                                    args.session_id
+                                ),
+                                args.session_id.clone(),
+                            )
+                            .into(),
+                        );
+                    }
+                }
             }
         }
 
@@ -950,16 +1066,21 @@ fn request_group_term(pgid: GroupId) {
 
 /// 组中断请求（unix＝killpg(SIGINT)——只请求中断，不保证退出）。
 #[cfg(unix)]
-fn request_group_interrupt(pgid: GroupId) {
-    unsafe {
-        libc::killpg(pgid, libc::SIGINT);
+fn request_group_interrupt(pgid: GroupId) -> std::io::Result<()> {
+    if unsafe { libc::killpg(pgid, libc::SIGINT) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
 }
 
 /// Windows：中断档以整树终止实现（残差登记）。
 #[cfg(windows)]
-fn request_group_interrupt(pgid: GroupId) {
-    let _ = kill_group_sigkill(pgid);
+fn request_group_interrupt(pgid: GroupId) -> std::io::Result<()> {
+    match kill_group_sigkill(pgid) {
+        KillOutcome::Ok | KillOutcome::Gone => Ok(()),
+        KillOutcome::Failed(errno) => Err(std::io::Error::from_raw_os_error(errno)),
+    }
 }
 
 fn kill_group_checked(pgid: GroupId) -> KillOutcome {
@@ -1002,6 +1123,11 @@ fn cancelled_before_start(cancel: Option<&AtomicBool>) -> Option<ExecResult> {
 struct Session {
     id: String,
     cmd: String,
+    /// 管道 Ctrl+C 的目标组。普通模式与终止组相同；bwrap 使用载荷 PID，因
+    /// `--new-session` 放行后的 PGID 等于载荷 PID，并按命名空间筛选成员。
+    interrupt_pgid: GroupId,
+    #[cfg(target_os = "linux")]
+    sandbox_payload: Option<crate::sandbox::SandboxPayloadIdentity>,
     /// 031：本进程是否以「基线＋额外授权」出生（§1.7-5——到期收尾只针对
     /// 此类进程；基线进程继续 016 可续接语义）。
     extra: bool,
@@ -1070,6 +1196,7 @@ impl Session {
         id: String,
         cmd: String,
         pgid: GroupId,
+        interrupt_pgid: GroupId,
         master: Option<Arc<File>>,
         readers: usize,
         extra: bool,
@@ -1078,8 +1205,11 @@ impl Session {
         Self {
             id,
             cmd,
+            interrupt_pgid,
             extra,
             owner,
+            #[cfg(target_os = "linux")]
+            sandbox_payload: None,
             st: Mutex::new(SessionState {
                 phase: Phase::Running { pgid },
                 pending: PendingBuffer::new(),
@@ -1171,11 +1301,27 @@ impl Session {
     }
 
     /// 管道会话的 Ctrl+C：向进程组发送 SIGINT（只请求中断，不保证退出）。
-    fn interrupt(&self) {
+    fn interrupt(&self) -> std::io::Result<()> {
         let st = self.lock();
-        if let Phase::Running { pgid } = st.phase {
-            request_group_interrupt(pgid);
+        if !matches!(st.phase, Phase::Running { .. }) {
+            return Ok(());
         }
+        #[cfg(target_os = "linux")]
+        if let Some(payload) = self.sandbox_payload.as_ref() {
+            return match crate::sandbox::signal_sandbox_payload_group(payload, libc::SIGINT) {
+                Ok(_) => Ok(()),
+                // The payload can exit between the session phase check and pidfd
+                // verification. Let the monitor report natural completion.
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        || error.raw_os_error() == Some(libc::ESRCH) =>
+                {
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            };
+        }
+        request_group_interrupt(self.interrupt_pgid)
     }
 
     /// PTY 输入通道的写入端。
@@ -1513,9 +1659,15 @@ fn ceil_char_boundary(s: &str, limit: usize) -> usize {
 
 /// 一次成功启动的产物。
 struct Spawned {
-    child: Child,
+    child: ChildHandle,
     /// PTY master（输入通道）；管道模式为 None。
     master: Option<Arc<File>>,
+    /// ConPTY 输出通道（038）：Windows PTY 的输入/输出是两个独立句柄，不能
+    /// 像 unix master 那样一份句柄既写又读——读取线程经本字段接入。
+    pty_reader: Option<Arc<File>>,
+    interrupt_pgid: Option<GroupId>,
+    #[cfg(target_os = "linux")]
+    sandbox_payload: Option<crate::sandbox::SandboxPayloadIdentity>,
     stdout: Option<std::process::ChildStdout>,
     stderr: Option<std::process::ChildStderr>,
 }
@@ -1529,23 +1681,81 @@ struct Spawned {
 /// 031：`policy` 携带时改走 [`crate::sandbox::permission_launch_argv`]（受限
 /// 读树＋deny 优先＋网络开关＋seccomp 的动态策略入口）；seccomp fd 守卫须
 /// 存活到 spawn 返回——本函数内联完成 spawn 前‥后的全部时序。
+/// 启动参数中间形态（038 ConPTY）：std Command 无读取接口，Windows PTY 路径
+/// 需要原始 program/argv/env 交给 CreateProcessW——两个消费方（std Command
+/// 构造与 ConPTY 启动）共用同一决策，行为零分歧。
+struct ToolArgv {
+    program: String,
+    args: Vec<String>,
+    /// Some＝白名单环境（env_clear＋仅此清单）；None＝继承进程环境（普通
+    /// 模式既有行为）。
+    env: Option<Vec<(String, String)>>,
+    /// 沙箱包装启动（bwrap 为 program）：unix 侧继承 fd 收口行为随分支保留。
+    sandbox_wrapped: bool,
+    #[cfg(unix)]
+    seccomp: Option<crate::sandbox::SeccompFd>,
+}
+
+fn tool_argv(
+    cmd: &str,
+    workdir: &std::path::Path,
+    policy: Option<&crate::sandbox::PolicySnapshot>,
+) -> std::io::Result<ToolArgv> {
+    let _ = workdir;
+    #[cfg(target_os = "linux")]
+    let command = if policy.is_some() || crate::sandbox::sandbox_requested() {
+        crate::sandbox::exec_gate_argv(cmd)
+    } else {
+        vec![SHELL.to_string(), SHELL_EXEC_FLAG.to_string(), cmd.to_string()]
+    };
+    #[cfg(not(target_os = "linux"))]
+    let command = vec![SHELL.to_string(), SHELL_EXEC_FLAG.to_string(), cmd.to_string()];
+    if let Some(snapshot) = policy {
+        let launch = crate::sandbox::permission_launch_argv(command, snapshot, workdir)?;
+        Ok(ToolArgv {
+            program: launch.program,
+            args: launch.args,
+            env: Some(launch.env),
+            sandbox_wrapped: true,
+            #[cfg(unix)]
+            seccomp: launch.seccomp,
+        })
+    } else {
+        match crate::sandbox::tool_launch_argv(command)? {
+            Some((program, args, child_env)) => Ok(ToolArgv {
+                program,
+                args,
+                env: Some(child_env),
+                sandbox_wrapped: true,
+                #[cfg(unix)]
+                seccomp: None,
+            }),
+            None => Ok(ToolArgv {
+                program: SHELL.to_string(),
+                args: vec![SHELL_EXEC_FLAG.to_string(), cmd.to_string()],
+                env: None,
+                sandbox_wrapped: false,
+                #[cfg(unix)]
+                seccomp: None,
+            }),
+        }
+    }
+}
+
 fn build_tool_command(
     cmd: &str,
     workdir: &std::path::Path,
     policy: Option<&crate::sandbox::PolicySnapshot>,
 ) -> std::io::Result<(Command, Option<crate::sandbox::SeccompFd>)> {
-    if let Some(snapshot) = policy {
-        let launch = crate::sandbox::permission_launch_argv(
-            vec![SHELL.to_string(), "-c".to_string(), cmd.to_string()],
-            snapshot,
-            workdir,
-        )?;
-        let mut c = Command::new(&launch.program);
-        c.args(&launch.args);
-        // 038：pre_exec 为 unix API——Windows 无沙箱路径（policy 恒 None，
-        // 本分支不可达），cfg 门控仅为可编译性。
+    let t = tool_argv(cmd, workdir, policy)?;
+    let mut c = Command::new(&t.program);
+    c.args(&t.args);
+    if t.sandbox_wrapped {
+        // 031：seccomp fd 守卫须存活到 spawn——经返回值交给调用方。
+        // Some＝close_range 版收口（除 seccomp fd 外全部关闭）；None＝033-B2
+        // 的 CLOEXEC 标记版（launcher 遗留 fd execve 时关闭；仅沙箱分支）。
         #[cfg(unix)]
-        match launch.seccomp.as_ref() {
+        match t.seccomp.as_ref() {
             Some(guard) => {
                 let fd = guard.raw();
                 unsafe {
@@ -1559,36 +1769,25 @@ fn build_tool_command(
             },
         }
         #[cfg(windows)]
-        let _ = &launch;
-        c.env_clear();
-        c.envs(launch.env);
-        Ok((c, launch.seccomp))
-    } else {
-        match crate::sandbox::tool_launch_argv(vec![
-            SHELL.to_string(),
-            "-c".to_string(),
-            cmd.to_string(),
-        ])? {
-            Some((program, args, child_env)) => {
-                let mut c = Command::new(program);
-                c.args(args);
-                // 033-B2：继承 fd ≥3 标记 CLOEXEC（execve 时关闭）——launcher 遗留的
-                // 非 CLOEXEC fd 不再进入沙箱载荷；仅沙箱分支（普通模式零变化）。
-                // 闭包为无捕获 fn 项，pre_exec 异步信号安全（单个 syscall）。
-                unsafe {
-                    c.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
-                }
-                c.env_clear();
-                c.envs(child_env);
-                Ok((c, None))
-            }
-            None => {
-                let mut c = Command::new(SHELL);
-                c.arg("-c").arg(cmd);
-                Ok((c, None))
-            }
-        }
+        let _ = &c;
     }
+    match t.env {
+        Some(env) => {
+            c.env_clear();
+            c.envs(env);
+        }
+        None => {}
+    }
+    Ok((c, {
+        #[cfg(unix)]
+        {
+            t.seccomp
+        }
+        #[cfg(windows)]
+        {
+            None
+        }
+    }))
 }
 
 /// 管道模式：stdin 关闭，stdout/stderr 管道；独立进程组。
@@ -1604,35 +1803,237 @@ fn spawn_piped(
     c.current_dir(workdir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0); // 组长即本子进程：终止时覆盖其全部后代
+        .stderr(Stdio::piped());
+    // 组长即本子进程：终止时覆盖其全部后代（std process_group 为 unix-only API；
+    // Windows 树终止经作业对象，见 win 模块）。
+    #[cfg(unix)]
+    c.process_group(0);
     let mut child = c.spawn()?;
-    #[cfg(unix)]
-    #[cfg(unix)]
-    if policy.is_some() {
-        crate::sandbox::verify_child_pid_namespace(child.id())?;
-    }
+    // 038 方案 A：沙箱确认闸在 start_with_owner 同步路径执行（cancel 引用
+    // 仅在调用线程可用——spawner 线程无法持有 &AtomicBool）；本函数只负责
+    // 起进程（载荷自停前缀使其停在首条用户命令之前）。
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    Ok(Spawned { child, master: None, stdout, stderr })
+    Ok(Spawned {
+        child: ChildHandle::Std(child),
+        master: None,
+        pty_reader: None,
+        interrupt_pgid: None,
+        #[cfg(target_os = "linux")]
+        sandbox_payload: None,
+        stdout,
+        stderr,
+    })
 }
 
 /// PTY 模式：分配真实伪终端作为控制终端；会话组长自身成组
 ///（pre_exec setsid，不用 process_group——setpgid 后 setsid 会失败）。
 /// 031：同管道模式的 spawn 后 PID 命名空间验证（TTY 组终止路径）。
-/// Windows：交互终端（ConPTY＋CreateProcessW 属性清单）为已登记里程碑
-///（含产品 SHELL 语义的 Windows 决策）——本轮显式 fail-closed，不静默降级。
-
-/// Windows 版：显式 fail-closed（见 unix 版注释）。
+/// Windows 版（038 ConPTY，008 A6 的 Windows 等价实现）：CreatePseudoConsole
+/// ＋PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE 属性清单＋CreateProcessW。会话语义
+/// 对齐 unix 版：ConPTY 输出端＝读取线程通道；输入端＝master（Arc<File> 输入
+/// 通道）；整树终止经作业对象（spawn 后挂接）；伪终端拆除顺序＝进程退出→
+/// ClosePseudoConsole（ChildHandle::Raw::wait，monitor 唯一 wait 点）。
+/// 沙箱请求（TCHAT_SANDBOX）仍经 tool_argv fail-closed——bwrap 缺失＝Err。
 #[cfg(windows)]
 fn spawn_pty(
-    _cmd: &str,
-    _workdir: &std::path::Path,
-    _policy: Option<&crate::sandbox::PolicySnapshot>,
+    cmd: &str,
+    workdir: &std::path::Path,
+    policy: Option<&crate::sandbox::PolicySnapshot>,
 ) -> std::io::Result<Spawned> {
-    Err(std::io::Error::other(
-        "交互终端（ConPTY）实现为 038 已登记后续里程碑：Windows 暂不支持 PTY 会话",
-    ))
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HANDLE_FLAG_INHERIT};
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::System::Console::{
+        ClosePseudoConsole, CreatePseudoConsole, COORD, HPCON,
+    };
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, EXTENDED_STARTUPINFO_PRESENT, InitializeProcThreadAttributeList,
+        PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, STARTUPINFOEXW, STARTUPINFOW,
+        TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
+    };
+
+    // —— 管道对：输入（ConPTY 读端可继承）与输出（ConPTY 写端可继承）——
+    fn inherit_pipe() -> std::io::Result<(HANDLE, HANDLE)> {
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: std::ptr::null_mut(),
+            bInheritHandle: 1,
+        };
+        let (mut r, mut w): (HANDLE, HANDLE) = (std::ptr::null_mut(), std::ptr::null_mut());
+        if unsafe { CreatePipe(&mut r, &mut w, &sa as *const _, 0) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok((r, w))
+    }
+    let (pty_in_read, our_in_write) = inherit_pipe()?;
+    let (our_out_read, pty_out_write) = inherit_pipe()?;
+
+    // —— 伪终端（80×24，与 unix open_pty 的初始窗口一致）——
+    let mut hpc: HPCON = 0;
+    let create_pc =
+        unsafe { CreatePseudoConsole(COORD { X: 80, Y: 24 }, pty_in_read, pty_out_write, 0, &mut hpc) };
+    if create_pc != 0 {
+        unsafe {
+            CloseHandle(pty_in_read);
+            CloseHandle(pty_out_write);
+            CloseHandle(our_in_write);
+            CloseHandle(our_out_read);
+        }
+        return Err(std::io::Error::from_raw_os_error(create_pc));
+    }
+    // ConPTY 已持有两端句柄，父进程侧立即关闭（文档顺序）。
+    unsafe {
+        CloseHandle(pty_in_read);
+        CloseHandle(pty_out_write);
+    }
+
+    // —— 属性清单：挂 PSEUDOCONSOLE（唯一属性）——
+    let mut attr_size: usize = 0;
+    unsafe {
+        // 预查询：传 null 必失败但填充所需字节数（文档约定）。
+        let _ = InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut attr_size);
+    }
+    let mut attr_buf = vec![0u8; attr_size];
+    if unsafe {
+        InitializeProcThreadAttributeList(attr_buf.as_mut_ptr() as *mut _, 1, 0, &mut attr_size)
+    } == 0
+    {
+        unsafe { ClosePseudoConsole(hpc) };
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe {
+        UpdateProcThreadAttribute(
+            attr_buf.as_mut_ptr() as *mut _,
+            0,
+            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
+            &mut hpc as *mut _ as *mut std::ffi::c_void,
+            std::mem::size_of::<HPCON>(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        )
+    } == 0
+    {
+        unsafe { ClosePseudoConsole(hpc) };
+        return Err(std::io::Error::last_os_error());
+    }
+
+    // —— 命令行：tool_argv（沙箱 fail-closed 在此生效）＋Windows 引号拼接 ——
+    let t = tool_argv(cmd, workdir, policy)?;
+    let mut cmdline = quote_windows_arg(&t.program);
+    for a in &t.args {
+        cmdline.push(' ');
+        cmdline.push_str(&quote_windows_arg(a));
+    }
+    let mut cmdline_w: Vec<u16> = cmdline.encode_utf16().chain(std::iter::once(0)).collect();
+    let workdir_w: Vec<u16> =
+        workdir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let env_block: Option<Vec<u16>> = t.env.as_ref().map(|env| {
+        let mut b: Vec<u16> = Vec::new();
+        for (k, v) in env {
+            b.extend(format!("{k}={v}").encode_utf16());
+            b.push(0);
+        }
+        b.push(0);
+        b
+    });
+
+    let mut siex: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+    siex.StartupInfo = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOEXW>() as u32,
+        ..unsafe { std::mem::zeroed() }
+    };
+    siex.lpAttributeList = attr_buf.as_mut_ptr() as *mut _;
+    let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe {
+        CreateProcessW(
+            std::ptr::null(),
+            cmdline_w.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0, // bInheritHandles=FALSE：可继承性已在 ConPTY 端句柄满足
+            EXTENDED_STARTUPINFO_PRESENT,
+            env_block
+                .as_ref()
+                .map(|b| b.as_ptr() as *mut std::ffi::c_void)
+                .unwrap_or(std::ptr::null_mut()),
+            workdir_w.as_ptr(),
+            &siex.StartupInfo,
+            &mut pi,
+        )
+    } == 0
+    {
+        let e = std::io::Error::last_os_error();
+        unsafe {
+            ClosePseudoConsole(hpc);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        }
+        return Err(e);
+    }
+    unsafe { CloseHandle(pi.hThread) };
+    let pid = pi.dwProcessId;
+    let process: HANDLE = pi.hProcess;
+    let _ = HANDLE_FLAG_INHERIT; // 继承性经 SECURITY_ATTRIBUTES 传递；显式消除未用告警
+
+    // 作业对象挂接（016 整树终止）：与管道模式同机制；挂接失败＝失去树终止
+    // 能力——终止已启动的进程并显式报错，不静默降级。
+    if let Err(e) = win::assign_raw_process(pid, process) {
+        unsafe {
+            TerminateProcess(process, 1);
+            let _ = WaitForSingleObject(process, 5_000);
+            ClosePseudoConsole(hpc);
+            CloseHandle(process);
+        }
+        return Err(e);
+    }
+
+    let master = Arc::new(unsafe { File::from_raw_handle(our_in_write) });
+    let pty_reader = Arc::new(unsafe { File::from_raw_handle(our_out_read) });
+    Ok(Spawned {
+        child: ChildHandle::Raw { process, pid, hpc },
+        master: Some(master),
+        pty_reader: Some(pty_reader),
+        interrupt_pgid: None,
+        #[cfg(target_os = "linux")]
+        sandbox_payload: None,
+        stdout: None,
+        stderr: None,
+    })
+}
+
+/// Windows 命令行引号拼接（CreateProcessW lpCommandLine 约定）：含空白或
+/// 引号的参数加引号，反斜杠仅在与收尾引号相邻时成对转义。
+#[cfg(windows)]
+fn quote_windows_arg(arg: &str) -> String {
+    if !arg.is_empty()
+        && !arg.chars().any(|c| c == ' ' || c == '\t' || c == '"')
+    {
+        return arg.to_string();
+    }
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    let mut backslashes = 0usize;
+    for c in arg.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                out.extend(std::iter::repeat('\\').take(backslashes * 2 + 1));
+                backslashes = 0;
+                out.push('"');
+            }
+            _ => {
+                out.extend(std::iter::repeat('\\').take(backslashes));
+                backslashes = 0;
+                out.push(c);
+            }
+        }
+    }
+    out.extend(std::iter::repeat('\\').take(backslashes * 2));
+    out.push('"');
+    out
 }
 
 #[cfg(unix)]
@@ -1658,7 +2059,8 @@ fn spawn_pty(
             }
             // fd 0 已是从设备（std 先 dup2 再跑 pre_exec）：挂为控制终端，
             // 终端产生的信号才能送达前台进程组。
-            if libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
+            // 038：apple ioctl request 形参为 c_ulong，显式提升（Linux 无操作）。
+            if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
@@ -1666,17 +2068,25 @@ fn spawn_pty(
     }
     let mut child = c.spawn()?;
     drop(c); // 关闭父进程持有的从设备副本（Command 内 Stdio 的 fd）
-    if policy.is_some() {
-        crate::sandbox::verify_child_pid_namespace(child.id())?;
-    }
+    // 038 方案 A：沙箱确认闸在 start_with_owner 同步路径执行（同 spawn_piped）。
     let master = Arc::new(master);
-    Ok(Spawned { child, master: Some(master), stdout: None, stderr: None })
+    Ok(Spawned {
+        child: ChildHandle::Std(child),
+        master: Some(master),
+        pty_reader: None,
+        interrupt_pgid: None,
+        #[cfg(target_os = "linux")]
+        sandbox_payload: None,
+        stdout: None,
+        stderr: None,
+    })
 }
 
-/// 打开一对伪终端（master 带 O_CLOEXEC，从设备以 O_CLOEXEC 打开）。
-#[cfg(windows)]
-fn open_pty_win_placeholder() {}
+/// 038：macOS ptsname 静态缓冲的串行化锁（见 open_pty 内注释）。
+#[cfg(target_os = "macos")]
+static PTY_NAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// 打开一对伪终端（master 带 O_CLOEXEC，从设备以 O_CLOEXEC 打开）。
 #[cfg(unix)]
 fn open_pty() -> std::io::Result<(File, File)> {
     unsafe {
@@ -1685,7 +2095,6 @@ fn open_pty() -> std::io::Result<(File, File)> {
             return Err(std::io::Error::last_os_error());
         }
         let mut ok = libc::grantpt(master_fd) == 0 && libc::unlockpt(master_fd) == 0;
-        // 非 Linux 平台无 ptsname_r 时早退（首版仅承诺 Linux）
         ok = ok
             && libc::fcntl(master_fd, libc::F_SETFD, libc::FD_CLOEXEC) == 0;
         if !ok {
@@ -1693,20 +2102,37 @@ fn open_pty() -> std::io::Result<(File, File)> {
             libc::close(master_fd);
             return Err(e);
         }
-        let mut name = [0u8; 256];
-        if libc::ptsname_r(
-            master_fd,
-            name.as_mut_ptr().cast(),
-            name.len(),
-        ) != 0
-        {
-            let e = std::io::Error::last_os_error();
-            libc::close(master_fd);
-            return Err(e);
-        }
-        let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
-        let c_path = std::ffi::CString::new(&name[..len])
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        // 038：libc crate 在 apple 目标不提供 ptsname_r（ptsname 返回进程级
+        // 静态缓冲、非线程安全）——分支内经 PTY_NAME_LOCK 串行化并立即拷贝；
+        // Linux 的 ptsname_r 语义不变。
+        #[cfg(not(target_os = "macos"))]
+        let c_path = {
+            let mut name = [0u8; 256];
+            if libc::ptsname_r(
+                master_fd,
+                name.as_mut_ptr().cast(),
+                name.len(),
+            ) != 0
+            {
+                let e = std::io::Error::last_os_error();
+                libc::close(master_fd);
+                return Err(e);
+            }
+            let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+            std::ffi::CString::new(&name[..len])
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
+        };
+        #[cfg(target_os = "macos")]
+        let c_path = {
+            let _guard = PTY_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let ptr = libc::ptsname(master_fd);
+            if ptr.is_null() {
+                let e = std::io::Error::last_os_error();
+                libc::close(master_fd);
+                return Err(e);
+            }
+            std::ffi::CStr::from_ptr(ptr).to_owned()
+        };
         let slave_fd = libc::open(
             c_path.as_ptr(),
             libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
@@ -1723,10 +2149,97 @@ fn open_pty() -> std::io::Result<(File, File)> {
     }
 }
 
-/// 监控线程：拥有 `Child`——轮询退出、执行终止请求／时限到期；退出后等
+/// 子进程句柄抽象（038 ConPTY）：std Child（管道模式、unix PTY）或 ConPTY
+/// 原生进程句柄（Windows PTY——CreateProcessW 的产物不构回 std Child）。
+/// 统一轮询/回收接口供监控线程使用，016 生命周期契约平台等价。
+/// 安全：HANDLE 为裸指针但句柄级操作（Wait/GetExitCode/Close/PseudoConsole
+/// 拆除）可跨线程调用；Raw 的句柄所有权随枚举整体移交监控线程（唯一持有
+/// 者），无别名访问。
+enum ChildHandle {
+    Std(Child),
+    /// ConPTY 子进程：process 句柄负责 wait/终止回收；hpc 负责 ClosePseudo
+    /// Console（wait 到终态后关闭——先进程退出再拆伪终端的文档顺序）。
+    #[cfg(windows)]
+    Raw { process: HANDLE, pid: u32, hpc: HPCON },
+}
+
+#[cfg(windows)]
+unsafe impl Send for ChildHandle {}
+
+
+impl ChildHandle {
+    fn id(&self) -> u32 {
+        match self {
+            ChildHandle::Std(c) => c.id(),
+            #[cfg(windows)]
+            ChildHandle::Raw { pid, .. } => *pid,
+        }
+    }
+
+    /// 作业挂接用的（pid, 原生句柄）——Std 经 AsRawHandle；Raw 自持句柄。
+    #[cfg(windows)]
+    fn raw_process(&self) -> (u32, HANDLE) {
+        match self {
+            ChildHandle::Std(c) => {
+                use std::os::windows::io::AsRawHandle;
+                (c.id(), unsafe { c.as_raw_handle() as HANDLE })
+            }
+            ChildHandle::Raw { process, pid, .. } => (*pid, *process),
+        }
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match self {
+            ChildHandle::Std(c) => c.try_wait(),
+            #[cfg(windows)]
+            ChildHandle::Raw { process, .. } => unsafe {
+                match WaitForSingleObject(*process, 0) {
+                    WAIT_OBJECT_0 => {
+                        let mut code: u32 = 0;
+                        if GetExitCodeProcess(*process, &mut code) == 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(Some(std::process::ExitStatus::from_raw(code)))
+                    }
+                    WAIT_TIMEOUT => Ok(None),
+                    _ => Err(std::io::Error::last_os_error()),
+                }
+            },
+        }
+    }
+
+    /// 终态回收：Std＝阻塞 wait；Raw＝阻塞等待＋读退出码＋拆伪终端＋关句柄
+    ///（monitor_thread 的唯一调用点；Drop 兜底不再重复清理）。
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        match self {
+            ChildHandle::Std(c) => c.wait(),
+            #[cfg(windows)]
+            ChildHandle::Raw { process, hpc, .. } => unsafe {
+                loop {
+                    match WaitForSingleObject(*process, 5_000) {
+                        WAIT_OBJECT_0 => break,
+                        WAIT_FAILED => return Err(std::io::Error::last_os_error()),
+                        _ => {} // WAIT_TIMEOUT：继续等（016 宽限语义内的有界阻塞）
+                    }
+                }
+                let mut code: u32 = 0;
+                if GetExitCodeProcess(*process, &mut code) == 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                ClosePseudoConsole(*hpc);
+                CloseHandle(*process);
+                Ok(std::process::ExitStatus::from_raw(code))
+            },
+        }
+    }
+}
+
+/// 监控线程：拥有子进程句柄——轮询退出、执行终止请求／时限到期；退出后等
 /// 读取线程收尾（有界），置 collect_done。终态回收（wait）只发生在这里。
-fn monitor_thread(session: Arc<Session>, mut child: Child, deadline: Option<Instant>) {
+fn monitor_thread(session: Arc<Session>, mut child: ChildHandle, deadline: Option<Instant>) {
     let pgid = child.id() as GroupId;
+    #[cfg(target_os = "linux")]
+    let mut payload_sweep_done = false;
     let terminal = loop {
         // 收口缝（仅 cfg(test)）：门控停靠点——见 test_gate_wait（不持锁）。
         #[cfg(test)]
@@ -1744,27 +2257,61 @@ fn monitor_thread(session: Arc<Session>, mut child: Child, deadline: Option<Inst
             }
         }
         if let Some(reason) = reason {
-            // killpg 本身快速，可持锁。
-            match kill_group_checked(pgid) {
-                KillOutcome::Ok => {
-                    drop(st);
-                    let _ = child.wait(); // 回收组长
-                    break match reason {
-                        KillReq::Deadline => Phase::TimedOut,
-                        KillReq::Terminate => Phase::Terminated,
-                    };
+            #[cfg(target_os = "linux")]
+            if let Some(payload) = session.sandbox_payload.as_ref() {
+                drop(st);
+                match terminate_sandbox_payload(payload, &mut child) {
+                    KillOutcome::Ok => {
+                        break match reason {
+                            KillReq::Deadline => Phase::TimedOut,
+                            KillReq::Terminate => Phase::Terminated,
+                        };
+                    }
+                    KillOutcome::Gone => {
+                        let code = child.wait().ok().and_then(|status| status.code());
+                        break Phase::Exited { code };
+                    }
+                    KillOutcome::Failed(errno) => {
+                        let mut state = session.lock();
+                        state.kill_failed = Some((reason, errno));
+                        drop(state);
+                        st = session.lock();
+                    }
                 }
-                KillOutcome::Gone => {
-                    // 组已不存在＝我们发信号前进程已死：按自然退出如实归属，
-                    // 不宣称发生过“终止并回收”。
-                    drop(st);
-                    let code = child.wait().ok().and_then(|s| s.code());
-                    break Phase::Exited { code };
+            } else {
+                // 普通模式仍终止并等待原 bwrap/命令进程组。
+                match kill_group_checked(pgid) {
+                    KillOutcome::Ok => {
+                        drop(st);
+                        let _ = child.wait();
+                        break match reason {
+                            KillReq::Deadline => Phase::TimedOut,
+                            KillReq::Terminate => Phase::Terminated,
+                        };
+                    }
+                    KillOutcome::Gone => {
+                        drop(st);
+                        let code = child.wait().ok().and_then(|s| s.code());
+                        break Phase::Exited { code };
+                    }
+                    KillOutcome::Failed(errno) => {
+                        st.kill_failed = Some((reason, errno));
+                    }
                 }
-                KillOutcome::Failed(errno) => {
-                    // 终止失败：未确认清理成功——不得伪装已终止/超时回收；
-                    // 如实记录，保持运行（不漏管），保留请求在后续轮询重试。
-                    st.kill_failed = Some((reason, errno));
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        if !payload_sweep_done {
+            if let Some(payload) = session.sandbox_payload.as_ref() {
+                if crate::sandbox::sandbox_payload_has_exited(payload).unwrap_or(false) {
+                    // bubblewrap PID 1 等待全部后代。若主载荷退出时仍有逃逸进程，
+                    // 先按原 D2 边界清理同 namespace 成员（排除 PID 1），让 reaper
+                    // wait 后退出，再由本 monitor 等待自己拥有的 bwrap Child。
+                    drop(st);
+                    crate::sandbox::sweep_sandbox_namespace(&payload.ns_inode);
+                    payload_sweep_done = true;
+                    continue;
                 }
             }
         }
@@ -1808,6 +2355,32 @@ fn monitor_thread(session: Arc<Session>, mut child: Child, deadline: Option<Inst
     session.cv.notify_all();
 }
 
+#[cfg(target_os = "linux")]
+fn terminate_sandbox_payload(
+    payload: &crate::sandbox::SandboxPayloadIdentity,
+    child: &mut ChildHandle,
+) -> KillOutcome {
+    match crate::sandbox::signal_sandbox_payload_group(payload, libc::SIGKILL) {
+        Ok(signaled) if signaled > 0 => {
+            crate::sandbox::sweep_sandbox_namespace(&payload.ns_inode);
+            let _ = child.wait();
+            KillOutcome::Ok
+        }
+        Ok(_) => match crate::sandbox::sandbox_payload_has_exited(payload) {
+            Ok(true) => {
+                crate::sandbox::sweep_sandbox_namespace(&payload.ns_inode);
+                KillOutcome::Gone
+            }
+            _ => KillOutcome::Failed(libc::ESRCH),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            crate::sandbox::sweep_sandbox_namespace(&payload.ns_inode);
+            KillOutcome::Gone
+        }
+        Err(error) => KillOutcome::Failed(error.raw_os_error().unwrap_or(libc::EIO)),
+    }
+}
+
 /// 读取线程：poll＋读取一路输出通道直到 EOF；持续推入待取缓存并唤醒等待方。
 /// `readers_may_stop` 置位后退出（宽限已过，通道由后代持有时不无限等待）。
 /// Windows 读取线程：阻塞 Read 直到 EOF（树终止后管道关闭必然 EOF；
@@ -1820,11 +2393,15 @@ fn spawn_reader<R: Read + Send + 'static>(session: Arc<Session>, mut pipe: R) {
             match pipe.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    let mut st = session.lock();
-                    st.pending.push(&buf[..n]);
-                    drop(st);
-                    session.cv.notify_all();
-                    if st.readers_may_stop {
+                    let stop = {
+                        let mut st = session.lock();
+                        st.pending.push(&buf[..n]);
+                        let stop = st.readers_may_stop;
+                        drop(st);
+                        session.cv.notify_all();
+                        stop
+                    };
+                    if stop {
                         break;
                     }
                 }
@@ -1866,6 +2443,797 @@ fn spawn_reader<R: Read + AsRawFd + Send + 'static>(session: Arc<Session>, mut p
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    struct TestEnvRestore(&'static str, Option<std::ffi::OsString>);
+    #[cfg(target_os = "linux")]
+    impl Drop for TestEnvRestore {
+        fn drop(&mut self) {
+            if let Some(value) = self.1.take() {
+                std::env::set_var(self.0, value);
+            } else {
+                std::env::remove_var(self.0);
+            }
+        }
+    }
+
+    /// A sandbox payload can exit after the session phase check but before SIGINT.
+    /// Its pidfd reports NotFound; continue collecting its natural exit status.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sandbox_interrupt_after_payload_exit_is_natural_completion() {
+        let mut child = Command::new("true")
+            .process_group(0)
+            .spawn()
+            .expect("短命子进程启动");
+        let pid = child.id() as libc::pid_t;
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        assert!(fd >= 0, "pidfd_open 失败：{}", std::io::Error::last_os_error());
+        let pidfd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) };
+        let _ = child.wait().expect("回收短命子进程");
+        let mut session = Session::new(
+            "s-interrupt-exited".into(),
+            "true".into(),
+            pid,
+            pid,
+            None,
+            0,
+            false,
+            OwnerTag::Root,
+        );
+        session.sandbox_payload = Some(crate::sandbox::SandboxPayloadIdentity {
+            pid,
+            reaper_pid: 1,
+            reaper_start_time: 1,
+            ns_inode: "unused-after-exit".into(),
+            start_time: 1,
+            process_group: pid,
+            session_id: pid,
+            pidfd: Arc::new(pidfd),
+        });
+
+        assert!(session.interrupt().is_ok());
+    }
+
+    // ---------- 038 方案 A：沙箱启动确认闸（用户确认契约，确定性单测） ----------
+    //
+    // 集成层（tests/exec_sandbox.rs gate03）验证放行路径；本组单测直接操纵
+    // 确认闸输入，确定性复现「取消/超时/LeaderGone/清理边界」——集成层无法
+    // 从外部构造这些窗口（本容器 bwrap setup <1ms，时间注入不可控）。
+
+    /// 确认期取消（cancel 预置位）：不放行——真实 bwrap 载荷（touch 标记文件）
+    /// 未执行（文件不存在），整组已被终止，调用者 ns 的无关哨兵不波及。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gate_confirm_cancel_does_not_execute() {
+        if !crate::sandbox::probe_available() {
+            return; // 无 bwrap 环境：确认闸随沙箱后端分支，用例照常通过
+        }
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        std::env::set_var("TCHAT_SANDBOX", "1");
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) { std::env::remove_var("TCHAT_SANDBOX"); }
+        }
+        let _env = EnvGuard;
+        let dir = std::env::temp_dir().join(format!(
+            "tchat-gate-cancel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mark = dir.join("gate-mark");
+        // 无关哨兵：与沙箱会话同在调用者 ns——清理不得波及。
+        let mut sentinel = std::process::Command::new("sleep")
+            .arg("20")
+            .spawn()
+            .expect("哨兵启动");
+        let launch = crate::sandbox::tool_launch_argv(crate::sandbox::exec_gate_argv(
+            &format!("touch {}; sleep 30", mark.display()),
+        ))
+        .unwrap()
+        .expect("沙箱可用时必须包装");
+        let mut c = Command::new(&launch.0);
+        c.args(&launch.1)
+            .env_clear()
+            .envs(launch.2.iter().cloned())
+            .process_group(0);
+        let mut child = c.spawn().expect("bwrap 启动");
+        let cancel = AtomicBool::new(true); // 预置位：确认第一循环即取消
+        let r = crate::sandbox::confirm_sandbox_isolation_and_release(child.id(), Some(&cancel));
+        assert!(r.is_err(), "取消必须不放行：{r:?}");
+        assert!(
+            r.unwrap_err().to_string().contains("取消"),
+            "错误须说明取消"
+        );
+        // 用户命令未执行（载荷停在 STOP，随后被整组终止）。
+        assert!(!mark.exists(), "确认取消时用户命令不得执行");
+        // 016 有界清理：监督进程已被回收——confirm 的 kill_group 内联
+        // waitpid 已收尸（child.wait 返回 ECHILD 即为已回收的证据）。
+        match child.wait() {
+            Ok(status) => assert!(!status.success(), "被终止的启动无成功退出码：{status:?}"),
+            Err(e) if e.raw_os_error() == Some(libc::ECHILD) => {}
+            Err(e) => panic!("意外的 wait 错误：{e}"),
+        }
+        // 清理不波及调用者 ns：无关哨兵仍存活。
+        assert!(
+            sentinel.try_wait().unwrap().is_none(),
+            "调用者 ns 无关进程不得被清理波及"
+        );
+        let _ = sentinel.kill();
+        let _ = sentinel.wait();
+        std::env::remove_var("TCHAT_SANDBOX");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cancellation set during the identity callback is checked again immediately
+    /// before SIGCONT; it must not race through the release point.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gate_cancel_during_validation_does_not_execute() {
+        if !crate::sandbox::probe_available() {
+            return;
+        }
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        std::env::set_var("TCHAT_SANDBOX", "1");
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                std::env::remove_var("TCHAT_SANDBOX");
+            }
+        }
+        let _env = EnvGuard;
+        let dir = std::env::temp_dir().join(format!(
+            "tchat-gate-cancel-validation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("gate-mark");
+        let launch = crate::sandbox::tool_launch_argv(crate::sandbox::exec_gate_argv(
+            &format!("touch {}", marker.display()),
+        ))
+        .unwrap()
+        .expect("沙箱可用时必须包装");
+        let mut command = Command::new(&launch.0);
+        command.args(&launch.1).env_clear().envs(launch.2.iter().cloned()).process_group(0);
+        let mut child = command.spawn().expect("bwrap 启动");
+        let cancel = AtomicBool::new(false);
+        let result = crate::sandbox::confirm_sandbox_with_release(
+            child.id(),
+            Some(&cancel),
+            |identity| {
+                assert_eq!(crate::sandbox::read_process_identity(identity.pid)?.state, 'T');
+                assert!(!marker.exists(), "用户 marker 在确认回调前不存在");
+                cancel.store(true, Ordering::SeqCst);
+                Ok(crate::sandbox::SandboxRelease::Ready)
+            },
+            |leader_pid, reaper_found| {
+                crate::sandbox::kill_sandbox_group_and_wait(leader_pid, reaper_found)
+            },
+        );
+        let error = result.expect_err("确认回调期间取消不得放行");
+        assert!(error.to_string().contains("取消"), "{error}");
+        assert!(!marker.exists(), "取消不得执行用户命令");
+        match child.wait() {
+            Ok(status) => assert!(!status.success()),
+            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {}
+            Err(error) => panic!("意外 wait 错误：{error}"),
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 真实 bwrap：调用者只在载荷 State T、namespace 父子关系和独立 PGID/SID
+    /// 都可读时返回 Ready；marker 在回调中不存在，确认器随后对固定 PIDFD 放行。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gate_release_observes_stopped_payload_before_marker() {
+        if !crate::sandbox::probe_available() {
+            return;
+        }
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        std::env::set_var("TCHAT_SANDBOX", "1");
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) { std::env::remove_var("TCHAT_SANDBOX"); }
+        }
+        let _env = EnvGuard;
+        let dir = std::env::temp_dir().join(format!(
+            "tchat-gate-release-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("after-release");
+        let launch = crate::sandbox::tool_launch_argv(crate::sandbox::exec_gate_argv(
+            &format!("printf released > {}", marker.display()),
+        ))
+        .unwrap()
+        .expect("沙箱可用时必须包装");
+        let mut command = Command::new(&launch.0);
+        command.args(&launch.1).env_clear().envs(launch.2.iter().cloned()).process_group(0);
+        let mut child = command.spawn().expect("启动 bwrap");
+        let mut before_release = None;
+        let result = crate::sandbox::confirm_sandbox_with_release(
+            child.id(),
+            None,
+            |payload| {
+                let reaper = crate::sandbox::read_process_identity(payload.reaper_pid)?;
+                let stopped = crate::sandbox::read_process_identity(payload.pid)?;
+                let nspid = std::fs::read_to_string(format!("/proc/{}/status", payload.pid))?;
+                let inner_pid = nspid.lines()
+                    .find_map(|line| line.strip_prefix("NSpid:"))
+                    .and_then(|ids| ids.split_whitespace().last())
+                    .ok_or_else(|| std::io::Error::other("载荷缺少 NSpid"))?;
+                assert_eq!(reaper.parent_pid, child.id() as libc::pid_t);
+                assert_eq!(stopped.parent_pid, payload.reaper_pid);
+                assert_eq!(stopped.state, 'T');
+                assert_ne!(inner_pid, "1", "只按父子关系定位载荷，不假定固定 namespace PID");
+                assert_eq!(stopped.process_group, payload.process_group);
+                assert_eq!(stopped.session_id, payload.session_id);
+                assert_eq!(payload.process_group, payload.pid);
+                assert_eq!(payload.session_id, payload.pid);
+                assert!(!marker.exists(), "SIGCONT 前用户 marker 不存在");
+                before_release = Some((payload.pid, payload.reaper_pid, inner_pid.to_string(), stopped.state,
+                    stopped.process_group, stopped.session_id));
+                Ok(crate::sandbox::SandboxRelease::Ready)
+            },
+            |leader_pid, reaper_found| {
+                crate::sandbox::kill_sandbox_group_and_wait(leader_pid, reaper_found)
+            },
+        );
+        let crate::sandbox::SandboxConfirm::Released(identity) = result.expect("gate 放行") else {
+            panic!("bwrap 在 gate 前退出");
+        };
+        let facts = before_release.expect("核验回调实际执行");
+        eprintln!(
+            "GATE_IDENTITY before_sigcont payload_host_pid={} reaper_host_pid={} payload_nspid={} state={} pgid={} sid={} ns={} start={} pidfd_fixed=true",
+            facts.0, facts.1, facts.2, facts.3, facts.4, facts.5, identity.ns_inode, identity.start_time
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !marker.exists() && Instant::now() < deadline {
+            if let Some(status) = child.try_wait().expect("等待 bwrap") {
+                panic!("bwrap 在 marker 写出前退出：{status}");
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(marker.exists(), "固定 PIDFD 放行后用户命令必须写 marker");
+        let status = child.wait().expect("回收 bwrap");
+        assert!(status.success(), "正常放行命令退出状态：{status}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 确认超时：以无载荷的普通进程（sleep，children 空且同 ns）为监督者，
+    /// 载荷定位永不可能→注入 1ms 窗口→确定性超时：不放行＋整组终止。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gate_confirm_timeout_does_not_release() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let _timeout_env = TestEnvRestore(
+            "TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS",
+            std::env::var_os("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS"),
+        );
+        std::env::set_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", "1");
+        let mut leader = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .expect("sleep 启动");
+        let r = crate::sandbox::confirm_sandbox_isolation_and_release(leader.id(), None);
+        let err = r.expect_err("无载荷监督进程必须确认超时");
+        assert!(err.to_string().contains("超时"), "{err}");
+        // 016 有界清理：监督者已被终止回收（confirm 内联 waitpid 已收尸）。
+        match leader.wait() {
+            Ok(status) => assert!(!status.success()),
+            Err(e) if e.raw_os_error() == Some(libc::ECHILD) => {}
+            Err(e) => panic!("意外的 wait 错误：{e}"),
+        }
+    }
+
+    /// LeaderGone：监督进程不存在（确认前已消失）→不报错、不放行、无清理
+    /// 标识——016 自然退出语义由监控线程收尾。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gate_confirm_leader_gone_is_quiet() {
+        let r = crate::sandbox::confirm_sandbox_isolation_and_release(3_999_999_999, None);
+        assert!(matches!(r, Ok(crate::sandbox::SandboxConfirm::LeaderGone)), "{r:?}");
+    }
+
+    /// 监督进程在真实载荷被定位后、放行前死亡：确认结果不得报告 Released。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gate_confirm_supervisor_dies_before_release_does_not_report_released() {
+        assert_gate_confirm_supervisor_dies_before_release(false);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gate_confirm_supervisor_dies_before_release_ready_does_not_release() {
+        assert_gate_confirm_supervisor_dies_before_release(true);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_gate_confirm_supervisor_dies_before_release(callback_ready: bool) {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+
+        if !crate::sandbox::probe_available() {
+            return;
+        }
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let _timeout_env = TestEnvRestore(
+            "TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS",
+            std::env::var_os("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS"),
+        );
+        std::env::set_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", "2000");
+        std::env::set_var("TCHAT_SANDBOX", "1");
+        let launch = crate::sandbox::tool_launch_argv(
+            crate::sandbox::exec_gate_argv("/bin/sleep 30"),
+        )
+        .unwrap()
+        .expect("沙箱可用时必须包装");
+        let mut command = Command::new(&launch.0);
+        command
+            .args(&launch.1)
+            .env_clear()
+            .envs(launch.2.iter().cloned())
+            .process_group(0);
+        let mut child = command.spawn().expect("启动 bwrap");
+        let supervisor_pidfd_raw = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_open,
+                child.id() as libc::pid_t,
+                0 as libc::c_uint,
+            )
+        };
+        let supervisor_pidfd_open_error = (supervisor_pidfd_raw < 0)
+            .then(|| std::io::Error::last_os_error().to_string());
+        let supervisor_pidfd = (supervisor_pidfd_raw >= 0).then(|| unsafe {
+            std::os::fd::OwnedFd::from_raw_fd(supervisor_pidfd_raw as i32)
+        });
+        let supervisor_pidfd_state = || match supervisor_pidfd.as_ref() {
+            Some(pidfd) => {
+                let mut pfd = libc::pollfd {
+                    fd: pidfd.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let ready = unsafe { libc::poll(&mut pfd, 1, 0) };
+                if ready < 0 {
+                    format!("poll_error={}", std::io::Error::last_os_error())
+                } else if ready == 0 {
+                    "live".to_string()
+                } else if pfd.revents & libc::POLLIN != 0 {
+                    "exited".to_string()
+                } else {
+                    format!("revents={:#x}", pfd.revents)
+                }
+            }
+            None => format!(
+                "unavailable={}",
+                supervisor_pidfd_open_error.as_deref().unwrap_or("unknown")
+            ),
+        };
+        let _trace = crate::sandbox::gate_confirm_trace_start();
+        crate::sandbox::gate_confirm_trace(format_args!(
+            "test.child.spawned leader_pid={} callback_ready={callback_ready}",
+            child.id()
+        ));
+        let mut payload_pidfd = None;
+        let mut payload_pid = None;
+        let mut release_calls = 0;
+        let mut abort_calls = 0;
+        let result = crate::sandbox::confirm_sandbox_with_release(
+            child.id(),
+            None,
+            |identity| {
+                crate::sandbox::gate_confirm_trace(format_args!(
+                    "test.validate.enter leader_pid={} payload_pid={} supervisor_pidfd={}",
+                    child.id(),
+                    identity.pid,
+                    supervisor_pidfd_state()
+                ));
+                release_calls += 1;
+                payload_pid = Some(identity.pid);
+                payload_pidfd = Some(identity.pidfd.try_clone()?);
+                let kill_result = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGKILL) };
+                crate::sandbox::gate_confirm_trace(format_args!(
+                    "test.validate.kill_supervisor result={} error={}",
+                    kill_result,
+                    if kill_result < 0 {
+                        std::io::Error::last_os_error().to_string()
+                    } else {
+                        "none".to_string()
+                    }
+                ));
+                assert_eq!(kill_result, 0);
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let status = loop {
+                    if let Some(status) = child.try_wait()? {
+                        crate::sandbox::gate_confirm_trace(format_args!(
+                            "test.validate.child.try_wait=Some code={:?} signal={:?}",
+                            status.code(),
+                            status.signal()
+                        ));
+                        break status;
+                    }
+                    if Instant::now() >= deadline {
+                        crate::sandbox::gate_confirm_trace(format_args!(
+                            "test.validate.child.try_wait=TimedOut"
+                        ));
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "bwrap 外力终止后未在 2 秒内退出",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                };
+                assert_eq!(status.signal(), Some(libc::SIGKILL));
+                crate::sandbox::gate_confirm_trace(format_args!(
+                    "test.validate.supervisor_pidfd.after_child_wait={}",
+                    supervisor_pidfd_state()
+                ));
+                crate::sandbox::gate_confirm_trace(format_args!(
+                    "test.validate.return kind={}",
+                    if callback_ready { "ready" } else { "pending" }
+                ));
+                Ok(if callback_ready {
+                    crate::sandbox::SandboxRelease::Ready
+                } else {
+                    crate::sandbox::SandboxRelease::Pending
+                })
+            },
+            |_leader_pid, _reaper_found| {
+                abort_calls += 1;
+                crate::sandbox::gate_confirm_trace(format_args!(
+                    "test.abort.callback invoked leader_pid={_leader_pid} reaper_found={_reaper_found}; Child wait is owned by validate callback"
+                ));
+                // The callback already reaped this Child. Do not signal its numeric PID here.
+                Ok(())
+            },
+        );
+        crate::sandbox::gate_confirm_trace(format_args!(
+            "test.confirm.return result={result:?} release_calls={release_calls} abort_calls={abort_calls} supervisor_pidfd={}",
+            supervisor_pidfd_state()
+        ));
+        let result = result.expect("bwrap 消失应返回 LeaderGone");
+        assert!(matches!(result, crate::sandbox::SandboxConfirm::LeaderGone));
+        assert_eq!(release_calls, 1, "只允许在载荷已定位后触发一次屏障");
+        assert_eq!(abort_calls, 0, "监督进程已退出时不伪造清理成功");
+        let payload_fd = payload_pidfd.expect("屏障前已固定载荷身份");
+        let mut pfd = libc::pollfd {
+            fd: payload_fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert!(unsafe { libc::poll(&mut pfd, 1, 0) } >= 0);
+        if pfd.revents & (libc::POLLIN | libc::POLLHUP) == 0 {
+            eprintln!(
+                "DIAGNOSTIC_CLEANUP_AFTER_PRODUCT_ASSERTION payload_pid={}",
+                payload_pid.expect("payload PID 已记录")
+            );
+            let rc = unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    payload_fd.as_raw_fd(),
+                    libc::SIGKILL,
+                    0,
+                    0,
+                )
+            };
+            if rc < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+                panic!("诊断清理孤儿 payload 失败：{}", std::io::Error::last_os_error());
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            assert!(unsafe { libc::poll(&mut pfd, 1, 0) } >= 0);
+            if pfd.revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "bwrap 退出后载荷仍未停止");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        std::env::remove_var("TCHAT_SANDBOX");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires writable user/PID namespaces; run `cargo test --locked --offline -p terminal-chat --lib proc_session::tests::gate_confirm_supervisor_pid_reuse_does_not_abort_or_signal_replacement -- --exact --ignored --test-threads=1` on a capable Linux host"]
+    fn gate_confirm_supervisor_pid_reuse_does_not_abort_or_signal_replacement() {
+        const INNER_MODE: &str = "TCHAT_GATE_PID_REUSE_INNER";
+        if std::env::var_os(INNER_MODE).is_some() {
+            gate_confirm_supervisor_pid_reuse_inner();
+            return;
+        }
+
+        let executable = std::env::current_exe().expect("获取测试执行文件");
+        let output = Command::new("timeout")
+            .args([
+                "12s",
+                "unshare",
+                "--user",
+                "--map-root-user",
+                "--pid",
+                "--fork",
+                "--mount-proc",
+                "--",
+            ])
+            .arg(executable)
+            .args([
+                "--exact",
+                "proc_session::tests::gate_confirm_supervisor_pid_reuse_does_not_abort_or_signal_replacement",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(INNER_MODE, "1")
+            .env_remove("TCHAT_SANDBOX")
+            .env_remove("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS")
+            .output()
+            .expect("在临时 user/PID namespace 启动回归");
+        eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "PID 重用回归子进程失败：status={:?}\nstdout={}\nstderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn gate_confirm_supervisor_pid_reuse_inner() {
+        use std::os::unix::process::ExitStatusExt;
+
+        assert!(crate::sandbox::probe_available(), "PID 重用回归需要真实 bwrap");
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let _timeout_env = TestEnvRestore(
+            "TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS",
+            std::env::var_os("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS"),
+        );
+        std::env::set_var("TCHAT_SANDBOX", "1");
+        std::env::set_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", "2000");
+
+        let launch = crate::sandbox::tool_launch_argv(crate::sandbox::exec_gate_argv(
+            "/bin/sleep 30",
+        ))
+        .unwrap()
+        .expect("沙箱可用时必须包装");
+        let mut command = Command::new(&launch.0);
+        command
+            .args(&launch.1)
+            .env_clear()
+            .envs(launch.2.iter().cloned())
+            .process_group(0);
+        let mut child = command.spawn().expect("启动 bwrap");
+        let leader_pid = child.id() as libc::pid_t;
+        assert!(leader_pid > 1, "PID namespace init 必须不是 bwrap");
+        let leader_start_time = crate::sandbox::read_process_identity(leader_pid)
+            .expect("读取原监督进程身份")
+            .start_time;
+        let mut replacement = None;
+        let mut replacement_start_time = None;
+        let mut payload = None;
+        let mut validate_calls = 0;
+        let mut abort_calls = 0;
+
+        let result = crate::sandbox::confirm_sandbox_with_release(
+            child.id(),
+            None,
+            |identity| {
+                validate_calls += 1;
+                payload = Some(identity.clone());
+                if validate_calls == 1 {
+                    assert_eq!(unsafe { libc::kill(leader_pid, libc::SIGKILL) }, 0);
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    let status = loop {
+                        if let Some(status) = child.try_wait()? {
+                            break status;
+                        }
+                        if Instant::now() >= deadline {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "bwrap 外力终止后未在 2 秒内退出",
+                            ));
+                        }
+                        std::thread::sleep(Duration::from_millis(2));
+                    };
+                    assert_eq!(status.signal(), Some(libc::SIGKILL));
+                    assert!(
+                        crate::sandbox::read_process_identity(leader_pid)
+                            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+                        "wait 后原监督进程必须已离开 /proc"
+                    );
+
+                    // ns_last_pid 是当前临时 PID namespace 的局部状态；把下一 PID
+                    // 设为原值，确定性创建复用该数字 PID 的新进程。start_time 以
+                    // 时钟 tick 计数，快速退出并重用时可能相同，不能单独判定身份。
+                    std::fs::write(
+                        "/proc/sys/kernel/ns_last_pid",
+                        format!("{}\n", leader_pid - 1),
+                    )?;
+                    let replacement_child = Command::new("/bin/sleep")
+                        .arg("30")
+                        .process_group(0)
+                        .spawn()?;
+                    assert_eq!(
+                        replacement_child.id(),
+                        leader_pid as u32,
+                        "必须重用原监督进程的 PID"
+                    );
+                    let current = crate::sandbox::read_process_identity(leader_pid)?;
+                    assert_eq!(current.process_group, leader_pid);
+                    replacement_start_time = Some(current.start_time);
+                    replacement = Some(replacement_child);
+
+                    let callback_deadline = Instant::now()
+                        + Duration::from_millis(crate::sandbox::sandbox_confirm_timeout_ms())
+                        + Duration::from_millis(50);
+                    while Instant::now() < callback_deadline {
+                        std::thread::park_timeout(
+                            callback_deadline.saturating_duration_since(Instant::now()),
+                        );
+                    }
+                }
+                Ok(crate::sandbox::SandboxRelease::Pending)
+            },
+            |_leader_pid, _reaper_found| {
+                abort_calls += 1;
+                // 不在测试回调中按已复用的 PID 清理；产品不应调用到此处。
+                Ok(())
+            },
+        );
+
+        let product_result = matches!(
+            &result,
+            Ok(crate::sandbox::SandboxConfirm::LeaderGone)
+        );
+        let product_validate_calls = validate_calls;
+        let product_abort_calls = abort_calls;
+        if let Some(identity) = payload.as_ref() {
+            if !crate::sandbox::sandbox_payload_has_exited(identity).unwrap_or(true) {
+                eprintln!(
+                    "DIAGNOSTIC_CLEANUP_AFTER_PRODUCT_RESULT payload_pid={}",
+                    identity.pid
+                );
+                let _ = crate::sandbox::signal_sandbox_payload_group(identity, libc::SIGKILL);
+                crate::sandbox::sweep_sandbox_namespace(&identity.ns_inode);
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while !crate::sandbox::sandbox_payload_has_exited(identity)
+                    .expect("检查诊断清理后的载荷")
+                {
+                    assert!(Instant::now() < deadline, "诊断清理后载荷仍存活");
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+        }
+        let replacement = replacement.as_mut().expect("已创建 PID 替代进程");
+        let replacement_alive = replacement
+            .try_wait()
+            .expect("检查 PID 替代进程")
+            .is_none();
+        let current = crate::sandbox::read_process_identity(leader_pid)
+            .expect("替代进程仍占用原 PID");
+        let replacement_identity_kept =
+            Some(current.start_time) == replacement_start_time && current.process_group == leader_pid;
+        eprintln!(
+            "PID_REUSE_EVIDENCE leader_pid={leader_pid} old_start_time={leader_start_time} replacement_start_time={:?} result={result:?} abort_calls={product_abort_calls} replacement_alive={replacement_alive}",
+            replacement_start_time
+        );
+
+        if let Ok(crate::sandbox::SandboxConfirm::Released(identity)) = &result {
+            let _ = crate::sandbox::signal_sandbox_payload_group(identity, libc::SIGKILL);
+            crate::sandbox::sweep_sandbox_namespace(&identity.ns_inode);
+        }
+        if replacement.try_wait().expect("复核替代进程状态").is_none() {
+            replacement.kill().expect("清理 PID 替代进程");
+        }
+        let _ = replacement.wait();
+        std::env::remove_var("TCHAT_SANDBOX");
+
+        assert!(
+            product_result,
+            "原监督进程已 wait，数字 PID 已重用，仍须返回 LeaderGone：{result:?}"
+        );
+        assert_eq!(product_validate_calls, 1, "回调只在原载荷身份固定后运行一次");
+        assert_eq!(product_abort_calls, 0, "不得进入超时 abort 清理");
+        assert!(replacement_alive, "不得向复用旧 PID 的替代进程发送信号");
+        assert!(replacement_identity_kept, "替代进程 PID/start time 应保持不变");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gate_confirm_callback_exhausting_deadline_does_not_release() {
+        if !crate::sandbox::probe_available() {
+            return;
+        }
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let _sandbox_env = TestEnvRestore("TCHAT_SANDBOX", std::env::var_os("TCHAT_SANDBOX"));
+        let _timeout_env = TestEnvRestore(
+            "TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS",
+            std::env::var_os("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS"),
+        );
+        std::env::set_var("TCHAT_SANDBOX", "1");
+        std::env::set_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", "2000");
+
+        let dir = std::env::temp_dir().join(format!(
+            "tchat-gate-callback-deadline-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("after-release");
+        let launch = crate::sandbox::tool_launch_argv(crate::sandbox::exec_gate_argv(
+            &format!("touch {}; exec sleep 30", marker.display()),
+        ))
+        .unwrap()
+        .expect("沙箱可用时必须包装");
+        let mut command = Command::new(&launch.0);
+        command
+            .args(&launch.1)
+            .env_clear()
+            .envs(launch.2.iter().cloned())
+            .process_group(0);
+        let mut child = command.spawn().expect("启动 bwrap");
+        let started = Instant::now();
+        let callback_deadline = started + Duration::from_millis(2_050);
+        let _trace = crate::sandbox::gate_confirm_trace_start();
+        let mut callback_calls = 0;
+        let mut abort_calls = 0;
+        let result = crate::sandbox::confirm_sandbox_with_release(
+            child.id(),
+            None,
+            |identity| {
+                callback_calls += 1;
+                assert!(
+                    Instant::now() < started + Duration::from_secs(2),
+                    "确认期限应仍有剩余时间时进入 validate"
+                );
+                assert_eq!(crate::sandbox::read_process_identity(identity.pid)?.state, 'T');
+                assert!(!marker.exists(), "载荷放行前 marker 不存在");
+                while Instant::now() < callback_deadline {
+                    std::thread::park_timeout(
+                        callback_deadline.saturating_duration_since(Instant::now()),
+                    );
+                }
+                Ok(crate::sandbox::SandboxRelease::Ready)
+            },
+            |leader_pid, reaper_found| {
+                abort_calls += 1;
+                crate::sandbox::kill_sandbox_group_and_wait(leader_pid, reaper_found)
+            },
+        );
+
+        if let Ok(crate::sandbox::SandboxConfirm::Released(identity)) = &result {
+            let _ = crate::sandbox::signal_sandbox_payload_group(identity, libc::SIGKILL);
+            crate::sandbox::sweep_sandbox_namespace(&identity.ns_inode);
+            let _ = crate::sandbox::kill_sandbox_group_and_wait(child.id(), true);
+        }
+        assert_eq!(callback_calls, 1, "必须实际进入一次 validate");
+        assert!(
+            result.as_ref().is_err_and(|error| error.to_string().contains("超时")),
+            "回调耗尽确认期限后必须超时且不放行：{result:?}"
+        );
+        assert_eq!(abort_calls, 1, "超时只执行一次既有清理");
+        assert!(!marker.exists(), "超时后用户代码不得执行");
+        match child.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("超时清理后 bwrap 仍存活"),
+            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {}
+            Err(error) => panic!("检查 bwrap 等待状态失败：{error}"),
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn sink_run(chunks: &[&[u8]]) -> PendingBuffer {
         let mut b = PendingBuffer::new();
@@ -1997,12 +3365,14 @@ impl Drop for KillpgFailGuard {
 }
 
 /// 对指定进程组注入 killpg 失败；返回守卫，drop(guard) 或离开作用域即解除。
+#[cfg(unix)]
 fn arm_killpg_fail(pgid: libc::pid_t) -> KillpgFailGuard {
     TEST_KILLPG_FAIL_PGD.store(pgid as i64, Ordering::SeqCst);
     KillpgFailGuard
 }
 
 /// 取指定会话的进程组 id（仅测试：注入 killpg 失败需精确限定目标）。
+#[cfg(unix)]
 fn session_pgid(mgr: &ProcessManager, id: &str) -> libc::pid_t {
     let pgid = {
         let st = mgr.lock_mgr();
@@ -2022,6 +3392,7 @@ fn writer_cmd(log: &std::path::Path) -> String {
 
 /// 接缝①：省略 timeout_ms＝不设截止（journal 记 None）；正整数（含 >60000 与
 /// u64::MAX）＝有截止；查询不新增、不改变已记录的截止时间。
+#[cfg(unix)] // 038：seam 时钟注入经子进程 sh 语法命令（unix 设施）
 #[test]
 fn seam_deadline_journal_omission_and_acceptance() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2059,6 +3430,7 @@ fn seam_deadline_journal_omission_and_acceptance() {
 
 /// 接缝②：截止时间计算边界注入失败——拒绝执行、零命令副作用
 ///（数值防御分支在本平台不可自然触达，见 compute_deadline 文档）。
+#[cfg(unix)] // 038：seam 时钟注入经子进程 sh 语法命令（unix 设施）
 #[test]
 fn seam_deadline_injection_rejects_execution() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2086,6 +3458,8 @@ fn seam_deadline_injection_rejects_execution() {
 
 /// 接缝③：终止失败注入——未确认清理成功不得返回“已终止”；进程保留可查询；
 /// 不误伤其他会话；解除注入后重试 terminate 成功。
+    #[cfg(unix)] // 038：killpg 注入为 unix 设施测试
+#[cfg(unix)] // 038：seam 时钟注入经子进程 sh 语法命令（unix 设施）
 #[test]
 fn seam_killpg_injection_terminate_reports_failure_keeps_session() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2146,6 +3520,8 @@ fn seam_killpg_injection_terminate_reports_failure_keeps_session() {
 
 /// 接缝④：时限到期的终止失败——不得伪装成“已终止回收”的 timeout；
 /// 进程保留、如实说明，解除注入后可终止。
+    #[cfg(unix)] // 038：killpg 注入为 unix 设施测试
+#[cfg(unix)] // 038：seam 时钟注入经子进程 sh 语法命令（unix 设施）
 #[test]
 fn seam_killpg_injection_deadline_not_fake_timeout() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2233,6 +3609,7 @@ fn wait_log_frozen(log: &std::path::Path) -> u64 {
 
 /// 时钟前移到恰过截止：无任何后续查询，监控线程自行到期终止真实进程
 ///（日志停止增长＝进程组死亡），事后一次查询确认 timeout 与记录移除。
+#[cfg(unix)] // 038：seam 时钟注入经子进程 sh 语法命令（unix 设施）
 #[test]
 fn seam_clock_shift_expiry_without_query() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2272,6 +3649,7 @@ fn seam_clock_shift_expiry_without_query() {
 
 /// 取消当前轮（等待被取消、进程保留）后，原截止时间仍然生效：
 /// 前移到恰过**启动时**截止即终止——若取消会重置/暂停时限则不会到期。
+#[cfg(unix)] // 038：seam 时钟注入经子进程 sh 语法命令（unix 设施）
 #[test]
 fn seam_clock_shift_deadline_survives_cancel() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2309,6 +3687,7 @@ fn seam_clock_shift_deadline_survives_cancel() {
 
 /// 查询与输入不延长截止：先查询（管道会话）并发送输入（PTY 会话），
 /// 再前移到恰过**启动时**截止——若查询/输入重置截止则不会到期。
+#[cfg(unix)] // 038：seam 时钟注入经子进程 sh 语法命令（unix 设施）
 #[test]
 fn seam_clock_shift_query_and_input_do_not_extend_deadline() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2358,6 +3737,7 @@ fn seam_clock_shift_query_and_input_do_not_extend_deadline() {
 
 /// 省略 timeout_ms：单调读数前移一小时后进程仍存活（不套用任何固定总时限），
 /// 日志持续增长；随后明确终止成功。
+#[cfg(unix)] // 038：seam 时钟注入经子进程 sh 语法命令（unix 设施）
 #[test]
 fn seam_clock_shift_omitted_timeout_has_no_fixed_limit() {
     let _g = SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2416,6 +3796,11 @@ mod win {
         std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
     pub fn assign_child_to_job(pid: u32, child: &Child) -> io::Result<()> {
+        assign_raw_process(pid, child.as_raw_handle() as HANDLE)
+    }
+
+    /// 038 ConPTY：CreateProcessW 产物的原生句柄挂接（无 std Child 可用）。
+    pub fn assign_raw_process(pid: u32, process: HANDLE) -> io::Result<()> {
         let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if job.is_null() {
             return Err(io::Error::last_os_error());
@@ -2433,7 +3818,7 @@ mod win {
                 CloseHandle(job);
                 return Err(io::Error::last_os_error());
             }
-            if AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0 {
+            if AssignProcessToJobObject(job, process) == 0 {
                 CloseHandle(job);
                 return Err(io::Error::last_os_error());
             }
@@ -2459,5 +3844,99 @@ mod win {
             },
             None => Err(io::Error::other("作业句柄不存在（会话未注册或已终止）")),
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod ns_sweep_tests {
+    use super::*;
+
+    /// D2 回归辅助：与 confirm_sandbox_isolation_and_release 的载荷定位同构
+    ///（children 中 ns≠self 的首个进程）；confirm 已把该逻辑用于放行闸，
+    /// 本辅助仅服务回归断言（不改产品行为）。
+    #[cfg(target_os = "linux")]
+    fn test_payload_ns_inode(leader_pid: u32) -> Option<String> {
+        let self_ns = std::fs::read_link("/proc/self/ns/pid").ok()?;
+        let tasks = std::fs::read_dir(format!("/proc/{leader_pid}/task")).ok()?;
+        for t in tasks.flatten() {
+            let Ok(text) = std::fs::read_to_string(t.path().join("children")) else {
+                continue;
+            };
+            for pid_str in text.split_whitespace() {
+                let Ok(pid) = pid_str.parse::<u32>() else {
+                    continue;
+                };
+                if let Ok(ns) = std::fs::read_link(format!("/proc/{pid}/ns/pid")) {
+                    if ns != self_ns {
+                        return Some(ns.to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// 038 D2 修正回归（2026-11-02）：ns 补杀圈定必须是载荷 ns≠调用者 ns。
+    /// 旧实现读组长（bwrap）自身 ns＝调用者 ns，sweep 会 SIGKILL 调用者 ns
+    /// 全体进程（容器内 zcode server 连坐死亡实证）。断言双向：①完整沙箱
+    /// 形态下捕获到载荷 ns 且≠self ns；②非沙箱进程（无新 ns 子进程）返回
+    /// None（降级不补杀）。bwrap 不可用的环境（CI 裸机）跳过——圈定断言
+    /// 依赖真实 ns 结构。
+    #[test]
+    fn payload_ns_inode_targets_sandbox_not_caller() {
+        let probe = std::process::Command::new("bwrap")
+            .args(["--unshare-user", "--unshare-ipc", "--ro-bind", "/", "/", "true"])
+            .status();
+        if !probe.map(|s| s.success()).unwrap_or(false) {
+            eprintln!("bwrap 不可用，跳过 ns 圈定回归（无真实 ns 结构可比对）");
+            return;
+        }
+        // 完整沙箱形态（033 argv 的 ns 集：NEWNS|NEWUSER|NEWPID|NEWIPC），
+        // 载荷长跑保证 children 可读窗口。
+        let mut leader = std::process::Command::new("bwrap")
+            .args([
+                "--unshare-user",
+                "--unshare-pid",
+                "--unshare-ipc",
+                "--dev-bind",
+                "/",
+                "/",
+                "sleep",
+                "5",
+            ])
+            .spawn()
+            .expect("bwrap 完整沙箱形态 spawn 失败");
+        let leader_pid = leader.id();
+        let self_ns = std::fs::read_link("/proc/self/ns/pid")
+            .expect("self ns/pid 必须可读")
+            .to_string_lossy()
+            .into_owned();
+        // 载荷出现轮询（verify_child_pid_namespace 同窗，放宽至 500ms）。
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let ns = loop {
+            match test_payload_ns_inode(leader_pid) {
+                Some(ns) => break ns,
+                None if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                None => panic!("沙箱载荷 ns 未捕获（500ms 窗口；bwrap 载荷应已在新 ns）"),
+            }
+        };
+        assert_ne!(
+            ns, self_ns,
+            "载荷 ns 不得等于调用者 ns——旧实现（读组长自身）即此错误形态，\
+             该形态下 sweep 会杀调用者 ns 全体"
+        );
+        // 反向：无沙箱子进程的普通进程必须 None（降级不补杀，killpg 兜底）。
+        let mut plain = std::process::Command::new("sleep").arg("2").spawn().unwrap();
+        assert_eq!(
+            test_payload_ns_inode(plain.id()),
+            None,
+            "无新 ns 子进程必须返回 None"
+        );
+        let _ = plain.kill();
+        let _ = plain.wait();
+        let _ = leader.kill();
+        let _ = leader.wait();
     }
 }

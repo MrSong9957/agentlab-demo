@@ -379,17 +379,12 @@ fn mem_write(root: &Path, v: &Value, expected_epoch: u64) -> String {
         // 绑定、不可变），不是共享配对文件——新代任务的 prepare 不会让旧
         // 任务的凭据恢复。「检查＋写入」在根目录共享锁内同一临界区（与
         // 重置的排他清空互斥——排除交错竞态；跨进程有效）。
-        #[cfg(unix)]
+        // 「检查＋写入」在根目录共享锁内同一临界区（与重置的排他清空互斥；
+        // 440cffb 起 Windows 命名互斥体真实生效——038 安全测试 D1：原无锁分支
+        // 使重置失效边界在 Windows 被打破）。None＝拒绝进入临界区（安全测试 A4）。
         {
-            let _lock = crate::memory::runner::lock_shared(root);
-            if crate::memory::runner::read_epoch(root) != expected_epoch {
-                return Err("记忆已被重置，本任务写入已中止（任务代数失效）".into());
-            }
-            crate::catalog::write_private_file(&scoped, &content)
-                .map_err(|e| format!("写入文件失败：{e}"))?;
-        }
-        #[cfg(not(unix))]
-        {
+            let _lock = crate::memory::runner::lock_shared(root)
+                .ok_or_else(|| "记忆根共享锁不可用：写入已中止".to_string())?;
             if crate::memory::runner::read_epoch(root) != expected_epoch {
                 return Err("记忆已被重置，本任务写入已中止（任务代数失效）".into());
             }

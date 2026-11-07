@@ -85,7 +85,9 @@ exec与wait的正常结果固定为下列字段：
 
 子进程采用可信当前可执行文件的隐藏 `--internal-js` 入口，在dotenv/模型目录/记忆初始化之前分流。只通过有界IPC接收源码/目录和发送请求/输出；始终env_clear、关闭无关fd、独立进程组。启用033时，由宿主调用现有 `sandbox::tool_launch_argv` 包装worker，策略锚定稳定的主进程工作区，不由JS或模型workdir重定；包装失败直接报错。关闭033时保留本节的worker语言/IPC/资源限制，不能因包装失败自动切换模式。
 
-033使用相同宿主UID、独立PID命名空间与新procfs，取消和回收沿宿主进程组处理，不恢复旧跨UID补杀。worker的RLIMIT、IPC、超时与bwrap组合在M0实测；仅凭已有033命令测试不能宣称JS运行时已验证。JS不提供文件/网络API是语言能力限制；033当前网络保留，不能据此宣称内核已断网。
+033 命令使用相同宿主 UID、独立 PID 命名空间与新 procfs；其终止沿宿主进程组处理，不恢复旧跨 UID 补杀。worker 的 RLIMIT、IPC、超时与 bwrap 组合须在本项实测。JS 不提供文件/网络 API 是语言能力限制；033 当前网络保留，不能据此宣称内核已断网。
+
+Linux JS worker 固定 payload pidfd 后才完成身份确认。worker 在入口停止态、进程组和 session 核验通过后才收到 init 帧。终止先使用 pidfd；pidfd 信号被拒时，回退信号只发给已核验的 worker 进程组。bwrap 留作等待者；产品确认 payload pidfd 退出和 bwrap 正常退出后才返回 terminated。bwrap 外力退出或全部信号被拒时，产品有界返回错误，不把外部 subreaper 的 wait 记作产品回收。038 本轮定向证据见 [`2026-11-05-process-reaping-closeout.md`](../logs/038-github-actions-ci/2026-11-05-process-reaping-closeout.md)。
 
 父进程是唯一能力与执行事实来源：逐次核对冻结目录、参数、预算、取消和原始MCP映射，复用既有工具执行函数；命令、MCP stdio、补丁继续经过033各自的真实沙箱入口，不在worker内直接执行业务。不信任子进程自报“已获批/已执行/新工具”。若031以后交付，策略也由宿主权限模块提交，JS不得提供自己的profile。JS子进程不持有模型/MCP认证、AutoSession或主历史引用。主轮驱动保存/通知，工作线程经有界事件队列回送，不并发改Vec/history或持锁等待网络。
 
@@ -204,5 +206,7 @@ env -u TCHAT_SANDBOX cargo test --locked --test tool_loop --test prompt_assembly
 | C16 | 记忆/实时CLI/TUI/PTY/resume：真实叶子事实可追溯且不重复；源码输出控制字符安全 | 已测：TUI/resume 共用投影的源码/参数/结果哨兵单测＋CLI 实时状态与 text 输出行（sanitize）＋rollout 外壳过滤实现（审查确认）；PTY 全屏渲染与记忆提取专测为残余小缺口（不改变行为判定） |
 | C17 | 固定32 KiB×4任务比较：计齐所有历史后脚本最终完整请求更小，额外模型请求为0 | 已测：E2E 字节对照已测（脚本路最终请求更小） |
 | C18 | §1.7冻结性能/RSS/大历史追加、资源与取消用例，关键反证及全量验证：满足冻结要求且证据齐全 | 已测：性能/RSS/10 万追加门禁冻结，两次连跑通过 |
+
+2026-11-05 worker 回收复验：`sandbox_worker_terminate_reaps_payload`、`sandbox_worker_cancel_inflight_leaf`、C13、CPU 5 秒和墙钟 120 秒直接回归通过。CPU 用例在 5.37 秒终止并确认 worker pidfd 退出；墙钟用例在 120.15 秒返回 `WALL_TIME_LIMIT` 并确认 payload 与 supervisor 退出。038 本轮回收验收和异常分类见上方日志；这不宣告 034 或 038 全部验收完成。
 
 证据已写入 `docs/logs/034-javascript-tool-orchestration/`（M0 原型、C18 性能冻结与原样本）。全量验证（2026-10-29）：`env -u TCHAT_SANDBOX cargo check --locked && env -u TCHAT_SANDBOX cargo test --locked --workspace --no-fail-fast` exit 0，**3781 通过 / 0 失败 / 3 既有忽略**；C13/C16 标注的补充面与 PTY 渲染为已知验证缺口，由验收人裁量。验收人按冻结规格和可运行产物独立核验，不读实现源码；实现方无权自行标已通过或为过关放宽限额、删除用例。

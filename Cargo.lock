@@ -692,6 +692,7 @@ dependencies = [
  "dunce",
  "pretty_assertions",
  "tempfile",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3954,6 +3955,8 @@ dependencies = [
  "itertools",
  "lazy_static",
  "libc",
+ "objc2-app-kit",
+ "objc2-foundation",
  "pathdiff",
  "pretty_assertions",
  "pulldown-cmark",
@@ -4048,6 +4051,7 @@ dependencies = [
  "ureq",
  "url",
  "uuid",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
