@@ -863,7 +863,10 @@ fn seccomp_fd_roundtrip() {
 fn seccomp_filter_blocks_clone3_and_preserves_openat2() {
     const CHILD: &str = "TCHAT_SECCOMP_CLONE3_TEST_CHILD";
     // 子进程全部断言通过后打印的最终标记；父裁决与子打印共用此常量，防单点失配。
-    const FILTER_MARKER: &str = "产品过滤器：clone3=ENOSYS openat2=ENOSYS";
+    // 039 扩展：变更条目 errno 实测——328 移除后 pwritev2 不再 EPERM；428 实拒
+    // open_tree（注释纠偏的实体验证）；442 加入后 mount_setattr 实拒。
+    const FILTER_MARKER: &str =
+        "产品过滤器：clone3=ENOSYS openat2=ENOSYS pwritev2!=EPERM open_tree=EPERM mount_setattr=EPERM";
     if std::env::var_os(CHILD).is_none() {
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "sandbox::tests::seccomp_filter_blocks_clone3_and_preserves_openat2", "--nocapture"])
@@ -911,7 +914,7 @@ fn seccomp_filter_blocks_clone3_and_preserves_openat2() {
     assert_eq!(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) }, 0);
     install(&outer);
     let probe = |nr| {
-        let result = unsafe { libc::syscall(nr, 0, 0, 0, 0) };
+        let result = unsafe { libc::syscall(nr, 0, 0, 0, 0, 0, 0) };
         assert_eq!(result, -1, "探针只使用无效参数");
         std::io::Error::last_os_error().raw_os_error().unwrap()
     };
@@ -932,6 +935,31 @@ fn seccomp_filter_blocks_clone3_and_preserves_openat2() {
     install(&filters);
     assert_eq!(probe(libc::SYS_openat2), libc::ENOSYS, "437 的既有行为不得改变");
     assert_eq!(probe(libc::SYS_clone3), libc::ENOSYS, "产品过滤器应拒绝 clone3");
+    // 039 变更条目 errno 实测：探针参数全零只产生内核侧错误（EBADF/EFAULT/
+    // EINVAL 或 count=0 的成功），不会产生真实副作用；EPERM 只能来自过滤器。
+    let probe_any = |nr| {
+        let result = unsafe { libc::syscall(nr, 0, 0, 0, 0, 0, 0) };
+        if result == -1 {
+            std::io::Error::last_os_error().raw_os_error().unwrap()
+        } else {
+            0
+        }
+    };
+    assert_ne!(
+        probe_any(libc::SYS_pwritev2),
+        libc::EPERM,
+        "328 移除后 pwritev2 不得再被拒（误拒普通写路径）"
+    );
+    assert_eq!(
+        probe(libc::SYS_open_tree),
+        libc::EPERM,
+        "428 应实拒 open_tree（原 328 注释意图由 428 承担）"
+    );
+    assert_eq!(
+        probe(libc::SYS_mount_setattr),
+        libc::EPERM,
+        "442 加入后 mount_setattr 应实拒（mount 族补齐）"
+    );
     eprintln!("{FILTER_MARKER}");
 }
 
@@ -1044,3 +1072,71 @@ fn leader_pidfd_exit_check_preserves_wait_owner() {
 }
 
 
+
+/// 039 回归锚：拒绝清单条目 ↔ libc `SYS_*` 符号逐条对照。编号漂移（clone3
+/// 曾被误标为 437 的同类错误）在此必然失败：清单或对照表任一侧改动都必须
+/// 有意识地同步另一侧，语义（符号名）与编号保持三方一致（注释＝实际拒绝＝
+/// 官方名）。附升序断言，保持清单可读性与新增条目的插入纪律。
+#[test]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn seccomp_deny_lists_match_libc_symbols() {
+    let eperm: &[(u32, &str)] = &[
+        (libc::SYS_ptrace as u32, "ptrace"),
+        (libc::SYS_pivot_root as u32, "pivot_root"),
+        (libc::SYS_mount as u32, "mount"),
+        (libc::SYS_umount2 as u32, "umount2"),
+        (libc::SYS_swapon as u32, "swapon"),
+        (libc::SYS_swapoff as u32, "swapoff"),
+        (libc::SYS_reboot as u32, "reboot"),
+        (libc::SYS_init_module as u32, "init_module"),
+        (libc::SYS_delete_module as u32, "delete_module"),
+        (libc::SYS_kexec_load as u32, "kexec_load"),
+        (libc::SYS_unshare as u32, "unshare"),
+        (libc::SYS_fanotify_init as u32, "fanotify_init"),
+        (libc::SYS_name_to_handle_at as u32, "name_to_handle_at"),
+        (libc::SYS_open_by_handle_at as u32, "open_by_handle_at"),
+        (libc::SYS_setns as u32, "setns"),
+        (libc::SYS_process_vm_readv as u32, "process_vm_readv"),
+        (libc::SYS_process_vm_writev as u32, "process_vm_writev"),
+        (libc::SYS_finit_module as u32, "finit_module"),
+        (libc::SYS_kexec_file_load as u32, "kexec_file_load"),
+        (libc::SYS_bpf as u32, "bpf"),
+        (libc::SYS_userfaultfd as u32, "userfaultfd"),
+        (libc::SYS_open_tree as u32, "open_tree"),
+        (libc::SYS_move_mount as u32, "move_mount"),
+        (libc::SYS_fsopen as u32, "fsopen"),
+        (libc::SYS_fsconfig as u32, "fsconfig"),
+        (libc::SYS_fsmount as u32, "fsmount"),
+        (libc::SYS_mount_setattr as u32, "mount_setattr"),
+    ];
+    let enosys: &[(u32, &str)] = &[
+        (libc::SYS_clone3 as u32, "clone3"),
+        (libc::SYS_openat2 as u32, "openat2"),
+    ];
+    for (list, table, label) in [
+        (SECCOMP_DENY_EPERM, eperm, "EPERM"),
+        (SECCOMP_DENY_ENOSYS, enosys, "ENOSYS"),
+    ] {
+        assert_eq!(
+            list.len(),
+            table.len(),
+            "{label} 清单条目数与对照表不一致：清单={list:?}"
+        );
+        for (nr, name) in table {
+            assert!(
+                list.contains(nr),
+                "{label} 清单缺少 {name}（SYS_{name}={nr}）——编号漂移或漏登记"
+            );
+        }
+        for (i, nr) in list.iter().enumerate() {
+            assert!(
+                table.iter().any(|(sym, _)| sym == nr),
+                "{label} 清单第 {i} 项 {nr} 无符号对照——更新对照表或修正编号"
+            );
+            assert!(
+                i == 0 || list[i - 1] < *nr,
+                "{label} 清单第 {i} 项 {nr} 破坏升序"
+            );
+        }
+    }
+}

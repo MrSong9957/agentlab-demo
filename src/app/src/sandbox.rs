@@ -1200,12 +1200,12 @@ const SECCOMP_DENY_EPERM: &[u32] = &[
     320, // kexec_file_load
     321, // bpf
     323, // userfaultfd
-    328, // open_tree
-    428, // fsopen
-    429, // fsconfig
-    430, // fsmount
-    431, // move_mount
-    432, // mount_setattr
+    428, // open_tree
+    429, // move_mount
+    430, // fsopen
+    431, // fsconfig
+    432, // fsmount
+    442, // mount_setattr
 ];
 
 /// clone3：以 ENOSYS 拒绝（glibc 对 ENOSYS 回退 clone(2)；对 EPERM 不回退，
