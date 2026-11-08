@@ -1,0 +1,10 @@
+control without product filter
+gate tasks=261 visible=49 limit=500
+peak tasks=262 visible=50
+exit=0 stdout=clone3 nr=435 args=(NULL,0) raw_kernel_return=-22 libc_return=-1 errno=22
+openat2 nr=437 args=(AT_FDCWD,NULL,NULL,0) libc_return=-1 errno=22 stderr=
+control with reconstructed filter mode=layered_with_clone3 bytes=544
+gate tasks=262 visible=50 limit=500
+peak tasks=263 visible=51
+exit=0 stdout=clone3 nr=435 args=(NULL,0) raw_kernel_return=-38 libc_return=-1 errno=38
+openat2 nr=437 args=(AT_FDCWD,NULL,NULL,0) libc_return=-1 errno=38 stderr=

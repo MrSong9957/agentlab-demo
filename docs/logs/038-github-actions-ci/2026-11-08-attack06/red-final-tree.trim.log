@@ -1,0 +1,42 @@
+running 1 test
+外层对照：clone3=EINVAL openat2=EINVAL
+
+thread 'sandbox::tests::seccomp_filter_blocks_clone3_and_preserves_openat2' (202598) panicked at src/app/src/sandbox/tests.rs:925:5:
+assertion `left == right` failed: 产品过滤器应拒绝 clone3
+  left: 22
+ right: 38
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'sandbox::tests::seccomp_filter_blocks_clone3_and_preserves_openat2' (202596) panicked at src/app/src/sandbox/tests.rs:885:9:
+受控子进程失败：
+
+running 1 test
+test sandbox::tests::seccomp_filter_blocks_clone3_and_preserves_openat2 ... FAILED
+
+failures:
+
+failures:
+    sandbox::tests::seccomp_filter_blocks_clone3_and_preserves_openat2
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 304 filtered out; finished in 0.00s
+
+
+外层对照：clone3=EINVAL openat2=EINVAL
+
+thread 'sandbox::tests::seccomp_filter_blocks_clone3_and_preserves_openat2' (202598) panicked at src/app/src/sandbox/tests.rs:925:5:
+assertion `left == right` failed: 产品过滤器应拒绝 clone3
+  left: 22
+ right: 38
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test sandbox::tests::seccomp_filter_blocks_clone3_and_preserves_openat2 ... FAILED
+
+failures:
+
+failures:
+    sandbox::tests::seccomp_filter_blocks_clone3_and_preserves_openat2
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 304 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p terminal-chat --lib`
