@@ -862,6 +862,8 @@ fn seccomp_fd_roundtrip() {
 #[test]
 fn seccomp_filter_blocks_clone3_and_preserves_openat2() {
     const CHILD: &str = "TCHAT_SECCOMP_CLONE3_TEST_CHILD";
+    // 子进程全部断言通过后打印的最终标记；父裁决与子打印共用此常量，防单点失配。
+    const FILTER_MARKER: &str = "产品过滤器：clone3=ENOSYS openat2=ENOSYS";
     if std::env::var_os(CHILD).is_none() {
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "sandbox::tests::seccomp_filter_blocks_clone3_and_preserves_openat2", "--nocapture"])
@@ -883,6 +885,13 @@ fn seccomp_filter_blocks_clone3_and_preserves_openat2() {
         let out = child.wait_with_output().unwrap();
         eprint!("{}", String::from_utf8_lossy(&out.stderr));
         assert!(out.status.success(), "受控子进程失败：\n{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        // 守卫父裁决：libtest 对零匹配的 --exact 仍以退出码 0 结束，只查退出码会把
+        // "子进程什么都没跑"误判为通过；最终标记位于子进程两条核心断言之后，
+        // 存在即证明断言已真实执行。
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(FILTER_MARKER),
+            "子进程未执行到目标测试的最终断言（--exact 名称可能失配：libtest 零匹配仍退出 0）"
+        );
         return;
     }
 
@@ -923,7 +932,7 @@ fn seccomp_filter_blocks_clone3_and_preserves_openat2() {
     install(&filters);
     assert_eq!(probe(libc::SYS_openat2), libc::ENOSYS, "437 的既有行为不得改变");
     assert_eq!(probe(libc::SYS_clone3), libc::ENOSYS, "产品过滤器应拒绝 clone3");
-    eprintln!("产品过滤器：clone3=ENOSYS openat2=ENOSYS");
+    eprintln!("{FILTER_MARKER}");
 }
 
 
