@@ -1210,8 +1210,9 @@ const SECCOMP_DENY_EPERM: &[u32] = &[
 
 /// clone3：以 ENOSYS 拒绝（glibc 对 ENOSYS 回退 clone(2)；对 EPERM 不回退，
 /// 会破坏线程创建）。namespace 创建经 clone(2) flags 由掩码检查拦截。
+/// 保留原有的 437（openat2）ENOSYS 行为。
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const SECCOMP_DENY_ENOSYS: &[u32] = &[437];
+const SECCOMP_DENY_ENOSYS: &[u32] = &[libc::SYS_clone3 as u32, 437];
 
 /// clone(2) 的 namespace 标志位（CLONE_NEWNS|NEWCGROUP|NEWUTS|NEWIPC|
 /// NEWUSER|NEWPID|NEWNET）：置位即 EPERM（嵌套进程不得创建自己的命名空间

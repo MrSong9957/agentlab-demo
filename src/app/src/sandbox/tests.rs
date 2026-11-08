@@ -857,6 +857,75 @@ fn seccomp_fd_roundtrip() {
     assert_eq!(buf, filter);
 }
 
+/// 外层先返回 EINVAL，避免宿主的 ENOSYS 掩盖产品过滤器缺失。
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn seccomp_filter_blocks_clone3_and_preserves_openat2() {
+    const CHILD: &str = "TCHAT_SECCOMP_CLONE3_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "sandbox::tests::seccomp_filter_blocks_clone3_and_preserves_openat2", "--nocapture"])
+            .env(CHILD, "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if child.try_wait().unwrap().is_some() { break; }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("seccomp 受控子进程超时");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let out = child.wait_with_output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "受控子进程失败：\n{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        return;
+    }
+
+    // 仅在子进程中叠加测试过滤器：对两个目标系统调用返回 EINVAL。
+    let outer = [
+        libc::sock_filter { code: 0x20, jt: 0, jf: 0, k: 0 },
+        libc::sock_filter { code: 0x15, jt: 1, jf: 0, k: libc::SYS_clone3 as u32 },
+        libc::sock_filter { code: 0x15, jt: 0, jf: 1, k: libc::SYS_openat2 as u32 },
+        libc::sock_filter { code: 0x06, jt: 0, jf: 0, k: 0x0005_0000 | libc::EINVAL as u32 },
+        libc::sock_filter { code: 0x06, jt: 0, jf: 0, k: 0x7fff_0000 },
+    ];
+    let install = |filters: &[libc::sock_filter]| {
+        let program = libc::sock_fprog { len: filters.len() as u16, filter: filters.as_ptr() as *mut _ };
+        let result = unsafe { libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &program) };
+        assert_eq!(result, 0, "安装 seccomp 失败：{}", std::io::Error::last_os_error());
+    };
+    assert_eq!(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) }, 0);
+    install(&outer);
+    let probe = |nr| {
+        let result = unsafe { libc::syscall(nr, 0, 0, 0, 0) };
+        assert_eq!(result, -1, "探针只使用无效参数");
+        std::io::Error::last_os_error().raw_os_error().unwrap()
+    };
+    assert_eq!(probe(libc::SYS_clone3), libc::EINVAL, "外层 clone3 对照未生效");
+    assert_eq!(probe(libc::SYS_openat2), libc::EINVAL, "外层 openat2 对照未生效");
+    eprintln!("外层对照：clone3=EINVAL openat2=EINVAL");
+
+    // 从产品 memfd 读取实际过滤器，按内核 sock_filter 格式装载。
+    let guard = build_seccomp_fd().unwrap().unwrap();
+    let mut bytes = vec![0u8; build_seccomp_filter().len()];
+    let n = unsafe { libc::read(guard.raw(), bytes.as_mut_ptr().cast(), bytes.len()) };
+    assert_eq!(n, bytes.len() as isize);
+    assert_eq!(bytes.len() % 8, 0);
+    let filters: Vec<libc::sock_filter> = bytes.chunks_exact(8).map(|chunk| libc::sock_filter {
+        code: u16::from_le_bytes([chunk[0], chunk[1]]), jt: chunk[2], jf: chunk[3],
+        k: u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]),
+    }).collect();
+    install(&filters);
+    assert_eq!(probe(libc::SYS_openat2), libc::ENOSYS, "437 的既有行为不得改变");
+    assert_eq!(probe(libc::SYS_clone3), libc::ENOSYS, "产品过滤器应拒绝 clone3");
+    eprintln!("产品过滤器：clone3=ENOSYS openat2=ENOSYS");
+}
+
 
 
 
