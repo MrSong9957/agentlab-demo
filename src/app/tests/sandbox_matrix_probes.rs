@@ -131,6 +131,76 @@ fn apply_patch_probe(spec: &Value) -> Value {
     json!({"result": result, "changes": changes.len()})
 }
 
+#[cfg(target_os = "linux")]
+fn try_wait_b2_scan(child: &mut std::process::Child) -> Option<std::process::ExitStatus> {
+    child.try_wait().unwrap_or_else(|error| {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("检查 B2 活动管道读取状态失败：{error}");
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn legacy_pipe_scan_preflight(pid: u32, fd: i32) -> Value {
+    let mut child = Command::new("cat")
+        .arg(format!("/proc/{pid}/fd/{fd}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("启动 B2 活动管道旧扫描复现器");
+    let cat_pid = child.id();
+    let started = Instant::now();
+    let launch_deadline = started + Duration::from_secs(5);
+    let mut blocked_state = None;
+    let mut status = None;
+    while status.is_none() && Instant::now() < launch_deadline {
+        status = try_wait_b2_scan(&mut child);
+        if status.is_none() {
+            blocked_state = fs::read_to_string(format!("/proc/{cat_pid}/stat"))
+                .ok()
+                .and_then(|stat| stat.split_whitespace().nth(2).map(str::to_owned));
+            if blocked_state.as_deref() == Some("S") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    let mut timed_out = false;
+    let blocked_elapsed_ms = if blocked_state.as_deref() == Some("S") {
+        let blocked_started = Instant::now();
+        let read_deadline = blocked_started + Duration::from_millis(500);
+        while status.is_none() && Instant::now() < read_deadline {
+            status = try_wait_b2_scan(&mut child);
+            if status.is_none() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        if status.is_none() {
+            let kill_sent = child.kill().is_ok();
+            status = Some(child.wait().expect("等待已终止的 B2 旧扫描读取"));
+            timed_out = kill_sent && status.as_ref().is_some_and(|exit| exit.code().is_none());
+        }
+        Some(blocked_started.elapsed().as_millis())
+    } else {
+        if status.is_none() {
+            let _ = child.kill();
+            status = Some(child.wait().expect("等待未进入读取状态的 B2 复现器"));
+        }
+        None
+    };
+    json!({
+        "launch_deadline_ms": 5000,
+        "read_deadline_ms": 500,
+        "elapsed_ms": started.elapsed().as_millis(),
+        "timed_out": timed_out,
+        "cat_pid": cat_pid,
+        "read_wait_state": blocked_state,
+        "blocked_elapsed_ms": blocked_elapsed_ms,
+        "status": status.map(|exit| exit.to_string()),
+    })
+}
+
 /// MCP 探针（生产入口 McpManager prepare/call/close）：mcp.json 由父测试写入
 /// TCHAT_USER_DIR；探针记录文本（rec）由服务器侧包装脚本落盘。可选 fd_path＝
 /// launcher 角色无 CLOEXEC 假凭据 fd（B2 的 MCP 面专项）。
@@ -139,12 +209,16 @@ fn mcp_probe(spec: &Value) -> Value {
     // 038：unix 设施探针（fcntl 语义），Windows 不执行。
     let mut fd_number: Option<i32> = None;
     #[cfg(unix)]
+    let mut inherited_file: Option<fs::File> = None;
+    #[cfg(not(unix))]
+    let inherited_file: Option<fs::File> = None;
+    #[cfg(unix)]
     if let Some(path) = spec["fd_path"].as_str() {
         use std::os::fd::AsRawFd;
         let f = fs::File::open(path).expect("打开假凭据 fd");
         let n = f.as_raw_fd();
         unsafe { assert_eq!(libc::fcntl(n, libc::F_SETFD, 0), 0, "清除 CLOEXEC 失败"); }
-        std::mem::forget(f);
+        inherited_file = Some(f);
         fd_number = Some(n);
     }
     let diag = &spec["diag"];
@@ -152,6 +226,47 @@ fn mcp_probe(spec: &Value) -> Value {
         "prepare.begin pid={} fd={fd_number:?}",
         std::process::id()
     )];
+    let mut pipe_diagnostic = Value::Null;
+    #[cfg(target_os = "linux")]
+    let mut active_pipe: Option<(fs::File, fs::File)> = None;
+    #[cfg(target_os = "linux")]
+    if spec["live_pipe"].as_bool().unwrap_or(false) {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let mut fds = [-1; 2];
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0, "创建 B2 活动管道");
+        let reader = unsafe { fs::File::from_raw_fd(fds[0]) };
+        let writer = unsafe { fs::File::from_raw_fd(fds[1]) };
+        let pipe_fd = reader.as_raw_fd();
+        let flags = unsafe { libc::fcntl(pipe_fd, libc::F_GETFD) };
+        assert!(flags >= 0, "读取 B2 管道 fd 标志");
+        assert_eq!(unsafe { libc::fcntl(pipe_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) }, 0, "保留 B2 管道读端");
+        let pipe_target = fs::read_link(format!("/proc/self/fd/{pipe_fd}"))
+            .expect("读取 B2 活动管道身份").to_string_lossy().into_owned();
+        let legacy_scan = legacy_pipe_scan_preflight(std::process::id(), pipe_fd);
+        fs::write(
+            spec["rec"].as_str().expect("rec 路径"),
+            format!(
+                "controlled_pipe fd={pipe_fd} target={pipe_target} writer=held_open\nlegacy_pipe_scan cat_pid={} read_wait_state={} blocked_elapsed_ms={} launch_deadline_ms={} read_deadline_ms={} elapsed_ms={} timed_out={} status={}\n",
+                legacy_scan["cat_pid"],
+                legacy_scan["read_wait_state"],
+                legacy_scan["blocked_elapsed_ms"],
+                legacy_scan["launch_deadline_ms"],
+                legacy_scan["read_deadline_ms"],
+                legacy_scan["elapsed_ms"],
+                legacy_scan["timed_out"],
+                legacy_scan["status"],
+            ),
+        )
+        .expect("记录 B2 活动管道旧扫描复现证据");
+        pipe_diagnostic = json!({
+            "fd": pipe_fd,
+            "target": pipe_target,
+            "legacy_scan": legacy_scan,
+        });
+        probe_stages.push(format!("controlled_pipe fd={pipe_fd} target={pipe_target} writer=held_open"));
+        probe_stages.push(format!("legacy_pipe_scan result={legacy_scan}"));
+        active_pipe = Some((reader, writer));
+    }
     let manager = McpManager::new();
     let prepared = manager.prepare_for_turn(&AtomicBool::new(false));
     let status_after_prepare = manager.status_lines();
@@ -170,6 +285,9 @@ fn mcp_probe(spec: &Value) -> Value {
     probe_stages.push("manager.close.begin".to_string());
     manager.close();
     probe_stages.push("manager.close.return".to_string());
+    #[cfg(target_os = "linux")]
+    drop(active_pipe);
+    drop(inherited_file);
     let status_after_close = manager.status_lines();
     let (probe_rec, probe_rec_read_error) =
         match fs::read_to_string(spec["rec"].as_str().expect("rec 路径")) {
@@ -177,9 +295,12 @@ fn mcp_probe(spec: &Value) -> Value {
             Err(error) => (String::new(), Some(error.to_string())),
         };
     let read_diag = |name: &str| {
-        match fs::read_to_string(diag[name].as_str().expect("B2 诊断路径")) {
-            Ok(content) => json!({"content": content}),
-            Err(error) => json!({"read_error": error.to_string()}),
+        match diag[name].as_str() {
+            Some(path) => match fs::read_to_string(path) {
+                Ok(content) => json!({"content": content}),
+                Err(error) => json!({"read_error": error.to_string()}),
+            },
+            None => json!({"not_configured": true}),
         }
     };
     json!({
@@ -189,6 +310,7 @@ fn mcp_probe(spec: &Value) -> Value {
         "probe_rec": probe_rec,
         "diagnostic": {
             "fd_number": fd_number,
+            "controlled_pipe": pipe_diagnostic,
             "manager_status_after_prepare": status_after_prepare,
             "manager_status_after_close": status_after_close,
             "probe_stages": probe_stages,
@@ -747,11 +869,11 @@ fn b2_mcp_face_fd_closed() {
         let rec = recs.path().join("probe.txt");
         let rec2 = recs.path().join("fixture.jsonl");
         let fixture = common::mcp_fixtures::FIXTURE.replace('\\', "/");
-        // 诊断写入独立文件；MCP stdout 仍只承载协议帧。FDMETA 读取扫描
-        // shell 自身的 fd 目标，FDSCAN 在 cat 子进程中读取 /proc/self/fd。
+        // 诊断写入独立文件；MCP stdout 仍只承载协议帧。
         let wrapper = format!(
-            r#"{{ printf 'stage=wrapper_scan pid=%s\n' "$$" >> '{rec}'; for f in /proc/self/fd/*; do case "$f" in */0|*/1|*/2) ;; *) _fd=${{f##*/}}; _target=$(readlink "/proc/$$/fd/$_fd" 2>&1 || true); printf 'FDMETA pid=%s fd=%s target=%s\n' "$$" "$_fd" "$_target" >> '{rec}'; echo "FDSCAN=$(cat "$f" 2>&1 | head -c 30)" >> '{rec}';; esac; done; printf 'stage=fixture_launch pid=%s\n' "$$" >> '{rec}'; python3 '{fixture}' --scenario echo --record '{rec2}' --trace-stdin '{protocol_stdin}' --trace-stdout '{protocol_stdout}' 2>>'{server_stderr}'; _status=$?; printf 'stage=fixture_exit status=%s\n' "$_status" >> '{rec}'; printf '%s\n' "$_status" > '{server_exit_status}'; exit "$_status"; }}"#,
+            r#"{{ printf 'stage=wrapper_scan pid=%s\n' "$$" >> '{rec}'; for f in /proc/$$/fd/*; do case "$f" in */0|*/1|*/2) ;; *) _fd=${{f##*/}}; _target=$(readlink "/proc/$$/fd/$_fd" 2>&1 || true); if [ "$_target" = '{fd_target}' ]; then _content=$(cat "/proc/$$/fd/$_fd" 2>&1 | head -c 30); printf 'FDREAD_MARKER pid=%s fd=%s target=%s content=%s\n' "$$" "$_fd" "$_target" "$_content" >> '{rec}'; else case "$_target" in pipe:\[*\]) printf 'FDSKIP pid=%s fd=%s target=%s\n' "$$" "$_fd" "$_target" >> '{rec}';; socket:\[*\]) printf 'FDSKIP pid=%s fd=%s kind=socket\n' "$$" "$_fd" >> '{rec}';; /dev/pts/*) printf 'FDSKIP pid=%s fd=%s kind=tty\n' "$$" "$_fd" >> '{rec}';; *) printf 'FDSKIP pid=%s fd=%s kind=other\n' "$$" "$_fd" >> '{rec}';; esac; fi;; esac; done; printf 'stage=fixture_launch pid=%s\n' "$$" >> '{rec}'; python3 '{fixture}' --scenario echo --record '{rec2}' --trace-stdin '{protocol_stdin}' --trace-stdout '{protocol_stdout}' 2>>'{server_stderr}'; _status=$?; printf 'stage=fixture_exit status=%s\n' "$_status" >> '{rec}'; printf '%s\n' "$_status" > '{server_exit_status}'; exit "$_status"; }}"#,
             rec = rec.display(),
+            fd_target = fd_file.display(),
             fixture = fixture,
             rec2 = rec2.display(),
             protocol_stdin = protocol_stdin.display(),
@@ -761,13 +883,15 @@ fn b2_mcp_face_fd_closed() {
         );
         let mcp = json!({"mcp_servers": {"fx": {
             "enabled": true, "command": "sh", "args": ["-c", wrapper],
-            "cwd": work.path().display().to_string(), "env_vars": []}}});
+            "cwd": work.path().display().to_string(), "env_vars": [],
+            "startup_timeout_sec": 5}}});
         fs::write(user.path().join("mcp.json"), mcp.to_string()).unwrap();
 
         let spec = json!({
             "kind": "mcp",
             "rec": rec.display().to_string(),
             "fd_path": fd_file.display().to_string(),
+            "live_pipe": !sandbox,
             "diag": {
                 "fixture_record": rec2.display().to_string(),
                 "protocol_stdin": protocol_stdin.display().to_string(),
@@ -797,11 +921,40 @@ fn b2_mcp_face_fd_closed() {
         if outcome["call"]["failed"] != json!(false) {
             failures.push(format!("调用往返成功：{outcome}"));
         }
+        if !sandbox {
+            if outcome["diagnostic"]["controlled_pipe"]["target"].as_str().is_none() {
+                failures.push(format!("普通模式应建立受控活动管道：{outcome}"));
+            }
+            if outcome["diagnostic"]["controlled_pipe"]["legacy_scan"]["timed_out"] != json!(true)
+                || outcome["diagnostic"]["controlled_pipe"]["legacy_scan"]["read_wait_state"] != json!("S")
+                || outcome["diagnostic"]["controlled_pipe"]["legacy_scan"]["blocked_elapsed_ms"]
+                    .as_u64().is_none_or(|ms| ms < 500)
+            {
+                failures.push(format!("旧式读取必须观察到停止态并持续阻塞至 500ms 截止：{outcome}"));
+            }
+        }
         let rec_text = outcome["probe_rec"].as_str().unwrap_or_default();
+        if !sandbox {
+            let pipe_target = outcome["diagnostic"]["controlled_pipe"]["target"]
+                .as_str()
+                .unwrap_or_default();
+            if !rec_text.lines().any(|line| {
+                line.starts_with("FDSKIP ") && line.ends_with(&format!("target={pipe_target}"))
+            }) {
+                failures.push(format!("活动管道应被识别并跳过内容读取：{outcome}"));
+            }
+            if !rec_text.contains("FDREAD_MARKER") {
+                failures.push(format!("普通模式应实际读取目标假标记 fd：{outcome}"));
+            }
+        }
+        if sandbox && rec_text.contains("FDREAD_MARKER") {
+            failures.push(format!("沙箱模式不得读取目标假标记 fd：{outcome}"));
+        }
         println!(
             "==== 033 B2 MCP 面（{}）====\n{rec_text}",
             if sandbox { "沙箱" } else { "普通对照" }
         );
+        println!("B2 独立阶段与协议记录：{}", outcome["diagnostic"]);
         if sandbox {
             if rec_text.contains("FAKE-FD-MCP-033") {
                 failures.push(format!("MCP 面：沙箱分支读出宿主 fd 假凭据：{rec_text}"));

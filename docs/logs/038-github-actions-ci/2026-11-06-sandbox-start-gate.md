@@ -423,4 +423,44 @@ Windows 与 macOS 的完整失败用例和断言见各自 Actions 日志。本�
 
 定向检查：Python fixture 语法解析通过；诊断记录读取调整后，经 `cargo test --locked --offline -p terminal-chat --test sandbox_matrix_probes --no-run` 再次编译通过；编译前核实 `pids.current=244`（低于 500），日志为 `/workspace/target/038-validation/2026-11-07-b2-mcp-fd/diagnostic-compile-final.log`。随后以 `--test-threads=1`、60 秒上限运行诊断候选的精确用例；启动前 `pids.current=258`，用例实际执行并通过（1 passed，0.11 秒），日志为 `/workspace/target/038-validation/2026-11-07-b2-mcp-fd/diagnostic-exact-pass.log`。本地仍未复现工具发现失败；沙箱扫描观察到 FD 3 是管道且未读到假标记，普通对照 FD 3 指向假凭据并读出标记，夹具启动和退出状态为 0。通过路径没有打印完整 MCP 帧诊断对象；该对象会在目标断言失败时随 outcome 一并输出。此结果验证诊断候选没有破坏本地正常路径，不能代表 runner 根因已知或 CI 已关闭。
 
-完整候选补丁（含本节验收记录更新）与仅测试代码的诊断补丁分别保存在 `/workspace/target/038-validation/2026-11-07-b2-mcp-fd/candidate.patch` 和 `diagnostic-code.patch`。一次远端取证需要将该测试诊断候选更新到现有 PR 分支；现有 `pull_request` 工作流会启动 Ubuntu、Windows、macOS 全量 job，不更改 workflow，也不需要手动诊断 job。只用 Ubuntu B2 日志判断根因和 FD 断言；其余平台结果不在本问题范围。当前未提交、未推送、未触发 CI；等待用户授权该一次诊断发布与 CI 运行。
+完整候选补丁（含本节验收记录更新）与仅测试代码的诊断补丁分别保存在 `/workspace/target/038-validation/2026-11-07-b2-mcp-fd/candidate.patch` 和 `diagnostic-code.patch`。本节末尾的未提交状态是候选形成时记录；已获准的推送和 CI 结果见下一节。
+
+## B2 诊断候选远端 CI（2026-11-07，运行后未提交记录）
+
+- 诊断提交 `a2ff2c39afdaa420293b5c5e581c28c9f3031662` 的父提交为 `544a8e7db262fad50ddef2b2ffc5faa3c0ef1fb1`，仅含 `sandbox_matrix_probes.rs`、`mcp_stdio_server.py` 和本验收记录。提交前暂存补丁 SHA-256 与批准补丁一致。提交已正常快进推送到 `origin/feat/038-github-actions-ci`，并保存在主仓库引用 `refs/codex/candidates/038-b2-mcp-diagnostics-a2ff2c3`；主工作区分支和差异未改。
+- PR #1 head 与 [CI run #83](https://github.com/MrSong9957/agentlab-demo/actions/runs/42420778793) 的 `head_sha` 均为 `a2ff2c39afdaa420293b5c5e581c28c9f3031662`。事件为 `pull_request`，三平台 job 全部结束；整体结果为 failure。作业日志：[Ubuntu](https://github.com/MrSong9957/agentlab-demo/actions/runs/42420778793/job/128548534088)、[Windows](https://github.com/MrSong9957/agentlab-demo/actions/runs/42420778793/job/128548534026)、[macOS](https://github.com/MrSong9957/agentlab-demo/actions/runs/42420778793/job/128548533834)。D1–D3 诊断 job 按工作流配置跳过；没有触发手动 job。
+
+### Ubuntu B2 结果
+
+- runner 实际安装 bubblewrap `0.11.1-1ubuntu0.3`。B2 的沙箱分支先运行：日志显示 wrapper PID 2、FD 3 指向管道、`cat /proc/self/fd/3` 未读出内容，随后到达 `fixture_launch`，夹具退出状态为 0。失败汇总只包含普通对照，因此按测试控制流可确认沙箱分支的 `tools=1`、调用成功和假标记缺失断言均通过；FD 负向断言实际执行。
+- 普通模式分支失败：`started=true`、`tools=0`、`call=null`。MCP 状态显示 `fx (stdio)` 在共享的 30 秒初始化／首次发现期限后不可用。wrapper PID 46762 记录 `fd=142 target=pipe:[18763]`，之后没有 `FDSCAN` 或 `fixture_launch`。fixture 记录、协议 stdin/stdout、stderr 与退出状态文件均返回 `read_error: No such file or directory`。诊断版测试评估了普通模式的假标记正向断言，并因记录中没有 marker 而失败；扫描未到达假凭据内容读取，因此没有形成正向 FD 可读证据。原 run #82 则在更早的 `tools=0` 断言处退出，后续 FD 内容断言未执行。
+- 阶段证据表明：bwrap 和 shell wrapper 已启动；FD 扫描未完成，Python MCP 夹具没有启动，因此普通模式没有进入握手或工具发现。由扫描顺序及 FD 142 为 live pipe，可判断探针在该 FD 的读取步骤阻塞；这是当前 run #83 普通对照失败的原因，不是服务 stderr 或协议响应错误。
+- 成功的沙箱分支日志没有打印诊断 outcome 中的原始协议帧、MCP 状态数组或独立 stderr 文件内容；现有日志能证明夹具启动并以 0 退出及原行为断言通过，但这些记录的具体内容仍未保留。协议 stdout 与诊断文件在实现中分开写入。
+- **旧失败未解决也未证实根因。** run #82 的沙箱分支曾在 `tools=0` 失败；run #83 的沙箱分支通过，说明该提交快照未复现旧失败。当前已观察到的 live-pipe 阻塞发生在普通模式探针，不能据此推断 run #82 沙箱失败也由同一阻塞造成。
+
+Ubuntu 全量 `cargo check` 通过；全量测试 exit 101。`sandbox_matrix_probes` 为 6 passed、4 failed：`c_mcp_face_masks_env_and_keeps_explicit_env`、`b1_hardlinked_deny_refused_on_all_three_faces`、`f_fail_closed_without_fallback`、`b2_mcp_face_fd_closed`。`security_attack_031` 为 6 passed、1 failed，失败项是 `attack06_seccomp_allows_toolchain_blocks_privileged_syscalls`。
+
+### 三平台其余结果
+
+| 平台 | `cargo check` | 全量 `cargo test` | 实际结果 |
+|---|---|---|---|
+| Ubuntu | 通过 | 失败，exit 101 | 两个失败 target；B2 整体测试失败在普通模式探针。 |
+| macOS | 通过 | 失败，exit 101 | 14 个 target 失败。 |
+| Windows | 通过 | 失败，exit 1 | 11 个 target、32 个测试失败。 |
+
+Windows/macOS job 的实际结论均为 failure，不以 `continue-on-error` 改写。当前结果只确认此提交快照的沙箱 B2 分支通过；B2 完整测试、run #82 根因及 038 整体均未关闭。本节是 Actions 运行后的验收更新，保持未提交；没有追加修复、推送或 workflow 变更。
+
+run #82 与 run #83 的摘录及校验和保存在 `/workspace/target/038-validation/2026-11-07-b2-mcp-fd/`。
+
+## B2 活动管道探针修复候选（2026-11-07，本地未提交）
+
+- 本轮只改 `src/app/tests/sandbox_matrix_probes.rs` 与本记录。没有改生产 MCP、FD 隔离策略、Python fixture、workflow、依赖或环境；没有合并主工作区的 MCP 环境截断修复。
+- `bwrap --version` 为 `bubblewrap 0.9.0`。真实沙箱分支在精确用例中实际运行：wrapper PID 为 namespace 内 PID 2，工具发现和调用成功。
+- 修复前的本地红测用例体实际执行（1 failed、0 ignored、9 filtered）。普通对照记录假标记 FD 3，随后记录受控 FD 4 为 `pipe:[26999042]`，没有对应的 `FDSCAN` 或 `fixture_launch`；MCP 启动状态在测试专设的 5 秒期限后返回 `tools=0`、`call=null`，fixture、协议帧、stderr 和退出状态记录都不存在。红测日志为 `/workspace/target/038-validation/2026-11-07-b2-fdscan-fix/red-exact.log`。
+- 同一探针另建无数据管道，写端一直打开。旧式读取控制复现确认 `cat` 进程状态为 `S`，在观察到该状态后等待 508 ms 仍未退出；进程被测试直接 kill 并 wait，退出为 SIGKILL。该预检只证明管道读取未完成，不启动 MCP 夹具，也不再用合成文件标记代表夹具状态。真实旧扫描未启动夹具的证据来自 `red-exact.log`：普通模式 wrapper 在记录 pipe FD 后没有 `FDSCAN` 或 `fixture_launch`，MCP 超时返回 `tools=0`，夹具与协议记录均不存在。临时 cat 的 kill/wait 仅用于测试复现，不作为产品回收结果。
+- 最小修复仅限测试探针：仍枚举 `/proc/<shell-pid>/fd` 并读取链接目标来分类；只读取链接目标恰为本测试假凭据文件的 descriptor。日志只保留假标记路径和管道目标，socket、TTY 和其他 descriptor 只记录类别；不会读取其内容。使用 `/proc/<shell-pid>/fd/N` 固定被读取的 shell 身份，不依赖固定 FD 编号。B2 的工具数、调用成功、沙箱假标记不可读、普通对照假标记可读断言均保留。
+- 修复后 `b2_mcp_face_fd_closed` 精确用例通过（1 passed、0 failed、0 ignored、9 filtered）。沙箱和普通对照都发现 1 个 echo 工具、成功调用并以状态 0 退出；两侧协议记录分别保存在 JSON 诊断字段中，stderr 单独记录且为空。沙箱日志没有 `FDREAD_MARKER`；普通模式对假文件记录 `FAKE-FD-MCP-033`，并明确将活动管道记为 `FDSKIP`。最终回归还记录旧式读取 cat PID、状态 `S`、508 ms 阻塞、500 ms 截止、SIGKILL 及 wait 结果；不再使用合成“夹具启动”标记。完整日志：`/workspace/target/038-validation/2026-11-07-b2-fdscan-fix/final-b2-exact-r2.log`。
+- 直接受 `mcp_probe` 影响的 `c_mcp_face_masks_env_and_keeps_explicit_env` 首次定向运行子进程 exit 101。源码显示测试辅助会对缺省 B2 诊断路径执行 `expect`；该子进程的 stderr 被父探针丢弃，因此未保存 panic 文本。B2 诊断读取现对缺省路径输出 `not_configured`，不改变 MCP 行为；最终候选上的精确回归通过（1 passed、0 failed、0 ignored、9 filtered）。日志：`/workspace/target/038-validation/2026-11-07-b2-fdscan-fix/direct-mcp-regression-r2.log`。此前的回归日志保留在同目录 `direct-mcp-regression-final.log`，首次失败日志为 `direct-mcp-regression.log`。
+- 差异简化复核保留必要的活动管道红测、身份记录、普通正向 marker 断言和沙箱负向断言。审阅发现等待状态读取错误不能伪装成超时，现已让该错误清理子进程后明确失败；fd 持有只保留所需的单个文件句柄。移除了不能代表真实夹具启动的合成文件标记，改用 cat 的退出状态、观察到的 `S` 状态和截止时间断言阻塞。没有删除或放宽 B2 行为断言。
+- **CI 结论未变。** run #83 的普通模式分支可由本地活动管道复现；这解释的是 run #83 普通对照阻塞。run #82 失败的是沙箱分支，现有记录仍不能证明其具体失败阶段；本地修复和通过不能反推 run #82 的根因，也不能证明 runner 已通过。该修改没有新 SHA、没有远端 CI 验证。
+- 最终补丁和红/绿日志保全在 `/workspace/target/038-validation/2026-11-07-b2-fdscan-fix/`；变更保持未提交。主工作区及其既有差异未动。
