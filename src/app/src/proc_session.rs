@@ -2353,6 +2353,11 @@ fn monitor_thread(session: Arc<Session>, mut child: ChildHandle, deadline: Optio
     st.collect_done = true;
     drop(st);
     session.cv.notify_all();
+    // 040：bwrap 监督进程已在本线程收割（终态 wait/try_wait），其 ns-PID-1
+    // reaper 此刻已被本进程收养——就地定向回收，不留给容器 init（普通（非
+    // 沙箱）会话无匹配，扫描即返回）。
+    #[cfg(target_os = "linux")]
+    crate::sandbox::reap_adopted_bwrap_reapers();
 }
 
 #[cfg(target_os = "linux")]

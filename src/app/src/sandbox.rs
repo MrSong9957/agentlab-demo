@@ -225,6 +225,7 @@ fn probe_bwrap() -> Result<PathBuf, String> {
 }
 
 fn probe_bwrap_at(bwrap: &Path) -> Result<PathBuf, String> {
+    ensure_child_subreaper();
     let run = std::process::Command::new(bwrap)
         // 与真实策略同构的最小集：全盘 ro-bind＋userns＋cap-drop；不 unshare-pid/net。
         .args([
@@ -242,6 +243,7 @@ fn probe_bwrap_at(bwrap: &Path) -> Result<PathBuf, String> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+    reap_adopted_bwrap_reapers();
     match run {
         Ok(status) if status.success() => Ok(bwrap.to_path_buf()),
         Ok(status) => Err(format!(
@@ -282,6 +284,159 @@ fn find_bwrap_in_path() -> Option<PathBuf> {
                     })
                     .unwrap_or(false)
         })
+}
+
+// ---------- bwrap reaper 收割（040：孤儿 reaper 僵尸根治） ----------
+
+/// bwrap 0.9.0 监督进程在载荷退出（stdio 管道 EOF）后即退出，不等其
+/// namespace PID 1 reaper；reaper 孤儿化后被最近祖先 subreaper 或容器 init
+/// 收养——容器 init 不收割时即每次启动累积 1 个永久僵尸（实测证据见
+/// docs/logs/040-sandbox-bwrap-reaper-reap/）。产品侧登记 child subreaper
+/// 把孤儿 reaper 收养进本进程，再由 [`reap_adopted_bwrap_reapers`] 在 bwrap
+/// 监督进程的收割点定向回收。subreaper 只改变「无父进程者」的收养归属，
+/// 不影响任何在世子进程的 wait 语义。
+#[cfg(target_os = "linux")]
+fn ensure_child_subreaper() {
+    static DONE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    DONE.get_or_init(|| {
+        // 失败静默：subreaper 不可用时退回现状（孤儿归容器 init），沙箱功能面
+        // 不变；收割函数对非收养进程天然无操作。
+        let rc = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
+        eprintln!("DRAIN-TLM ensure_subreaper pid={} rc={}", std::process::id(), rc);
+    });
+}
+
+/// 回收已收养的 bwrap reaper 僵尸（在每个 bwrap 监督进程被收割的点位调用）。
+/// 签名三重精确：PPid=本进程（收养关系）＋comm=bwrap＋NSpid 末级=1（即
+/// namespace PID 1）。bwrap 监督进程 NSpid 单级、载荷及其后代 NSpid 末级≠1，
+/// 均不匹配——绝不触碰其他线程正在管理的在世/将回收子进程。并行收割点对
+/// 同一目标竞争时，后到者得 ECHILD，按已处理。仅收割 Z 态；S 态 reaper
+/// （载荷树刚死、自身退出在即）以 10ms 步进有界等待（约 1s 上限，仅病态
+/// 残留时到达），超限放弃、留给下一次收割点。
+#[cfg(target_os = "linux")]
+pub fn reap_adopted_bwrap_reapers() {
+    let me = std::process::id() as i32;
+    // 已知「卡死」候选：有界等待后仍 S 态的 reaper（主进程被强杀时其设置期
+    // 子进程会永远阻塞在 bwrap 内部同步原语上，永不退出）。记住并跳过，避免
+    // 每个收割点重复消耗等待窗口；卡死进程存活期间 PID 不会被复用。
+    static STUCK: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<i32>>> =
+        std::sync::OnceLock::new();
+    let stuck = STUCK.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    // 已登记卡死者的廉价巡检：单次 WNOHANG，误登记者（有界窗口内未及退出
+    // 的慢 reaper）一旦转 Z 即在此回收；真卡死者（永不退出）rc=0 原样保留。
+    {
+        let mut guard = stuck.lock().unwrap_or_else(|e| e.into_inner());
+        let done: Vec<i32> = guard
+            .iter()
+            .filter(|pid| {
+                let mut status = 0;
+                let rc = unsafe { libc::waitpid(**pid, &mut status, libc::WNOHANG) };
+                // rc==pid：本调用收割；rc==-1：已被并行收割点处理——两者都
+                // 从集合移除；rc==0＝仍存活（真卡死），保留。
+                rc == **pid || rc == -1
+            })
+            .copied()
+            .collect();
+        for pid in done {
+            guard.remove(&pid);
+        }
+    }
+    for _ in 0..101 {
+        let Some(pids) = scan_adopted_reaper_pids(me) else {
+            return;
+        };
+        let pids: Vec<i32> = {
+            let guard = stuck.lock().unwrap_or_else(|e| e.into_inner());
+            pids.into_iter().filter(|pid| !guard.contains(pid)).collect()
+        };
+        if pids.is_empty() {
+            return;
+        }
+        let mut alive = false;
+        for pid in pids {
+            let mut status = 0;
+            let rc = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            if rc == 0 {
+                alive = true;
+            }
+            // rc==pid：本调用收割；rc==-1：并行收割点已收（ECHILD）或其他
+            // 竞态——均按已处理，不重试同一 pid（僵尸期 PID 不会被复用）。
+        }
+        if !alive {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // 有界窗口耗尽：剩余 S 态候选分两路处置。
+    // ① 无任何子进程＝bwrap 设置期孤儿（主进程已死、子进程卡在
+    //    child_wait_fd/privsep 同步上，永不进入 wait 循环、永不 fork 载荷、
+    //    永不退出——收割不可达）。它是空命名空间的 ns-PID-1，SIGKILL 即命名
+    //    空间销毁，无附带进程；随后立刻收割其退出态。
+    // ② 有子进程＝合法等待载荷树收尾的 reaper，登记后由后续收割点的廉价
+    //    巡检回收（转 Z 即收割），不再重复消耗等待窗口。
+    let Some(remaining) = scan_adopted_reaper_pids(me) else {
+        return;
+    };
+    let mut stuck_guard = stuck.lock().unwrap_or_else(|e| e.into_inner());
+    for pid in remaining {
+        let childless = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+            .is_ok_and(|c| c.split_whitespace().next().is_none());
+        if childless {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            let mut status = 0;
+            let rc = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            let _ = rc; // rc==pid 即回收；竞态下 ECHILD 同样视为已处理
+        } else {
+            stuck_guard.insert(pid);
+        }
+    }
+}
+
+/// 扫描 /proc 中匹配收养 reaper 签名的进程号。/proc 不可达或目标消失按无
+/// 匹配处理；匹配条件见 [`reap_adopted_bwrap_reapers`]。
+#[cfg(target_os = "linux")]
+fn scan_adopted_reaper_pids(me: i32) -> Option<Vec<i32>> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let pid: i32 = match entry.file_name().to_str().and_then(|s| s.parse().ok()) {
+            Some(pid) if pid != me => pid,
+            _ => continue,
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        // comm 可含空格/括号：状态与 ppid 取最后「)」之后的首两个字段。
+        let Some((_, rest)) = stat.rsplit_once(") ") else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        let state = fields.next().unwrap_or("?");
+        if state != "Z" && state != "S" {
+            continue;
+        }
+        let Some(ppid) = fields.next().and_then(|p| p.parse::<i32>().ok()) else {
+            continue;
+        };
+        if ppid != me {
+            continue;
+        }
+        let open = stat.find('(').map_or(0, |i| i + 1);
+        let close = stat.rfind(')').unwrap_or(open);
+        if &stat[open..close] != "bwrap" {
+            continue;
+        }
+        let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+            continue;
+        };
+        let Some(nspid) = status.lines().find_map(|l| l.strip_prefix("NSpid:")) else {
+            continue;
+        };
+        if nspid.split_whitespace().last() != Some("1") {
+            continue;
+        }
+        found.push(pid);
+    }
+    Some(found)
 }
 
 // ---------- 策略（本地化极小集） ----------

@@ -974,6 +974,8 @@ fn kill_worker(child: &mut std::process::Child, cleanup: &WorkerCleanup) -> Resu
         }
         if let Err(error) = wait_for_payload_exit_and_bwrap_wait(child, fd, deadline) {
             if child.try_wait().map_err(|wait_error| wait_error.to_string())?.is_some() {
+                // 040：监督进程已被 try_wait 收割，就地回收其被收养的 reaper。
+                crate::sandbox::reap_adopted_bwrap_reapers();
                 return Err(format!("bwrap 在 payload 等待期间退出（{error}）"));
             }
             return kill_worker_group_and_confirm(child, cleanup, &error, deadline);
@@ -1003,6 +1005,8 @@ fn recover_after_pidfd_kill_denied(
             let grace = Instant::now() + Duration::from_millis(250);
             if let Err(wait_error) = wait_for_payload_exit_and_bwrap_wait(child, fd, grace) {
                 if child.try_wait().map_err(|error| error.to_string())?.is_some() {
+                    // 040：监督进程已被 try_wait 收割，就地回收其被收养的 reaper。
+                    crate::sandbox::reap_adopted_bwrap_reapers();
                     return Err(format!("bwrap 在 payload 等待期间退出（{wait_error}）"));
                 }
                 return kill_worker_group_and_confirm(
@@ -1036,6 +1040,8 @@ fn wait_for_payload_exit_and_bwrap_wait(
     use std::os::unix::process::ExitStatusExt;
     loop {
         if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            // 040：监督进程已被收割，就地回收其被收养的 reaper（下方返回路径共用）。
+            crate::sandbox::reap_adopted_bwrap_reapers();
             if status.signal().is_some() {
                 return Err("bwrap 被外力终止，payload wait 责任未确认".into());
             }
@@ -1079,6 +1085,8 @@ fn wait_for_bwrap_exit(
     use std::os::unix::process::ExitStatusExt;
     loop {
         if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            // 040：监督进程已被收割，就地回收其被收养的 reaper。
+            crate::sandbox::reap_adopted_bwrap_reapers();
             if status.signal().is_some() {
                 return Err("bwrap 被外力终止，payload wait 责任未确认".into());
             }
@@ -1138,6 +1146,8 @@ fn kill_worker_group_and_confirm(
 fn wait_worker_supervisor(child: &mut std::process::Child, deadline: Instant) -> Result<(), String> {
     loop {
         if child.try_wait().map_err(|e| format!("回收 worker 失败：{e}"))?.is_some() {
+            // 040：监督进程已被收割，就地回收其被收养的 reaper。
+            crate::sandbox::reap_adopted_bwrap_reapers();
             return Ok(());
         }
         if Instant::now() >= deadline {

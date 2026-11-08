@@ -124,6 +124,9 @@ fn run_payload(snapshot: &PolicySnapshot, script: &str, cwd: &Path) -> std::io::
     c.env_clear();
     c.envs(launch.env.iter().cloned());
     let out = c.output()?;
+    // 040：bwrap 监督进程已被收割，就地回收其被收养的 ns-PID-1 reaper。
+    #[cfg(target_os = "linux")]
+    terminal_chat::sandbox::reap_adopted_bwrap_reapers();
     drop(launch); // seccomp fd 守卫在 spawn 完成后即可释放
     Ok(out)
 }
@@ -880,7 +883,11 @@ fn run_payload_pty(snapshot: &PolicySnapshot, cwd: &Path) -> std::io::Result<std
     sandbox::verify_child_pid_namespace(child.id())?;
     drop(launch); // seccomp fd 守卫：spawn 已返回
     drop(master);
-    child.wait()
+    let status = child.wait()?;
+    // 040：bwrap 监督进程已被收割，就地回收其被收养的 ns-PID-1 reaper。
+    #[cfg(target_os = "linux")]
+    terminal_chat::sandbox::reap_adopted_bwrap_reapers();
+    Ok(status)
 }
 
 /// 已回收子进程的峰值 RSS（KB，Linux）——RUSAGE_CHILDREN 为进程内单调最大值，
@@ -1033,4 +1040,127 @@ fn p16_full_launch_faces_and_peak_rss() {
         "沙箱启动子进程峰值 RSS {peak_rss_kb}KB 超过 128MiB 冻结上限"
     );
     fs::remove_dir_all(&f.root).ok();
+}
+
+/// 040 回归：沙箱启动不得泄漏 bwrap ns-PID-1 reaper 僵尸（根因与机制见
+/// docs/specs/040-sandbox-bwrap-reaper-reap.md）。在独立辅助进程内做 3 次
+/// 真实启动，前后对照全容器「bwrap reaper 僵尸」基线（state=Z＋comm=bwrap＋
+/// NSpid 末级=1＋PPid∈{本进程, 1}）：收割路径工作时零新增；被变异禁用时
+/// 新增 3 个（PPid=1）即失败。单独进程承载 subreaper 归属，不改并行测试
+/// 进程的子进程归属（同 js sandbox_worker_terminate_reaps_payload 隔离模式）。
+#[test]
+fn sandbox_launch_leaks_no_bwrap_reaper_zombie() {
+    use std::io::Read;
+    use std::time::Instant;
+
+    const HELPER: &str = "TCHAT_TEST_REAPER_HELPER";
+    const MARKER: &str = "REAPER-BASELINE-CLEAN";
+    if std::env::var_os(HELPER).is_none() {
+        let mut helper = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "sandbox_launch_leaks_no_bwrap_reaper_zombie", "--nocapture"])
+            .env(HELPER, "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("启动 reaper 回归辅助进程");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if helper.try_wait().expect("等待辅助进程").is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = helper.kill();
+                let _ = helper.wait();
+                panic!("reaper 回归辅助进程超时");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut out = String::new();
+        let mut err = String::new();
+        if let Some(mut h) = helper.stdout.take() {
+            let _ = h.read_to_string(&mut out);
+        }
+        if let Some(mut h) = helper.stderr.take() {
+            let _ = h.read_to_string(&mut err);
+        }
+        let status = helper.wait().expect("读取辅助进程状态");
+        eprint!("{err}");
+        // 守卫父裁决：标记位于辅助进程全部断言之后，存在即证明断言真实执行
+        //（--exact 零匹配时 libtest 仍退出 0，不能只查退出码）。
+        assert!(
+            status.success() && err.contains(MARKER),
+            "reaper 回归失败（exit {status:?}）：\n{out}\n{err}"
+        );
+        return;
+    }
+
+    // 辅助进程：subreaper 已由启动路径（probe_bwrap_at）登记。
+    if !bwrap_available() {
+        eprintln!("跳过：bwrap 不可用");
+        return;
+    }
+    let f = fx();
+    let snap = snapshot_for(&f, &[], false);
+    let before = reaper_zombie_baseline();
+    for i in 0..3 {
+        let out = run_payload(&snap, "true", &f.anchor.clone()).unwrap_or_else(|e| {
+            panic!("第 {i} 次启动失败：{e}");
+        });
+        assert!(out.status.success(), "第 {i} 次载荷应成功");
+    }
+    let after = reaper_zombie_baseline();
+    assert_eq!(
+        after, before,
+        "沙箱启动新增了 bwrap reaper 僵尸：before={before} after={after}"
+    );
+    eprintln!("{MARKER} {before}->{after}");
+    fs::remove_dir_all(&f.root).ok();
+}
+
+/// 全容器 bwrap reaper 僵尸计数（040 回归基线口径）：Z 态＋comm=bwrap＋
+/// NSpid 末级=1＋PPid∈{本进程, 1}。PPid=本进程＝已收养未收割；PPid=1＝
+/// 已泄漏给容器 init。其余进程（其他测试进程的收养对象）不计入。
+fn reaper_zombie_baseline() -> usize {
+    let me = std::process::id();
+    let mut count = 0usize;
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let pid: i32 = match entry.file_name().to_str().and_then(|s| s.parse().ok()) {
+            Some(pid) => pid,
+            None => continue,
+        };
+        let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        let Some((_, rest)) = stat.rsplit_once(") ") else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        if fields.next() != Some("Z") {
+            continue;
+        }
+        let Some(ppid) = fields.next().and_then(|p| p.parse::<u32>().ok()) else {
+            continue;
+        };
+        if ppid != me && ppid != 1 {
+            continue;
+        }
+        let open = stat.find('(').map_or(0, |i| i + 1);
+        let close = stat.rfind(')').unwrap_or(open);
+        if &stat[open..close] != "bwrap" {
+            continue;
+        }
+        let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) else {
+            continue;
+        };
+        let Some(nspid) = status.lines().find_map(|l| l.strip_prefix("NSpid:")) else {
+            continue;
+        };
+        if nspid.split_whitespace().last() == Some("1") {
+            count += 1;
+        }
+    }
+    count
 }
