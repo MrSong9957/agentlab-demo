@@ -44,7 +44,7 @@
 
 ## 已知边界与未验证项
 
-- **目标 runner 未验证**：所有验证在本地 Linux 6.18.33.2 WSL2、x86-64、bwrap 0.9.0。目标 GitHub runner（Ubuntu 26.04.1）产品链未复验；CI 探针仍以 `TCHAT_SKIP_SECCOMP_ENFORCEMENT_PROBE=1` 跳过（本轮范围禁改 workflow/环境）。不能宣称远端 CI 通过。关闭规格 §5 第 6 条需按安全报告在 runner 捕获 `prctl` 返回与过滤器 fd 内容。
+- **目标 runner 未验证**：所有验证在本地 Linux 6.18.33.2 WSL2、x86-64、bwrap 0.9.0。目标 GitHub runner（Ubuntu 26.04.1）产品链未复验；CI 探针仍以 `TCHAT_SKIP_SECCOMP_ENFORCEMENT_PROBE=1` 跳过（本轮范围禁改 workflow/环境）。不能宣称远端 CI 通过。关闭规格 §5 第 6 条需按安全报告在 runner 捕获 `prctl` 返回与过滤器 fd 内容。**（2026-11-08 准备阶段更正：该跳过变量实际不存在于当前 workflow 与代码——由 `b3d5700` 引入、`c50ff40` 移除，attack06 在 CI 主 test job 真实运行，runner 复现即如实失败；详见规格 §5 第 6 条更正。）**
 - **未跑全量/L3**：按用户范围约定，本轮仅聚焦验证；全量验证（clippy＋全测试集）留待完整路径。
 - **共享构建目录污染（一次性）**：红跑首次命令把 `--target-dir` 误置于 `--` 之后，cargo 回退全局 `CARGO_TARGET_DIR=/workspace/target` 构建了一次（仅构建缓存，主工作区源码与 git 状态不受影响）；已纠正并重跑。
 - 既有日志中红/绿/attack06 的 `/tmp` 原始日志可能随环境清理消失，以上入库裁剪件为存档版本。
