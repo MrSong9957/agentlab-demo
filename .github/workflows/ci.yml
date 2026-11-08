@@ -117,7 +117,7 @@ jobs:
           #include <unistd.h>
           #include <sys/syscall.h>
           int main(void) {
-              long r = syscall(437, NULL, 0); /* clone3 */
+              long r = syscall(435, NULL, 0); /* clone3 */
               printf("clone3_ret=%ld errno=%d (%s)\n", r, errno, strerror(errno));
               return 0;
           }
@@ -128,9 +128,10 @@ jobs:
           # ENOSYS 清单→clone 命名空间掩码→ALLOW
           EPERM=[101,155,165,166,167,168,169,175,176,246,272,300,303,304,308,310,311,313,320,321,323,328,428,429,430,431,432]
           def insn(code,jt,jf,k): return struct.pack('<HBBI',code,jt,jf,k)
-          prog  = insn(0x20,0,0,4) + insn(0x15,1,0,0xC000003E) + insn(0x06,0,0,0x00080000)
+          prog  = insn(0x20,0,0,4) + insn(0x15,1,0,0xC000003E) + insn(0x06,0,0,0x80000000)
           prog += insn(0x20,0,0,0)
           for nr in EPERM: prog += insn(0x15,0,1,nr) + insn(0x06,0,0,0x00050000|1)
+          prog += insn(0x15,0,1,435) + insn(0x06,0,0,0x00050000|38)
           prog += insn(0x15,0,1,437) + insn(0x06,0,0,0x00050000|38)
           prog += insn(0x15,0,4,56) + insn(0x20,0,0,16) + insn(0x54,0,0,0x7E020000) + insn(0x15,1,0,0)
           prog += insn(0x06,0,0,0x00050000|1) + insn(0x06,0,0,0x7FFF0000)
@@ -143,9 +144,9 @@ jobs:
             echo "== 不带 --seccomp 对照（期望 errno=22 EINVAL）=="
             bwrap --ro-bind / / --unshare-user --unshare-ipc --cap-drop ALL --dev-bind /dev /dev -- /tmp/probe || echo "(exit=$?)"
             echo "== strace：bwrap 是否调用 seccomp(SET_MODE_FILTER)＝加载侧取证 =="
-            strace -f -e trace=seccomp,memfd_create,close_range -o /tmp/strace.txt \
+            strace -f -e trace=seccomp,memfd_create,close_range,prctl -o /tmp/strace.txt \
               bwrap --ro-bind / / --unshare-user --unshare-ipc --cap-drop ALL --dev-bind /dev /dev --seccomp 3 3</tmp/filter.bpf -- /tmp/probe || true
-            grep -E "seccomp|memfd|close_range" /tmp/strace.txt | head -40 || true
+            grep -E "seccomp|memfd|close_range|prctl" /tmp/strace.txt | head -40 || true
           } | tee d1-seccomp.txt
       - name: D2/D3 失败用例复跑＋进程树采样
         run: |
@@ -175,19 +176,19 @@ jobs:
           #include <unistd.h>
           #include <sys/syscall.h>
           int main(void) {
-              long r = syscall(437, NULL, 0);
+              long r = syscall(435, NULL, 0);
               printf("clone3_ret=%ld errno=%d (%s)\n", r, errno, strerror(errno));
               return 0;
           }
           EOF
           {
             echo "== 产品的 bwrap 启动链（policy_from_env → build_tool_command）=="
-            strace -f -e trace=seccomp,memfd_create,close_range,execve -o /tmp/strace-product.txt \
+            strace -f -e trace=seccomp,memfd_create,close_range,prctl,execve -o /tmp/strace-product.txt \
               cargo test --locked -p terminal-chat --test security_attack_031 attack06_seccomp_allows_toolchain_blocks_privileged_syscalls -- --exact --nocapture 2>&1 | tail -20
             echo "== bwrap argv（来自 strace execve 行）=="
             grep -E "execve.*bwrap" /tmp/strace-product.txt | head -3
             echo "== seccomp/memfd/close_range 调用序列 =="
-            grep -E "seccomp|memfd_create|close_range" /tmp/strace-product.txt | head -30
+            grep -E "seccomp|memfd_create|close_range|prctl" /tmp/strace-product.txt | head -30
           } | tee d1-product-chain.txt || true
       - name: 上传诊断工件
         if: always()
