@@ -12,7 +12,28 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// 串行化使用进程级环境变量的测试，避免并行竞态。
 pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Save and restore the process timeout while the caller holds its test env lock.
+pub struct SandboxConfirmTimeoutEnvRestore(Option<std::ffi::OsString>);
+
+impl SandboxConfirmTimeoutEnvRestore {
+    pub fn capture_after_test_lock() -> Self {
+        Self(std::env::var_os("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS"))
+    }
+}
+
+impl Drop for SandboxConfirmTimeoutEnvRestore {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(value) => std::env::set_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", value),
+            None => std::env::remove_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS"),
+        }
+    }
+}
+
 /// 011：PTY 尺寸常量（e2e 沟位列/行号断言与 PtySession 建立共用单一事实源）。
+// 038-CI：pty 模块基于 posix_openpt（POSIX 语义），Windows 不编译；唯一消费方
+// e2e_acceptance 同为 unix 门控。
+#[cfg(unix)]
 pub(crate) use pty::{PTY_COLS, PTY_ROWS};
 
 #[derive(Clone, Debug)]
@@ -291,7 +312,28 @@ pub fn cleanup_cred_file(tag: &str) {
         terminal_chat::catalog::credential_dir().join(format!("cred-{tag}.json")),
     );
 }
+pub mod cmd_builder;
 pub mod mcp_fixtures;
+
+/// 路径形态统一（比较用）：Windows 上 canonicalize 返回 `\\?\` verbatim＋长名，
+/// 而 cmd 输出/环境注入可能是 8.3 短名或无前缀形态——统一为「无 verbatim 前缀
+/// 的长路径」。unix 恒等（canonicalize 已是长路径语义）。比较双方都经本函数
+/// 归一，授权集合与实际访问对象的判定不受形态影响（产品侧 verbatim 保留不变）。
+pub fn long_norm(p: &std::path::Path) -> std::path::PathBuf {
+    let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let s = canon.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    {
+        std::path::PathBuf::from(s.strip_prefix(r"\\?\").map(String::from).unwrap_or(s))
+    }
+    #[cfg(not(windows))]
+    {
+        std::path::PathBuf::from(s)
+    }
+}
+// 038-CI：PTY 测试设施基于 posix_openpt/grantpt（POSIX 语义），Windows 不编译；
+// 依赖本模块的测试文件均带同级 unix 门控。
+#[cfg(unix)]
 pub mod pty;
 
 /// 022：持有 ENV_LOCK 的守卫类型（与 mcp 测试的 Drop 清理模式配合）。
@@ -302,4 +344,32 @@ impl std::ops::Deref for EnvLockGuard {
     fn deref(&self) -> &Self::Target {
         &self.0
     }
+}
+
+/// 038 Windows：reset 对被在途连接持有的 memories.sqlite 降级为 DROP 全表
+///（文件作为基础设施保留——Windows 无 unix unlink 语义，产品侧已文档化）。
+/// 外部契约＝生成内容清空：Windows 断言「文件不存在或无用户表」，unix 断言
+/// 文件不存在。memory_lifecycle / memory_runner 的 reset 断言共用。
+pub fn assert_memories_db_reset_cleared(root: &Path, ctx: &str) {
+    let db = root.join("memories.sqlite");
+    #[cfg(windows)]
+    if db.exists() {
+        let conn = rusqlite::Connection::open_with_flags(
+            &db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap_or_else(|e| panic!("{ctx}: 保留的库文件必须可读：{e}"));
+        let tables: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|e| panic!("{ctx}: 读取表清单失败：{e}"));
+        assert_eq!(tables, 0, "{ctx}: 生成表应被 DROP 清空");
+        return;
+    }
+    #[cfg(not(windows))]
+    let _ = ctx;
+    assert!(!db.exists(), "{ctx}: memories.sqlite 应不存在");
 }

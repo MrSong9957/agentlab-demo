@@ -622,18 +622,41 @@ fn read_bounded(file: &mut std::fs::File, path: &Path) -> Result<Vec<u8>, String
 /// 打开并复核为普通文件：Linux 以 O_NONBLOCK 打开避免 FIFO 阻塞，再按句柄
 /// 元数据复核文件类型；目录/设备/FIFO/缺失/不可读均明确报错（§3.1）。
 fn open_regular_file(path: &Path) -> Result<std::fs::File, String> {
+    // 038 Windows：`dir\.` 形态的打开被内核拒绝（os error 5 Access denied），
+    // 类型复核永远到不了——词法消除 dot/_dotdot 分量后打开，unix 行为不变
+    //（消除不改变指向对象）；类型判定仍在打开后的句柄侧。
+    let open_path = crate::sandbox::absolute_lexical(path);
     #[cfg(unix)]
     let file = {
         use std::os::unix::fs::OpenOptionsExt;
         std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NONBLOCK)
-            .open(path)
+            .open(&open_path)
             .map_err(|e| format!("图片路径无法打开（{}）：{e}", path.display()))?
     };
     #[cfg(not(unix))]
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("图片路径无法打开（{}）：{e}", path.display()))?;
+    let file = {
+        // 038 Windows：目录开档被内核拒绝（CreateFile 无 BACKUP_SEMANTICS
+        // 打开目录＝os error 5），类型复核到不了——打开失败时先按路径元数据
+        // 判型，目录/特殊文件复用统一的「非普通文件」错误面（语义与 unix
+        // 句柄侧判定一致）。
+        match std::fs::File::open(&open_path) {
+            Ok(f) => f,
+            Err(e) => {
+                if let Ok(md) = std::fs::symlink_metadata(&open_path) {
+                    if !md.is_file() {
+                        let kind = if md.is_dir() { "目录" } else { "设备/FIFO/套接字等特殊文件" };
+                        return Err(format!(
+                            "图片路径不是普通文件（{}）：{kind}",
+                            path.display()
+                        ));
+                    }
+                }
+                return Err(format!("图片路径无法打开（{}）：{e}", path.display()));
+            }
+        }
+    };
     let meta = file
         .metadata()
         .map_err(|e| format!("图片文件元数据读取失败（{}）：{e}", path.display()))?;
@@ -954,6 +977,7 @@ mod tests {
         assert!(v["path"].as_str().unwrap().contains("中文 图.png"));
         assert!(outcome.image.is_some());
     }
+    #[cfg(unix)] // 038：POSIX 权限/符号链接语义用例（Windows 无等价设施），见 specs/038 §5
 
     #[test]
     fn execute_symlink_to_regular_file_accepted() {

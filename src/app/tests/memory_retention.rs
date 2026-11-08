@@ -165,14 +165,17 @@ fn resources_filename_boundary_instructions_and_notes() {
     let old = "2023-10-31T22-13-19-old.md";
     let exact = "2023-10-31T22-13-20-exact.md";
     let recent = "2023-10-31T22-13-21-recent.md";
-    for name in [
-        old,
-        exact,
-        recent,
-        "invalid.md",
-        "2023-02-30T22-13-20-invalid.md",
-        "2023-10-31T22-13-19-old.MD",
-    ] {
+    // 大小写不敏感文件系统（Windows NTFS；macOS APFS 默认同为不敏感）上
+    // old.md 与 old.MD 同一实体——二者无法并存（038 实测）。契约面＝扩展名
+    // 匹配按名字字符串精确判 .md（.MD 保留）：该类文件系统只建 old.MD 单独
+    // 验证该边界，小写删除面由 exact/recent 覆盖。
+    let case_insensitive = cfg!(windows) || cfg!(target_os = "macos");
+    let case_twin = if case_insensitive {
+        vec!["2023-10-31T22-13-19-old.MD"]
+    } else {
+        vec![old, exact, recent, "invalid.md", "2023-02-30T22-13-20-invalid.md", "2023-10-31T22-13-19-old.MD"]
+    };
+    for name in case_twin {
         fs::write(resources.join(name), name).unwrap();
     }
     let nested = resources.join("nested");
@@ -191,7 +194,9 @@ fn resources_filename_boundary_instructions_and_notes() {
     .unwrap();
     let mut warnings = Vec::new();
     prune_old_extension_resources(&e.root, T0, &mut |w| warnings.push(w.to_owned()));
-    assert!(!resources.join(old).exists());
+    if !case_insensitive {
+        assert!(!resources.join(old).exists());
+    }
     assert!(!resources.join(exact).exists());
     for name in [
         recent,

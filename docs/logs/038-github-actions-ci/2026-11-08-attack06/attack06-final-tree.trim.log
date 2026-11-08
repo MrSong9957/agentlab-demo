@@ -1,0 +1,26 @@
+running 1 test
+attack06 载荷输出：
+SH-OK
+BASH-OK
+CP-OK
+GCC-OK
+mount=Operation not permitted
+umount2=Operation not permitted
+pivot_root=Operation not permitted
+bpf=Operation not permitted
+ptrace=Operation not permitted
+setns=Operation not permitted
+open_by_handle_at=Operation not permitted
+process_vm_readv=Operation not permitted
+clone3=Function not implemented
+unshare_newns=Operation not permitted
+unshare_newuser=Operation not permitted
+mount_after_newuser=Operation not permitted
+unshare_newns_after_newuser=Operation not permitted
+keyctl=Operation not permitted
+perf_event_open=Operation not permitted
+PROBE-EXIT=0
+
+test attack06_seccomp_allows_toolchain_blocks_privileged_syscalls ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.04s

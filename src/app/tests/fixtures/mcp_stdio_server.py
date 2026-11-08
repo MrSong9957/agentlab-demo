@@ -32,12 +32,17 @@ def snap_env():
 
 
 class Writer:
-    def __init__(self):
+    def __init__(self, trace_path=""):
         self.lock = threading.Lock()
+        self.trace_path = trace_path
 
     def send(self, payload):
         line = json.dumps(payload, ensure_ascii=False)
         with self.lock:
+            if self.trace_path:
+                with open(self.trace_path, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+                    f.flush()
             sys.stdout.write(line + "\n")
             sys.stdout.flush()
 
@@ -93,11 +98,13 @@ def main():
     ap.add_argument("--scenario", required=True)
     ap.add_argument("--record", default="")
     ap.add_argument("--delay-ms", type=int, default=0)
+    ap.add_argument("--trace-stdin", default="")
+    ap.add_argument("--trace-stdout", default="")
     args, _unknown = ap.parse_known_args()  # 额外 argv（元字符注入测试）按字面忽略
     if args.scenario == "stderr_secret":
         token = os.environ.get("TCHAT_MCP_TOKEN_A", "")
         threading.Thread(target=_stderr_flood, args=(token,), daemon=True).start()
-    w = Writer()
+    w = Writer(args.trace_stdout)
     rec = args.record
     record(rec, {"kind": "startup", "argv": sys.argv, "cwd": os.getcwd(),
                  "env": snap_env(), "pid": os.getpid()})
@@ -193,6 +200,10 @@ def main():
         return list_requests[-1] if list_requests else None
 
     for raw in sys.stdin:
+        if args.trace_stdin:
+            with open(args.trace_stdin, "a", encoding="utf-8") as f:
+                f.write(raw)
+                f.flush()
         raw = raw.strip()
         if not raw:
             continue

@@ -9777,7 +9777,8 @@ mod a02_tests {
     }
 
     /// A03（生产入口）：shell 转义路径粘贴 → 附件建立在反转义后的路径。
-    #[test]
+    #[cfg(unix)] // 038：粘贴路径识别依赖 shlex 转义语义（POSIX shell 设施）
+#[test]
     fn paste_shell_escaped_path_attaches_unescaped() {
         let _dir = Dir::new();
         let target = fixture_path("My 图.png");
@@ -9794,7 +9795,8 @@ mod a02_tests {
 
     /// A03（负例，生产入口）：多路径文本不被误吞——不建附件、原文作为
     /// 普通文本保留（上游"单路径才转附件"语义）。
-    #[test]
+    #[cfg(unix)] // 038：粘贴路径识别依赖 shlex 转义语义（POSIX shell 设施）
+#[test]
     fn paste_multi_path_text_is_not_swallowed() {
         let _dir = Dir::new();
         let a = fixture_path("first.png");

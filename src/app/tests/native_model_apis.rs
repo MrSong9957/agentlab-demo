@@ -1,4 +1,6 @@
 //! 024：通过本地 HTTP 边界验证真实原生接口，期望值来自固定协议样本。
+#![cfg(unix)]
+// 038-CI：本文件依赖 POSIX 语义（PTY/Unix fd/文件权限位），Windows 不编译；
 mod common;
 
 use common::{spawn_mock, MockResp};

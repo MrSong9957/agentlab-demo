@@ -1,6 +1,8 @@
 //! 007 会话保存与恢复验收：序列化表征、装载与修复、写入器、命令面。
 //! 全部走 `terminal_chat::session` 公共接口与真实文件系统（独立临时目录，
 //! TCHAT_USER_DIR 覆盖），不 mock 内部逻辑；网络边界仅在 CLI E2E 用本地 mock。
+#![cfg(unix)]
+// 038-CI：本文件依赖 POSIX 语义（PTY/Unix fd/文件权限位），Windows 不编译；
 
 mod common;
 

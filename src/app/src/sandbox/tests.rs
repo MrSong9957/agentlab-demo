@@ -22,6 +22,7 @@ fn tmp_ws(tag: &str) -> PathBuf {
 /// 一致（ro-bind 根→dev→bind 可写根→根内 deny 遮蔽→会话/命名空间→cap-drop→--）。
 /// 手写单可写根策略以精确断言层级（policy_for 的 temp 可写根另测）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn policy_argv_binds_root_writable_and_masks_env() {
     let ws = tmp_ws("argv");
     fs::write(ws.join(".env"), "FAKE-TEST-TOKEN=1\n").unwrap();
@@ -38,7 +39,6 @@ fn policy_argv_binds_root_writable_and_masks_env() {
     )
     .unwrap();
     let expected = vec![
-        "--as-pid-1".to_string(),
         "--new-session".to_string(),
         "--die-with-parent".to_string(),
         "--ro-bind".to_string(),
@@ -81,6 +81,7 @@ fn policy_argv_binds_root_writable_and_masks_env() {
 /// 直接 EROFS 失败——整个沙箱不可用。两分支：目录在＝遮蔽（WSL 部署面），
 /// 不在＝不产生该参数（Docker/裸机部署面）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn wsl_interop_mask_follows_dir_presence_flag() {
     let ws = tmp_ws("wsl-mask");
     fs::write(ws.join(".env"), "FAKE-TEST-TOKEN=8\n").unwrap();
@@ -103,18 +104,31 @@ fn wsl_interop_mask_follows_dir_presence_flag() {
 /// T1b 生产策略（policy_for）包含 temp 可写根（对齐 Claude Code 默认写面），
 /// 且可写根按深度排序——宽根（/tmp）先 bind、深根（工作区）后 bind 重开。
 #[test]
+// 038：纯快照构造（不依赖 bwrap//proc）。macOS 上 temp_dir 经产品侧
+// canonicalize 落在 /private/var/…——断言对齐产品自身的规范化。Windows：
+// temp 可写根 argv 断言依赖 bind 布局（Linux 沙箱设施），门控。
+#[cfg(not(target_os = "windows"))]
 fn policy_for_includes_temp_writable_root() {
     let ws = tmp_ws("policy-temp");
     let policy = policy_for(&ws);
+    let temp_canon =
+        std::env::temp_dir().canonicalize().unwrap_or_else(|_| std::env::temp_dir());
     assert!(
-        policy.writable_roots.iter().any(|p| p == &std::env::temp_dir()),
+        policy.writable_roots.iter().any(|p| p == &temp_canon),
         "temp 目录应在可写根内"
     );
     let args =
         create_bwrap_command_args(vec!["sh".into()], &policy, &ws, false).unwrap();
-    let tmp_bind = args
-        .windows(3)
-        .any(|w| w == ["--bind", "/tmp", "/tmp"]);
+    // 038：产品侧对可写根做 canonicalize（macOS temp_dir 落在 /var→/private/var
+    // 符号链接后）——断言用同源规范化后的 temp 路径比较。
+    let temp_canon =
+        std::env::temp_dir().canonicalize().unwrap_or_else(|_| std::env::temp_dir());
+    let tmp_expected = [
+        "--bind".to_string(),
+        temp_canon.to_string_lossy().into_owned(),
+        temp_canon.to_string_lossy().into_owned(),
+    ];
+    let tmp_bind = args.windows(3).any(|w| w == tmp_expected);
     assert!(tmp_bind, "argv 应包含 temp 可写根 bind：{args:?}");
     fs::remove_dir_all(&ws).ok();
 }
@@ -122,6 +136,7 @@ fn policy_for_includes_temp_writable_root() {
 /// T1c deny 目标为目录＝`--perms 000`＋`--tmpfs`＋`--remount-ro` 遮蔽
 ///（上游 `append_existing_unreadable_path_args` 目录分支）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn denied_directory_is_masked_with_readonly_tmpfs() {
     let ws = tmp_ws("deny-dir");
     fs::create_dir_all(ws.join("secrets")).unwrap();
@@ -148,6 +163,7 @@ fn denied_directory_is_masked_with_readonly_tmpfs() {
 
 /// T1d deny 在全部可写根之外（rootless 分支）＝仍被遮蔽（不因不可写而漏保护）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn deny_outside_writable_roots_is_still_masked() {
     let ws = tmp_ws("rootless");
     let outside_dir = std::env::temp_dir().join(format!("tchat-sb-outside-{}", std::process::id()));
@@ -171,6 +187,7 @@ fn deny_outside_writable_roots_is_still_masked() {
 
 /// T1e 可写根本身是符号链接＝bind canonical 目标（上游 `mount_root` 语义）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn writable_root_symlink_binds_canonical_target() {
     let real = tmp_ws("ws-real");
     fs::write(real.join(".env"), "FAKE-TEST-TOKEN=4\n").unwrap();
@@ -211,19 +228,20 @@ fn probe_with_nonexistent_bwrap_reports_error() {
 }
 
 /// T9（G4-R1/G3 修复回归，先 RED 后 GREEN）：PID 命名空间与新 procfs 成对恢复——
-/// `--unshare-pid`＋`--as-pid-1`（上游 launcher 语义：bwrap 为子 ns 的 pid 1）
+/// `--unshare-pid`（bwrap 内建 PID 1 回收器等待初始载荷）
 /// ＋`--proc /proc`（新 procfs 保留 `/proc/self/fd`，apply_patch Update 的 F2
 /// 写绑定恢复；主进程从沙箱 /proc 视图消失＝G3 读/kill 面关闭）。成对语义下
 /// 不再有 `--tmpfs /proc`（上游：tmpfs 仅在未挂新 procfs 时遮蔽继承视图）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn pid_namespace_and_proc_paired() {
     let ws = tmp_ws("pidns");
     fs::write(ws.join(".env"), "FAKE-TEST-TOKEN=7\n").unwrap();
     let policy = policy_for(&ws);
     let args = create_bwrap_command_args(vec!["sh".into()], &policy, &ws, false).unwrap();
-    assert_eq!(
-        args[0], "--as-pid-1",
-        "bwrap 应为子 PID 命名空间的 pid 1（上游 launcher 语义）：{args:?}"
+    assert!(
+        !args.iter().any(|arg| arg == "--as-pid-1"),
+        "应由 bubblewrap 内建 PID 1 回收器等待载荷：{args:?}"
     );
     assert!(
         args.windows(2).any(|w| w == ["--unshare-pid", "--unshare-ipc"]),
@@ -249,6 +267,7 @@ fn pid_namespace_and_proc_paired() {
 /// T2 deny 路径穿可写目录内的符号链接＝组装失败（上游 TOCTTOU fail-closed，
 /// 注释逐字保留的那条路径）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn deny_path_through_writable_symlink_fails_closed() {
     let ws = tmp_ws("symlink");
     fs::create_dir_all(ws.join("real")).unwrap();
@@ -266,6 +285,7 @@ fn deny_path_through_writable_symlink_fails_closed() {
 /// T3 deny 目标自身是符号链接＝组装失败（与 027 open_nofollow_chain「符号链接
 /// 拒绝」同语义：遮蔽只保护当前目标，逻辑路径可被沙箱内改写）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn deny_target_itself_symlink_fails_closed() {
     let ws = tmp_ws("deny-symlink");
     fs::write(ws.join("secret"), "FAKE-TEST-TOKEN=2\n").unwrap();
@@ -278,6 +298,7 @@ fn deny_target_itself_symlink_fails_closed() {
 
 /// T4 deny 路径不存在＝no-op 不遮蔽（上游预创建空文件的差异点，见适配注释）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn missing_deny_path_is_noop() {
     let ws = tmp_ws("missing");
     let policy = policy_for(&ws);
@@ -296,6 +317,7 @@ fn missing_deny_path_is_noop() {
 /// 存在」的硬链接：检查到挂载之间及运行期的并发变化仍是边界（不构成完整
 /// 竞态防护），见 docs/logs/033-tool-sandbox/2026-10-27-b1-b2-risk-verification.md。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn deny_target_with_hardlinks_fails_closed() {
     let ws = tmp_ws("deny-hardlink");
     // 夹具预清理（幂等）：上次失败运行的残留会让 hard_link EEXIST 掩盖真实信号。
@@ -315,6 +337,7 @@ fn deny_target_with_hardlinks_fails_closed() {
 
 /// B1 控制组：单链接（nlink=1）deny 目标照常遮蔽（既有 T1 层级语义不变）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn deny_target_single_link_still_masks() {
     let ws = tmp_ws("deny-single");
     let env = ws.join(".env");
@@ -333,6 +356,7 @@ fn deny_target_single_link_still_masks() {
 /// 分支）＝检查**跟随到的实际文件**的链接数（符号链接自身恒为 1，查链接本身
 /// 会漏判）；实际文件多链接时同样拒绝。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn rootless_symlink_deny_follows_to_actual_file_nlink() {
     let ws = tmp_ws("deny-sl-nlink");
     let outside = std::env::temp_dir().join(format!("tchat-sb-out-sl-{}", std::process::id()));
@@ -364,6 +388,7 @@ fn rootless_symlink_deny_follows_to_actual_file_nlink() {
 /// 任何 stat 错误都返回 false，会把这类错误静默当 missing 跳过检查（不遮蔽、
 /// 不拒绝＝fail-open，本轮 RED 留档）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn deny_target_metadata_error_fails_closed() {
     let ws = tmp_ws("deny-eloop");
     let outside = std::env::temp_dir().join(format!("tchat-sb-out-loop-{}", std::process::id()));
@@ -389,6 +414,7 @@ fn deny_target_metadata_error_fails_closed() {
 /// B1 收口：deny 目标父目录不可穿越（权限 000，EACCES）＝同样显式拒绝。
 /// 符号链接遍历遇 lstat 错误按上游语义 break 跳过（不构成拦截），非 NotFound
 /// 分类必须由 metadata 检查兜底。夹具目录在工作区之外，锚定根不受影响；
+    #[cfg(unix)] // 038：POSIX 权限/符号链接语义用例（Windows 无等价设施），见 specs/038 §5
 /// 断言后先恢复权限再清理（否则自身 remove_dir_all 也失败）。
 #[test]
 fn deny_target_parent_permission_error_fails_closed() {
@@ -418,6 +444,7 @@ fn deny_target_parent_permission_error_fails_closed() {
 /// 控制组：路径组件非目录（ENOTDIR）与 NotFound 同类＝既有 missing no-op
 /// 语义不变（不遮蔽、不拒绝；missing_deny_path_is_noop 覆盖 NotFound 面）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn deny_target_enotdir_is_noop() {
     let ws = tmp_ws("deny-enotdir");
     let notdir = ws.join("plain-file");
@@ -437,6 +464,7 @@ fn deny_target_enotdir_is_noop() {
 
 /// T5 cwd 符号链接别名：命令 cwd 进入 canonical（上游 --chdir 分支）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn symlinked_command_cwd_gets_chdir() {
     let ws = tmp_ws("cwd-alias");
     let alias = tmp_ws("cwd-alias-link-parent").join("alias");
@@ -455,6 +483,7 @@ fn symlinked_command_cwd_gets_chdir() {
 
 /// T6 启用判定：TCHAT_SANDBOX 未设/空＝false；非空＝true（进程级 env，锁内执行）。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn sandbox_requested_reads_env() {
     let _g = crate::TEST_ENV_LOCK.lock().unwrap();
     std::env::remove_var("TCHAT_SANDBOX");
@@ -473,14 +502,36 @@ fn non_canonical_writable_root_fails_closed() {
     let ws = tmp_ws("s4a");
     fs::write(ws.join(".env"), "FAKE-TEST-TOKEN=5\n").unwrap();
     fs::create_dir_all(ws.join("sub")).unwrap();
-    let raw = ws.join("sub").join(".."); // 内核解析回 ws；词法非 canonical
+    // 038 Windows 实证：PathBuf::join("..") 在 push 时折叠（raw 即干净路径，
+    // 词法非清洁形态无法经 join 构造）——以字符串拼接保留 `sub\..` 原样；
+    // 该形态仅 unix 上可写经（verbatim 路径内核不解析 ..，.env 改写跳过，
+    // 边界对象由上方的 ws\.env 承载）。
+    let raw = PathBuf::from(format!(
+        "{}{}sub{}..",
+        ws.display(),
+        std::path::MAIN_SEPARATOR,
+        std::path::MAIN_SEPARATOR
+    ));
+    #[cfg(not(windows))]
     fs::write(raw.join(".env"), "FAKE-TEST-TOKEN=6\n").unwrap(); // 同一文件（经解析）
     let policy = SandboxPolicy {
         full_disk_read: true,
-        writable_roots: vec![raw],
+        writable_roots: vec![raw.clone()],
         unreadable_roots: vec![ws.join(".env")],
     };
-    let err = create_bwrap_command_args(vec!["sh".into()], &policy, &ws, false).unwrap_err();
+    let err = match create_bwrap_command_args(vec!["sh".into()], &policy, &ws, false) {
+        Err(e) => e,
+        Ok(argv) => panic!(
+            "非词法清洁可写根必须显式拒绝：诊断 raw={raw:?} segments={segs:?} lex={lex:?} argv_n={argv}",
+            raw = raw.to_string_lossy(),
+            segs = raw
+                .to_string_lossy()
+                .split(['/', '\\'])
+                .collect::<Vec<_>>(),
+            lex = absolute_lexical(&raw).to_string_lossy(),
+            argv = argv.len()
+        ),
+    };
     assert!(
         err.contains("词法非清洁"),
         "非词法清洁可写根必须显式拒绝：{err}"
@@ -492,6 +543,7 @@ fn non_canonical_writable_root_fails_closed() {
 /// 显式 Err（failIfUnavailable，绝不返回 None 静默回退）；有 bwrap＝真实包装。
 /// 策略锚定为主进程 cwd（G1 修复）：接口不收目录参数，调用方无法转移锚定。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn tool_launch_argv_fails_closed_when_unavailable() {
     let _g = crate::TEST_ENV_LOCK.lock().unwrap();
     std::env::remove_var("TCHAT_SANDBOX");
@@ -661,6 +713,8 @@ fn deny_traversal_budget_timeout_refuses() {
 ///（不能仅靠 st_dev 变化检测）。以本进程真实 /proc/self/mountinfo 验证：
 /// 任一路径至少映射出自身（identity 投影）。
 #[test]
+#[cfg(target_os = "linux")]
+// 038-CI：依赖 bwrap//proc/mountinfo（Linux 专属），见 docs/specs/038 §5。
 fn deny_aliases_identity_projection() {
     let mounts = parse_mountinfo();
     assert!(!mounts.is_empty(), "mountinfo 应可解析");
@@ -679,6 +733,8 @@ fn mountinfo_unescapes_octal() {
 
 /// dev 分解与 mountinfo 第 3 列同构（真实根路径上验证）。
 #[test]
+#[cfg(target_os = "linux")]
+// 038-CI：依赖 bwrap//proc/mountinfo（Linux 专属），见 docs/specs/038 §5。
 fn path_dev_matches_mountinfo_format() {
     let mounts = parse_mountinfo();
     let root = PathBuf::from("/");
@@ -727,6 +783,40 @@ fn permission_layout_runtime_and_carveouts() {
     fs::remove_dir_all(&root).ok();
 }
 
+/// The 031 MCP gate launches setsid first, but still mounts the original server binary.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn mcp_gate_permission_launch_mounts_original_server_program() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tmp_ws("mcp-gate-program");
+    let server = dir.join("mcp-server");
+    fs::write(&server, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&server, fs::Permissions::from_mode(0o755)).unwrap();
+    let server = server.canonicalize().unwrap();
+    let server_str = server.to_string_lossy().into_owned();
+    let (program, args) = mcp_stdio_gate_wrap(&server_str, &[]);
+    let command = std::iter::once(program).chain(args).collect();
+    let snapshot = PolicySnapshot {
+        read_paths: vec![],
+        write_paths: vec![],
+        deny_paths: vec![],
+        network: false,
+        poison: None,
+    };
+    let launch = permission_launch_argv_with_payload_program(
+        command,
+        &snapshot,
+        &dir,
+        Some(&server_str),
+    )
+    .expect("031 MCP gate launch arguments");
+    assert!(launch.args.windows(3).any(|window| {
+        window[0] == "--ro-bind" && window[1] == server_str && window[2] == server_str
+    }), "原 MCP 可执行文件必须保留单文件只读挂载：{:?}", launch.args);
+    fs::remove_dir_all(dir).unwrap();
+}
+
 /// 毒丸快照：启动入口显式拒绝（不产出 argv）。
 #[test]
 fn poisoned_snapshot_refuses_launch() {
@@ -765,6 +855,84 @@ fn seccomp_fd_roundtrip() {
     let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
     assert_eq!(n as usize, filter.len(), "应从偏移 0 读到完整过滤器");
     assert_eq!(buf, filter);
+}
+
+/// 外层先返回 EINVAL，避免宿主的 ENOSYS 掩盖产品过滤器缺失。
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn seccomp_filter_blocks_clone3_and_preserves_openat2() {
+    const CHILD: &str = "TCHAT_SECCOMP_CLONE3_TEST_CHILD";
+    // 子进程全部断言通过后打印的最终标记；父裁决与子打印共用此常量，防单点失配。
+    const FILTER_MARKER: &str = "产品过滤器：clone3=ENOSYS openat2=ENOSYS";
+    if std::env::var_os(CHILD).is_none() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "sandbox::tests::seccomp_filter_blocks_clone3_and_preserves_openat2", "--nocapture"])
+            .env(CHILD, "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if child.try_wait().unwrap().is_some() { break; }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("seccomp 受控子进程超时");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let out = child.wait_with_output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "受控子进程失败：\n{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        // 守卫父裁决：libtest 对零匹配的 --exact 仍以退出码 0 结束，只查退出码会把
+        // "子进程什么都没跑"误判为通过；最终标记位于子进程两条核心断言之后，
+        // 存在即证明断言已真实执行。
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(FILTER_MARKER),
+            "子进程未执行到目标测试的最终断言（--exact 名称可能失配：libtest 零匹配仍退出 0）"
+        );
+        return;
+    }
+
+    // 仅在子进程中叠加测试过滤器：对两个目标系统调用返回 EINVAL。
+    let outer = [
+        libc::sock_filter { code: 0x20, jt: 0, jf: 0, k: 0 },
+        libc::sock_filter { code: 0x15, jt: 1, jf: 0, k: libc::SYS_clone3 as u32 },
+        libc::sock_filter { code: 0x15, jt: 0, jf: 1, k: libc::SYS_openat2 as u32 },
+        libc::sock_filter { code: 0x06, jt: 0, jf: 0, k: 0x0005_0000 | libc::EINVAL as u32 },
+        libc::sock_filter { code: 0x06, jt: 0, jf: 0, k: 0x7fff_0000 },
+    ];
+    let install = |filters: &[libc::sock_filter]| {
+        let program = libc::sock_fprog { len: filters.len() as u16, filter: filters.as_ptr() as *mut _ };
+        let result = unsafe { libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &program) };
+        assert_eq!(result, 0, "安装 seccomp 失败：{}", std::io::Error::last_os_error());
+    };
+    assert_eq!(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) }, 0);
+    install(&outer);
+    let probe = |nr| {
+        let result = unsafe { libc::syscall(nr, 0, 0, 0, 0) };
+        assert_eq!(result, -1, "探针只使用无效参数");
+        std::io::Error::last_os_error().raw_os_error().unwrap()
+    };
+    assert_eq!(probe(libc::SYS_clone3), libc::EINVAL, "外层 clone3 对照未生效");
+    assert_eq!(probe(libc::SYS_openat2), libc::EINVAL, "外层 openat2 对照未生效");
+    eprintln!("外层对照：clone3=EINVAL openat2=EINVAL");
+
+    // 从产品 memfd 读取实际过滤器，按内核 sock_filter 格式装载。
+    let guard = build_seccomp_fd().unwrap().unwrap();
+    let mut bytes = vec![0u8; build_seccomp_filter().len()];
+    let n = unsafe { libc::read(guard.raw(), bytes.as_mut_ptr().cast(), bytes.len()) };
+    assert_eq!(n, bytes.len() as isize);
+    assert_eq!(bytes.len() % 8, 0);
+    let filters: Vec<libc::sock_filter> = bytes.chunks_exact(8).map(|chunk| libc::sock_filter {
+        code: u16::from_le_bytes([chunk[0], chunk[1]]), jt: chunk[2], jf: chunk[3],
+        k: u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]),
+    }).collect();
+    install(&filters);
+    assert_eq!(probe(libc::SYS_openat2), libc::ENOSYS, "437 的既有行为不得改变");
+    assert_eq!(probe(libc::SYS_clone3), libc::ENOSYS, "产品过滤器应拒绝 clone3");
+    eprintln!("{FILTER_MARKER}");
 }
 
 
@@ -823,6 +991,7 @@ fn mountinfo_optional_fields_are_parsed() {
 /// 位）与挂载二（root=<T> 整盘 bind 到 <T>/m2）；deny <T>/a/x 的别名必须
 /// 同时显形 <T>/a/x 与 <T>/m2/a/x，遮蔽须覆盖两者。
 #[test]
+#[cfg(target_os = "linux")] // 038：mountinfo/bwrap/WSL 等 Linux 设施测试
 fn deny_aliases_cross_mount_projection() {
     let t = sbx_dir("cross-mount");
     let a = t.join("a");
@@ -841,6 +1010,37 @@ fn deny_aliases_cross_mount_projection() {
         "跨挂载别名必须显形（bind 到 m2 的同一文件）：{aliases:?}"
     );
     fs::remove_dir_all(&t).ok();
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn leader_pidfd_exit_check_preserves_wait_owner() {
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("启动短命监督进程");
+    let pidfd = open_pidfd(child.id() as libc::pid_t).expect("固定监督进程 PIDFD");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !pidfd_is_exited(&pidfd).expect("轮询监督进程 PIDFD") {
+        assert!(std::time::Instant::now() < deadline, "监督进程未在 2 秒内退出");
+        let mut pfd = libc::pollfd {
+            fd: std::os::fd::AsRawFd::as_raw_fd(&pidfd),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let timeout = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+        let result = unsafe { libc::poll(&mut pfd, 1, timeout) };
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            panic!("等待 PIDFD 退出事件失败：{error}");
+        }
+    }
+
+    assert!(child.try_wait().expect("原 Child 仍可 wait").is_some());
+    assert!(pidfd_is_exited(&pidfd).expect("再次查询原进程退出状态"));
 }
 
 

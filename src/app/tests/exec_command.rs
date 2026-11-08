@@ -4,6 +4,7 @@
 //! 终止、容量、独立总时限的完整行为）见 tests/proc_session.rs。
 
 mod common;
+use common::cmd_builder;
 
 use std::fs;
 use std::path::PathBuf;
@@ -31,10 +32,23 @@ fn log_size(path: &PathBuf) -> u64 {
 
 /// 后台写入循环 + 长睡眠前台：直接子进程是 sh，孙进程持续写文件。
 fn writer_cmd(log: &PathBuf) -> String {
-    format!(
-        "while true; do echo x >> {log}; sleep 0.05; done & sleep 30",
-        log = log.display()
-    )
+    // 持续写入者＋保活：平台等价构造（038 蓝图 cmd_builder）。
+    // 038 Windows：不得经 seq 追加保活 sleep——`for ... do X & Y` 的 `& Y`
+    // 被 cmd 绑进 for 循环体（每迭代多执行一次 30s 睡眠的 powershell）＝
+    // 写入停滞；Windows 侧 for /l (1,0,2) 自身即无限循环，无需保活前台。
+    if cfg!(windows) {
+        cmd_builder::writer_loop(log)
+    } else {
+        cmd_builder::seq(&[cmd_builder::writer_loop(log), cmd_builder::sleep_ms(30_000)])
+    }
+}
+
+/// Windows fs::canonicalize 的 \\?\ verbatim 前缀剥离（cmd 输出与文本断言
+/// 均无此前缀；temp 目录还可能呈 8.3 短名——规范化后统一长名形态）。
+fn strip_verbatim(p: std::path::PathBuf) -> String {
+    p.to_str()
+        .map(|s| s.strip_prefix(r"\\?\").unwrap_or(s).to_string())
+        .unwrap_or_default()
 }
 
 /// 单次调用入口（参数层解析＋管理器执行）：与 turn 层分派同构——
@@ -111,7 +125,12 @@ fn workdir_child_mode() {
     fs::write("sub/in-rel.txt", "rel-cwd-content\n").unwrap();
     let mgr = ProcessManager::new();
     let relative = run_with(&mgr, &json!({ "cmd": "cat in-rel.txt", "workdir": "sub" }), None);
-    let default = run_with(&mgr, &json!({ "cmd": "pwd > pwd-default.txt" }), None);
+    // 平台等价：pwd 为 sh 内置（runner PATH 的 Git usr/bin 无 pwd.exe）——cmd 用 cd
+    let default = run_with(
+        &mgr,
+        &json!({ "cmd": if cfg!(windows) { "cd > pwd-default.txt" } else { "pwd > pwd-default.txt" } }),
+        None,
+    );
     mgr.close();
     std::fs::write(
         &outcome,
@@ -135,8 +154,14 @@ fn cd_child_mode() {
     };
     let target = std::env::var("TCHAT_CD_TARGET").expect("缺少 TCHAT_CD_TARGET");
     let mgr = ProcessManager::new();
-    let after_cd = run_with(&mgr, &json!({ "cmd": format!("cd {target} && pwd") }), None);
-    let back = run_with(&mgr, &json!({ "cmd": "pwd" }), None);
+    // 平台等价：cmd `cd /d` 切换目录并打印（pwd 无对应内置）
+    let (after_cd_cmd, back_cmd) = if cfg!(windows) {
+        (format!("cd /d {target} && cd"), "cd".to_string())
+    } else {
+        (format!("cd {target} && pwd"), "pwd".to_string())
+    };
+    let after_cd = run_with(&mgr, &json!({ "cmd": after_cd_cmd }), None);
+    let back = run_with(&mgr, &json!({ "cmd": back_cmd }), None);
     mgr.close();
     std::fs::write(
         &outcome,
@@ -178,6 +203,8 @@ fn workdir_resolves_relative_paths() {
     let session = host.join("session");
     fs::create_dir_all(&session).unwrap();
     let outcome = host.join("outcome.json");
+    // 平台等价：Windows fs::canonicalize 返回 \\?\ 前缀、temp 目录可能呈 8.3
+    // 短名（RUNNER~1）——统一剥离前缀并以规范化长路径为 cd 目标，cmd `cd` 输出
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("workdir_resolves_relative_paths")
         .arg("--exact")
@@ -194,10 +221,10 @@ fn workdir_resolves_relative_paths() {
     let outcome_text = fs::read_to_string(&outcome).ok();
     let rel_file = fs::read_to_string(session.join("sub/in-rel.txt")).ok();
     let pwd_text = fs::read_to_string(session.join("pwd-default.txt")).ok();
-    let session_canon = fs::canonicalize(&session).ok();
+    let session_canon = fs::canonicalize(&session).ok().map(strip_verbatim);
     let pwd_canon = pwd_text
         .as_deref()
-        .and_then(|t| std::fs::canonicalize(t.trim()).ok());
+        .and_then(|t| std::fs::canonicalize(t.trim()).ok().map(strip_verbatim));
     let _ = fs::remove_dir_all(&host);
     assert!(child_ok, "workdir 子进程异常退出：{child_stderr}");
     let v: serde_json::Value = serde_json::from_str(&outcome_text.unwrap_or_else(|| {
@@ -213,8 +240,8 @@ fn workdir_resolves_relative_paths() {
     // 缺省 workdir：pwd 落盘于会话目录，且内容即该目录（证明缺省＝会话当前目录）
     assert_eq!(v["default"]["status"], json!("completed"), "{}", v["default"]);
     assert_eq!(
-        pwd_canon.as_ref().and_then(|p| p.to_str()),
-        session_canon.as_ref().and_then(|p| p.to_str()),
+        pwd_canon.as_deref().map(|s| common::long_norm(std::path::Path::new(s)).to_string_lossy().into_owned()),
+        session_canon.as_deref().map(|s| common::long_norm(std::path::Path::new(s)).to_string_lossy().into_owned()),
         "缺省 workdir 的输出落在会话目录且 pwd 即该目录"
     );
 }
@@ -226,9 +253,19 @@ fn command_computes_product_and_writes_exact_file() {
     let product = dir.path().join("product.txt");
     assert!(!product.exists());
 
+    // 平台等价：$((算术))/printf 为 sh 设施——Windows 侧预计算后经 echo 写文件
+    // Windows：echo 重定向（set /p 语法在 runner 实测报 syntax incorrect——038 迭代 31）
+    let cmd = if cfg!(windows) {
+        cmd_builder::seq(&[
+            cmd_builder::echo_to_file(&product, "21"),
+            cmd_builder::cat(&product),
+        ])
+    } else {
+        "printf '%s\\n' \"$((7 * 3))\" > product.txt && cat product.txt".to_string()
+    };
     let r = run(
         &json!({
-            "cmd": "printf '%s\\n' \"$((7 * 3))\" > product.txt && cat product.txt",
+            "cmd": cmd,
             "workdir": dir.path().display().to_string(),
         }),
         None,
@@ -239,14 +276,14 @@ fn command_computes_product_and_writes_exact_file() {
     assert_eq!(r.error, None);
     assert!(!r.truncated);
     assert!(r.session_id.is_none(), "完成不留会话");
-    assert_eq!(r.output, "21\n");
-    assert_eq!(fs::read(&product).unwrap(), b"21\n");
+    assert_eq!(r.output, format!("21{}", cmd_builder::nl()));
+    assert_eq!(fs::read(&product).unwrap(), format!("21{}", cmd_builder::nl()).into_bytes());
 }
 
 /// 场景：stdout/stderr 各输出一行、退出码 7 → 两行都返回，completed、exit_code=7。
 #[test]
 fn stdout_stderr_merged_exit_code_preserved() {
-    let r = run(&json!({ "cmd": "echo out-line; echo err-line 1>&2; exit 7" }), None);
+    let r = run(&json!({ "cmd": cmd_builder::seq(&[cmd_builder::echo("out-line"), cmd_builder::echo_err("err-line"), "exit 7".into()]) }), None);
     assert_eq!(r.status, ExecStatus::Completed);
     assert_eq!(r.exit_code, Some(7));
     assert_eq!(r.error, None);
@@ -313,8 +350,16 @@ fn cancel_keeps_process_then_terminate_stops_writes() {
 
     // 016：取消等待 ≠ 进程停止——进程继续写文件
     let s1 = log_size(&log);
-    thread::sleep(Duration::from_millis(400));
-    let s2 = log_size(&log);
+    // 有界轮询替代固定睡眠（Windows PowerShell 写入者每行 400-600ms——固定
+    // 窗口在 runner 两次实测零增长；契约不变：取消等待 ≠ 进程停止）
+    let grow_deadline = std::time::Instant::now() + Duration::from_millis(if cfg!(windows) { 6000 } else { 1500 });
+    let s2 = loop {
+        let v = log_size(&log);
+        if v > s1 || std::time::Instant::now() > grow_deadline {
+            break v;
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
     assert!(s2 > s1, "取消后受管理进程应继续运行（{s1} -> {s2}）");
 
     // 明确终止回收：整个进程组停止写入
@@ -333,9 +378,19 @@ fn cancel_keeps_process_then_terminate_stops_writes() {
 #[test]
 fn oversized_output_truncated_to_char_cap() {
     // 100 行 ×（“行”+2 位数字+🎉+换行 = 5 字符）= 500 码点 > 上限 200
-    let cmd = "i=0; while [ $i -lt 100 ]; do printf '行%02d🎉\\n' $i; i=$((i+1)); done";
+    // 平台等价：printf 格式化＋unicode 码页为 sh 设施——Windows 经 PowerShell
+    // EncodedCommand（base64 UTF-16LE，无引号歧义）以 UTF-8 输出同等内容
+    let cmd = if cfg!(windows) {
+        use base64::Engine as _;
+        let script = "[Console]::OutputEncoding=[Text.Encoding]::UTF8;0..99|ForEach-Object{('行{0:D2}' -f $_)+'🎉'}";
+        let enc: String = base64::engine::general_purpose::STANDARD
+            .encode(script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect::<Vec<u8>>());
+        format!("powershell -NoProfile -EncodedCommand {enc}")
+    } else {
+        "i=0; while [ $i -lt 100 ]; do printf '行%02d🎉\\n' $i; i=$((i+1)); done".to_string()
+    };
     let full: String = (0..100)
-        .map(|i| format!("行{i:02}🎉\n"))
+        .map(|i| format!("行{i:02}🎉{}", cmd_builder::nl()))
         .collect();
     let r = run(
         &json!({ "cmd": cmd, "max_output_chars": 200 }),
@@ -367,11 +422,16 @@ fn cd_inside_command_does_not_stick() {
     fs::create_dir_all(&session).unwrap();
     fs::create_dir_all(&target).unwrap();
     let outcome = host.join("outcome.json");
+    // 平台等价：Windows fs::canonicalize 返回 \\?\ 前缀、temp 目录可能呈 8.3
+    // 短名（RUNNER~1）——统一剥离前缀并以规范化长路径为 cd 目标，cmd `cd` 输出
+    // 才与期望一致
+    let target_canon = fs::canonicalize(&target).ok().map(strip_verbatim);
+    let session_canon = fs::canonicalize(&session).ok().map(strip_verbatim);
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("cd_inside_command_does_not_stick")
         .arg("--exact")
         .env("TCHAT_CD_OUTCOME", &outcome)
-        .env("TCHAT_CD_TARGET", target.display().to_string())
+        .env("TCHAT_CD_TARGET", target_canon.clone().unwrap_or_else(|| target.display().to_string()))
         .current_dir(&session)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -381,9 +441,9 @@ fn cd_inside_command_does_not_stick() {
     let child_ok = status.status.success();
     let child_stderr = String::from_utf8_lossy(&status.stderr).to_string();
     let outcome_text = fs::read_to_string(&outcome).ok();
-    let target_canon = fs::canonicalize(&target).ok();
-    let session_canon = fs::canonicalize(&session).ok();
-    let _ = fs::remove_dir_all(&host);
+
+    // 038 实测：清理必须在全部路径归一断言之后——目录已删时 canonicalize
+    // 失败退回短名形态（RUNNER~1），长名比较恒失败
     assert!(child_ok, "cd 子进程异常退出：{child_stderr}");
     let v: serde_json::Value = serde_json::from_str(&outcome_text.unwrap_or_else(|| {
         panic!("子进程成功退出但未写结果（entry 漂移或缺 cd_child_mode 调用？）")
@@ -392,19 +452,26 @@ fn cd_inside_command_does_not_stick() {
     // 第一次：cd 后 pwd 输出精确等于目标目录（自然完成、退出码 0）
     assert_eq!(v["after_cd"]["status"], json!("completed"), "{}", v["after_cd"]);
     assert_eq!(v["after_cd"]["exit_code"], json!(0));
-    assert_eq!(
-        v["after_cd"]["output"].as_str().unwrap().trim(),
-        target_canon.as_ref().and_then(|p| p.to_str()).unwrap_or_default(),
-        "cd 后 pwd 必须输出目标目录"
+    let cmp_norm = |s: &str| common::long_norm(std::path::Path::new(s.trim())).to_string_lossy().into_owned();
+    let eq_norm = |a: String, b: String| {
+        if cfg!(windows) { a.eq_ignore_ascii_case(&b) } else { a == b }
+    };
+    assert!(
+        eq_norm(cmp_norm(v["after_cd"]["output"].as_str().unwrap()), target_canon.clone().unwrap_or_default()),
+        "cd 后 pwd 必须输出目标目录：{} vs {}",
+        v["after_cd"]["output"].as_str().unwrap(),
+        target_canon.clone().unwrap_or_default()
     );
     // 第二次：缺省 workdir 的 pwd 精确等于原会话目录（不得沿用上次目标目录）
     assert_eq!(v["back"]["status"], json!("completed"), "{}", v["back"]);
     assert_eq!(v["back"]["exit_code"], json!(0));
-    assert_eq!(
-        v["back"]["output"].as_str().unwrap().trim(),
-        session_canon.as_ref().and_then(|p| p.to_str()).unwrap_or_default(),
-        "命令内 cd 不得改变后续调用的默认目录"
+    assert!(
+        eq_norm(cmp_norm(v["back"]["output"].as_str().unwrap()), session_canon.clone().unwrap_or_default()),
+        "命令内 cd 不得改变后续调用的默认目录：{} vs {}",
+        v["back"]["output"].as_str().unwrap(),
+        session_canon.clone().unwrap_or_default()
     );
+    let _ = fs::remove_dir_all(&host);
 }
 
 // ---------- 高风险清单补充（2026-10-10；016 语义适配）----------
@@ -413,8 +480,17 @@ fn cd_inside_command_does_not_stick() {
 /// 命令正常收尾（任一管道未排空都会把子进程阻塞），前缀与截断标志正确。
 #[test]
 fn exec_b04_dual_stream_mb_drain_after_cap() {
-    let cmd = "i=0; while [ $i -lt 40000 ]; do echo out-wwwwwwwwww; echo err-eeeeeeeeee 1>&2; \
-               i=$((i+1)); done";
+    // 平台等价：cmd for /l 双流循环（unix 保留原 while 计数）
+    let cmd = if cfg!(windows) {
+        // 紧凑形态：`echo X &` 的空格会进 echo 输出（由下方 trim_end 归一）。
+        // stderr 行必须保留 `1>&2` 前的空格：`err-eeeeeeeeee1>&2` 的紧邻数字
+        // 不绑定句柄（解析为 `>&2`），`1` 进文本＝"err-eeeeeeeeee1"——不是
+        // 尾随空白，trim_end 无法归一（41373539854 实测）
+        "for /l %i in (1,1,40000) do @(echo out-wwwwwwwwww&echo err-eeeeeeeeee 1>&2)".to_string()
+    } else {
+        "i=0; while [ $i -lt 40000 ]; do echo out-wwwwwwwwww; echo err-eeeeeeeeee 1>&2; \
+               i=$((i+1)); done".to_string()
+    };
     let r = run(
         &json!({ "cmd": cmd, "yield_time_ms": 30000, "max_output_chars": 200 }),
         None,
@@ -425,16 +501,20 @@ fn exec_b04_dual_stream_mb_drain_after_cap() {
     assert_eq!(r.output.chars().count(), 200, "码点恰为上限");
     // 跨流时序无契约：不钉先后；200 码点为精确前缀（可落在行中）。完整性检查：
     // 完整行必须是两条合法流之一，尾段（截断处）必须是某一合法行的前缀——无损坏、无混合
-    let (complete, tail) = r.output.rsplit_once('\n').unwrap_or(("", r.output.as_str()));
+    let normalized = cmd_builder::normalize(&r.output);
+    let (complete, tail) = normalized.rsplit_once('\n').unwrap_or(("", normalized.as_str()));
     for line in complete.lines() {
+        // 尾随空白剥离：cmd echo 的重定向空格绑定（`text 1>&2`/`text1>&2`）
+        // 产生的尾随字符不属内容契约（038 实测 "err-eeeeeeeeee " 与
+        // "err-eeeeeeeeee1" 两形态）
         assert!(
-            line == "out-wwwwwwwwww" || line == "err-eeeeeeeeee",
-            "完整行必须属于两条合法流：{line}"
+            line.trim_end() == "out-wwwwwwwwww" || line.trim_end() == "err-eeeeeeeeee",
+            "完整行必须属于两条合法流：{line:?}"
         );
     }
     if !tail.is_empty() {
         let ok_prefix = "out-wwwwwwwwww\n".starts_with(tail) || "err-eeeeeeeeee\n".starts_with(tail);
-        assert!(ok_prefix, "截断尾段必须是合法行前缀：{tail}");
+        assert!(ok_prefix, "截断尾段必须是合法行前缀：{tail:?}");
     }
 }
 
@@ -443,7 +523,17 @@ fn exec_b04_dual_stream_mb_drain_after_cap() {
 #[test]
 fn exec_b05_utf8_multibyte_across_read_boundary() {
     // 8190 个 A 后跟“中🙂”（3+4 字节），再 99 个 b：多字节序列跨越 8192 边界
-    let cmd = "printf '%0.sA' $(seq 1 8190); printf '中🙂'; printf '%0.sb' $(seq 1 99)";
+    // 平台等价：printf/seq 为 sh 设施——Windows 经 PowerShell EncodedCommand
+    // 精确输出同一字节序列（多字节仍跨越 8192 读取边界）
+    let cmd = if cfg!(windows) {
+        use base64::Engine as _;
+        let script = "[Console]::OutputEncoding=[Text.Encoding]::UTF8;[Console]::Out.Write('A'*8190+'中🙂'+'b'*99)";
+        let enc: String = base64::engine::general_purpose::STANDARD
+            .encode(script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect::<Vec<u8>>());
+        format!("powershell -NoProfile -EncodedCommand {enc}")
+    } else {
+        "printf '%0.sA' $(seq 1 8190); printf '中🙂'; printf '%0.sb' $(seq 1 99)".to_string()
+    };
     let r = run(&json!({ "cmd": cmd, "yield_time_ms": 30000 }), None);
     assert_eq!(r.status, ExecStatus::Completed, "{r:?}");
     let mut expected = String::new();
@@ -496,14 +586,23 @@ fn exec_p01_huge_timeout_accepted_then_terminate_reaps_group() {
     let c2 = cancel.clone();
     let pgid_path = pgid_file.clone();
     let kid_path = kid_file.clone();
+    let writer_log = dir.join("w-p01.log");
+    let writer_log_in = writer_log.clone();
     let h = thread::spawn(move || {
         let mgr2 = ProcessManager::new();
-        let r = run_with(
-            &mgr2,
-            &json!({ "cmd": format!(
+        // 平台分支：pgid/kid 记录机制为 unix 信号语义（$$/$!/killpg）——Windows
+        // 由文件增长观测同一契约面（超大时限受理＋取消不终止＋terminate 回收树）
+        let cmd = if cfg!(windows) {
+            cmd_builder::writer_loop(&writer_log_in)
+        } else {
+            format!(
                 "echo $$ > {p}; sleep 30 & echo $! > {k}; wait",
                 p = pgid_path.display(), k = kid_path.display()
-            ), "yield_time_ms": 8000, "timeout_ms": u64::MAX }),
+            )
+        };
+        let r = run_with(
+            &mgr2,
+            &json!({ "cmd": cmd, "yield_time_ms": 8000, "timeout_ms": u64::MAX }),
             Some(&*c2),
         );
         done.store(true, Ordering::SeqCst);
@@ -520,35 +619,60 @@ fn exec_p01_huge_timeout_accepted_then_terminate_reaps_group() {
     let (r, mgr2) = h.join().unwrap();
     assert_eq!(r.status, ExecStatus::Cancelled, "{r:?}");
     let sid = r.session_id.expect("取消后保留句柄");
+    #[cfg(unix)]
     let pgid: i32 = fs::read_to_string(&pgid_file).unwrap().trim().parse().unwrap();
+    #[cfg(unix)]
     let kid: i32 = fs::read_to_string(&kid_file).unwrap().trim().parse().unwrap();
-    // 取消不杀：组长进程组仍存在
+    // 取消不杀：unix＝组长进程组仍存在；Windows＝写入者仍增长
+    #[cfg(windows)]
+    {
+        let s1 = fs::metadata(&writer_log).map(|m| m.len()).unwrap_or(0);
+        thread::sleep(Duration::from_millis(2500));
+        let s2 = fs::metadata(&writer_log).map(|m| m.len()).unwrap_or(0);
+        assert!(s2 > s1, "取消当前轮不得终止写入者（{s1} -> {s2}）");
+    }
+    #[cfg(unix)]
     thread::sleep(Duration::from_millis(200));
-    let errno_after_cancel = unsafe {
-        let rc = libc::killpg(pgid, 0);
-        if rc == 0 { None } else { std::io::Error::last_os_error().raw_os_error() }
-    };
-    assert_eq!(errno_after_cancel, None, "取消当前轮不得终止进程组");
-    // 明确终止：回收整个受管理进程组
-    let term = WriteStdinArgs::from_value(&json!({ "session_id": sid, "terminate": true })).unwrap();
-    assert_eq!(mgr2.interact(&term, None).result.status, ExecStatus::Terminated);
-    let kid_state = |pid: i32| -> Option<char> {
-        fs::read_to_string(format!("/proc/{pid}/stat")).ok()?.rsplit_once(')')?.1.trim_start().chars().next()
-    };
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let errno = unsafe {
+    // 038：killpg(0) 存活探测为 unix 信号语义——Windows 由下方 child 状态
+    // 断言（Terminated）覆盖同一契约面。
+    #[cfg(unix)]
+    {
+        let errno_after_cancel = unsafe {
             let rc = libc::killpg(pgid, 0);
             if rc == 0 { None } else { std::io::Error::last_os_error().raw_os_error() }
         };
-        if errno == Some(libc::ESRCH) || matches!(kid_state(kid), None | Some('Z') | Some('X')) {
-            break;
+        assert_eq!(errno_after_cancel, None, "取消当前轮不得终止进程组");
+    }
+    // 明确终止：回收整个受管理进程组
+    let term = WriteStdinArgs::from_value(&json!({ "session_id": sid, "terminate": true })).unwrap();
+    assert_eq!(mgr2.interact(&term, None).result.status, ExecStatus::Terminated);
+    #[cfg(unix)]
+    {
+        let kid_state = |pid: i32| -> Option<char> {
+            fs::read_to_string(format!("/proc/{pid}/stat")).ok()?.rsplit_once(')')?.1.trim_start().chars().next()
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let errno = unsafe {
+                let rc = libc::killpg(pgid, 0);
+                if rc == 0 { None } else { std::io::Error::last_os_error().raw_os_error() }
+            };
+            if errno == Some(libc::ESRCH) || matches!(kid_state(kid), None | Some('Z') | Some('X')) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "终止后进程组未回收：pgid={pgid} kid={kid}"
+            );
+            thread::sleep(Duration::from_millis(10));
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "终止后进程组未回收：pgid={pgid} kid={kid}"
-        );
-        thread::sleep(Duration::from_millis(10));
+    }
+    #[cfg(windows)]
+    {
+        let s1 = fs::metadata(&writer_log).map(|m| m.len()).unwrap_or(0);
+        thread::sleep(Duration::from_millis(2500));
+        let s2 = fs::metadata(&writer_log).map(|m| m.len()).unwrap_or(0);
+        assert_eq!(s1, s2, "终止后写入者（含树内子进程）停止写入：{s1} -> {s2}");
     }
     let _ = fs::remove_dir_all(&dir);
 }
@@ -559,7 +683,7 @@ fn exec_p01_huge_timeout_accepted_then_terminate_reaps_group() {
 fn n4a_max_output_chars_upper_bound() {
     let dir = temp_dir("n4a");
     let flag = dir.join("probe.txt");
-    let touch = format!("touch {}", flag.display());
+    let touch = cmd_builder::touch(&flag);
     for bad in [100_001usize, 1_000_000, 200_000_000] {
         let r = run(&json!({ "cmd": &touch, "max_output_chars": bad }), None);
         let err = r.error.clone().unwrap_or_default();
@@ -568,13 +692,14 @@ fn n4a_max_output_chars_upper_bound() {
     }
     assert!(!flag.exists(), "拒绝不得启动进程");
     // 恰上限 100000 合法：大输出截断为精确前缀、truncated、正常收尾
-    let big = "i=0; while [ $i -lt 30000 ]; do echo 0123456789; i=$((i+1)); done"; // 300000 码点
+    // 平台等价：cmd for /l 计数输出（行尾随平台）
+    let big = cmd_builder::count_lines("0123456789", 30_000); // 300000 码点
     let r = run(&json!({ "cmd": big, "max_output_chars": 100_000, "yield_time_ms": 30000 }), None);
     assert_eq!(r.status, ExecStatus::Completed, "{r:?}");
     assert_eq!(r.exit_code, Some(0), "排空后正常收尾：{r:?}");
     assert!(r.truncated, "{r:?}");
     assert_eq!(r.output.chars().count(), 100_000, "码点恰为上限");
-    let expect: String = "0123456789\n".repeat(10000).chars().take(100_000).collect();
+    let expect: String = format!("0123456789{}", cmd_builder::nl()).repeat(10000).chars().take(100_000).collect();
     assert_eq!(r.output, expect, "前缀逐字精确");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -637,9 +762,18 @@ fn min_timeout_accepted_and_expires_as_one_millisecond() {
 #[test]
 fn min_output_cap_truncates_at_codepoint_boundaries() {
     let text = "中🙂文";
+    // 平台等价：printf 为 sh 设施——Windows 经 PowerShell 精确字节输出
+    //（OutputEncoding UTF-8，同 b05 已验证模式）
+    let cmd_exact = if cfg!(windows) {
+        cmd_builder::ps_encoded(
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8;[Console]::Out.Write('中🙂文')",
+        )
+    } else {
+        "printf '%s' '中🙂文'".to_string()
+    };
     for (cap, expected) in [(1usize, "中"), (2, "中🙂"), (3, text)] {
         let r = run(
-            &json!({ "cmd": "printf '%s' '中🙂文'", "max_output_chars": cap }),
+            &json!({ "cmd": cmd_exact, "max_output_chars": cap }),
             None,
         );
         assert_eq!(r.status, ExecStatus::Completed, "cap={cap}：{r:?}");
@@ -651,9 +785,16 @@ fn min_output_cap_truncates_at_codepoint_boundaries() {
     }
 
     // 码点额度为 1 时，后续 100 KB 仍须被读取丢弃，子进程正常收尾而不是堵塞。
+    let cmd_flood = if cfg!(windows) {
+        cmd_builder::ps_encoded(
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8;[Console]::Out.Write('中');[Console]::Out.Write('0'*100000)",
+        )
+    } else {
+        "printf '中'; yes 0123456789012345678901234567890 | head -c 100000".to_string()
+    };
     let r = run(
         &json!({
-            "cmd": "printf '中'; yes 0123456789012345678901234567890 | head -c 100000",
+            "cmd": cmd_flood,
             "max_output_chars": 1,
             "yield_time_ms": 30000,
         }),

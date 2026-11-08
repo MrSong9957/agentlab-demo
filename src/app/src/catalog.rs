@@ -2206,6 +2206,7 @@ mod tests {
         assert!(dir.join("auto_catalog.json").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
+    #[cfg(unix)] // 038：POSIX 权限/符号链接语义用例（Windows 无等价设施），见 specs/038 §5
 
     #[test]
     fn readonly_dir_write_fails_cleanly() {
@@ -2308,6 +2309,7 @@ mod tests {
     }
 
     /// TRUST-B05：凭证根自身为符号链接——两侧 canonicalize 后根内引用仍可用、
+    #[cfg(unix)] // 038：POSIX 权限/符号链接语义用例（Windows 无等价设施），见 specs/038 §5
     /// 逃逸仍拒绝（不得只规范化引用而保留未规范化的根）。
     #[test]
     fn trust_b05_credential_root_symlink() {
@@ -2433,6 +2435,7 @@ let tmp = d.join(format!("state.json.tmp.{}.7.7", std::process::id()));
         *TEST_TMP_PIN.lock().unwrap() = None;
         let _ = std::fs::remove_dir_all(&d);
     }
+    #[cfg(unix)] // 038：POSIX 权限/符号链接语义用例（Windows 无等价设施），见 specs/038 §5
 
         #[test]
     fn preexisting_tmp_symlink_is_not_followed() {

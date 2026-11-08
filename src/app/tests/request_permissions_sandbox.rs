@@ -5,6 +5,8 @@
 //! 关——快照显式传入），验证：受限读树正/负例、deny 优先（含目录遮蔽）、
 //! 网络开关、启动前 deny 边界检查的 fail-closed（工具零执行）、PID 命名空
 //! 间隔离真实生效。全程假数据，不触真实凭据。
+#![cfg(unix)]
+// 038-CI：本文件依赖 POSIX 语义（fd 继承/pre_exec），Windows 不编译；沙箱用例自带可用性分支（无 bwrap＝显式失败断言），macOS 照常运行。
 
 use std::fs;
 use std::os::fd::FromRawFd;
@@ -19,6 +21,14 @@ use terminal_chat::exec::ExecArgs;
 use terminal_chat::permissions::{self, Access, DenyContext};
 use terminal_chat::proc_session::ProcessManager;
 use terminal_chat::sandbox::{self, PolicySnapshot};
+
+/// 038-CI：031 性能冻结阈值（P10/P16）为校准机器口径（同 032/034 冻结约定
+/// ——机器或构建变化须重新冻结）。CI 托管机器临时且不可比，置
+/// `TCHAT_P31_PERF_SAMPLE=1` 按同款采样约定跳过冻结断言（场景照跑、样本照
+/// 输出）；本地默认断言，行为零变化。
+fn perf_sample_mode() -> bool {
+    std::env::var("TCHAT_P31_PERF_SAMPLE").is_ok()
+}
 
 fn root_dir(name: &str) -> PathBuf {
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -656,15 +666,20 @@ fn p16_launch_check_perf_and_budget_freeze() {
     // 冻结阈值（余量断言）：端到端组装 p95 中位轮 < 50ms（阈值＝观测值数十
     // 倍量级，容纳更大 deny 树）；1000 项遍历 < 100ms（对应 20000 项 ≈ 2s 内、
     // 2000ms 超时预算与 20000 条目预算在实测速率下有 ≥10× 余量——见证据记录
-    // 的冻结说明）。
-    assert!(
-        median_p95_us < 50_000,
-        "启动检查 p95 中位轮 {median_p95_us}µs 超过 50ms 冻结上限"
-    );
-    assert!(
-        walk_1000_us < 100_000,
-        "1000 项遍历 {walk_1000_us}µs 超过 100ms 上限"
-    );
+    // 的冻结说明）。038-CI：两项均为校准机器口径（同 032/034 冻结约定），
+    // CI 置 TCHAT_P31_PERF_SAMPLE=1 按同款采样约定跳过断言；本地默认断言。
+    if perf_sample_mode() {
+        eprintln!("P10 采样：median_p95={median_p95_us}µs walk_1000={walk_1000_us}µs（跳过冻结断言）");
+    } else {
+        assert!(
+            median_p95_us < 50_000,
+            "启动检查 p95 中位轮 {median_p95_us}µs 超过 50ms 冻结上限"
+        );
+        assert!(
+            walk_1000_us < 100_000,
+            "1000 项遍历 {walk_1000_us}µs 超过 100ms 上限"
+        );
+    }
     fs::remove_dir_all(&f.root).ok();
 }
 
@@ -767,6 +782,10 @@ fn nested_read_grant_does_not_mask_approved_write_face() {
 
 /// 打开一对伪终端（镜像 proc_session::open_pty 的生产机制：master O_CLOEXEC、
 /// grantpt/unlockpt、ptsname_r）。
+/// 038-CI：macOS ptsname 静态缓冲的串行化锁（见 open_pty_pair 内注释）。
+#[cfg(target_os = "macos")]
+static PTY_NAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn open_pty_pair() -> std::io::Result<(std::fs::File, std::fs::File)> {
     unsafe {
         let master_fd = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
@@ -781,18 +800,42 @@ fn open_pty_pair() -> std::io::Result<(std::fs::File, std::fs::File)> {
             libc::close(master_fd);
             return Err(e);
         }
-        let mut name = [0u8; 256];
-        if libc::ptsname_r(master_fd, name.as_mut_ptr().cast(), name.len()) != 0 {
-            let e = std::io::Error::last_os_error();
-            libc::close(master_fd);
-            return Err(e);
-        }
-        let slave_fd = libc::open(name.as_ptr().cast(), libc::O_RDWR | libc::O_NOCTTY);
-        if slave_fd < 0 {
-            let e = std::io::Error::last_os_error();
-            libc::close(master_fd);
-            return Err(e);
-        }
+        // 038-CI：libc crate 在 apple 目标不提供 ptsname_r——分支化（本文件面向
+        // Linux/bwrap 环境，macOS 分支仅保编译；见 common/pty.rs 同款注释）。
+        #[cfg(not(target_os = "macos"))]
+        let slave_fd = {
+            let mut name = [0u8; 256];
+            if libc::ptsname_r(master_fd, name.as_mut_ptr().cast(), name.len()) != 0 {
+                let e = std::io::Error::last_os_error();
+                libc::close(master_fd);
+                return Err(e);
+            }
+            let fd = libc::open(name.as_ptr().cast(), libc::O_RDWR | libc::O_NOCTTY);
+            if fd < 0 {
+                let e = std::io::Error::last_os_error();
+                libc::close(master_fd);
+                return Err(e);
+            }
+            fd
+        };
+        #[cfg(target_os = "macos")]
+        let slave_fd = {
+            let _guard = PTY_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let ptr = libc::ptsname(master_fd);
+            if ptr.is_null() {
+                let e = std::io::Error::last_os_error();
+                libc::close(master_fd);
+                return Err(e);
+            }
+            let c_path = std::ffi::CStr::from_ptr(ptr);
+            let fd = libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+            if fd < 0 {
+                let e = std::io::Error::last_os_error();
+                libc::close(master_fd);
+                return Err(e);
+            }
+            fd
+        };
         Ok((
             std::fs::File::from(std::os::unix::io::OwnedFd::from_raw_fd(master_fd)),
             std::fs::File::from(std::os::unix::io::OwnedFd::from_raw_fd(slave_fd)),
@@ -821,15 +864,16 @@ fn run_payload_pty(snapshot: &PolicySnapshot, cwd: &Path) -> std::io::Result<std
         .stdout(std::process::Stdio::from(out_f))
         .stderr(std::process::Stdio::from(err_f));
     unsafe {
-        c.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+                c.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    // 038-CI：apple ioctl request 形参为 c_ulong，显式提升（Linux 无操作）。
+                    if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
     }
     let mut child = c.spawn()?;
     drop(c);
@@ -901,10 +945,14 @@ fn p16_full_launch_faces_and_peak_rss() {
         let (pty_p95, pty_rounds) = time_rounds(|_i| {
             run_payload_pty(&base, &f.anchor).unwrap();
         });
-        assert!(
-            pty_p95 < 30_000,
-            "PTY 完整启动 p95 中位轮 {pty_p95}µs 超过 30ms 冻结上限"
-        );
+        if perf_sample_mode() {
+            eprintln!("p16 PTY 启动采样：{pty_p95}µs（三轮 {pty_rounds:?}，跳过冻结断言）");
+        } else {
+            assert!(
+                pty_p95 < 30_000,
+                "PTY 完整启动 p95 中位轮 {pty_p95}µs 超过 30ms 冻结上限"
+            );
+        }
         eprintln!("p16 full-launch PTY p95 中位轮＝{pty_p95}µs（三轮 {pty_rounds:?}）");
     }
 
@@ -977,9 +1025,9 @@ fn p16_full_launch_faces_and_peak_rss() {
     // p95 中位轮 30ms（实测 ~4–5ms）；载荷二进制面（补丁/图片）250ms（实测
     // p95 中位轮 ~65–75ms，含 debug 二进制启动 ~60ms 与偶发 ~155ms 尖峰）；
     // 峰值 RSS 上界 128MiB（实测 ~13.7MB）。超限＝性能回归，阻断交付。
-    assert!(pipes_p95 < 30_000, "pipes 完整启动 p95 中位轮 {pipes_p95}µs 超过 30ms 冻结上限");
-    assert!(patch_p95 < 250_000, "补丁完整启动 p95 中位轮 {patch_p95}µs 超过 250ms 冻结上限");
-    assert!(image_p95 < 250_000, "图片完整启动 p95 中位轮 {image_p95}µs 超过 250ms 冻结上限");
+    assert!(pipes_p95 < 30_000 || perf_sample_mode(), "pipes 完整启动 p95 中位轮 {pipes_p95}µs 超过 30ms 冻结上限");
+    assert!(patch_p95 < 250_000 || perf_sample_mode(), "补丁完整启动 p95 中位轮 {patch_p95}µs 超过 250ms 冻结上限");
+    assert!(image_p95 < 250_000 || perf_sample_mode(), "图片完整启动 p95 中位轮 {image_p95}µs 超过 250ms 冻结上限");
     assert!(
         peak_rss_kb < 128 * 1024,
         "沙箱启动子进程峰值 RSS {peak_rss_kb}KB 超过 128MiB 冻结上限"

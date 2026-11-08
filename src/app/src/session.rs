@@ -779,6 +779,50 @@ fn auto_file_name() -> String {
 
 // ---------- 独占锁（§6-I） ----------
 
+/// 会话锁守卫：Windows＝命名互斥体句柄（Drop＝ReleaseMutex＋CloseHandle）；
+/// unix＝无类型（flock 随文件句柄存活，State 不额外持守卫）。
+#[cfg(unix)]
+type SessionLock = ();
+
+#[cfg(windows)]
+struct SessionLock {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    /// 取得所有权（WaitForSingleObject 返回）的线程。ReleaseMutex 契约要求
+    /// 「由拥有互斥体的线程释放」——非拥有线程调用必失败（ERROR_NOT_OWNER），
+    /// 互斥体保持被持有。守卫可能随 State 跨线程移动（TUI：turn 线程经
+    /// on_history 取锁，退出时 UI 线程经 flush_final/Drop 释放），Drop 按
+    /// owner 判定是否可释放；不可释放时仅关句柄，互斥体由拥有线程退出时
+    /// 自动废弃（WAIT_ABANDONED＝flock「进程死即释放」同语义）。
+    owner: std::thread::ThreadId,
+}
+
+// 安全：HANDLE 为裸指针但句柄级操作（CloseHandle）可跨线程调用；ReleaseMutex
+// 仅在 owner 线程执行（Drop 内判定）；守卫本身不访问线程局部状态。
+#[cfg(windows)]
+unsafe impl Send for SessionLock {}
+
+#[cfg(windows)]
+impl SessionLock {
+    /// 当前线程是否仍拥有该互斥体（ReleaseMutex 的调用资格判定）。
+    fn releasable_by_current_thread(&self) -> bool {
+        self.owner == std::thread::current().id()
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SessionLock {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::ReleaseMutex;
+        unsafe {
+            if self.releasable_by_current_thread() {
+                ReleaseMutex(self.handle);
+            }
+            CloseHandle(self.handle);
+        }
+    }
+}
+
 enum LockOutcome {
     Acquired,
     Busy,
@@ -787,7 +831,14 @@ enum LockOutcome {
 
 /// 对数据文件本身的 `flock(LOCK_EX|LOCK_NB)`：进程退出/崩溃自动释放，
 /// 无需母本的锁文件与协调锁清理。
-fn try_flock(file: &File) -> LockOutcome {
+#[cfg(unix)]
+fn try_flock(path: &Path, file: &File) -> (LockOutcome, Option<SessionLock>) {
+    let _ = path;
+    (try_flock_unix(file), None)
+}
+
+#[cfg(unix)]
+fn try_flock_unix(file: &File) -> LockOutcome {
     let r = unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(file), libc::LOCK_EX | libc::LOCK_NB) };
     if r == 0 {
         return LockOutcome::Acquired;
@@ -797,6 +848,45 @@ fn try_flock(file: &File) -> LockOutcome {
         // Linux 上 EWOULDBLOCK 与 EAGAIN 同值；两条都列以覆盖值不同的平台
         Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN => LockOutcome::Busy,
         _ => LockOutcome::Failed(err.to_string()),
+    }
+}
+
+/// Windows 版：命名互斥体（`Local\<路径 SHA-256 前 16 字节>`，登录会话隔离，
+/// 无文件系统痕迹；同 memory::runner::flock_root 模式）——Windows 字节锁为
+/// 强制语义，锁数据字节令外部读者在读到锁字节时报 ERROR 33（unix advisory
+/// flock 不阻止读——038 实测 fs::read 整文件失败），故不用 LockFileEx。
+/// WAIT_ABANDONED 视为取得（持有进程已死＝flock「进程死即释放」）；0ms 等待
+/// 对应 LOCK_NB 立即失败语义；守卫 Drop＝释放。
+#[cfg(windows)]
+fn try_flock(path: &Path, _file: &File) -> (LockOutcome, Option<SessionLock>) {
+    use sha2::{Digest, Sha256};
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
+    let name: String = format!(
+        "Local\tchat-session-{}\0",
+        digest.iter().take(16).map(|b| format!("{b:02x}")).collect::<String>()
+    );
+    let wide: Vec<u16> = name.encode_utf16().collect();
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };
+    if handle.is_null() {
+        return (LockOutcome::Failed("CreateMutexW 失败".into()), None);
+    }
+    let wait = unsafe { WaitForSingleObject(handle, 0) };
+    if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
+        (
+            LockOutcome::Acquired,
+            Some(SessionLock { handle, owner: std::thread::current().id() }),
+        )
+    } else if wait == WAIT_TIMEOUT {
+        unsafe { CloseHandle(handle) };
+        (LockOutcome::Busy, None)
+    } else {
+        unsafe { CloseHandle(handle) };
+        (LockOutcome::Failed("WaitForSingleObject 失败".into()), None)
     }
 }
 
@@ -868,7 +958,11 @@ enum State {
     /// 尚无 auto 目标：本运行首次需要追加落盘时创建（恢复快照/降级后亦然）。
     Idle,
     /// 追加目标：打开后持锁复用的同一文件描述符。
-    Writing { _path: PathBuf, file: File },
+    Writing {
+        _path: PathBuf,
+        file: File,
+        _lock: Option<SessionLock>,
+    },
     /// 停用：此后仅内存（行超限/截回失败/创建失败）。
     Disabled,
 }
@@ -1003,10 +1097,10 @@ impl Session {
         // 任一失败只清理临时文件，self 不动（旧目标与普通自动保存保持原样，
         // 不再出现「无检查点的 V3 残档」或迁移失败即停用）。
         if self.version != 3 {
-            let (path, file, bytes) =
+            let (path, file, bytes, session_lock) =
                 self.create_v3_target_with_checkpoint(history, cp_line.as_str())?;
             self.version = 3;
-            self.state = State::Writing { _path: path, file };
+            self.state = State::Writing { _path: path, file, _lock: session_lock };
             self.durable_len = bytes;
             // 游标越过检查点：调用方回执成功后恰推入一条同名记录
             self.persisted_upto = history.len() + 1;
@@ -1078,9 +1172,10 @@ impl Session {
             }
         }
         if self.version != 3 {
-            let (path, file, bytes) = self.create_v3_target_with_tail(history, &[line.as_str()])?;
+            let (path, file, bytes, session_lock) =
+                self.create_v3_target_with_tail(history, &[line.as_str()])?;
             self.version = 3;
-            self.state = State::Writing { _path: path, file };
+            self.state = State::Writing { _path: path, file, _lock: session_lock };
             self.durable_len = bytes;
             // 迁移开篇已写完整 transcript＋事件行；游标停在普通记录末，
             // 事件行由 untracked 吸收（内存 push 后 flush 跳过）。
@@ -1152,9 +1247,10 @@ impl Session {
             }
         }
         if self.version != 3 {
-            let (path, file, bytes) = self.create_v3_target_with_tail(history, &[line.as_str()])?;
+            let (path, file, bytes, session_lock) =
+                self.create_v3_target_with_tail(history, &[line.as_str()])?;
             self.version = 3;
-            self.state = State::Writing { _path: path, file };
+            self.state = State::Writing { _path: path, file, _lock: session_lock };
             self.durable_len = bytes;
             self.persisted_upto = history.len();
             self.agent_untracked += 1;
@@ -1346,7 +1442,7 @@ impl Session {
             .read(true)
             .open(&path)
             .map_err(|e| format!("打开会话 {} 失败：{e}", path.display()))?;
-        let lock = try_flock(&file);
+        let (lock, session_lock) = try_flock(&path, &file);
         match lock {
             LockOutcome::Acquired => {
                 let file_len = file
@@ -1373,7 +1469,7 @@ impl Session {
                 self.error_reported = false;
                 self.orch_untracked = 0;
                 self.agent_untracked = 0;
-                self.state = State::Writing { _path: path, file };
+                self.state = State::Writing { _path: path, file, _lock: session_lock };
                 Ok(ResumeInfo { loaded, degraded: false })
             }
             LockOutcome::Busy => {
@@ -1400,8 +1496,8 @@ impl Session {
             return None;
         }
         match self.create_auto_file(history) {
-            Ok((path, file, bytes)) => {
-                self.state = State::Writing { _path: path, file };
+            Ok((path, file, bytes, session_lock)) => {
+                self.state = State::Writing { _path: path, file, _lock: session_lock };
                 self.durable_len = bytes;
                 self.persisted_upto = history.len();
                 // 开篇已含全部内存记录（含已提交事件）——计数清零。
@@ -1416,7 +1512,10 @@ impl Session {
         }
     }
 
-    fn create_auto_file(&self, history: &[HistoryItem]) -> Result<(PathBuf, File, u64), String> {
+    fn create_auto_file(
+        &self,
+        history: &[HistoryItem],
+    ) -> Result<(PathBuf, File, u64, Option<SessionLock>), String> {
         catalog::ensure_private_dir(&self.dir)
             .map_err(|e| format!("自动会话目录初始化失败：{e}"))?;
         let base = auto_file_name();
@@ -1441,7 +1540,14 @@ impl Session {
                 }
                 #[cfg(not(unix))]
                 {
-                    std::fs::OpenOptions::new().append(true).create_new(true).open(&path)
+                    // read(true)：Windows LockFileEx 要求句柄具备 GENERIC_READ/
+                    // GENERIC_WRITE；append-only 句柄（仅 FILE_APPEND_DATA）取锁
+                    // 得 ERROR_ACCESS_DENIED——CI 实测（038）自动保存因此停用。
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .read(true)
+                        .create_new(true)
+                        .open(&path)
                 }
             };
             let mut file = match opened {
@@ -1453,7 +1559,8 @@ impl Session {
             // 会被本运行持续追加，正是续写目标；坑009：命名不提供互斥）。
             // Busy＝该名字已被并发恢复者抢先持锁（文件刚创建仍 0 字节，抢锁者
             // 装载空文件会得到明确错误）→ 视同名字冲突换下一候选；其余错误停用
-            match try_flock(&file) {
+            let (lock_outcome, session_lock) = try_flock(&path, &file);
+            match lock_outcome {
                 LockOutcome::Acquired => {}
                 LockOutcome::Busy => continue,
                 LockOutcome::Failed(e) => return Err(format!("自动会话文件加锁失败：{e}")),
@@ -1481,7 +1588,7 @@ impl Session {
                 Ok(())
             })();
             match outcome {
-                Ok(()) => return Ok((path, file, bytes)),
+                Ok(()) => return Ok((path, file, bytes, session_lock)),
                 Err(msg) => {
                     // 创建即失败：无已提交记录可保，清掉残档后停用
                     let _ = std::fs::remove_file(&path);
@@ -1500,7 +1607,7 @@ impl Session {
         &self,
         history: &[HistoryItem],
         cp_line: &str,
-    ) -> Result<(PathBuf, File, u64), String> {
+    ) -> Result<(PathBuf, File, u64, Option<SessionLock>), String> {
         self.create_v3_target_with_tail(history, &[cp_line])
     }
 
@@ -1510,7 +1617,7 @@ impl Session {
         &self,
         history: &[HistoryItem],
         tail_lines: &[&str],
-    ) -> Result<(PathBuf, File, u64), String> {
+    ) -> Result<(PathBuf, File, u64, Option<SessionLock>), String> {
         catalog::ensure_private_dir(&self.dir)
             .map_err(|e| format!("自动会话目录初始化失败：{e}"))?;
         let base = auto_file_name();
@@ -1533,8 +1640,10 @@ impl Session {
                 }
                 #[cfg(not(unix))]
                 {
+                    // read(true)：同 create_auto_file——LockFileEx 句柄访问权要求。
                     std::fs::OpenOptions::new()
                         .append(true)
+                        .read(true)
                         .create_new(true)
                         .open(&path)
                 }
@@ -1544,7 +1653,8 @@ impl Session {
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(format!("创建自动会话文件失败：{e}")),
             };
-            match try_flock(&file) {
+            let (lock_outcome, session_lock) = try_flock(&path, &file);
+            match lock_outcome {
                 LockOutcome::Acquired => {}
                 LockOutcome::Busy => continue,
                 LockOutcome::Failed(e) => return Err(format!("自动会话文件加锁失败：{e}")),
@@ -1579,7 +1689,7 @@ impl Session {
                 Ok(())
             })();
             match outcome {
-                Ok(()) => return Ok((path, file, bytes)),
+                Ok(()) => return Ok((path, file, bytes, session_lock)),
                 Err(msg) => {
                     // 局部演练失败：清掉残档，self 未被触碰（旧目标原样）
                     let _ = std::fs::remove_file(&path);
@@ -1693,18 +1803,21 @@ mod tests {
     /// 触发"检查点写失败→截回失败→停用＋明确报错"。验证：失败回执（不 Ok）、
     /// 停用后普通追加不再尝试、检查点未提交（游标不越界）。
     #[test]
+    // 038：夹具已跨平台化（只读句柄失败注入），三端执行。
     fn checkpoint_write_failure_reports_and_disables_via_real_device() {
         let dir = temp_dir("cpdev");
-        let dev = std::fs::OpenOptions::new()
-            .append(true)
-            .read(true)
-            .open("/dev/full")
-            .expect("本测试需要 /dev/full（Linux 标准字符设备）");
+        // 038：跨平台失败注入——原 /dev/full 为 Linux 字符设备（macOS 无对应物）。
+        // 等价夹具＝Writing 态持只读句柄：产品写路径经同一真实 fd 写入失败
+        // （unix EBADF／Windows ERROR_ACCESS_DENIED），截回同步失败，停用路径
+        // 与设备版一致；断言原文不变。名字保留 device 以对齐原验收记录。
+        let ro_source = dir.join("ro-fixture.bin");
+        std::fs::write(&ro_source, b"").unwrap();
+        let dev = std::fs::File::open(&ro_source).expect("只读夹具句柄");
         let mut session = Session {
             version: 3,
             native_seen: 0,
             dir: dir.clone(),
-            state: State::Writing { _path: PathBuf::from("/dev/full"), file: dev },
+            state: State::Writing { _path: ro_source, file: dev, _lock: None },
             persisted_upto: 1,
             durable_len: 64,
             error_reported: false,
@@ -1762,19 +1875,19 @@ mod tests {
     /// 非状态预设或替身）。验证：明确报错、停用后不再尝试追加、内存对话
     /// 继续、停用留下的半行残档可被装载器按坏行处理。
     #[test]
+    // 038：夹具已跨平台化（只读句柄失败注入），三端执行。
     fn truncate_failure_disables_autosave_via_real_device() {
         let dir = temp_dir("dev");
-        // Writing 态指向 /dev/full：前两条视为已提交（游标＝2）
-        let dev = std::fs::OpenOptions::new()
-            .append(true)
-            .read(true)
-            .open("/dev/full")
-            .expect("本测试需要 /dev/full（Linux 标准字符设备）");
+        // 038：跨平台失败注入（同 checkpoint 版注释）——只读句柄替代 /dev/full：
+        // 写入 EBADF → 截回 EBADF → 停用＋明确报错，路径与设备版一致。
+        let ro_source = dir.join("ro-fixture.bin");
+        std::fs::write(&ro_source, b"").unwrap();
+        let dev = std::fs::File::open(&ro_source).expect("只读夹具句柄");
         let mut session = Session {
             version: 1,
             native_seen: 0,
             dir: dir.clone(),
-            state: State::Writing { _path: PathBuf::from("/dev/full"), file: dev },
+            state: State::Writing { _path: ro_source, file: dev, _lock: None },
             persisted_upto: 2,
             durable_len: 1234,
             error_reported: false,

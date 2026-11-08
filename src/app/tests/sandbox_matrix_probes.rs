@@ -77,6 +77,9 @@ fn exec_probe(spec: &Value) -> Value {
     }
     let mut fd = Value::Null;
     let mut input = spec["input"].clone();
+    // 038：假凭据 fd 注入为 unix 设施探针（fcntl CLOEXEC 语义），Windows
+    // 不执行（fd_path 场景仅由 unix 门控的探针使用）。
+    #[cfg(unix)]
     if let Some(path) = spec["fd_path"].as_str() {
         use std::os::fd::AsRawFd;
         let f = fs::File::open(path).expect("打开假凭据 fd");
@@ -90,6 +93,8 @@ fn exec_probe(spec: &Value) -> Value {
         }
         fd = json!(n);
     }
+    #[cfg(windows)]
+    let _ = &mut input;
     let marker = spec["scan_marker"].as_str().unwrap_or("");
     let mgr = ProcessManager::new();
     let result = match ExecArgs::from_value(&input) {
@@ -97,10 +102,23 @@ fn exec_probe(spec: &Value) -> Value {
         Err(msg) => ExecResult::error(msg),
     };
     std::thread::sleep(Duration::from_millis(600)); // 终止/回收异步落定
-    let before = scan_marker(marker);
+    // 038-CI：组杀→进程消亡在慢 CI 上超过固定等待——按项目时序约定改 poll＋
+    // 截止（取消场景期望进程仍在运行，不适用 poll-until-empty）。
+    let mut before = scan_marker(marker);
+    if spec["cancel_after_ms"].is_null() {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !before.is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
+            before = scan_marker(marker);
+        }
+    }
     mgr.close();
-    std::thread::sleep(Duration::from_millis(200));
-    let after = scan_marker(marker);
+    let mut after = scan_marker(marker);
+    let after_deadline = Instant::now() + Duration::from_secs(15);
+    while !after.is_empty() && Instant::now() < after_deadline {
+        std::thread::sleep(Duration::from_millis(200));
+        after = scan_marker(marker);
+    }
     json!({"result": result, "before_close": before, "after_close": after, "fd": fd})
 }
 
@@ -113,33 +131,197 @@ fn apply_patch_probe(spec: &Value) -> Value {
     json!({"result": result, "changes": changes.len()})
 }
 
+#[cfg(target_os = "linux")]
+fn try_wait_b2_scan(child: &mut std::process::Child) -> Option<std::process::ExitStatus> {
+    child.try_wait().unwrap_or_else(|error| {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("检查 B2 活动管道读取状态失败：{error}");
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn legacy_pipe_scan_preflight(pid: u32, fd: i32) -> Value {
+    let mut child = Command::new("cat")
+        .arg(format!("/proc/{pid}/fd/{fd}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("启动 B2 活动管道旧扫描复现器");
+    let cat_pid = child.id();
+    let started = Instant::now();
+    let launch_deadline = started + Duration::from_secs(5);
+    let mut blocked_state = None;
+    let mut status = None;
+    while status.is_none() && Instant::now() < launch_deadline {
+        status = try_wait_b2_scan(&mut child);
+        if status.is_none() {
+            blocked_state = fs::read_to_string(format!("/proc/{cat_pid}/stat"))
+                .ok()
+                .and_then(|stat| stat.split_whitespace().nth(2).map(str::to_owned));
+            if blocked_state.as_deref() == Some("S") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    let mut timed_out = false;
+    let blocked_elapsed_ms = if blocked_state.as_deref() == Some("S") {
+        let blocked_started = Instant::now();
+        let read_deadline = blocked_started + Duration::from_millis(500);
+        while status.is_none() && Instant::now() < read_deadline {
+            status = try_wait_b2_scan(&mut child);
+            if status.is_none() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        if status.is_none() {
+            let kill_sent = child.kill().is_ok();
+            status = Some(child.wait().expect("等待已终止的 B2 旧扫描读取"));
+            timed_out = kill_sent && status.as_ref().is_some_and(|exit| exit.code().is_none());
+        }
+        Some(blocked_started.elapsed().as_millis())
+    } else {
+        if status.is_none() {
+            let _ = child.kill();
+            status = Some(child.wait().expect("等待未进入读取状态的 B2 复现器"));
+        }
+        None
+    };
+    json!({
+        "launch_deadline_ms": 5000,
+        "read_deadline_ms": 500,
+        "elapsed_ms": started.elapsed().as_millis(),
+        "timed_out": timed_out,
+        "cat_pid": cat_pid,
+        "read_wait_state": blocked_state,
+        "blocked_elapsed_ms": blocked_elapsed_ms,
+        "status": status.map(|exit| exit.to_string()),
+    })
+}
+
 /// MCP 探针（生产入口 McpManager prepare/call/close）：mcp.json 由父测试写入
 /// TCHAT_USER_DIR；探针记录文本（rec）由服务器侧包装脚本落盘。可选 fd_path＝
 /// launcher 角色无 CLOEXEC 假凭据 fd（B2 的 MCP 面专项）。
 fn mcp_probe(spec: &Value) -> Value {
     // B2：launcher 角色 fd——清除 CLOEXEC 并跨 spawn 保持（子进程退出即关闭）。
+    // 038：unix 设施探针（fcntl 语义），Windows 不执行。
+    let mut fd_number: Option<i32> = None;
+    #[cfg(unix)]
+    let mut inherited_file: Option<fs::File> = None;
+    #[cfg(not(unix))]
+    let inherited_file: Option<fs::File> = None;
+    #[cfg(unix)]
     if let Some(path) = spec["fd_path"].as_str() {
         use std::os::fd::AsRawFd;
         let f = fs::File::open(path).expect("打开假凭据 fd");
         let n = f.as_raw_fd();
         unsafe { assert_eq!(libc::fcntl(n, libc::F_SETFD, 0), 0, "清除 CLOEXEC 失败"); }
-        std::mem::forget(f);
+        inherited_file = Some(f);
+        fd_number = Some(n);
+    }
+    let diag = &spec["diag"];
+    let mut probe_stages = vec![format!(
+        "prepare.begin pid={} fd={fd_number:?}",
+        std::process::id()
+    )];
+    let mut pipe_diagnostic = Value::Null;
+    #[cfg(target_os = "linux")]
+    let mut active_pipe: Option<(fs::File, fs::File)> = None;
+    #[cfg(target_os = "linux")]
+    if spec["live_pipe"].as_bool().unwrap_or(false) {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let mut fds = [-1; 2];
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0, "创建 B2 活动管道");
+        let reader = unsafe { fs::File::from_raw_fd(fds[0]) };
+        let writer = unsafe { fs::File::from_raw_fd(fds[1]) };
+        let pipe_fd = reader.as_raw_fd();
+        let flags = unsafe { libc::fcntl(pipe_fd, libc::F_GETFD) };
+        assert!(flags >= 0, "读取 B2 管道 fd 标志");
+        assert_eq!(unsafe { libc::fcntl(pipe_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) }, 0, "保留 B2 管道读端");
+        let pipe_target = fs::read_link(format!("/proc/self/fd/{pipe_fd}"))
+            .expect("读取 B2 活动管道身份").to_string_lossy().into_owned();
+        let legacy_scan = legacy_pipe_scan_preflight(std::process::id(), pipe_fd);
+        fs::write(
+            spec["rec"].as_str().expect("rec 路径"),
+            format!(
+                "controlled_pipe fd={pipe_fd} target={pipe_target} writer=held_open\nlegacy_pipe_scan cat_pid={} read_wait_state={} blocked_elapsed_ms={} launch_deadline_ms={} read_deadline_ms={} elapsed_ms={} timed_out={} status={}\n",
+                legacy_scan["cat_pid"],
+                legacy_scan["read_wait_state"],
+                legacy_scan["blocked_elapsed_ms"],
+                legacy_scan["launch_deadline_ms"],
+                legacy_scan["read_deadline_ms"],
+                legacy_scan["elapsed_ms"],
+                legacy_scan["timed_out"],
+                legacy_scan["status"],
+            ),
+        )
+        .expect("记录 B2 活动管道旧扫描复现证据");
+        pipe_diagnostic = json!({
+            "fd": pipe_fd,
+            "target": pipe_target,
+            "legacy_scan": legacy_scan,
+        });
+        probe_stages.push(format!("controlled_pipe fd={pipe_fd} target={pipe_target} writer=held_open"));
+        probe_stages.push(format!("legacy_pipe_scan result={legacy_scan}"));
+        active_pipe = Some((reader, writer));
     }
     let manager = McpManager::new();
     let prepared = manager.prepare_for_turn(&AtomicBool::new(false));
-    let Some(snapshot) = prepared else {
-        manager.close();
-        return json!({"started": false, "tools": 0, "call": null, "probe_rec": ""});
-    };
-    let tools = snapshot.len();
-    let call = snapshot.entry("mcp__fx__echo").map(|entry| {
-        let (result, failed) = manager.call(entry, json!({"text": "iso"}), &AtomicBool::new(false));
-        json!({"result": result, "failed": failed})
+    let status_after_prepare = manager.status_lines();
+    let started = prepared.is_some();
+    let tools = prepared.as_ref().map_or(0, |snapshot| snapshot.len());
+    let call = prepared.and_then(|snapshot| {
+        snapshot.entry("mcp__fx__echo").map(|entry| {
+            let (result, failed) = manager.call(entry, json!({"text": "iso"}), &AtomicBool::new(false));
+            json!({"result": result, "failed": failed})
+        })
     });
+    probe_stages.push(format!(
+        "prepare.return started={started} tools={tools} status={}",
+        status_after_prepare.join(" | ")
+    ));
+    probe_stages.push("manager.close.begin".to_string());
     manager.close();
-    let probe_rec =
-        fs::read_to_string(spec["rec"].as_str().expect("rec 路径")).unwrap_or_default();
-    json!({"started": true, "tools": tools, "call": call, "probe_rec": probe_rec})
+    probe_stages.push("manager.close.return".to_string());
+    #[cfg(target_os = "linux")]
+    drop(active_pipe);
+    drop(inherited_file);
+    let status_after_close = manager.status_lines();
+    let (probe_rec, probe_rec_read_error) =
+        match fs::read_to_string(spec["rec"].as_str().expect("rec 路径")) {
+            Ok(content) => (content, None),
+            Err(error) => (String::new(), Some(error.to_string())),
+        };
+    let read_diag = |name: &str| {
+        match diag[name].as_str() {
+            Some(path) => match fs::read_to_string(path) {
+                Ok(content) => json!({"content": content}),
+                Err(error) => json!({"read_error": error.to_string()}),
+            },
+            None => json!({"not_configured": true}),
+        }
+    };
+    json!({
+        "started": started,
+        "tools": tools,
+        "call": call,
+        "probe_rec": probe_rec,
+        "diagnostic": {
+            "fd_number": fd_number,
+            "controlled_pipe": pipe_diagnostic,
+            "manager_status_after_prepare": status_after_prepare,
+            "manager_status_after_close": status_after_close,
+            "probe_stages": probe_stages,
+            "probe_rec_read_error": probe_rec_read_error,
+            "fixture_record": read_diag("fixture_record"),
+            "protocol_stdin": read_diag("protocol_stdin"),
+            "protocol_stdout": read_diag("protocol_stdout"),
+            "server_stderr": read_diag("server_stderr"),
+            "server_exit_status": read_diag("server_exit_status"),
+        }
+    })
 }
 
 // ---------- 父侧：子进程派生（显式环境构造，看门狗） ----------
@@ -194,8 +376,10 @@ fn sandbox_env(work: &Path) -> Box<dyn FnOnce(&mut Command) + '_> {
 
 /// C-MCP：服务器经生产 transport（bwrap 包装）启动——沙箱内读锚定根 .env 被遮蔽
 /// （外部先证可读）；mcp.json 显式 env 保留；HOME＝锚定根、TERM 传递、污染 env
-/// 不进入（env_clear）；载荷＝新 PID ns 的 pid 1。普通模式对照：.env 可读、
-/// HOME＝主进程值、pid≠1——差异证明来自沙箱。
+/// 不进入（env_clear）；MCP 载荷位于新 PID namespace 的非 init 进程。普通模式
+/// 对照：.env 可读、HOME＝主进程值、PID 由宿主 namespace 分配——差异证明来自沙箱。
+#[cfg(target_os = "linux")]
+// 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn c_mcp_face_masks_env_and_keeps_explicit_env() {
     for sandbox in [true, false] {
@@ -216,8 +400,8 @@ fn c_mcp_face_masks_env_and_keeps_explicit_env() {
         let rec2 = recs.path().join("fixture.jsonl");
         let fixture = common::mcp_fixtures::FIXTURE.replace('\\', "/");
         let anchor = work.path().display().to_string();
-        // 服务器包装脚本：记录自身环境与 .env 读取尝试后，转 exec 真实测试夹具
-        //（同一进程＝bwrap 直接载荷）。
+        // 服务器包装脚本：记录自身环境与 .env 读取尝试后，转 exec 真实测试夹具；
+        // 沙箱载荷由启动闸放行，不假设其 namespace PID 固定值。
         let wrapper = format!(
             r#"{{ echo "PID=$$"; echo "HOME=$HOME"; echo "TERM=$TERM"; echo "TOKEN=[$TCHAT_033_MCP_TOKEN]"; echo "POISON=[$TCHAT_033_POISON]"; echo "ENV_READ=$(cat '{anchor}/.env' 2>&1 | head -c 90)"; }} >> '{rec}'; exec python3 '{fixture}' --scenario echo --record '{rec2}'"#,
             anchor = anchor,
@@ -262,7 +446,10 @@ fn c_mcp_face_masks_env_and_keeps_explicit_env() {
                 val("ENV_READ").contains("denied"),
                 "遮蔽证据（open 被拒文本）：{rec_text}"
             );
-            assert_eq!(val("PID"), "1", "服务器＝新 ns pid 1：{rec_text}");
+            assert!(
+                val("PID").parse::<u32>().is_ok_and(|pid| pid > 1),
+                "服务器应是独立 gate 载荷，不是 PID 1 reaper：{rec_text}"
+            );
             assert_eq!(val("HOME"), anchor.as_str(), "HOME＝锚定根：{rec_text}");
         } else {
             assert!(rec_text.contains(&marker), "普通对照：.env 可读：{rec_text}");
@@ -333,6 +520,8 @@ fn c_apply_patch_face_cannot_touch_env() {
 ///（错误指向硬链接）、无执行副作用、不回退普通模式；单链接控制组照常运行且
 /// 遮蔽有效。只处理检查时已存在的硬链接——检查到挂载之间及运行期的并发变化
 /// 仍是边界（如实声明，见 B1/B2 核实记录）。
+#[cfg(target_os = "linux")]
+// 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn b1_hardlinked_deny_refused_on_all_three_faces() {
     // ── 多链接：三面拒绝 ──
@@ -431,6 +620,8 @@ fn b1_hardlinked_deny_refused_on_all_three_faces() {
 /// 夹具未变。真实 CLI 固定策略下该夹具先命中可写符号链接 fail-closed 分支
 ///（错误含 "writable symlink"）；元数据错误三分类的单元证据见 sandbox::tests
 ///（ELOOP rootless／父目录 EACCES 两个稳定夹具＋ENOTDIR 控制组）。
+#[cfg(target_os = "linux")]
+// 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn b1_unverifiable_deny_target_refused_before_launch() {
     let work = TempDir::new("033b1-loop");
@@ -469,6 +660,8 @@ fn b1_unverifiable_deny_target_refused_before_launch() {
 /// `close_range(CLOSE_RANGE_CLOEXEC)` 于 execve 时关闭（`/proc/self/fd/N`
 /// 不再可读）；普通对照分支继承行为不变（零变化承诺）。动态 fd 编号（避免与
 /// 并发用例的 PTY/套接字 fd 互踩）。
+#[cfg(target_os = "linux")]
+// 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn d_fd_inheritance_sandbox_closed_normal_unchanged() {
     for sandbox in [true, false] {
@@ -497,8 +690,12 @@ fn d_fd_inheritance_sandbox_closed_normal_unchanged() {
                 "沙箱分支：无 CLOEXEC fd 应于 execve 时关闭（B2 加固）：{output}"
             );
             assert!(
-                output.lines().any(|l| l == "PID=1"),
-                "链路证据：exec 经 bwrap --as-pid-1：{output}"
+                output.lines().any(|line| {
+                    line.strip_prefix("PID=")
+                        .and_then(|pid| pid.parse::<u32>().ok())
+                        .is_some_and(|pid| pid > 1)
+                }),
+                "链路证据：exec 经真实启动闸运行在非 init namespace 载荷：{output}"
             );
         } else {
             assert!(
@@ -516,6 +713,9 @@ fn d_fd_inheritance_sandbox_closed_normal_unchanged() {
 ///     spawn 失败信道（Linux 为 SOCK_SEQPACKET socketpair，fd≥3、自带
 ///     CLOEXEC）不被破坏；若误用真 close，execve 失败会被误报为 spawn 成功
 ///     （子进程静默 exit 1）——本探针即该风险的回归防线。
+// 038-CI：直接调用 libc::close_range（Linux 专属 syscall，apple libc 无绑定）
+// ——macOS/Windows 不编译，排除原因见 docs/specs/038-github-actions-ci.md。
+#[cfg(target_os = "linux")]
 #[test]
 fn b2_fix_feasibility_preexec_close_fds_keeps_stdio() {
     use std::os::unix::process::CommandExt;
@@ -641,8 +841,15 @@ fn b2_fix_feasibility_preexec_close_fds_keeps_stdio() {
 ///（零变化）。exec 面由 d_fd/b2_real 覆盖（管道＋真实 CLI 全链路）；PTY 与
 /// exec 共用 build_tool_command 注入位；apply_patch 面共用同一助手，其子进程
 ///（--internal-apply）无 fd 观测面，由共用机制＋代码审查覆盖（记录注明）。
+#[cfg(target_os = "linux")]
+// 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn b2_mcp_face_fd_closed() {
+    // 038 恢复真实检查（2026-10-31）：本地含 bwrap 0.11.1（runner 同版本）均通过。
+    // GH runner 实测的沙箱内 MCP 服务器未应答差异（tools=0）根因待 runner 侧
+    // 诊断（见 docs/logs/038-github-actions-ci/2026-10-31-runner-diagnosis-plan.md）；
+    // 该用例不再提前 return——runner 上若复现即如实失败，为诊断提供信号。
+    let mut scenario_failures = Vec::new();
     for sandbox in [true, false] {
         let work = TempDir::new("033b2m-work");
         let user = TempDir::new("033b2m-user");
@@ -652,27 +859,46 @@ fn b2_mcp_face_fd_closed() {
         fs::write(work.path().join(".env"), "TCHAT_033_FAKE_ENV_SECRET=b2m-fake\n").unwrap();
         let fd_file = recs.path().join("fd-secret.txt");
         fs::write(&fd_file, "FAKE-FD-MCP-033").unwrap();
+        let diag = recs.path().join("b2-diagnostics");
+        fs::create_dir_all(&diag).unwrap();
+        let protocol_stdin = diag.join("protocol.stdin");
+        let protocol_stdout = diag.join("protocol.stdout");
+        let server_stderr = diag.join("server.stderr");
+        let server_exit_status = diag.join("server.exit-status");
 
         let rec = recs.path().join("probe.txt");
         let rec2 = recs.path().join("fixture.jsonl");
         let fixture = common::mcp_fixtures::FIXTURE.replace('\\', "/");
-        // 包装脚本：扫描 fd ≥3 内容（跳过 0/1/2＝stdio 管道，防阻塞）后转真实
-        // 夹具——泄漏时假凭据正文会出现在 FDSCAN 行。
+        // 诊断写入独立文件；MCP stdout 仍只承载协议帧。
         let wrapper = format!(
-            r#"{{ for f in /proc/self/fd/*; do case "$f" in */0|*/1|*/2) ;; *) echo "FDSCAN=$(cat "$f" 2>&1 | head -c 30)";; esac; done; }} >> '{rec}'; exec python3 '{fixture}' --scenario echo --record '{rec2}'"#,
+            r#"{{ printf 'stage=wrapper_scan pid=%s\n' "$$" >> '{rec}'; for f in /proc/$$/fd/*; do case "$f" in */0|*/1|*/2) ;; *) _fd=${{f##*/}}; _target=$(readlink "/proc/$$/fd/$_fd" 2>&1 || true); if [ "$_target" = '{fd_target}' ]; then _content=$(cat "/proc/$$/fd/$_fd" 2>&1 | head -c 30); printf 'FDREAD_MARKER pid=%s fd=%s target=%s content=%s\n' "$$" "$_fd" "$_target" "$_content" >> '{rec}'; else case "$_target" in pipe:\[*\]) printf 'FDSKIP pid=%s fd=%s target=%s\n' "$$" "$_fd" "$_target" >> '{rec}';; socket:\[*\]) printf 'FDSKIP pid=%s fd=%s kind=socket\n' "$$" "$_fd" >> '{rec}';; /dev/pts/*) printf 'FDSKIP pid=%s fd=%s kind=tty\n' "$$" "$_fd" >> '{rec}';; *) printf 'FDSKIP pid=%s fd=%s kind=other\n' "$$" "$_fd" >> '{rec}';; esac; fi;; esac; done; printf 'stage=fixture_launch pid=%s\n' "$$" >> '{rec}'; python3 '{fixture}' --scenario echo --record '{rec2}' --trace-stdin '{protocol_stdin}' --trace-stdout '{protocol_stdout}' 2>>'{server_stderr}'; _status=$?; printf 'stage=fixture_exit status=%s\n' "$_status" >> '{rec}'; printf '%s\n' "$_status" > '{server_exit_status}'; exit "$_status"; }}"#,
             rec = rec.display(),
+            fd_target = fd_file.display(),
             fixture = fixture,
             rec2 = rec2.display(),
+            protocol_stdin = protocol_stdin.display(),
+            protocol_stdout = protocol_stdout.display(),
+            server_stderr = server_stderr.display(),
+            server_exit_status = server_exit_status.display(),
         );
         let mcp = json!({"mcp_servers": {"fx": {
             "enabled": true, "command": "sh", "args": ["-c", wrapper],
-            "cwd": work.path().display().to_string(), "env_vars": []}}});
+            "cwd": work.path().display().to_string(), "env_vars": [],
+            "startup_timeout_sec": 5}}});
         fs::write(user.path().join("mcp.json"), mcp.to_string()).unwrap();
 
         let spec = json!({
             "kind": "mcp",
             "rec": rec.display().to_string(),
             "fd_path": fd_file.display().to_string(),
+            "live_pipe": !sandbox,
+            "diag": {
+                "fixture_record": rec2.display().to_string(),
+                "protocol_stdin": protocol_stdin.display().to_string(),
+                "protocol_stdout": protocol_stdout.display().to_string(),
+                "server_stderr": server_stderr.display().to_string(),
+                "server_exit_status": server_exit_status.display().to_string(),
+            },
         });
         let outcome = run_probe("b2m", &spec, |cmd| {
             cmd.env("TCHAT_USER_DIR", user.path())
@@ -684,27 +910,69 @@ fn b2_mcp_face_fd_closed() {
                 cmd.env("TCHAT_SANDBOX", "1");
             }
         });
-        // 服务器应正常启动并完成往返（fd 收口不破坏 MCP 面）
-        assert_eq!(outcome["started"], json!(true), "服务器应启动：{outcome}");
-        assert_eq!(outcome["tools"], json!(1), "应发现工具：{outcome}");
-        assert_eq!(outcome["call"]["failed"], json!(false), "调用往返成功：{outcome}");
+        // 沙箱分支即使失败也执行普通正向对照，单次 CI 日志保留两侧证据。
+        let mut failures = Vec::new();
+        if outcome["started"] != json!(true) {
+            failures.push(format!("服务器应启动：{outcome}"));
+        }
+        if outcome["tools"] != json!(1) {
+            failures.push(format!("应发现工具：{outcome}"));
+        }
+        if outcome["call"]["failed"] != json!(false) {
+            failures.push(format!("调用往返成功：{outcome}"));
+        }
+        if !sandbox {
+            if outcome["diagnostic"]["controlled_pipe"]["target"].as_str().is_none() {
+                failures.push(format!("普通模式应建立受控活动管道：{outcome}"));
+            }
+            if outcome["diagnostic"]["controlled_pipe"]["legacy_scan"]["timed_out"] != json!(true)
+                || outcome["diagnostic"]["controlled_pipe"]["legacy_scan"]["read_wait_state"] != json!("S")
+                || outcome["diagnostic"]["controlled_pipe"]["legacy_scan"]["blocked_elapsed_ms"]
+                    .as_u64().is_none_or(|ms| ms < 500)
+            {
+                failures.push(format!("旧式读取必须观察到停止态并持续阻塞至 500ms 截止：{outcome}"));
+            }
+        }
         let rec_text = outcome["probe_rec"].as_str().unwrap_or_default();
+        if !sandbox {
+            let pipe_target = outcome["diagnostic"]["controlled_pipe"]["target"]
+                .as_str()
+                .unwrap_or_default();
+            if !rec_text.lines().any(|line| {
+                line.starts_with("FDSKIP ") && line.ends_with(&format!("target={pipe_target}"))
+            }) {
+                failures.push(format!("活动管道应被识别并跳过内容读取：{outcome}"));
+            }
+            if !rec_text.contains("FDREAD_MARKER") {
+                failures.push(format!("普通模式应实际读取目标假标记 fd：{outcome}"));
+            }
+        }
+        if sandbox && rec_text.contains("FDREAD_MARKER") {
+            failures.push(format!("沙箱模式不得读取目标假标记 fd：{outcome}"));
+        }
         println!(
             "==== 033 B2 MCP 面（{}）====\n{rec_text}",
             if sandbox { "沙箱" } else { "普通对照" }
         );
+        println!("B2 独立阶段与协议记录：{}", outcome["diagnostic"]);
         if sandbox {
-            assert!(
-                !rec_text.contains("FAKE-FD-MCP-033"),
-                "MCP 面：沙箱分支不得读出 fd 正文（tokio 注入点回归）：{rec_text}"
-            );
+            if rec_text.contains("FAKE-FD-MCP-033") {
+                failures.push(format!("MCP 面：沙箱分支读出宿主 fd 假凭据：{rec_text}"));
+            }
         } else {
-            assert!(
-                rec_text.contains("FAKE-FD-MCP-033"),
-                "MCP 面：普通对照 fd 可读（零变化承诺）：{rec_text}"
-            );
+            if !rec_text.contains("FAKE-FD-MCP-033") {
+                failures.push(format!("MCP 面：普通对照未读取 fd 假凭据：{rec_text}"));
+            }
+        }
+        if !failures.is_empty() {
+            scenario_failures.push(format!(
+                "B2 MCP 面（{}）失败：{}\n完整阶段、协议与子进程证据：{outcome}",
+                if sandbox { "沙箱" } else { "普通对照" },
+                failures.join("；")
+            ));
         }
     }
+    assert!(scenario_failures.is_empty(), "{}", scenario_failures.join("\n"));
 }
 
 // ---------- 矩阵 E：取消/超时/正常完成的整批回收（管道＋PTY，重复时序） ----------
@@ -712,8 +980,15 @@ fn b2_mcp_face_fd_closed() {
 /// E：四组合（管道/PTY × 取消/超时）各重复 3 次＋正常完成两型＋纯短命令两型。
 /// 回收证据＝双侧扫描（子进程 close 前后＋父进程在子进程退出后）皆无 marker
 /// 进程；沙箱下正常完成的后台子/孙进程随 PID ns 回收（pid 1 退出→内核 SIGKILL）。
+#[cfg(target_os = "linux")]
+// 038-CI：本探针要求 bwrap 真实执行（033 沙箱后端），macOS/Windows 不编译。
 #[test]
 fn e_reaping_cancel_timeout_completion_pipe_and_pty() {
+    // 038 恢复真实检查（2026-10-31）：本地含 bwrap 0.11.1（runner 同版本）均通过。
+    // GH runner 实测的组杀后孙进程存活差异（close 后 3 进程超 15s poll）根因待
+    // runner 侧诊断（见 docs/logs/038-github-actions-ci/
+    // 2026-10-31-runner-diagnosis-plan.md）；该用例不再提前 return——runner 上
+    // 若复现即如实失败，为诊断提供信号。
     let mk_cmd = |tag: &str, fg: &str| {
         // 两个后台子进程（其一再派生孙进程）＋前台长命令；marker 进各进程 cmdline。
         format!("sh -c 'sleep 299' {t} & sh -c 'exec sh -c \"sleep 299\" {t}' {t} & {fg}", t = tag)
@@ -828,6 +1103,8 @@ fn e_reaping_cancel_timeout_completion_pipe_and_pty() {
 
 /// 建造假 bwrap 目录：mode 0644＝不可执行文件；0755＋exit 1＝探测干跑失败；
 /// 0755＋仅探测参数通过＝探测成功但真实启动失败。
+// 038：假 bwrap 构造依赖 unix 权限位（chmod 语义）与 bwrap 探针——unix 门控。
+#[cfg(unix)]
 fn fake_bwrap_dir(kind: &str) -> TempDir {
     use std::os::unix::fs::PermissionsExt;
     let dir = TempDir::new(&format!("033f-{kind}"));
@@ -848,6 +1125,7 @@ fn fake_bwrap_dir(kind: &str) -> TempDir {
 
 /// F：四场景 × 三工具面——沙箱启用时必须显式失败，执行标记不得出现，绝不静默
 /// 回退为无沙箱执行。全程不触碰 /usr/bin/bwrap（仅隔离子进程 PATH 替换）。
+#[cfg(unix)] // 038：F 探针依赖 fake_bwrap（unix 权限位＋bwrap 语义）
 #[test]
 fn f_fail_closed_without_fallback() {
     let scenarios: [(&str, &str); 4] = [

@@ -1,0 +1,134 @@
+failures:
+
+---- s141_tui_permission_prompt_allow_and_deny stdout ----
+
+thread 's141_tui_permission_prompt_allow_and_deny' (56817) panicked at src/app/tests/e2e_acceptance.rs:10910:40:
+called `Result::unwrap()` on an `Err` value: "等待屏幕 \"? for shortcuts\" 超时（30s），屏幕：\n错误：沙箱后端 bwrap 不可用：031 需要固定沙箱后端（TCHAT_SANDBOX 模式），拒绝启用 031（不回退普通模式）\n原始输出：\n错误：沙箱后端 bwrap 不可用：031 需要固定沙箱后端（TCHAT_SANDBOX 模式），拒绝启用 031（不回退普通模式）\r\n"
+
+---- s140_request_permissions_cli_grant_and_enforce stdout ----
+
+thread 's140_request_permissions_cli_grant_and_enforce' (56796) panicked at src/app/tests/e2e_acceptance.rs:10770:28:
+called `Result::unwrap()` on an `Err` value: "等待屏幕 \"你>\" 超时（30s），屏幕：\n错误：沙箱后端 bwrap 不可用：031 需要固定沙箱后端（TCHAT_SANDBOX 模式），拒绝启用 031（不回退普通模式）\n原始输出：\n错误：沙箱后端 bwrap 不可用：031 需要固定沙箱后端（TCHAT_SANDBOX 模式），拒绝启用 031（不回退普通模式）\r\n"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- s142_resume_shows_permission_history_and_requires_new_confirmation stdout ----
+
+thread 's142_resume_shows_permission_history_and_requires_new_confirmation' (56824) panicked at src/app/tests/e2e_acceptance.rs:11050:40:
+called `Result::unwrap()` on an `Err` value: "等待屏幕 \"? for shortcuts\" 超时（30s），屏幕：\n错误：沙箱后端 bwrap 不可用：031 需要固定沙箱后端（TCHAT_SANDBOX 模式），拒绝启用 031（不回退普通模式）\n原始输出：\n错误：沙箱后端 bwrap 不可用：031 需要固定沙箱后端（TCHAT_SANDBOX 模式），拒绝启用 031（不回退普通模式）\r\n"
+
+
+failures:
+    s140_request_permissions_cli_grant_and_enforce
+    s141_tui_permission_prompt_allow_and_deny
+    s142_resume_shows_permission_history_and_requires_new_confirmation
+
+test result: FAILED. 147 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 40.95s
+
+--
+failures:
+
+---- b2_real_cli_fd_chain_full_path stdout ----
+
+thread 'b2_real_cli_fd_chain_full_path' (60609) panicked at src/app/tests/e2e_sandbox.rs:565:9:
+assertion `left == right` failed: exec 完成：{"status":"error","exit_code":null,"output":"","truncated":false,"error":"进程启动失败：未在 PATH 中找到 bubblewrap（bwrap）；请安装 bubblewrap","session_id":null}
+  left: String("error")
+ right: "completed"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    b2_real_cli_fd_chain_full_path
+
+test result: FAILED. 6 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.34s
+--
+failures:
+
+---- c18_cold_start_pure_js stdout ----
+
+thread 'c18_cold_start_pure_js' (60715) panicked at src/app/tests/js_orchestration_perf.rs:176:9:
+cold-js p95 中位 342482µs 超过冻结阈值 300000µs（机器/构建变化须重新冻结）
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- c18_leaf_counts_1_4_31 stdout ----
+
+thread 'c18_leaf_counts_1_4_31' (60717) panicked at src/app/tests/js_orchestration_perf.rs:176:9:
+leaf1 p95 中位 367651µs 超过冻结阈值 250000µs（机器/构建变化须重新冻结）
+
+
+failures:
+    c18_cold_start_pure_js
+    c18_leaf_counts_1_4_31
+
+test result: FAILED. 5 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 256.61s
+
+error: test failed, to rerun pass `-p terminal-chat --test js_orchestration_perf`
+--
+failures:
+
+---- b2_mcp_face_fd_closed stdout ----
+
+thread 'b2_mcp_face_fd_closed' (65386) panicked at src/app/tests/sandbox_matrix_probes.rs:691:9:
+assertion `left == right` failed: 应发现工具：{"started":true,"tools":0,"call":null,"probe_rec":""}
+  left: Number(0)
+ right: Number(1)
+
+---- c_mcp_face_masks_env_and_keeps_explicit_env stdout ----
+
+thread 'c_mcp_face_masks_env_and_keeps_explicit_env' (65388) panicked at src/app/tests/sandbox_matrix_probes.rs:248:9:
+assertion `left == right` failed: 应发现 echo 工具：{"started":true,"tools":0,"call":null,"probe_rec":""}
+  left: Number(0)
+ right: Number(1)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- b1_unverifiable_deny_target_refused_before_launch stdout ----
+
+thread 'b1_unverifiable_deny_target_refused_before_launch' (65384) panicked at src/app/tests/sandbox_matrix_probes.rs:454:5:
+应命中 fail-closed 拒绝而非放行（普通模式下 cat 循环链接也会失败，但那不是沙箱拒绝）：{"status":"error","exit_code":null,"output":"","truncated":false,"error":"进程启动失败：未在 PATH 中找到 bubblewrap（bwrap）；请安装 bubblewrap","session_id":null}
+
+---- b1_hardlinked_deny_refused_on_all_three_faces stdout ----
+
+thread 'b1_hardlinked_deny_refused_on_all_three_faces' (65383) panicked at src/app/tests/sandbox_matrix_probes.rs:360:5:
+exec 面错误应指向硬链接：{"status":"error","exit_code":null,"output":"","truncated":false,"error":"进程启动失败：未在 PATH 中找到 bubblewrap（bwrap）；请安装 bubblewrap","session_id":null}
+
+---- d_fd_inheritance_sandbox_closed_normal_unchanged stdout ----
+033 D-FD（沙箱）：
+
+thread 'd_fd_inheritance_sandbox_closed_normal_unchanged' (65389) panicked at src/app/tests/sandbox_matrix_probes.rs:497:13:
+沙箱分支：无 CLOEXEC fd 应于 execve 时关闭（B2 加固）：
+
+---- e_reaping_cancel_timeout_completion_pipe_and_pty stdout ----
+
+thread 'e_reaping_cancel_timeout_completion_pipe_and_pty' (65390) panicked at src/app/tests/sandbox_matrix_probes.rs:747:13:
+assertion `left == right` failed: cancel/tty=false 第 0 次：{"status":"error","exit_code":null,"output":"","truncated":false,"error":"进程启动失败：未在 PATH 中找到 bubblewrap（bwrap）；请安装 bubblewrap","session_id":null}
+  left: String("error")
+ right: "cancelled"
+
+
+failures:
+    b1_hardlinked_deny_refused_on_all_three_faces
+    b1_unverifiable_deny_target_refused_before_launch
+    b2_mcp_face_fd_closed
+    c_mcp_face_masks_env_and_keeps_explicit_env
+
+<!--
+038 模拟实测（2026-10-30）：无 bwrap＋无 TCHAT_SANDBOX 环境下的全量实跑
+命令：env -u TCHAT_SANDBOX PATH="/usr/local/cargo/bin:/tmp/ci-sim-bin:/usr/sbin:/sbin" cargo test --workspace --no-fail-fast --locked
+模拟目的：预测 macOS（unix 无 bwrap）与未装 bwrap 的 Linux CI 行为。
+/tmp/ci-sim-bin＝/usr/bin 全量符号链接副本（仅去除 bwrap）。
+
+首轮（门控前）失败目标 6 个：--lib、e2e_acceptance、e2e_sandbox、
+js_orchestration_perf、multi_agent_security_probe、sandbox_matrix_probes。
+二轮（门控后，重跑失败目标）失败 4 个 12 用例：
+- e2e_acceptance 3：s140/s141/s142——"031 需要固定沙箱后端（TCHAT_SANDBOX 模式），
+  拒绝启用"（需 bwrap 真实执行）→ 已加用例级 #[cfg(target_os = "linux")]
+- e2e_sandbox 1：b2_real_cli_fd_chain_full_path——bwrap 启动失败（同上）→ 已门控
+- js_orchestration_perf 2：c18_cold_start_pure_js（p95 342ms>冻结 300ms）、
+  c18_leaf_counts_1_4_31（368ms>冻结 250ms）——阈值为本容器机器口径，
+  机器变化须重新冻结（模块头注释）；CI 机器不可比 → CI 按模块设计的
+  JS34_PERF_SAMPLE=1 采样模式执行（跳断言不跳场景）
+- sandbox_matrix_probes 6：b1×2/b2/c/d/e 探针需 bwrap 真实执行 → 用例级门控；
+  4 个 F fail-closed 探针无 bwrap 通过 → 保留运行
+
+偶发记录：--lib 与 multi_agent_security_probe 首轮失败、二轮通过——失败详情
+已被首轮 tail 管道截断无法定位；标准容器环境基线复跑观察（见同目录基线日志）。
+-->

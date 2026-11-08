@@ -16,7 +16,7 @@ use common::{TempDir, ENV_LOCK};
 
 use common::mcp_fixtures::{
     definition_names, read_record, setup, setup_no_prepare, setup_with,
-    CANARY, CANARY_VALUE, FIXTURE,
+    CANARY, CANARY_VALUE, FIXTURE, PY,
 };
 use terminal_chat::mcp::manager::McpManager;
 
@@ -107,9 +107,10 @@ fn a03_shell_metacharacters_passed_verbatim_no_shell() {
     let record_path = record_dir.path().join("record.jsonl");
     let fixture = FIXTURE.replace('\\', "/");
     let json = format!(
-        r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "python3", "args": ["{fixture}", "--scenario", "echo", "--record", "{}", "; rm -rf /tmp/x", "`id`", "$(whoami)"], "cwd": "{}"}}}}}}"#,
+        r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "echo", "--record", "{}", "; rm -rf /tmp/x", "`id`", "$(whoami)"], "cwd": "{}"}}}}}}"#,
         record_path.display().to_string().replace('\\', "/"),
-        std::env::temp_dir().display()
+        std::env::temp_dir().display().to_string().replace('\\', "/"),
+        py = PY,
     );
     std::fs::write(dir.path().join("mcp.json"), json).expect("写入 mcp.json");
     let manager = Arc::new(McpManager::new());
@@ -484,9 +485,10 @@ fn a12_server_death_after_side_effect_marks_unknown_once() {
     let target = side_effect_dir.path().join("written.txt");
     let fixture = FIXTURE.replace('\\', "/");
     let json = format!(
-        r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "python3", "args": ["{fixture}", "--scenario", "write_then_die", "--record", "{}"], "cwd": "{}"}}}}}}"#,
+        r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "write_then_die", "--record", "{}"], "cwd": "{}"}}}}}}"#,
         record_path.display().to_string().replace('\\', "/"),
-        std::env::temp_dir().display()
+        std::env::temp_dir().display().to_string().replace('\\', "/"),
+        py = PY,
     );
     std::fs::write(dir.path().join("mcp.json"), json).expect("写入 mcp.json");
     let manager = McpManager::new();
@@ -755,9 +757,10 @@ fn a06_cross_server_same_tool_names_resolved_with_hash() {
     let fixture = FIXTURE.replace('\\', "/");
     // 两台服务器目录同名（echo）；第二台记录到同一 record（不同 kind 前缀可区分 server）。
     let json = format!(
-        r#"{{"mcp_servers": {{"aa": {{"enabled": true, "command": "python3", "args": ["{fixture}", "--scenario", "echo", "--record", "{rec}"], "cwd": "{cwd}"}}, "bb": {{"enabled": true, "command": "python3", "args": ["{fixture}", "--scenario", "echo", "--record", "{rec}"], "cwd": "{cwd}"}}}}}}"#,
+        r#"{{"mcp_servers": {{"aa": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "echo", "--record", "{rec}"], "cwd": "{cwd}"}}, "bb": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "echo", "--record", "{rec}"], "cwd": "{cwd}"}}}}}}"#,
         rec = record_path.display().to_string().replace('\\', "/"),
-        cwd = std::env::temp_dir().display(),
+        cwd = std::env::temp_dir().display().to_string().replace('\\', "/"),
+        py = PY,
     );
     std::fs::write(dir.path().join("mcp.json"), json).expect("写入 mcp.json");
     let manager = Arc::new(McpManager::new());
@@ -886,9 +889,10 @@ fn p2_active_notification_without_recent_call_still_relists() {
     let record_path = record_dir.path().join("record.jsonl");
     let fixture = FIXTURE.replace('\\', "/");
     let json = format!(
-        r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "python3", "args": ["{fixture}", "--scenario", "notify_on_list", "--record", "{}"], "cwd": "{}"}}}}}}"#,
+        r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "notify_on_list", "--record", "{}"], "cwd": "{}"}}}}}}"#,
         record_path.display().to_string().replace('\\', "/"),
-        std::env::temp_dir().display()
+        std::env::temp_dir().display().to_string().replace('\\', "/"),
+        py = PY,
     );
     std::fs::write(dir.path().join("mcp.json"), json).expect("写入 mcp.json");
     let manager = Arc::new(McpManager::new());

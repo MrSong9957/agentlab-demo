@@ -1,0 +1,69 @@
+[2026-11-04 05:32:35] == 0 容器状态（必要）==
+ID=b944a159ec468720c68dc9daf0824160c8ce6880d4498f932bafe81068e55d89 Name=/agentlab-demo-dev Status=running StartedAt=2026-11-03T21:00:18.667152374Z RestartCount=0
+[2026-11-04 05:32:35] == 1 最小 shell 命令（必要）==
+[2026-11-04 05:32:36] PASS: exec shell 可用
+[2026-11-04 05:32:36] == 2 进程数量与 pids 配额（旁证，不要求归零）==
+pids.max=max
+pids.current=38
+进程总数=9
+[2026-11-04 05:32:36] 对照: 重启前 pids.current=23884、进程总数=24268；备份期采样 pre=35/post=35
+[2026-11-04 05:32:36] == 3 两工作树 HEAD/status 与保全前及备份副本比对（必要）==
+[2026-11-04 05:32:37] PASS: workspace HEAD = 基线
+[2026-11-04 05:32:37] PASS: workspace HEAD 与保全前一致
+[2026-11-04 05:32:57] PASS: workspace status 与保全前一致（37 条）
+[2026-11-04 05:32:57] PASS: wt HEAD = 基线
+[2026-11-04 05:32:57] PASS: wt HEAD 与保全前一致
+[2026-11-04 05:32:58] PASS: wt status 与保全前一致（17 条）
+[2026-11-04 05:32:58] 任务 B 候选抽查（必要）:
+[2026-11-04 05:32:58] PASS: 规格含迭代 37 段（2 处）
+[2026-11-04 05:32:59] PASS: 安全报告在位
+[2026-11-04 05:32:59] PASS: /tmp/sec-test-038 在位
+[2026-11-04 05:32:59] == 3.5 内容回归核验（必要）：live 与备份逐哈希比对——M 状态文件内容变化必检，不只看 status 行 ==
+[2026-11-04 05:33:00] PASS: workspace live 与备份逐哈希一致（1751 项）
+[2026-11-04 05:33:25] PASS: wt live 与备份逐哈希一致（1720 项）
+[2026-11-04 05:33:25] == 4 Git 对象完整性（必要；覆盖共享对象库与两工作树引用）==
+[2026-11-04 05:33:38] PASS: git fsck --full 通过（明细 /c/Users/sry27/agentlab-recovery-20261104-052734/fsck-post.txt）
+[2026-11-04 05:33:38] == 5 夹具保全证据与活环境一致性（必要）==
+[2026-11-04 05:33:39] PASS: 夹具活环境在位: src/app/tests/fixtures/mcp_stdio_server.py
+[2026-11-04 05:33:39] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_inject/read_context.md
+[2026-11-04 05:33:39] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_lifecycle/b.md
+[2026-11-04 05:33:40] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_lifecycle/initial_MEMORY.md
+[2026-11-04 05:33:40] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_lifecycle/initial_a.md
+[2026-11-04 05:33:40] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_lifecycle/initial_raw.json
+[2026-11-04 05:33:41] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_lifecycle/initial_summary.md
+[2026-11-04 05:33:41] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_lifecycle/renewed_MEMORY.md
+[2026-11-04 05:33:41] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_lifecycle/renewed_a.md
+[2026-11-04 05:33:42] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_lifecycle/renewed_raw.json
+[2026-11-04 05:33:42] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_lifecycle/renewed_summary.md
+[2026-11-04 05:33:42] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_lifecycle/retained_MEMORY.md
+[2026-11-04 05:33:43] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_lifecycle/retained_raw.json
+[2026-11-04 05:33:43] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_lifecycle/retained_summary.md
+[2026-11-04 05:33:43] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_storage_files/a13_raw.md
+[2026-11-04 05:33:44] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_storage_files/a13_summary.md
+[2026-11-04 05:33:44] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_storage_files/empty_raw.md
+[2026-11-04 05:33:45] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_storage_files/initial_a.md
+[2026-11-04 05:33:45] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_storage_files/initial_b.md
+[2026-11-04 05:33:45] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_storage_files/initial_raw.md
+[2026-11-04 05:33:46] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_storage_files/remaining_raw.md
+[2026-11-04 05:33:46] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_storage_files/updated_a.md
+[2026-11-04 05:33:46] PASS: 夹具活环境在位: src/app/tests/fixtures/memory_storage_files/updated_raw.md
+[2026-11-04 05:33:47] PASS: 夹具活环境在位: src/app/tests/fixtures/tls/ca.crt
+[2026-11-04 05:33:47] PASS: 夹具活环境在位: src/app/tests/fixtures/tls/server.crt
+[2026-11-04 05:33:47] PASS: 夹具活环境在位: src/app/tests/fixtures/tls/server.key
+[2026-11-04 05:33:47] 夹具登记共 26 项
+[2026-11-04 05:33:47] == 6 执行器自动拉起检查（旁证）==
+RestartPolicy=no
+UID          PID    PPID  C STIME TTY          TIME CMD
+dev            1       0  0 21:00 pts/0    00:00:00 sleep infinity
+dev           48       1  0 21:00 ?        00:00:01 /home/dev/.zcode/server/releases/3.17.2-linux-x64-88a41b337faa/runtime/node /home/dev/.zcode/server/releases/3.17.2-linux-x64-88a41b337faa/runtime/server-cli.js serve --supervisor --server-root /home/dev/.zcode/server
+dev           59      48  0 21:00 ?        00:00:07 /home/dev/.zcode/server/releases/3.17.2-linux-x64-88a41b337faa/runtime/node /home/dev/.zcode/server/releases/3.17.2-linux-x64-88a41b337faa/runtime/server-core.js 1
+dev           88       0  0 21:00 ?        00:00:00 sh -lc "$HOME/.zcode/server/bin/zcode" server proxy-stdio --server-root "$HOME/.zcode/server"
+dev           96      88  0 21:00 ?        00:00:00 /home/dev/.zcode/server/releases/3.17.2-linux-x64-88a41b337faa/runtime/node /home/dev/.zcode/server/releases/3.17.2-linux-x64-88a41b337faa/runtime/server-cli.js server proxy-stdio --server-root /home/dev/.zcode/server
+dev          627       0  0 21:33 ?        00:00:00 sh -c ps -ef --sort=start_time | tail -30
+dev          633     627  0 21:33 ?        00:00:00 ps -ef --sort=start_time
+dev          634     627  0 21:33 ?        00:00:00 tail -30
+[2026-11-04 05:33:48] 判读口径: 重启后仅应见 PID1(entrypoint) 与本核验 shell；若出现 agent 执行器被拉起，记录其 PID/启动时间用于交接，禁止按模糊进程名批量杀共享进程
+[2026-11-04 05:33:48] == 7 备份目录完整性（必要）==
+[2026-11-04 05:33:48] == 里程碑判定 ==
+[2026-11-04 05:33:48] 【里程碑：核验完成】全部必要检查通过；证据=post-restart-verify.txt 全文
+[2026-11-04 05:33:48] == 8 证据归档（归档自身会在 workspace 新增 docs/logs/2026-11-03-env-recovery/ 条目，预期现象非回归）==

@@ -80,6 +80,19 @@ fn fixtures() -> Fixtures {
     Fixtures { trusted, anchor, requestable }
 }
 
+/// 与产品 canonical_long 同形态（canonicalize＋剥 verbatim）：产品策略/边界/
+/// lex 三侧已统一长路径形态，夹具比较侧同步归一（同一真实对象的等价形态）。
+fn ln(p: &std::path::Path) -> std::path::PathBuf {
+    let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    #[cfg(windows)]
+    {
+        let s = canon.to_string_lossy().into_owned();
+        std::path::PathBuf::from(s.strip_prefix(r"\\?\").map(String::from).unwrap_or(s))
+    }
+    #[cfg(not(windows))]
+    canon
+}
+
 fn env_lock() -> MutexGuard<'static, ()> {
     common::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
 }
@@ -91,11 +104,11 @@ fn policy_valid_example_loads() {
     let f = fixtures();
     let policy = Policy::parse(&valid_policy_json(&f.anchor, &f.requestable)).unwrap();
     assert_eq!(policy.base.entries.len(), 1);
-    assert_eq!(policy.base.entries[0].path, f.anchor.canonicalize().unwrap());
+    assert_eq!(policy.base.entries[0].path, ln(&f.anchor));
     assert_eq!(policy.base.entries[0].access, Access::Write);
     assert!(!policy.base.network);
     assert!(policy.requestable.network);
-    assert_eq!(policy.deny_paths, vec![f.anchor.join(".env")]);
+    assert_eq!(policy.deny_paths, vec![ln(&f.anchor.join(".env"))]);
 }
 
 #[test]
@@ -266,7 +279,9 @@ fn policy_load_accepts_trusted_location() {
     // temp root 传不含夹具的目录：可信位置正例不被临时目录规则误伤
     let fake_temp = f.trusted.join("fake-tmp-unused");
     let policy = Policy::load_verified(&p, &f.anchor, &fake_temp).unwrap();
-    assert_eq!(policy.base.entries[0].path, f.anchor.canonicalize().unwrap());
+    // 038-CI：策略装载侧统一 canonical_long 形态（剥 verbatim；unix 恒等），
+    // 期望侧同函数归一
+    assert_eq!(policy.base.entries[0].path, ln(&f.anchor.canonicalize().unwrap()));
 }
 
 #[test]
@@ -285,14 +300,14 @@ fn policy_effective_deny_auto_merges_sensitive_boundaries() {
         user_dir: user_dir.clone(),
         install_dirs: vec![f.trusted.clone(), install_dir.clone()],
     });
-    // 显式 deny 保留
-    assert!(deny.contains(&f.anchor.join(".env")));
-    // 自动边界：.env、配置目录、用户目录（记忆/会话私有根）、策略与安装目录
-    assert!(deny.contains(&f.anchor.join(".env")));
-    assert!(deny.contains(&config_dir.canonicalize().unwrap()));
-    assert!(deny.contains(&user_dir.canonicalize().unwrap()));
-    assert!(deny.contains(&f.trusted.canonicalize().unwrap()));
-    assert!(deny.contains(&install_dir.canonicalize().unwrap()));
+    // 显式 deny 保留；自动边界：.env、配置目录、用户目录、策略与安装目录
+    // （集合成员比较两侧经 ln 归一——产品侧已统一 canonical_long 形态）
+    let has = |p: &std::path::Path| deny.iter().any(|d| *d == ln(p));
+    assert!(has(&f.anchor.join(".env")));
+    assert!(has(&config_dir));
+    assert!(has(&user_dir));
+    assert!(has(&f.trusted));
+    assert!(has(&install_dir));
     // 去重
     assert_eq!(deny.len(), dedup_count(&deny), "deny 集合应去重");
 }
@@ -472,7 +487,7 @@ fn normalize_resolves_relative_against_session_cwd() {
     // 会话 cwd＝夹具根（不是测试进程 cwd），相对路径基于它解析
     let root = f.anchor.parent().unwrap().to_path_buf();
     let norm = permissions::normalize_request(&req, &root).unwrap();
-    assert_eq!(norm.entries[0].path, target.canonicalize().unwrap());
+    assert_eq!(norm.entries[0].path, ln(&target));
 }
 
 #[test]
@@ -483,6 +498,8 @@ fn normalize_rejects_symlink_component() {
     let link = f.requestable.join("link");
     #[cfg(unix)]
     std::os::unix::fs::symlink(&real, &link).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&real, &link).unwrap();
     let req = permissions::parse_request(&format!(
         r#"{{"permissions": {{"file_system": {{"entries": [{{"path": {{"type": "path", "path": {:?}}}, "access": "read"}}]}}}}}}"#,
         link,
@@ -505,13 +522,38 @@ fn normalize_rejects_missing_and_accepts_dotdot() {
     .unwrap();
     assert!(permissions::normalize_request(&req, &root).unwrap_err().contains("不存在"));
     // .. 解析为实际路径（不自动扩父目录，逐组件存在）
-    let req2 = permissions::parse_request(&format!(
-        r#"{{"permissions": {{"file_system": {{"entries": [{{"path": {{"type": "path", "path": {:?}}}, "access": "read"}}]}}}}}}"#,
-        f.requestable.join("sub").join(".."),
-    ))
-    .unwrap();
+    let canonical_requestable = fs::canonicalize(&f.requestable).unwrap();
+    // Canonical Windows paths have a verbatim prefix, where PathBuf::join folds `..`.
+    // Append as text so the raw request reaches the parser unchanged.
+    #[cfg(windows)]
+    assert!(
+        canonical_requestable.to_string_lossy().starts_with(r"\\?\"),
+        "G2 requires the canonical Windows verbatim prefix: {canonical_requestable:?}"
+    );
+    let separator = std::path::MAIN_SEPARATOR;
+    let raw_path = format!(
+        "{}{separator}sub{separator}..",
+        canonical_requestable.display(),
+    );
+    let request_json = json!({
+        "permissions": {
+            "file_system": {
+                "entries": [{
+                    "path": { "type": "path", "path": &raw_path },
+                    "access": "read"
+                }]
+            }
+        }
+    })
+    .to_string();
+    eprintln!("G2 serialized request: {request_json}");
+    let req2 = permissions::parse_request(&request_json).unwrap();
+    assert_eq!(
+        req2.entries[0].path, raw_path,
+        "G2 sub{separator}.. path must reach parse_request unchanged"
+    );
     let norm = permissions::normalize_request(&req2, &root).unwrap();
-    assert_eq!(norm.entries[0].path, f.requestable.canonicalize().unwrap());
+    assert_eq!(norm.entries[0].path, ln(&f.requestable));
 }
 
 #[test]
@@ -645,10 +687,15 @@ fn policy_env_assembly_gates() {
     let err = permissions::policy_from_env(&f.anchor).unwrap_err();
     assert!(err.contains("TCHAT_SANDBOX"), "缺开关应失败：{err}");
 
-    // 设置且开关启用：加载成功
-    std::env::set_var("TCHAT_SANDBOX", "1");
-    let loaded = permissions::policy_from_env(&f.anchor).unwrap().expect("应加载").0;
-    assert_eq!(loaded.base.entries.len(), 1);
+    // 设置且开关启用：加载成功（unix 专属段——产品 sandbox_requested() 在
+    // Windows 恒 false，开关打开也不进入 031 模式；拒绝路径已在上方覆盖）
+    #[cfg(unix)]
+    {
+        std::env::set_var("TCHAT_SANDBOX", "1");
+        let loaded = permissions::policy_from_env(&f.anchor).unwrap().expect("应加载").0;
+        assert_eq!(loaded.base.entries.len(), 1);
+        std::env::remove_var("TCHAT_SANDBOX");
+    }
 
     // .env 不能注入信任根：load_dotenv_from 跳过该变量
     let dotenv = f.trusted.join(".env");
@@ -680,8 +727,10 @@ fn exe_deployment_prerequisite_refuses_workspace_and_temp() {
     let exe_dir = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
     let err = permissions::verify_exe_deployment(&exe_dir, Path::new("/nonexistent-tmp")).unwrap_err();
     assert!(err.contains("工作区"), "工作区产物应拒绝：{err}");
-    // temp 之下 → 拒绝（temp root 指到覆盖二进制的 /workspace）
-    let err = permissions::verify_exe_deployment(Path::new("/nonexistent-anchor"), Path::new("/workspace")).unwrap_err();
+    // temp 之下 → 拒绝（temp root 覆盖二进制的实际位置。038-CI：原为容器专属
+    // 字面量 /workspace——GH runner 的二进制在 /home/runner 下，两个拒绝分支
+    // 均不命中；改为按进程实际位置锚定，三端等价）
+    let err = permissions::verify_exe_deployment(Path::new("/nonexistent-anchor"), &exe_dir).unwrap_err();
     assert!(err.contains("临时目录"), "临时目录应拒绝：{err}");
 }
 
@@ -728,7 +777,7 @@ fn install_dir_outside_runtime_keeps_directory_deny() {
     };
     let snap = permissions::build_snapshot(&policy, &TurnGrants::new(), &ctx).unwrap();
     assert!(
-        snap.deny_paths.iter().any(|d| d == &install.canonicalize().unwrap()),
+        snap.deny_paths.iter().any(|d| *d == ln(&install)),
         "白名单外安装目录应保持目录级 deny"
     );
     // 该目录内部条目（若被误当内容面）同样被拒——目录级语义生效
@@ -847,6 +896,10 @@ fn nested_read_under_write_reduced_in_snapshot() {
 /// 明确失败，零模型命令执行；不回退普通/033）。
 #[test]
 fn bwrap_backend_deployment_refuses_missing_or_model_writable() {
+    // 环境隔离：std::env::temp_dir() 实时读 TMPDIR——policy_env_assembly_gates
+    // 并行改写 TMPDIR 时本测试的临时目录断言会被扰动（038 L3 并行实测），
+    // 取同一把 env_lock 串行化
+    let _env = env_lock();
     let f = fixtures();
     // 缺后端：None → 启动期明确失败
     let err = permissions::verify_bwrap_backend(None, &f.anchor, &std::env::temp_dir()).unwrap_err();

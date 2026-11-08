@@ -23,9 +23,13 @@ use tchat_tui::test_backend::VT100Backend;
 pub(crate) const PTY_COLS: u16 = 200;
 pub(crate) const PTY_ROWS: u16 = 50;
 
+/// 038-CI：macOS ptsname 静态缓冲的串行化锁（并行测试线程共用，见 spawn_inner）。
+#[cfg(target_os = "macos")]
+static PTY_NAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub struct PtyCli {
     master: fs::File,
-    pub child: Child,
+    pub child: Option<Child>,
     captured: Vec<u8>,
     /// 已被 wait 消费到的位置：后续等待只在新输出中匹配。
     consumed: usize,
@@ -43,28 +47,47 @@ impl PtyCli {
             assert!(master_fd >= 0, "posix_openpt 失败：{}", std::io::Error::last_os_error());
             assert_eq!(libc::grantpt(master_fd), 0, "grantpt 失败");
             assert_eq!(libc::unlockpt(master_fd), 0, "unlockpt 失败");
-            let mut name = [0u8; 256];
-            assert_eq!(
-                libc::ptsname_r(master_fd, name.as_mut_ptr().cast(), name.len()),
-                0,
-                "ptsname_r 失败"
-            );
-            let len = name.iter().position(|&b| b == 0).unwrap();
-            let slave = std::ffi::OsString::from_vec(name[..len].to_vec());
-            let c_path = std::ffi::CString::new(slave.as_encoded_bytes()).unwrap();
+            // 038-CI：libc crate 在 apple 目标不提供 ptsname_r（ptsname 返回进程级
+            // 静态缓冲、非线程安全）——经 PTY_NAME_LOCK 串行化并立即拷贝；Linux
+            // 的 ptsname_r 语义不变。
+            #[cfg(not(target_os = "macos"))]
+            let c_path = {
+                let mut name = [0u8; 256];
+                assert_eq!(
+                    libc::ptsname_r(master_fd, name.as_mut_ptr().cast(), name.len()),
+                    0,
+                    "ptsname_r 失败"
+                );
+                let len = name.iter().position(|&b| b == 0).unwrap();
+                let slave = std::ffi::OsString::from_vec(name[..len].to_vec());
+                std::ffi::CString::new(slave.as_encoded_bytes()).unwrap()
+            };
+            #[cfg(target_os = "macos")]
+            let c_path = {
+                let _guard = PTY_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                let ptr = libc::ptsname(master_fd);
+                assert!(!ptr.is_null(), "ptsname 失败：{}", std::io::Error::last_os_error());
+                std::ffi::CStr::from_ptr(ptr).to_owned()
+            };
             let fd0 = libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
             assert!(fd0 >= 0, "打开 PTY 从设备失败：{}", std::io::Error::last_os_error());
+            // 038：master 双向均非阻塞——读侧 poll 门控已有；写侧 send 配套
+            // poll＋看门狗（子进程停读输入时 send 不再无限阻塞，超时转储证据）。
+            let fl = libc::fcntl(master_fd, libc::F_GETFL);
+            assert!(fl >= 0, "F_GETFL 失败");
+            assert_eq!(libc::fcntl(master_fd, libc::F_SETFL, fl | libc::O_NONBLOCK), 0);
             let fd1 = libc::dup(fd0);
             let fd2 = libc::dup(fd0);
             // 008-ADAPT：窗口尺寸提为常量（VT100 解析器与 TIOCSWINSZ 同尺寸）
             let ws = libc::winsize { ws_row: PTY_ROWS, ws_col: PTY_COLS, ws_xpixel: 0, ws_ypixel: 0 };
             libc::ioctl(master_fd, libc::TIOCSWINSZ, &ws);
             // 成为会话组长并把 PTY 挂为控制终端：终端产生的 SIGINT 才能送达前台进程组
+            // 038-CI：同 proc_session——apple ioctl request 形参为 c_ulong，显式提升。
             cmd.pre_exec(|| {
                 if libc::setsid() == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
-                if libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
+                if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())
@@ -72,7 +95,7 @@ impl PtyCli {
             cmd.stdin(Stdio::from(fs::File::from_raw_fd(fd0)));
             cmd.stdout(Stdio::from(fs::File::from_raw_fd(fd1)));
             cmd.stderr(Stdio::from(fs::File::from_raw_fd(fd2)));
-            let child = cmd.spawn().expect("PTY CLI 子进程启动失败");
+            let child = Some(cmd.spawn().expect("PTY CLI 子进程启动失败"));
             PtyCli {
                 master: fs::File::from_raw_fd(master_fd),
                 child,
@@ -108,12 +131,12 @@ impl PtyCli {
                 return;
             }
             if Instant::now() > deadline {
-                let pid = self.child.id() as i32;
+                let pid = self.child.as_ref().map(|c| c.id()).unwrap_or(0) as i32;
                 let state = fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|t| {
                     t.rsplit_once(')').map(|(_, a)| a.trim_start().chars().next().unwrap_or('?'))
                 });
-                match self.child.try_wait() {
-                    Ok(Some(st)) => panic!("等待 {:?} 时子进程已退出：{st}", needle),
+                match self.child.as_mut().and_then(|c| c.try_wait().ok()).flatten() {
+                    Some(st) => panic!("等待 {:?} 时子进程已退出：{st}", needle),
                     _ => panic!(
                         "等待 {:?} 超时（子进程状态 {:?}）：\n{}",
                         needle,
@@ -141,12 +164,12 @@ impl PtyCli {
                 return;
             }
             if Instant::now() > deadline {
-                let pid = self.child.id() as i32;
+                let pid = self.child.as_ref().map(|c| c.id()).unwrap_or(0) as i32;
                 let state = fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|t| {
                     t.rsplit_once(')').map(|(_, a)| a.trim_start().chars().next().unwrap_or('?'))
                 });
-                match self.child.try_wait() {
-                    Ok(Some(st)) => panic!(
+                match self.child.as_mut().and_then(|c| c.try_wait().ok()).flatten() {
+                    Some(st) => panic!(
                         "等待屏幕 {:?} 时子进程已退出（{st}）。屏幕：\n{}\n原始输出：\n{}",
                         needle,
                         self.vt,
@@ -197,18 +220,64 @@ impl PtyCli {
     ///   ＝120ms）——分隔发送并等窗口过期，模拟真人键入节奏。
     pub fn send(&mut self, line: &str) {
         std::thread::sleep(Duration::from_millis(50));
-        self.master.write_all(line.as_bytes()).expect("PTY 写入失败");
+        self.write_bounded(line.as_bytes());
         std::thread::sleep(Duration::from_millis(150));
-        self.master.write_all(b"\r").expect("PTY 写入失败");
+        self.write_bounded(b"\r");
+    }
+
+    /// 038：非阻塞 master 上的有界写——poll 可写就绪后写一片，EAGAIN 重试；
+    /// 看门狗超时＝子进程长时间不读输入（异常态），转储子进程状态与已捕获
+    /// 输出后 panic（此前该路径 write_all 无限阻塞，为 macOS 卡死嫌疑点）。
+    fn write_bounded(&mut self, mut data: &[u8]) {
+        let deadline = Instant::now() + self.watchdog;
+        while !data.is_empty() {
+            if Instant::now() > deadline {
+                let state = self
+                    .child
+                    .as_mut()
+                    .and_then(|c| c.try_wait().ok())
+                    .flatten();
+                panic!(
+                    "PTY 写入超时（子进程未读输入？state={state:?}）：\n{}",
+                    String::from_utf8_lossy(&self.captured)
+                );
+            }
+            let mut pfd = libc::pollfd {
+                fd: self.master.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            let r = unsafe { libc::poll(&mut pfd, 1, 100) };
+            if r > 0 && pfd.revents & (libc::POLLOUT | libc::POLLHUP | libc::POLLERR) != 0 {
+                let n = unsafe {
+                    libc::write(
+                        self.master.as_raw_fd(),
+                        data.as_ptr().cast(),
+                        data.len(),
+                    )
+                };
+                if n > 0 {
+                    data = &data[n as usize..];
+                } else if n < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() != std::io::ErrorKind::WouldBlock {
+                        panic!(
+                            "PTY write 失败：{err}\n{}",
+                            String::from_utf8_lossy(&self.captured)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// 018-B：原样发送按键字节（不追加 CR）——功能键（F6）、方向键、Tab 与
     /// 需自控提交时机的粘贴使用；与 [`Self::send`]（文本＋Enter）区分。
+    /// 038 D-mac：走有界写——无界 write_all 在子进程停读输入时永久阻塞
+    /// （macOS 卡死形态），超时转储证据后 panic。
     pub fn send_keys(&mut self, keys: &str) {
         std::thread::sleep(Duration::from_millis(50));
-        self.master
-            .write_all(keys.as_bytes())
-            .expect("PTY 写入失败");
+        self.write_bounded(keys.as_bytes());
     }
 
     pub fn output(&self) -> String {
@@ -216,17 +285,25 @@ impl PtyCli {
     }
 
     /// 结束会话：限期等待退出，返回（输出，退出码）。
+    /// 038 macOS：等待期必须持续排干 master——产品退出序列写满 PTY 缓冲后
+    /// 阻塞在退出中（E 态泄漏，SIGKILL 不可中断内核写等待）＝「未在期限内
+    /// 退出」级联失败（与 e2e_acceptance finish() 同根因同修法）。
     pub fn finish(mut self) -> (String, Option<i32>) {
         let deadline = Instant::now() + self.watchdog;
         let status = loop {
-            match self.child.try_wait() {
-                Ok(Some(s)) => break s,
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(20))
+            match self
+                .child
+                .as_mut()
+                .and_then(|c| c.try_wait().ok())
+                .flatten()
+            {
+                Some(s) => break s,
+                None if Instant::now() < deadline => {
+                    self.poll_read();
                 }
                 _ => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
+                    // 只 kill 不 wait 不 take（同 e2e——Drop 分离收尸承接）
+                    let _ = self.child.as_mut().map(|c| c.kill());
                     panic!("PTY CLI 子进程未在期限内退出");
                 }
             }
@@ -235,9 +312,36 @@ impl PtyCli {
     }
 }
 
+impl PtyCli {
+    /// 038 D-mac：同 e2e_acceptance——强杀后不内联 wait（E 态不可中断），
+    /// 收尸交分离线程。
+    fn kill_and_reap_detached(child: &mut Option<Child>) {
+        let _ = child.as_mut().map(|c| c.kill());
+        if let Some(mut c) = child.take() {
+            std::thread::spawn(move || {
+                let _ = c.wait();
+            });
+        }
+    }
+}
+
 impl Drop for PtyCli {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // 038 D-mac：同 e2e_acceptance——退出序列写满 PTY 缓冲的子进程阻塞在
+        // 退出中，Drop 的无界 wait 形成死锁闭环。先有界排空 master，再强杀，
+        // 收尸交分离线程（Drop 永不无限阻塞）。
+        let Some(mut child) = self.child.take() else { return };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => self.poll_read(),
+                Err(_) => break,
+            }
+        }
+        let _ = child.kill();
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
     }
 }

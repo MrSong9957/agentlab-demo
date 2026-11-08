@@ -1,0 +1,6 @@
+running 1 test
+外层对照：clone3=EINVAL openat2=EINVAL
+产品过滤器：clone3=ENOSYS openat2=ENOSYS
+test sandbox::tests::seccomp_filter_blocks_clone3_and_preserves_openat2 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 304 filtered out; finished in 0.01s

@@ -28,13 +28,32 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Node/npm 来自官方 glibc 镜像，只复制运行所需文件，保留基础镜像其他工具。
+# Node/npm 供容器内通用开发使用；pi 已改用官方 Release 独立二进制，不再经 npm 安装
+# （036 规格修订，2026-11-04）。
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
-    && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
-    && npm install --global --prefix /usr/local --ignore-scripts --engine-strict \
-        @earendil-works/pi-coding-agent@latest \
-    && npm cache clean --force
+    && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+
+# pi 官方 Release 独立二进制（Bun 编译自包含，不依赖 Node/npm；按用户要求使用）。
+# tar 内含一层 pi/ 包装目录（程序＋theme/assets/
+# native 等资源须同目录，官方按 dirname(execPath) 查找资源），整包解到
+# /usr/local/lib/pi，/usr/local/bin/pi 符号链接指向真实路径（符号链接调用加载
+# 资源已实测正常）。SHA256SUMS 由官方发布工作流生成，构建期强制校验。
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64) pi_arch="x64" ;; \
+        aarch64) pi_arch="arm64" ;; \
+        *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/earendil-works/pi/releases/latest/download/pi-linux-${pi_arch}.tar.gz" -o "/tmp/pi-linux-${pi_arch}.tar.gz"; \
+    curl -fsSL "https://github.com/earendil-works/pi/releases/latest/download/SHA256SUMS" -o /tmp/pi-SHA256SUMS; \
+    (cd /tmp && grep "pi-linux-${pi_arch}.tar.gz" pi-SHA256SUMS | sha256sum -c -); \
+    tar -xzf "/tmp/pi-linux-${pi_arch}.tar.gz" -C /tmp; \
+    cp -a /tmp/pi/. /usr/local/lib/pi/; \
+    ln -s /usr/local/lib/pi/pi /usr/local/bin/pi; \
+    rm -rf /tmp/pi "/tmp/pi-linux-${pi_arch}.tar.gz" /tmp/pi-SHA256SUMS
 
 # 分开下载和执行，下载失败时构建立刻失败；参数仅作用于官方安装脚本。
 RUN curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh \

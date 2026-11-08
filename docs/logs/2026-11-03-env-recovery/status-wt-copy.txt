@@ -1,0 +1,19 @@
+ D .env.example
+ M docs/logs/038-github-actions-ci/2026-11-02-iteration32-status.md
+ M docs/specs/016-process-sessions-plan.md
+ M docs/specs/031-request-permissions.md
+ M docs/specs/033-tool-sandbox.md
+ M docs/specs/038-github-actions-ci.md
+ M src/app/src/apply_patch.rs
+ M src/app/src/mcp/transport.rs
+ M src/app/src/proc_session.rs
+ M src/app/src/sandbox.rs
+ M src/app/src/sandbox/tests.rs
+ M src/app/src/view_image.rs
+ D src/app/tests/fixtures/tls/server.key
+ M src/app/tests/memory_storage_files.rs
+ M src/app/tests/request_permissions_sandbox.rs
+ M src/app/tests/sandbox_lifecycle.rs
+ M src/app/tests/security_attack_031.rs
+?? docs/security/reports/2026-11-02-038-f1-isolation-security.md
+?? docs/solutions/testing/tautological-assertion-independent-expectation.md

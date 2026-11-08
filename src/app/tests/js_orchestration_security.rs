@@ -10,6 +10,8 @@
 //!
 //! 全部经真实 worker 子进程（CARGO_BIN_EXE）或直接装载/纯函数路径；独立
 //! 临时目录，不触真实用户环境；普通模式运行（env -u TCHAT_SANDBOX）。
+#![cfg(unix)]
+// 038-CI：本文件依赖 POSIX 语义（PTY/Unix fd/文件权限位），Windows 不编译；
 
 mod common;
 
@@ -103,6 +105,55 @@ fn real_worker() -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(env!("CARGO_BIN_EXE_terminal-chat")))
 }
 
+#[cfg(target_os = "linux")]
+fn pidfd_for_test(pid: libc::pid_t) -> std::os::fd::OwnedFd {
+    use std::os::fd::FromRawFd;
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    assert!(fd >= 0, "pidfd_open({pid}): {}", std::io::Error::last_os_error());
+    unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) }
+}
+
+#[cfg(target_os = "linux")]
+fn assert_pidfd_reaped(fd: &std::os::fd::OwnedFd, what: &str) {
+    use std::os::fd::AsRawFd;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let mut pfd = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let rc = unsafe { libc::poll(&mut pfd, 1, 20) };
+        assert!(rc >= 0, "poll {what}: {}", std::io::Error::last_os_error());
+        if pfd.revents & libc::POLLHUP != 0 {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "{what} 未完成回收：{:#x}", pfd.revents);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn sandbox_payload_pidfd(supervisor: u32) -> std::os::fd::OwnedFd {
+    let own_ns = std::fs::read_link("/proc/self/ns/pid").unwrap();
+    let children = format!("/proc/{supervisor}/task/{supervisor}/children");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let text = std::fs::read_to_string(&children).unwrap_or_default();
+        if let Some(pid) = text
+            .split_whitespace()
+            .filter_map(|value| value.parse::<libc::pid_t>().ok())
+            .find(|pid| {
+                std::fs::read_link(format!("/proc/{pid}/ns/pid"))
+                    .is_ok_and(|ns| ns != own_ns)
+            })
+        {
+            return pidfd_for_test(pid);
+        }
+        assert!(std::time::Instant::now() < deadline, "未找到沙箱载荷");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 fn turn_budget() -> Arc<AtomicUsize> {
     Arc::new(AtomicUsize::new(TURN_LEAF_QUOTA))
 }
@@ -158,7 +209,7 @@ fn forged_tool_names_and_dispatch_bridge_zero_execution() {
         dispatcher: dispatcher.clone(),
         worker_exe: real_worker(),
     };
-    let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
+    let mut cell = spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn");
     let obs = drive(&mut cell, &mut sink);
     assert_eq!(obs.status, CellStatus::Completed, "{obs:?}");
     let report: Value = serde_json::from_str(&obs.output[0]).unwrap();
@@ -211,7 +262,7 @@ fn catalog_surface_frozen_and_minimal() {
         dispatcher,
         worker_exe: real_worker(),
     };
-    let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
+    let mut cell = spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn");
     let obs = drive(&mut cell, &mut sink);
     assert_eq!(obs.status, CellStatus::Completed, "{obs:?}");
     let v: Value = serde_json::from_str(&obs.output[0]).unwrap();
@@ -230,6 +281,15 @@ fn catalog_surface_frozen_and_minimal() {
 
 /// 进程级环境变量读写串行锁（并行测试共用 environ，读者与写者共锁）。
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn spawn_cell_with_env_lock(
+    config: &CellConfig<'_>,
+    sink: &mut dyn OrchestrationSink,
+    history: &[terminal_chat::prompt::HistoryItem],
+) -> Result<terminal_chat::js_orchestration::runtime::CellHandle, String> {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    spawn_cell(config, sink, history)
+}
 
 /// worker 必须零宿主环境（env_clear：哨兵不进 /proc/<pid>/environ）且关闭
 /// 无关继承 fd（ planted 非 CLOEXEC 哨兵 fd 不进 /proc/<pid>/fd）。
@@ -261,10 +321,19 @@ fn env_and_fd_sentinels_absent_from_worker() {
     let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
     let pid = cell.worker_pid();
 
-    // env 哨兵：worker environ 不含宿主凭证
-    let environ = std::fs::read(format!("/proc/{pid}/environ"))
-        .expect("worker 进程存活且 environ 可读");
-    let env_str = String::from_utf8_lossy(&environ).to_string();
+    // env 哨兵：worker environ 不含宿主凭证。038 macOS：无 /proc——经
+    // `ps -Eww`（自有进程可见环境）等价取证；Linux 维持 /proc environ 直读。
+    let env_str = if cfg!(target_os = "macos") {
+        let out = std::process::Command::new("ps")
+            .args(["-Eww", "-p", &pid.to_string()])
+            .output()
+            .expect("ps -E 采样失败");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    } else {
+        let environ = std::fs::read(format!("/proc/{pid}/environ"))
+            .expect("worker 进程存活且 environ 可读");
+        String::from_utf8_lossy(&environ).into_owned()
+    };
     std::env::remove_var(SENTINEL_KEY);
     drop(_env_guard);
     assert!(
@@ -272,17 +341,32 @@ fn env_and_fd_sentinels_absent_from_worker() {
         "宿主 env 哨兵泄漏进 worker environ：{env_str:?}"
     );
 
-    // fd 哨兵：planted 非 CLOEXEC fd 不进 worker
-    let mut leaked: Option<(String, String)> = None;
-    for entry in std::fs::read_dir(format!("/proc/{pid}/fd")).expect("worker fd 目录可读") {
-        let entry = entry.unwrap();
-        let target = std::fs::read_link(entry.path())
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
-        if target.contains("fd-sentinel") {
-            leaked = Some((entry.file_name().to_string_lossy().to_string(), target));
+    // fd 哨兵：planted 非 CLOEXEC fd 不进 worker。038 macOS：无 /proc fd——
+    // 经 `lsof -p`（runner 预装）扫描打开文件名等价取证。
+    let leaked = if cfg!(target_os = "macos") {
+        let out = std::process::Command::new("lsof")
+            .args(["-Fn", "-p", &pid.to_string()])
+            .output()
+            .expect("lsof 采样失败");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        if text.contains("fd-sentinel") {
+            Some(("lsof".to_string(), text))
+        } else {
+            None
         }
-    }
+    } else {
+        let mut leaked: Option<(String, String)> = None;
+        for entry in std::fs::read_dir(format!("/proc/{pid}/fd")).expect("worker fd 目录可读") {
+            let entry = entry.unwrap();
+            let target = std::fs::read_link(entry.path())
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if target.contains("fd-sentinel") {
+                leaked = Some((entry.file_name().to_string_lossy().to_string(), target));
+            }
+        }
+        leaked
+    };
     let observation = cell.terminate(&mut sink, &[]);
     assert_eq!(observation.status, CellStatus::Terminated);
     unsafe { libc::close(planted_fd) };
@@ -336,7 +420,7 @@ fn spawn_with_worker(
         dispatcher,
         worker_exe: Some(worker),
     };
-    spawn_cell(&cfg, &mut sink, &[]).expect("spawn 假 worker cell")
+    spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn 假 worker cell")
 }
 
 /// 未知帧类型＝坏帧：cell 关闭（failed），主进程存活、后续 cell 正常。
@@ -368,7 +452,7 @@ fn fake_worker_unknown_frame_closes_cell_host_survives() {
         dispatcher: dispatcher.clone(),
         worker_exe: real_worker(),
     };
-    let mut cell2 = spawn_cell(&cfg, &mut sink2, &[]).expect("后续 spawn");
+    let mut cell2 = spawn_cell_with_env_lock(&cfg, &mut sink2, &[]).expect("后续 spawn");
     let obs2 = drive(&mut cell2, &mut sink2);
     assert_eq!(obs2.status, CellStatus::Completed, "{obs2:?}");
 }
@@ -391,7 +475,7 @@ fn fake_worker_oversize_frame_closes_cell() {
         dispatcher: dispatcher.clone(),
         worker_exe: Some(worker),
     };
-    let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
+    let mut cell = spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn");
     let obs = drive(&mut cell, &mut sink);
     assert_eq!(obs.status, CellStatus::Failed, "{obs:?}");
     assert!(dispatcher.calls().is_empty(), "断开前零业务执行");
@@ -415,7 +499,7 @@ fn fake_worker_bad_json_frame_closes_cell() {
         dispatcher: dispatcher.clone(),
         worker_exe: Some(worker),
     };
-    let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
+    let mut cell = spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn");
     let obs = drive(&mut cell, &mut sink);
     assert_eq!(obs.status, CellStatus::Failed, "{obs:?}");
     assert!(dispatcher.calls().is_empty());
@@ -451,7 +535,7 @@ fn fake_worker_forged_call_frames_zero_execution() {
         dispatcher: dispatcher.clone(),
         worker_exe: Some(worker),
     };
-    let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
+    let mut cell = spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn");
     let obs = drive(&mut cell, &mut sink);
     // 核心安全断言：伪造调用帧零业务执行（受理门拒绝全部伪造资格）
     assert!(
@@ -481,7 +565,7 @@ fn pending_output_overflow_marks_truncated() {
         dispatcher,
         worker_exe: real_worker(),
     };
-    let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
+    let mut cell = spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn");
     let obs = cell.observe(3_000, 64 * 1024, &mut sink, None, &[]);
     assert_eq!(obs.status, CellStatus::Running, "{obs:?}");
     assert!(obs.output_truncated, "缓冲溢出必须标记 truncated：{obs:?}");
@@ -503,7 +587,7 @@ fn total_output_flood_closes_cell_host_continues() {
         dispatcher: dispatcher.clone(),
         worker_exe: real_worker(),
     };
-    let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
+    let mut cell = spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn");
     let obs = drive(&mut cell, &mut sink);
     assert_eq!(obs.status, CellStatus::Failed, "{obs:?}");
     assert_eq!(obs.error.as_ref().expect("错误必带")["code"], "OUTPUT_LIMIT", "{obs:?}");
@@ -519,7 +603,7 @@ fn total_output_flood_closes_cell_host_continues() {
         dispatcher: dispatcher.clone(),
         worker_exe: real_worker(),
     };
-    let mut cell2 = spawn_cell(&cfg2, &mut sink2, &[]).expect("后续 spawn");
+    let mut cell2 = spawn_cell_with_env_lock(&cfg2, &mut sink2, &[]).expect("后续 spawn");
     let obs2 = drive(&mut cell2, &mut sink2);
     assert_eq!(obs2.status, CellStatus::Completed, "{obs2:?}");
 }
@@ -554,7 +638,7 @@ fn quota_charged_for_invalid_args_and_unknown_tools() {
         dispatcher: dispatcher.clone(),
         worker_exe: real_worker(),
     };
-    let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
+    let mut cell = spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn");
     let obs = drive(&mut cell, &mut sink);
     assert_eq!(obs.status, CellStatus::Completed, "{obs:?}");
     assert_eq!(dispatcher.calls().len(), 1, "试探零执行、合格调用执行：{:?}", dispatcher.calls());
@@ -587,7 +671,7 @@ fn quota_charged_for_invalid_args_and_unknown_tools() {
         dispatcher: dispatcher.clone(),
         worker_exe: real_worker(),
     };
-    let mut cell2 = spawn_cell(&cfg2, &mut sink2, &[]).expect("spawn2");
+    let mut cell2 = spawn_cell_with_env_lock(&cfg2, &mut sink2, &[]).expect("spawn2");
     let obs2 = drive(&mut cell2, &mut sink2);
     assert_eq!(obs2.status, CellStatus::Completed, "{obs2:?}");
     assert_eq!(
@@ -620,7 +704,9 @@ fn cpu_limit_kills_spin_worker_host_continues() {
         dispatcher: dispatcher.clone(),
         worker_exe: real_worker(),
     };
-    let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("spawn");
+    let mut cell = spawn_cell_with_env_lock(&cfg, &mut sink, &[]).expect("spawn");
+    #[cfg(target_os = "linux")]
+    let worker_fd = pidfd_for_test(cell.worker_pid() as libc::pid_t);
     let obs = cell.observe(20_000, 1024, &mut sink, None, &[]);
     let elapsed = started.elapsed();
     assert_eq!(obs.status, CellStatus::Failed, "{obs:?}");
@@ -629,6 +715,8 @@ fn cpu_limit_kills_spin_worker_host_continues() {
         "CPU 限应远早于观察期限生效：{elapsed:?} {obs:?}"
     );
     assert!(cell.is_closed());
+    #[cfg(target_os = "linux")]
+    assert_pidfd_reaped(&worker_fd, "CPU 超限 worker");
     // 主进程继续
     let mut sink2 = RecordingSink::new();
     let cfg2 = CellConfig {
@@ -640,9 +728,64 @@ fn cpu_limit_kills_spin_worker_host_continues() {
         dispatcher: dispatcher.clone(),
         worker_exe: real_worker(),
     };
-    let mut cell2 = spawn_cell(&cfg2, &mut sink2, &[]).expect("后续 spawn");
+    let mut cell2 = spawn_cell_with_env_lock(&cfg2, &mut sink2, &[]).expect("后续 spawn");
     let obs2 = drive(&mut cell2, &mut sink2);
     assert_eq!(obs2.status, CellStatus::Completed, "{obs2:?}");
+}
+
+/// 034 墙钟 120 秒：挂起的 Promise 不再推进 JS，仍须由宿主期限终止并回收。
+#[cfg(target_os = "linux")]
+#[test]
+fn wall_clock_limit_terminates_pending_sandbox_worker() {
+    use std::time::{Duration, Instant};
+    let mut sink = RecordingSink::new();
+    let cfg = CellConfig {
+        code: "await new Promise(() => {});",
+        arguments_json: r#"{"code":"<pending>"}"#,
+        catalog: vec![],
+        exec_call_id: "call_wall_limit",
+        turn_budget: turn_budget(),
+        dispatcher: MapDispatcher::new(&[]),
+        worker_exe: real_worker(),
+    };
+    let (mut cell, started) = {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        struct SandboxEnvRestore(Option<std::ffi::OsString>);
+        impl Drop for SandboxEnvRestore {
+            fn drop(&mut self) {
+                if let Some(value) = self.0.take() {
+                    std::env::set_var("TCHAT_SANDBOX", value);
+                } else {
+                    std::env::remove_var("TCHAT_SANDBOX");
+                }
+            }
+        }
+        let _sandbox_env = SandboxEnvRestore(std::env::var_os("TCHAT_SANDBOX"));
+        let _timeout_env = common::SandboxConfirmTimeoutEnvRestore::capture_after_test_lock();
+        std::env::set_var("TCHAT_SANDBOX", "1");
+        std::env::set_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", "2000");
+        assert!(terminal_chat::sandbox::sandbox_requested());
+        assert!(terminal_chat::sandbox::probe_available(), "真实 bwrap 是本用例前置");
+        let started = Instant::now();
+        let cell = spawn_cell(&cfg, &mut sink, &[]).expect("启动真实沙箱 worker");
+        (cell, started)
+    };
+    let supervisor_fd = pidfd_for_test(cell.worker_pid() as libc::pid_t);
+    let payload_fd = sandbox_payload_pidfd(cell.worker_pid());
+
+    let first = cell.observe(60_000, 1024, &mut sink, None, &[]);
+    assert_eq!(first.status, CellStatus::Running, "第一次观察不能重置时限：{first:?}");
+    let result = cell.observe(60_000, 1024, &mut sink, None, &[]);
+    let elapsed = started.elapsed();
+
+    assert_eq!(result.status, CellStatus::Failed, "{result:?}");
+    assert_eq!(result.error.as_ref().expect("超限错误") ["code"], "WALL_TIME_LIMIT", "{result:?}");
+    assert!(cell.is_closed(), "墙钟超限后必须关闭 cell");
+    assert!(elapsed >= Duration::from_secs(115), "过早终止，未覆盖 120 秒期限：{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(130), "超过 120 秒期限的清理余量：{elapsed:?}");
+    assert!(sink.events.lock().unwrap().contains(&EventKind::CellClosed));
+    assert_pidfd_reaped(&payload_fd, "墙钟超限载荷");
+    assert_pidfd_reaped(&supervisor_fd, "墙钟超限监督进程");
 }
 
 // ---------- 6. 参数层：绕过前端限制（直打解析器） ----------
@@ -1236,4 +1379,59 @@ fn e2e_cell_id_guess_uniform_not_found() {
         ra["error"]["message"], rb["error"]["message"]
     );
     assert_eq!(ra["status"], rb["status"]);
+}
+
+// ---------- 038 方案 A：js worker 路径的启动确认闸（接线测试） ----------
+//
+// 超时确定性复现：0ms 确认窗＋**不读闸标记的载荷**（假 worker——普通脚本，
+// 无自停入口）＝载荷永不出现…实际假 worker 即刻运行（无 STOP 入口）→
+// children 中立即可见。真确定性形态：假 worker 为**空脚本即退**——载荷
+// spawn 前监督链无 children，载荷瞬间退出后亦无 children——确认循环在
+// 0ms 窗口内只能走超时分支（Err）。放行路径由 env_and_fd_sentinels（真实
+// worker＋自停入口＋确认→CONT→执行）承载。
+
+#[test]
+fn gate_timeout_worker_startup_fails_closed() {
+    let _serial = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !terminal_chat::sandbox::probe_available() {
+        return; // 无 bwrap 环境：闸随沙箱后端分支
+    }
+    let _timeout_env = common::SandboxConfirmTimeoutEnvRestore::capture_after_test_lock();
+    std::env::set_var("TCHAT_SANDBOX", "1");
+    std::env::set_var("TCHAT_SANDBOX_CONFIRM_TIMEOUT_MS", "0");
+
+    let dispatcher = MapDispatcher::new(&[]);
+    let mut sink = RecordingSink::new();
+    // 空脚本假 worker：exec 即退——载荷定位不可达（children 瞬时空）。
+    let dir = TempDir::new("gate-js-timeout");
+    let script = dir.path().join("instant-exit-worker.sh");
+    std::fs::write(&script, "#!/bin/sh\nexit 7\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cfg = crate_js_cfg(script.to_str().unwrap(), dispatcher.clone());
+    let outcome = spawn_cell(&cfg, &mut sink, &[]);
+    std::env::remove_var("TCHAT_SANDBOX");
+    match outcome {
+        Err(msg) => assert!(
+            msg.contains("确认") || msg.contains("超时") || msg.contains("退出"),
+            "错误须如实说明启动确认失败：{msg}"
+        ),
+        Ok(_) => panic!("0ms 确认窗＋即退载荷必须启动失败（不放行）"),
+    }
+}
+
+/// 最小 CellConfig 构造（测试专用）。
+fn crate_js_cfg(
+    worker: &str,
+    dispatcher: std::sync::Arc<dyn LeafDispatcher>,
+) -> CellConfig<'_> {
+    CellConfig {
+        code: "\"done\"",
+        arguments_json: r#"{"code":"<gate>"}"#,
+        catalog: vec![],
+        exec_call_id: "call_gate",
+        turn_budget: turn_budget(),
+        dispatcher,
+        worker_exe: Some(std::path::PathBuf::from(worker)),
+    }
 }

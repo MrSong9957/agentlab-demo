@@ -18,9 +18,9 @@ DC() { MSYS_NO_PATHCONV=1 docker compose -f "$ROOT_WIN/.devcontainer/compose.yam
 echo "== 0. 引擎版本守卫 =="
 ENGINE_VER=$(MSYS_NO_PATHCONV=1 docker version --format '{{.Server.Version}}')
 echo "Engine: $ENGINE_VER"
-if [ "$ENGINE_VER" != "29.8.2" ]; then
-  echo "FAIL: seccomp 基线按 docker-v29.8.2 → moby/profiles/seccomp v0.2.3 锁定生成，" >&2
-  echo "当前引擎 $ENGINE_VER ≠ 29.8.2——不得沿用未知版本的策略基线（fail closed）。" >&2
+if [ "$ENGINE_VER" != "29.9.2" ]; then
+  echo "FAIL: seccomp 基线按 docker-v29.9.2 → moby/profiles/seccomp seccomp/v0.2.4 锁定生成，" >&2
+  echo "当前引擎 $ENGINE_VER ≠ 29.9.2——不得沿用未知版本的策略基线（fail closed）。" >&2
   echo "请按 docs/logs/033-tool-sandbox/2026-10-27-dev-deploy.md「基线再生成」重做后再部署。" >&2
   exit 1
 fi
