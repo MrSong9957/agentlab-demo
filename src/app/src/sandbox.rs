@@ -225,6 +225,7 @@ fn probe_bwrap() -> Result<PathBuf, String> {
 }
 
 fn probe_bwrap_at(bwrap: &Path) -> Result<PathBuf, String> {
+    #[cfg(target_os = "linux")]
     ensure_child_subreaper();
     let run = std::process::Command::new(bwrap)
         // 与真实策略同构的最小集：全盘 ro-bind＋userns＋cap-drop；不 unshare-pid/net。
@@ -243,6 +244,7 @@ fn probe_bwrap_at(bwrap: &Path) -> Result<PathBuf, String> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+    #[cfg(target_os = "linux")]
     reap_adopted_bwrap_reapers();
     match run {
         Ok(status) if status.success() => Ok(bwrap.to_path_buf()),

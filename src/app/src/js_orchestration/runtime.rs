@@ -974,6 +974,10 @@ fn kill_worker(child: &mut std::process::Child, cleanup: &WorkerCleanup) -> Resu
         }
         if let Err(error) = wait_for_payload_exit_and_bwrap_wait(child, fd, deadline) {
             if child.try_wait().map_err(|wait_error| wait_error.to_string())?.is_some() {
+                // 040：此路径 helper 内部收割未覆盖（其超时/轮询错误返回先于
+                // try_wait 成功），外层收割是首次也是唯一收割点。
+                #[cfg(target_os = "linux")]
+                crate::sandbox::reap_adopted_bwrap_reapers();
                 return Err(format!("bwrap 在 payload 等待期间退出（{error}）"));
             }
             return kill_worker_group_and_confirm(child, cleanup, &error, deadline);
@@ -1003,6 +1007,9 @@ fn recover_after_pidfd_kill_denied(
             let grace = Instant::now() + Duration::from_millis(250);
             if let Err(wait_error) = wait_for_payload_exit_and_bwrap_wait(child, fd, grace) {
                 if child.try_wait().map_err(|error| error.to_string())?.is_some() {
+                    // 040：同上——helper 内部收割未覆盖的首次收割点。
+                    #[cfg(target_os = "linux")]
+                    crate::sandbox::reap_adopted_bwrap_reapers();
                     return Err(format!("bwrap 在 payload 等待期间退出（{wait_error}）"));
                 }
                 return kill_worker_group_and_confirm(

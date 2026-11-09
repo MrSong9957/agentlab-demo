@@ -1056,6 +1056,12 @@ fn sandbox_launch_leaks_no_bwrap_reaper_zombie() {
     const HELPER: &str = "TCHAT_TEST_REAPER_HELPER";
     const MARKER: &str = "REAPER-BASELINE-CLEAN";
     if std::env::var_os(HELPER).is_none() {
+        // 与文件内 14 处姊妹测试一致：无 bwrap 环境（macOS CI、精简容器）
+        // 静默跳过，不作为失败——父分支先行判定，helper 内保留同款防御。
+        if !bwrap_available() {
+            eprintln!("跳过：bwrap 不可用");
+            return;
+        }
         let mut helper = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "sandbox_launch_leaks_no_bwrap_reaper_zombie", "--nocapture"])
             .env(HELPER, "1")
