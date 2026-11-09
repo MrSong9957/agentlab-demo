@@ -28,3 +28,5 @@ worker 被外力 SIGKILL 时，事件序为：读线程观察到 ReaderDead → 
 - 20 连绿 → 实测：**符合**——20/20 全绿（b85c4ee+041 与 rebase 后 main+041 两形态）。
 - R4 无扩散 → 实测：**符合**——仅 add_cleanup_failure 观察层 guard（+6 行）；kill_worker/wait 路径、040 收割调用、会话拆除均未触碰；cargo check --all-targets 通过。
 - js 全套全绿 → **未达成，被独立的存量确定性失败阻断**：\`sandbox_worker_all_termination_methods_denied_reports_failure\` 在 rebase 后（ccfba40+041）单跑与并行均确定性失败。插桩实证：terminate → close 先写 shutdown 帧 → worker 收帧自退（await Promise 不影响引擎控制帧）→ kill_worker 的信号调用全部 ESRCH → wait 成功 → **Ok** → cleanup_error=None → Terminated；测试断言「信号全拒 ⇒ Failed＋WORKER_REAP_FAILED」。矛盾＝测试设计（把「信号被拒」当充分条件）与产品优雅关闭语义（shutdown 帧优先、信号为兜底）的冲突；11-08 记录「聚焦均绿」与 04-batchB「FAILED」并存，说明该测试结果随环境负载在两路径间翻转（帧处理 vs 信号 EPERM 的竞速）。**两个修法需用户裁决**：(a) 修测试——注入环境同时使 shutdown 帧失效（如 spawn 后即刻关闭协议 stdin 写端），保持产品语义与既有断言不变；(b) 修产品语义——信号被拒时即使 shutdown 帧成功也上报 WORKER_REAP_FAILED（改 terminate 成功语义，影响真实优雅关闭路径，不推荐）。此为阶段 4 授权范围（worker_killed_ipc_dead 修复）外的独立存量缺陷，按「重大取舍先请示」停下。
+
+**2026-11-09 用户裁决：修法 (a) 落地（0ba7f66）。** 纯测试侧实现：SIGSTOP 替代「关闭 stdin 写端」（stdin 为产品私有字段无测试途径，SIGSTOP 停止态不读 stdin 达成同一失效效果且零产品改动）；注入点在 seccomp 安装前（不受被拒环境约束）。验收全达成：单跑绿＋并行 42/0 ×4 连跑（翻转消除）、worker_killed_ipc_dead 20/20 回归不破、断言原文不削弱。证据见验证记录。
