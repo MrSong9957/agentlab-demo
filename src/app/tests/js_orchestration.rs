@@ -656,6 +656,15 @@ fn sandbox_worker_all_termination_methods_denied_reports_failure() {
     let mut sink = RecordingSink::new();
     let cfg = config("await new Promise(() => {});", vec![], MapDispatcher::new(&[]), turn_budget());
     let mut cell = spawn_cell(&cfg, &mut sink, &[]).expect("启动沙箱 worker");
+    // 041 修法 (a)：seccomp 安装前 SIGSTOP worker——停止态不读 stdin，
+    // close 的 shutdown 帧写入管道但不被处理（等效关闭协议 stdin 读端），
+    // 逼出「强杀信号全被拒」路径；否则优雅关闭先行使该注入前提失效。
+    // 进程退出时由既有 PDEATHSIG/--die-with-parent 树杀兜底清理。
+    assert_eq!(
+        unsafe { libc::kill(cell.worker_pid() as libc::pid_t, libc::SIGSTOP) },
+        0,
+        "SIGSTOP worker（shutdown 帧失效注入）"
+    );
     let mut filter = [
         libc::sock_filter { code: 0x20, jt: 0, jf: 0, k: 0 },
         libc::sock_filter { code: 0x15, jt: 0, jf: 5, k: libc::SYS_pidfd_send_signal as u32 },
