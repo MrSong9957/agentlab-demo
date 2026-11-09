@@ -1144,6 +1144,7 @@ fn seccomp_deny_lists_match_libc_symbols() {
             );
         }
     }
+}
 
 /// 040 负向签名保护：收割只作用于匹配签名（PPid=本进程＋comm=bwrap＋
 /// NSpid 末级=1）的收养 reaper——非 bwrap 的收养子进程（此处＝普通 sh 僵尸）
