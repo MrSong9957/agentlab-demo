@@ -1094,7 +1094,6 @@ fn sandbox_launch_leaks_no_bwrap_reaper_zombie() {
         return;
     }
 
-    // 辅助进程：subreaper 已由启动路径（probe_bwrap_at）登记。
     if !bwrap_available() {
         eprintln!("跳过：bwrap 不可用");
         return;
@@ -1117,9 +1116,6 @@ fn sandbox_launch_leaks_no_bwrap_reaper_zombie() {
     fs::remove_dir_all(&f.root).ok();
 }
 
-/// 全容器 bwrap reaper 僵尸计数（040 回归基线口径）：Z 态＋comm=bwrap＋
-/// NSpid 末级=1＋PPid∈{本进程, 1}。PPid=本进程＝已收养未收割；PPid=1＝
-/// 已泄漏给容器 init。其余进程（其他测试进程的收养对象）不计入。
 fn reaper_zombie_baseline() -> usize {
     let me = std::process::id();
     let mut count = 0usize;

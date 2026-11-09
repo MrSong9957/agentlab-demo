@@ -301,8 +301,7 @@ fn ensure_child_subreaper() {
     DONE.get_or_init(|| {
         // 失败静默：subreaper 不可用时退回现状（孤儿归容器 init），沙箱功能面
         // 不变；收割函数对非收养进程天然无操作。
-        let rc = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
-        eprintln!("DRAIN-TLM ensure_subreaper pid={} rc={}", std::process::id(), rc);
+        unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
     });
 }
 
@@ -342,12 +341,12 @@ pub fn reap_adopted_bwrap_reapers() {
         }
     }
     for _ in 0..101 {
-        let Some(pids) = scan_adopted_reaper_pids(me) else {
-            return;
-        };
         let pids: Vec<i32> = {
             let guard = stuck.lock().unwrap_or_else(|e| e.into_inner());
-            pids.into_iter().filter(|pid| !guard.contains(pid)).collect()
+            scan_adopted_reaper_pids(me)
+                .into_iter()
+                .filter(|pid| !guard.contains(pid))
+                .collect()
         };
         if pids.is_empty() {
             return;
@@ -374,10 +373,10 @@ pub fn reap_adopted_bwrap_reapers() {
     //    空间销毁，无附带进程；随后立刻收割其退出态。
     // ② 有子进程＝合法等待载荷树收尾的 reaper，登记后由后续收割点的廉价
     //    巡检回收（转 Z 即收割），不再重复消耗等待窗口。
-    let Some(remaining) = scan_adopted_reaper_pids(me) else {
-        return;
-    };
-    let mut stuck_guard = stuck.lock().unwrap_or_else(|e| e.into_inner());
+    let remaining = scan_adopted_reaper_pids(me);
+    // 先做分类 I/O（children 读取＋SIGKILL＋waitpid），锁只保护最终的登记，
+    // 不跨文件读取持锁。
+    let mut to_register = Vec::new();
     for pid in remaining {
         let childless = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
             .is_ok_and(|c| c.split_whitespace().next().is_none());
@@ -387,56 +386,49 @@ pub fn reap_adopted_bwrap_reapers() {
             let rc = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
             let _ = rc; // rc==pid 即回收；竞态下 ECHILD 同样视为已处理
         } else {
-            stuck_guard.insert(pid);
+            to_register.push(pid);
         }
+    }
+    if !to_register.is_empty() {
+        let mut stuck_guard = stuck.lock().unwrap_or_else(|e| e.into_inner());
+        stuck_guard.extend(to_register);
     }
 }
 
-/// 扫描 /proc 中匹配收养 reaper 签名的进程号。/proc 不可达或目标消失按无
-/// 匹配处理；匹配条件见 [`reap_adopted_bwrap_reapers`]。
 #[cfg(target_os = "linux")]
-fn scan_adopted_reaper_pids(me: i32) -> Option<Vec<i32>> {
+fn scan_adopted_reaper_pids(me: i32) -> Vec<i32> {
     let mut found = Vec::new();
-    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return found;
+    };
+    for entry in entries.flatten() {
         let pid: i32 = match entry.file_name().to_str().and_then(|s| s.parse().ok()) {
             Some(pid) if pid != me => pid,
             _ => continue,
         };
+        // 单次 stat 读提取 comm（主过滤，绝大多数进程在此跳过）；state/ppid
+        // 与 NSpid 复用同模块既有解析器。
         let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
             continue;
         };
-        // comm 可含空格/括号：状态与 ppid 取最后「)」之后的首两个字段。
-        let Some((_, rest)) = stat.rsplit_once(") ") else {
-            continue;
-        };
-        let mut fields = rest.split_whitespace();
-        let state = fields.next().unwrap_or("?");
-        if state != "Z" && state != "S" {
-            continue;
-        }
-        let Some(ppid) = fields.next().and_then(|p| p.parse::<i32>().ok()) else {
-            continue;
-        };
-        if ppid != me {
-            continue;
-        }
+        // comm 可含空格/括号：取首尾括号之间。
         let open = stat.find('(').map_or(0, |i| i + 1);
         let close = stat.rfind(')').unwrap_or(open);
         if &stat[open..close] != "bwrap" {
             continue;
         }
-        let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+        let Ok(identity) = read_process_identity(pid) else {
             continue;
         };
-        let Some(nspid) = status.lines().find_map(|l| l.strip_prefix("NSpid:")) else {
+        if identity.state != 'Z' && identity.state != 'S' || identity.parent_pid != me {
             continue;
-        };
-        if nspid.split_whitespace().last() != Some("1") {
+        }
+        if !read_nspid(pid).is_ok_and(|nspid| nspid.last() == Some(&1)) {
             continue;
         }
         found.push(pid);
     }
-    Some(found)
+    found
 }
 
 // ---------- 策略（本地化极小集） ----------

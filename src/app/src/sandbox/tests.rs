@@ -1149,6 +1149,7 @@ fn seccomp_deny_lists_match_libc_symbols() {
 /// NSpid 末级=1）的收养 reaper——非 bwrap 的收养子进程（此处＝普通 sh 僵尸）
 /// 必须原样保留，由其父进程（本测试）正常 wait 回收。误收＝偷走其他组件的
 /// wait 责任（016 会话/JS worker 依赖各自收割），属所有权破坏。
+
 #[test]
 #[cfg(target_os = "linux")]
 fn reap_adopted_bwrap_reapers_leaves_non_bwrap_children_alone() {
@@ -1157,25 +1158,17 @@ fn reap_adopted_bwrap_reapers_leaves_non_bwrap_children_alone() {
         .arg("true")
         .spawn()
         .expect("spawn 非 bwrap 子进程");
-    // 轮询确认子进程已真成 Z 态（不调 waitpid——waitpid 即收割，会掩盖后续
-    // 敏感性）：此时它满足「PPid=本进程＋Z 态」的收养语义，仅 comm/NSpid
-    // 与 bwrap reaper 不同。收割若签名失守即在此误收。
     let pid = child.id() as i32;
     let mut zombie_confirmed = false;
     for _ in 0..500 {
-        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-            if let Some((_, rest)) = stat.rsplit_once(") ") {
-                if rest.split_whitespace().next() == Some("Z") {
-                    zombie_confirmed = true;
-                    break;
-                }
-            }
+        if read_process_identity(pid).is_ok_and(|i| i.state == 'Z') {
+            zombie_confirmed = true;
+            break;
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
     assert!(zombie_confirmed, "子进程未如期进入 Z 态（环境异常）");
     crate::sandbox::reap_adopted_bwrap_reapers();
-    // 收割后仍能由本测试亲自回收＝收割未触碰它（若被误收，此处 ECHILD）。
     let mut status = 0;
     let rc = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
     assert_eq!(
