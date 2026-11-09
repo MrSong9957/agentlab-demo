@@ -22,8 +22,14 @@
 | lib 全量（分支内最小全量） | `cargo test --lib` | 305 passed / 0 failed / 1 ignored（既有 ignore） |
 | 静态检查 | `cargo clippy --all-targets -- -D warnings` | 组件下载失败（rustup 缓存错误）→ 按 AGENTS.md 兜底 `cargo check --all-targets`：Finished，无新增错误；警告为 038 存量基线 |
 
+## 追记（2026-11-09）：433 fspick 补入（用户裁决）
+
+- `SECCOMP_DENY_EPERM` 27→28 条：插入 433 fspick（升序 432/433/442）；回归锚对照表同步 `SYS_fspick`；守卫测试补 fspick→EPERM 实测断言（标记行六项齐全：clone3/openat2=ENOSYS、pwritev2≠EPERM、open_tree/mount_setattr/fspick=EPERM）。
+- 复验：锚 4/4 绿＋守卫标记行实测；变异证明 433→434 FAILED（「EPERM 清单缺少 fspick（SYS_fspick=433）——编号漂移或漏登记」）→ 还原回绿；attack06 ok；lib 305/0/1；`cargo check --all-targets` Finished（clippy 组件下载失败沿用兜底，同前记录）。
+
 ## 集合变更记录（变更前后）
 
 - 移除：328（实拒 pwritev2——普通写路径误拒，无登记意图）。
 - 加入：442 mount_setattr（mount 族最后一块；CLONE_NS_MASK/cap-drop ALL 之下的纵深面）。
-- 保持：其余 26 条编号与语义不变；437 openat2 ENOSYS、435 clone3 ENOSYS 行为不变（守卫测试断言）。
+- 保持：其余条目编号与语义不变；437 openat2 ENOSYS、435 clone3 ENOSYS 行为不变（守卫测试断言）。
+- （2026-11-09 追记）加入：433 fspick（用户裁决补入，mount 族最后一块拼图）。

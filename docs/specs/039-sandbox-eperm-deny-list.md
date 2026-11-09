@@ -1,6 +1,6 @@
 # 规格：031 沙箱 EPERM 拒绝清单纠偏与编号回归锚
 
-- 状态：**已实施待验收（2026-11-08）**。用户已确认按草案执行；B 类定案（依据草案内推荐与最小不变更原则）：328 移除、442 mount_setattr 加入、433 fspick 未纳入（草案未点名其注释意图，不自动扩大拒绝集合；如需纳入为 1 行清单＋对照表增量）。实现与验证证据见 [`2026-11-08-verification.md`](../logs/039-sandbox-eperm-deny-list/2026-11-08-verification.md)。
+- 状态：**已实施待验收（2026-11-08）**。用户已确认按草案执行；B 类定案（依据草案内推荐与最小不变更原则）：328 移除、442 mount_setattr 加入、433 fspick **补入（2026-11-09 用户裁决**，覆盖草案「待定」标记——mount 族 API 全家补齐；328 移除、442 补入维持不变）。实现与验证证据见 [`2026-11-08-verification.md`](../logs/039-sandbox-eperm-deny-list/2026-11-08-verification.md)。
 - 创建：2026-11-08。来源：038 attack06 后续轮独立审查（三审查者交叉命中，见 `/tmp/compound-engineering-1000/ce-code-review/20261108-024223-061dbcf6/report.md` #3 与 clone3 根因同类的编号漂移）。
 - 关联：`docs/specs/031-request-permissions.md`（§1.6 要求限制关键系统调用；规格不逐项枚举清单，清单为 M0 冻结的实现选择，注释声称意图）；`docs/specs/038-github-actions-ci.md`（本轮范围登记）。
 
@@ -53,4 +53,5 @@
 - 428-432 注释修正 → 预期过滤器字节不变（仅注释）→ 实测：**符合**——清单保持 27 条（-328 +442），seccomp_filter_shape_valid／seccomp_fd_roundtrip 通过；注释行不进过滤器。
 - 328 处置（移除）→ 预期过滤器减少 2 条 insn、pwritev2 不再被拒 → 实测：**符合**——守卫子进程（外层 EINVAL 对照＋真实产品 memfd 过滤器）探针 pwritev2 实测非 EPERM；条目数 27→27（-1 +1，净 insn 数不变）。
 - 新增 442 → 预期过滤器增加 2 条 insn、mount_setattr 实测 EPERM → 实测：**符合**——同一探针 mount_setattr=EPERM、open_tree（428 纠偏后）=EPERM。
+- 补入 433 fspick（2026-11-09）→ 预期清单 28 条、fspick 实测 EPERM → 实测：**符合**——守卫标记行含「fspick=EPERM」；变异证明（433→434 漂移）FAILED「EPERM 清单缺少 fspick（SYS_fspick=433）」、还原回绿；attack06 全绿；lib 305/0/1；cargo check --all-targets 通过（clippy 组件仍不可用，按 AGENTS.md 兜底）。
 - 回归锚变异 → 预期清单错配即失败 → 实测：**符合**——注入 428→429 编号漂移（clone3 类错误）后 `seccomp_deny_lists_match_libc_symbols` FAILED（报文「EPERM 清单缺少 open_tree（SYS_open_tree=428）——编号漂移或漏登记」）；还原后 ok。

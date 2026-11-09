@@ -1205,6 +1205,7 @@ const SECCOMP_DENY_EPERM: &[u32] = &[
     430, // fsopen
     431, // fsconfig
     432, // fsmount
+    433, // fspick
     442, // mount_setattr
 ];
 

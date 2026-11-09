@@ -865,8 +865,7 @@ fn seccomp_filter_blocks_clone3_and_preserves_openat2() {
     // 子进程全部断言通过后打印的最终标记；父裁决与子打印共用此常量，防单点失配。
     // 039 扩展：变更条目 errno 实测——328 移除后 pwritev2 不再 EPERM；428 实拒
     // open_tree（注释纠偏的实体验证）；442 加入后 mount_setattr 实拒。
-    const FILTER_MARKER: &str =
-        "产品过滤器：clone3=ENOSYS openat2=ENOSYS pwritev2!=EPERM open_tree=EPERM mount_setattr=EPERM";
+    const FILTER_MARKER: &str = "产品过滤器：clone3=ENOSYS openat2=ENOSYS pwritev2!=EPERM open_tree=EPERM mount_setattr=EPERM fspick=EPERM";
     if std::env::var_os(CHILD).is_none() {
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "sandbox::tests::seccomp_filter_blocks_clone3_and_preserves_openat2", "--nocapture"])
@@ -959,6 +958,11 @@ fn seccomp_filter_blocks_clone3_and_preserves_openat2() {
         probe(libc::SYS_mount_setattr),
         libc::EPERM,
         "442 加入后 mount_setattr 应实拒（mount 族补齐）"
+    );
+    assert_eq!(
+        probe(libc::SYS_fspick),
+        libc::EPERM,
+        "433 加入后 fspick 应实拒（mount 族补齐，用户裁决 2026-11-09）"
     );
     eprintln!("{FILTER_MARKER}");
 }
@@ -1107,6 +1111,7 @@ fn seccomp_deny_lists_match_libc_symbols() {
         (libc::SYS_fsopen as u32, "fsopen"),
         (libc::SYS_fsconfig as u32, "fsconfig"),
         (libc::SYS_fsmount as u32, "fsmount"),
+        (libc::SYS_fspick as u32, "fspick"),
         (libc::SYS_mount_setattr as u32, "mount_setattr"),
     ];
     let enosys: &[(u32, &str)] = &[
