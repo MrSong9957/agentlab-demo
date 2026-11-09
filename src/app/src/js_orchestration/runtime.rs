@@ -1332,6 +1332,12 @@ impl CellHandle {
 
     fn add_cleanup_failure(&self, observation: &mut Observation) {
         if let Some(error) = &self.cleanup_error {
+            // 041：清理失败不得覆盖既有终态错误——真实根因（如 worker IPC
+            // 断开）比内部清理细节（回收未确认）更早、更可诊断；无既有错误
+            // 时清理失败照常呈现（正常完成/终止＋清理失败的既有语义不变）。
+            if observation.error.is_some() {
+                return;
+            }
             observation.ok = false;
             observation.status = CellStatus::Failed;
             observation.error = Some(leaf_error("WORKER_REAP_FAILED", error, LeafExecution::Unknown));
