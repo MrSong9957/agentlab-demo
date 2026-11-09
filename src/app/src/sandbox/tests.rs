@@ -1145,3 +1145,37 @@ fn seccomp_deny_lists_match_libc_symbols() {
         }
     }
 }
+
+/// 040 负向签名保护：收割只作用于匹配签名（PPid=本进程＋comm=bwrap＋
+/// NSpid 末级=1）的收养 reaper——非 bwrap 的收养子进程（此处＝普通 sh 僵尸）
+/// 必须原样保留，由其父进程（本测试）正常 wait 回收。误收＝偷走其他组件的
+/// wait 责任（016 会话/JS worker 依赖各自收割），属所有权破坏。
+
+#[test]
+#[cfg(target_os = "linux")]
+fn reap_adopted_bwrap_reapers_leaves_non_bwrap_children_alone() {
+    let mut child = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("true")
+        .spawn()
+        .expect("spawn 非 bwrap 子进程");
+    let pid = child.id() as i32;
+    let mut zombie_confirmed = false;
+    for _ in 0..500 {
+        if read_process_identity(pid).is_ok_and(|i| i.state == 'Z') {
+            zombie_confirmed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert!(zombie_confirmed, "子进程未如期进入 Z 态（环境异常）");
+    crate::sandbox::reap_adopted_bwrap_reapers();
+    let mut status = 0;
+    let rc = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    assert_eq!(
+        rc,
+        child.id() as i32,
+        "收割误收了非 bwrap 子进程（wait 责任被偷走）"
+    );
+    let _ = child.wait();
+}

@@ -233,6 +233,10 @@ pub fn apply_patch_sandboxed_with_exe(
         Ok(o) => o,
         Err(e) => return err(format!("沙箱执行等待失败：{e}"), false),
     };
+    // 040：沙箱分支 program=bwrap，监督进程已收割——就地回收其被收养的
+    // ns-PID-1 reaper（非沙箱分支 program 为补丁程序本体，扫描无匹配）。
+    #[cfg(target_os = "linux")]
+    crate::sandbox::reap_adopted_bwrap_reapers();
     if !out.status.success() {
         let all = String::from_utf8_lossy(&out.stderr);
         let skip = all.chars().count().saturating_sub(200);

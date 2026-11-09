@@ -409,6 +409,10 @@ impl StdioProcess {
                     }
                 }
             }
+            // 040：沙箱化 MCP 服务器的 bwrap 监督进程已在上方路径收割，
+            // 就地回收其被收养的 ns-PID-1 reaper（非沙箱子进程无匹配）。
+            #[cfg(target_os = "linux")]
+            crate::sandbox::reap_adopted_bwrap_reapers();
         }
     }
 }

@@ -234,6 +234,9 @@ pub fn execute_sandboxed_with_exe(
         let out = child
             .wait_with_output()
             .map_err(|e| format!("沙箱图片准备等待失败：{e}"))?;
+        // 040：bwrap 监督进程已被收割，就地回收其被收养的 ns-PID-1 reaper。
+        #[cfg(target_os = "linux")]
+        crate::sandbox::reap_adopted_bwrap_reapers();
         if !out.status.success() {
             let tail: String = {
                 let all = String::from_utf8_lossy(&out.stderr);
