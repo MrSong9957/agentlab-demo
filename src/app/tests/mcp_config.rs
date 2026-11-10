@@ -108,6 +108,12 @@ fn a02_duplicate_json_keys_rejected_at_every_level() {
         r#"{"mcp_servers": {"a": {"command": "/bin/true", "command": "/bin/false"}}}"#,
     );
     assert!(e.contains("重复配置字段"), "实际：{e}");
+    // env_http_headers 层对象重复头名（完全相同）：serde_json Value 层会
+    // 静默合并（后值覆盖前值），必须在原始条目流上拒绝（022 §2.1；A6）。
+    let e = parse_err(
+        r#"{"mcp_servers": {"a": {"url": "http://127.0.0.1:9/mcp", "env_http_headers": {"X-A": "V1", "X-A": "V2"}}}}"#,
+    );
+    assert!(e.contains("重复配置字段"), "实际：{e}");
 }
 
 #[test]

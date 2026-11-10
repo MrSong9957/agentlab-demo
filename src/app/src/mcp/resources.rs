@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use super::call::client_error_json;
 use super::connection::{CallFailure, McpConnection, MAX_CATALOG_ITEMS, MAX_CATALOG_PAGES, MAX_CURSOR_BYTES};
-use super::secrets::SensitiveValues;
+use super::secrets::{value_polluted, SensitiveValues};
 
 /// 定向／汇总资源列举的固定模型工具名（023 §1）。
 pub const LIST_TOOL_NAME: &str = "list_mcp_resources";
@@ -175,16 +175,8 @@ fn serialize_within_budget(value: &Value) -> Result<String, String> {
     }
 }
 
-/// 递归检查 JSON 值的全部字符串叶子（023 §5.1：逐字段检查原文，不能仅
-/// 扫序列化字符串——敏感值含引号／反斜杠时转义会掩盖原文包含关系）。
-fn value_polluted(value: &Value, sensitive: &SensitiveValues) -> bool {
-    match value {
-        Value::String(s) => sensitive.contains_secret(s),
-        Value::Array(items) => items.iter().any(|v| value_polluted(v, sensitive)),
-        Value::Object(map) => map.values().any(|v| value_polluted(v, sensitive)),
-        _ => false,
-    }
-}
+// 递归检查 JSON 值的全部字符串叶子（023 §5.1：逐字段检查原文）在本文件
+// 经顶部导入的 secrets::value_polluted 使用——A5 起与工具结果路径共用。
 
 /// 执行一次资源工具调用（管理器同步桥接后进入；M1 定向列举、M2 定向
 /// 模板列举与资源读取）。返回 CC 工具结果文本与 isError。

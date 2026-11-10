@@ -43,17 +43,19 @@
 - 依据：主会话已对照两函数逐组件分支。
 - 改法：与 S27 合并处理（改用 `absolute_lexical`＋规格登记 Windows 行为变化）。
 
-### A5. MCP 工具结果污染检查在序列化后做 `- [ ]`
+### A5. MCP 工具结果污染检查在序列化后做 `- [x]`
 - 位置：`src/app/src/mcp/manager.rs:627-628`（对投影 JSON 字符串 `contains_secret`）；注释 `mcp/call.rs:8-9` 声称「检查发生在投影之前」。
 - 问题：敏感值含 `"`、`\` 或控制字符时被 JSON 转义，子串检查漏报。023 §5.1 复审已在资源路径修过同类（`resources.rs:178-187` 按字符串叶子逐个检查），工具结果路径未跟上。
 - 依据：主会话已核实顺序（先 `project_result` 后 `contains_secret`）。
 - 改法：先加失败用例（`TCHAT_MCP_TOKEN_A` 设为含双引号的值，断言调用失败＋标准客户端错误，参照 `a16_polluted_result_replaced_with_client_error`）→ 修复改为对 `serde_json::to_value(&result)` 逐叶检查（可复用 `value_polluted`）→ 测试通过后删注释。同类缺口：`catalog.rs:139-141` Schema 也扫序列化串。
+- 处理：2026-11-10 修复——①`value_polluted` 自 resources.rs 下沉至 secrets.rs（pub，与 `SensitiveValues` 同文件；resources.rs 顶部导入共用，资源路径行为不变）；②call.rs 新增 `project_result_value`（to_value 一次供检查与投影共用）＋`value_to_tool_text` 转 pub，`project_result` 改为委托（call.rs 自测继续使用）；③manager.rs 工具结果路径改为 `project_result_value` → `value_polluted` 逐叶 → 通过才投影文本；is_error 取自同一 Value（原 from_str 回析等价）。call.rs:8-9 注释修复后内容属实，保留未删（与 S35 原文「删注释」偏差已说明）。回归转义敏感值场景：先红（failed=false 直通）后绿（客户端错误「敏感数据」）。**同类缺口 `catalog.rs:139-141`（Schema 扫序列化串）本轮未动，保持登记。**证据见 `docs/logs/2026-11-10-simplify-a5a6-s35/`。
 
-### A6. MCP `env_http_headers` 重复键静默覆盖 `- [ ]`
+### A6. MCP `env_http_headers` 重复键静默覆盖 `- [x]`
 - 位置：`src/app/src/mcp/config.rs:222`（字段值经 `next_value::<serde_json::Value>()`）＋ `:467`（`as_object()` 取头对象）；注释 `:128-129` 声称「各层对象都手动迭代键值对」。
 - 问题：serde_json Value 反序列化静默合并重复键，`{"X-A":"A","X-A":"B"}` 被接受（后者覆盖前者），违反 022 §2.1。`:481-488` 只拦大小写不同的重名。
 - 依据：主会话已核实解析结构（server 层 visitor 拒重，Value 层不拒）。
 - 改法：先在 `tests/mcp_config.rs` `a02_duplicate_json_keys_rejected_at_every_level` 加「头名完全相同」断言（今天失败）→ `env_http_headers` 层改用拒绝重复键的 visitor → 通过后删注释。
+- 处理：2026-11-10 修复——`RawServerFields` 增 `env_http_headers: Option<RawHeaderField>`；ServerVisitor 对该键特判，值经 `RawHeaderField`（`deserialize_any`：`visit_map` 在原始条目流上逐键收集并拒绝重复键，错误文案沿用既有「重复配置字段：{key}」；标量/序列/单元降级 `NotObject`）；`parse_http` 增参接收，`NotObject` 按既有文案报「env_http_headers 必须是对象」，对象条目沿用原有校验逐字不变（头名非法/保留头/大小写重复/值非字符串/空白）。config.rs:128-129 注释修复后内容属实（各层确已手动迭代），保留未删（与 S35 原文「删注释」偏差已说明）。先红（解析成功且 `env_http_headers: [("X-A","V2")]` 后值覆盖）后绿（「重复配置字段」拒绝）。**同类缺口：stdio `env_vars` 为数组（无对象内层键），不受影响；其余 Value 值字段无内层对象键。**证据见 `docs/logs/2026-11-10-simplify-a5a6-s35/`。
 
 ### A7. JS 编排通道无界 `- [ ]`
 - 位置：`src/app/src/js_orchestration/runtime.rs:527`（`mpsc::channel` 无界）vs 模块头 `:7-11`（「有界事件通道」「worker 写 stdout 阻塞形成天然背压」）。
@@ -253,8 +255,9 @@
 - 用例：before_unlink 屏障换源为符号链接，断言错误同时含两个绝对路径。**今天失败**（A3）。修复后删 `apply_patch.rs:1594-1595` 注释。
 - 处理：2026-11-10 落地为 `apply_patch::tests::move_symlink_swap_error_contains_both_paths`（仿 `move_source_swap_detected_before_unlink` 的接缝子进程机制；替换对象＝悬空末端符号链接，另断言 state_known=false、错误含「删除前复核」阶段、目标保留不回滚、替换对象不被删）。先红（错误为「…源是符号链接（含悬空），拒绝移动」无任何路径）后绿。`apply_patch.rs:1594-1595` 注释经 A3 修复后内容恢复属实，按其现状保留（未删）。证据见 `docs/logs/2026-11-10-simplify-a3-s34/`。
 
-### S35. MCP 污染与重复键 `- [ ]`
+### S35. MCP 污染与重复键 `- [x]`
 - 两例：含 `"`/`\` 敏感值的工具结果被整份替换为客户端错误（**预计今天失败**，A5）；`env_http_headers` 头名完全相同的重复键被拒绝（**今天失败**，A6）。修复后分别删 `call.rs:8-9`、`config.rs:128-129` 注释。
+- 处理：2026-11-10 落地两例——①`tests/mcp_stdio.rs::a16_polluted_escaped_result_rejected_by_leaf_check`（夹具新增 `polluted_result_escaped` 场景回显 `TCHAT_MCP_TOKEN_Q`＝`canary"q\tail`，断言 failed＋标准客户端错误＋canary 不入投影）；②`tests/mcp_config.rs::a02_duplicate_json_keys_rejected_at_every_level` 追加第三段断言（url＋`env_http_headers` 对象内完全同名的重复头）。先红（转义值漏报直通；`[("X-A","V2")]` 静默覆盖）后绿。两条注释（call.rs:8-9、config.rs:128-129）修复后内容属实，保留未删——偏差与理由见 A5/A6 处理记录。证据见 `docs/logs/2026-11-10-simplify-a5a6-s35/`（红绿×4＋8 套件回归日志）。
 
 ### S36. 审查标签规则补锚（7 条）`- [ ]`
 - JS seq 连续无空洞（P1-3，`tests/js_orchestration.rs:1179` 附近）；二次 observe 不再截断（P2-8）；followup 满槽保状态文案（N3）；`proc_session.rs:142-143` reap_failed 清除时机；`sandbox.rs:891-892` 成对断言在组装层强制。通过后删除对应标签注释。

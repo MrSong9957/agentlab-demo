@@ -659,6 +659,37 @@ fn a16_polluted_result_replaced_with_client_error() {
     ctx.close();
 }
 
+/// S35 前半（清单 A5 回归锚，023 §5.1）：敏感值含引号／反斜杠时，工具
+/// 结果的 JSON 序列化会转义掩盖原文包含关系——仅扫序列化串的污染检查
+/// 漏报；按字符串叶子逐个检查必须仍拒绝（整份替换为标准客户端错误）。
+#[test]
+fn a16_polluted_escaped_result_rejected_by_leaf_check() {
+    let canary_escaped = "canary\"q\\tail";
+    std::env::set_var("TCHAT_MCP_TOKEN_Q", canary_escaped);
+    let ctx = setup(
+        "polluted_result_escaped",
+        r#", "env_vars": ["TCHAT_MCP_TOKEN_Q"]"#,
+    );
+    let entry = ctx.snapshot.entry("mcp__fx__echo").unwrap();
+    let (result, failed) = ctx.manager.call(
+        &entry,
+        serde_json::json!({"text": "x"}),
+        &AtomicBool::new(false),
+    );
+    assert!(failed, "转义敏感值必须被逐叶检查检出：{result}");
+    assert!(!result.contains(canary_escaped), "污染结果不入投影：{result}");
+    let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(v["isError"], true);
+    assert!(
+        v["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("MCP 客户端错误（敏感数据）"),
+        "标准客户端错误：{v}"
+    );
+    ctx.close();
+}
+
 #[test]
 fn a16_stderr_tail_is_sanitized_in_status() {
     let ctx = setup(

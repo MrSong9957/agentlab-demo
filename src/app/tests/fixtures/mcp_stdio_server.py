@@ -125,6 +125,11 @@ def main():
         elif s == "polluted_result":
             token = os.environ.get("TCHAT_MCP_TOKEN_A", "")
             call_result(w, req, [text_block(f"result with {token} inside")])
+        elif s == "polluted_result_escaped":
+            # A5/S35：敏感值含引号与反斜杠——序列化转义会掩盖原文包含关系，
+            # 逐叶检查（023 §5.1）必须仍能检出。
+            token = os.environ.get("TCHAT_MCP_TOKEN_Q", "")
+            call_result(w, req, [text_block(f"result with {token} inside")])
         elif s == "content_types":
             call_result(w, req, [
                 text_block("第一段"),

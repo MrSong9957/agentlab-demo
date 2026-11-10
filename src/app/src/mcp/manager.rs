@@ -27,7 +27,7 @@ use super::config::{load_mcp_file, McpServerConfig, McpTransport};
 use super::connection::{wait_cancel_flag, CallFailure, McpConnection};
 use super::naming::assign_model_names;
 use super::resources::{self, ResourceServerEntry};
-use super::secrets::{collect_sensitive_values, SensitiveValues};
+use super::secrets::{collect_sensitive_values, value_polluted, SensitiveValues};
 
 /// 每个用户轮冻结的 MCP 工具快照：定义＋原始身份映射＋连接句柄，
 /// 所有本轮模型请求和实际分派共用它（不可变）。023 起资源能力服务器
@@ -624,21 +624,28 @@ impl McpManager {
         let sensitive = &entry.sensitive;
         match result {
             Ok(rmcp::model::ServerResult::CallToolResult(result)) => {
-                let projected = call::project_result(&result);
-                if sensitive.contains_secret(&projected) {
-                    (
-                        call::client_error_json(
-                            "敏感数据",
-                            "调用结果包含凭证数据，已拒绝（已发调用的远端执行状态未知）",
-                        ),
-                        true,
-                    )
-                } else {
-                    let is_error = serde_json::from_str::<Value>(&projected)
-                        .ok()
-                        .and_then(|v| v.get("isError").and_then(Value::as_bool))
-                        .unwrap_or(false);
-                    (projected, is_error)
+                // 023 §5.1（与资源路径同一实现）：污染检查按投影前 Value 的
+                // 字符串叶子逐个进行——仅扫序列化串时，含引号／反斜杠的敏感
+                // 值被转义掩盖而漏报（A5：S35 回归锚
+                // a16_polluted_escaped_result_rejected_by_leaf_check）。
+                match call::project_result_value(&result) {
+                    Ok(value) => {
+                        if value_polluted(&value, sensitive) {
+                            (
+                                call::client_error_json(
+                                    "敏感数据",
+                                    "调用结果包含凭证数据，已拒绝（已发调用的远端执行状态未知）",
+                                ),
+                                true,
+                            )
+                        } else {
+                            let projected = call::value_to_tool_text(&value);
+                            let is_error =
+                                value.get("isError").and_then(Value::as_bool).unwrap_or(false);
+                            (projected, is_error)
+                        }
+                    }
+                    Err(e) => (call::client_error_json("协议", &e), true),
                 }
             }
             Ok(rmcp::model::ServerResult::InputRequiredResult(_)

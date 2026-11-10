@@ -6,6 +6,7 @@
 //! 会话／记忆、展示或普通日志之前检查；检测先于截断。
 //! 这不是任意第三方秘密识别器，也不扫描原有用户历史。
 
+use serde_json::Value;
 use std::collections::HashSet;
 
 /// 一次连接的固定敏感值集合（Arc 共享给快照与连接）。
@@ -47,6 +48,18 @@ impl SensitiveValues {
     /// 集合为空＝无敏感值（匿名、无显式环境引用的连接）。
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
+    }
+}
+
+/// 递归检查 JSON 值的全部字符串叶子（023 §5.1：逐字段检查原文，不能仅
+/// 扫序列化字符串——敏感值含引号／反斜杠时转义会掩盖原文包含关系；
+/// A5 起工具结果路径与资源路径共用本实现）。
+pub fn value_polluted(value: &Value, sensitive: &SensitiveValues) -> bool {
+    match value {
+        Value::String(s) => sensitive.contains_secret(s),
+        Value::Array(items) => items.iter().any(|v| value_polluted(v, sensitive)),
+        Value::Object(map) => map.values().any(|v| value_polluted(v, sensitive)),
+        _ => false,
     }
 }
 
