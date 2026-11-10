@@ -1417,12 +1417,11 @@ pub fn build_seccomp_filter() -> Vec<u8> {
     prog
 }
 
-/// 非 x86_64：031 的过滤器清单按 x86_64 编号固定，其他架构 fail-closed
-/// （返回 Err，031 拒绝启用——不产出无 arch 门或错误编号的过滤器）。
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-pub fn build_seccomp_filter() -> Option<Vec<u8>> {
-    None
-}
+// 非 x86_64：031 的过滤器清单按 x86_64 编号固定，其他架构由下方
+// `build_seccomp_fd` 恒 Err 承担 fail-closed（拒绝启用 031 模式，不产出
+// 无 arch 门或错误编号的过滤器）。曾在此放一个返回 `None` 的
+// build_seccomp_filter 桩：该 cfg 组合下无任何调用方，且文档声称
+// 「返回 Err」与实际不符——已删（简化清单 S6）。
 
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 fn build_seccomp_fd() -> std::io::Result<Option<SeccompFd>> {

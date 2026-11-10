@@ -890,38 +890,8 @@ pub fn run_user_turn_with_context(
     sources: &crate::context::ContextSources,
     procs: &ProcessManager,
 ) -> Result<String, String> {
-    run_user_turn_with_context_and_host(
-        history,
-        current_input,
-        sender,
-        notify,
-        cancel,
-        on_record,
-        mode,
-        sources,
-        procs,
-        None,
-        false,
-        None,
-    )
-}
-
-/// 018：原上下文入口保留无宿主行为；只在交互宿主传入问答接口。
-/// 019：`image_input`＝本轮模型图片能力快照（声明与执行分派共用，轮内固定）。
-pub fn run_user_turn_with_context_and_host(
-    history: &mut Vec<HistoryItem>,
-    current_input: &str,
-    sender: &mut dyn FnMut(&Value) -> Result<Value, String>,
-    notify: &mut dyn FnMut(TurnNotify),
-    cancel: Option<&std::sync::atomic::AtomicBool>,
-    on_record: &mut dyn FnMut(&[HistoryItem]),
-    mode: ToolMode<'_>,
-    sources: &crate::context::ContextSources,
-    procs: &ProcessManager,
-    input_host: Option<&mut crate::user_input::InputHost<'_>>,
-    image_input: bool,
-    user_images: Option<&crate::prompt::UserImagePayload>,
-) -> Result<String, String> {
+    // 原 `_and_host` 中间层已删（简化清单 S7）：无宿主/无图/无附件语义
+    // 直连 `_and_hosts`，行为不变。
     run_user_turn_with_context_and_hosts(
         history,
         current_input,
@@ -932,15 +902,14 @@ pub fn run_user_turn_with_context_and_host(
         mode,
         sources,
         procs,
-        input_host,
         None,
-        image_input,
-        user_images,
+        None,
+        false,
+        None,
     )
 }
 
-/// 018 阶段 B：TUI 用户轮同时传入同步与异步问答宿主（七工具）；
-/// CLI 仍走 [`run_user_turn_with_context_and_host`]（五工具，仅同步）。
+/// 018 阶段 B：TUI 用户轮同时传入同步与异步问答宿主（七工具）。
 /// 019：`image_input`＝本轮模型图片能力快照；MemoryMerge 内部轮不经本入口。
 /// 021 兼容入口：无消息能力、无运行中接续通道。
 pub fn run_user_turn_with_context_and_hosts(

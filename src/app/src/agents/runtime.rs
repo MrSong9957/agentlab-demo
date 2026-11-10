@@ -635,7 +635,6 @@ impl GroupRuntime {
             sender: (spawn_ctx.sender_factory)(),
             system: spawn_ctx.system.clone(),
             deadline: Instant::now() + Duration::from_secs(super::ASSIGNMENT_WALL_LIMIT_SECS),
-            wall_limit: Duration::from_secs(super::ASSIGNMENT_WALL_LIMIT_SECS),
             cancel,
         };
         self.live_children.fetch_add(1, Ordering::SeqCst);
@@ -937,7 +936,6 @@ impl GroupRuntime {
                     sender: (spawn_ctx.sender_factory)(),
                     system: spawn_ctx.system.clone(),
                     deadline: Instant::now() + Duration::from_secs(super::ASSIGNMENT_WALL_LIMIT_SECS),
-                    wall_limit: Duration::from_secs(super::ASSIGNMENT_WALL_LIMIT_SECS),
                     cancel,
                 };
                 self.live_children.fetch_add(1, Ordering::SeqCst);
@@ -1478,8 +1476,6 @@ struct ChildSpec {
     sender: Box<dyn ChildModelSender>,
     system: String,
     deadline: Instant,
-    #[allow(dead_code)]
-    wall_limit: Duration,
     cancel: Arc<AtomicBool>,
 }
 

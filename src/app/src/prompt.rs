@@ -756,16 +756,9 @@ pub fn build_turn_request(history: &[HistoryItem]) -> Value {
 /// developer→system 是经批准的协议适配，不宣称两角色语义等价。
 /// `None` 保持既有请求逐字节不变；上下文由 turn 按轮读取，本层不读文件。
 pub fn build_turn_request_with_memory(history: &[HistoryItem], memory_context: Option<&str>) -> Value {
-    build_turn_request_with_input_host(history, memory_context, false)
-}
-
-/// 018：只有具备回答宿主的用户轮声明第五项工具。
-pub fn build_turn_request_with_input_host(
-    history: &[HistoryItem],
-    memory_context: Option<&str>,
-    has_input_host: bool,
-) -> Value {
-    build_turn_request_with_async_host(history, memory_context, has_input_host, false, false, false)
+    // 原 `_with_input_host` 中间层已删（简化清单 S7）：无宿主能力＝
+    // has_input_host/async/send_message 全 false，语义不变。
+    build_turn_request_with_async_host(history, memory_context, false, false, false, false)
 }
 
 /// 018 阶段 B：同时具备同步与异步回答宿主的 TUI 用户轮声明七项工具
@@ -816,41 +809,8 @@ pub fn build_turn_request_with_tool_search(
     tool_search: Option<&Value>,
     mcp_tools: &[Value],
 ) -> Value {
-    build_turn_request_with_orchestration(
-        history,
-        memory_context,
-        has_input_host,
-        has_async_input_host,
-        image_input,
-        send_message,
-        context_query,
-        context_switch,
-        permissions,
-        tool_search,
-        mcp_tools,
-        false,
-    )
-}
-
-/// 034：`orchestration`＝模型目录双 opt-in 时追加 exec/wait 声明（条件原生
-/// 工具之后、tool_search/MCP 之前；关闭路径与既有入口逐字节一致）。
-/// 035：`agents`＝模型目录六名全配时追加六控制工具声明（编排之后、
-/// tool_search/MCP 之前；关闭路径与既有入口逐字节一致）。
-#[allow(clippy::too_many_arguments)]
-pub fn build_turn_request_with_orchestration(
-    history: &[HistoryItem],
-    memory_context: Option<&str>,
-    has_input_host: bool,
-    has_async_input_host: bool,
-    image_input: bool,
-    send_message: bool,
-    context_query: bool,
-    context_switch: bool,
-    permissions: bool,
-    tool_search: Option<&Value>,
-    mcp_tools: &[Value],
-    orchestration: bool,
-) -> Value {
+    // 原 `_with_orchestration` 中间层已删（简化清单 S7）：本入口无
+    // orchestration 参数（恒 false），直连终端组装面语义不变。
     build_turn_request_with_agents(
         history,
         memory_context,
@@ -863,7 +823,7 @@ pub fn build_turn_request_with_orchestration(
         permissions,
         tool_search,
         mcp_tools,
-        orchestration,
+        false,
         false,
     )
 }

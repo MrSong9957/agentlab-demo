@@ -100,40 +100,47 @@
 
 ### 删除
 
-### S1. agents 死常量与过时架构注释 `- [ ]`
+### S1. agents 死常量与过时架构注释 `- [x]`
 - 位置：`src/app/src/agents/mod.rs:75-76,88`（三个零引用常量）＋ `:6-10,74-76,87-88`（「有界通道/泵线程/终态通道」架构注释）。
 - 依据：常量零引用已 grep 核实；注释与 writer 互斥串行提交的实际机制不符，035 规格已登记「未引入独立泵线程」。
 - 改法：删除常量与注释段（`runtime.rs:6-11` 头注释已有正确版本）。
+- 处理（2026-11-10）：三常量（`EVENT_CHANNEL_CAPACITY`/`GROUP_CLOSEDOWN_BUDGET`/`GROUP_CLOSE_BUDGET`）连同其文档删除（grep 证据 `s1-grep.txt`：仅定义行，src/docs/specs/plans/.github 零引用）；架构段落失实句（「事件经有界通道交根调度泵线程顺序落盘」）改写为 writer 互斥串行提交的准确表述并指向 runtime.rs 头注释，段落其余属实现说明保留。
 
-### S2. agents 只写状态与死函数 `- [ ]`
+### S2. agents 只写状态与死函数 `- [x]`
 - 位置：`agents/runtime.rs:1469` `ChildSpec.wall_limit`（只写）、`agents/registry.rs:105,135` `GroupCore.seq`、`agents/mailbox.rs:28,65` `delivered`、`agents/events.rs:260-263` `event_value`（零调用）。
 - 依据：审查者全仓 grep（src＋tests）仅命中定义/写入。
 - 改法：逐个删除字段/函数及配套初始化、`#[allow]`、孤儿 import。
+- 处理（2026-11-10）：四组全删——wall_limit（字段＋`#[allow(dead_code)]`＋:638/:940 两处初始化）、GroupCore.seq（字段＋文档＋:135 初始化；其余 seq 命中均为 AgentEvent 自身真实字段）、Mailbox.delivered（字段＋drain 内自增；abandon 不涉它）、event_value（函数＋`#[allow(dead_code)]`＋文档）＋events.rs 的 `use serde_json::Value` 孤儿导入（删后 grep 仅剩导入行）。grep 证据 `s2-grep.txt`/`s2-grep2.txt`。
 
-### S3. memory/feedback 死分类族 `- [ ]`
+### S3. memory/feedback 死分类族 `- [x]`（保留＋注释分支）
 - 位置：`src/app/src/memory/feedback.rs:151-193` `MemoriesUsageKind`＋`as_tag`＋`memory_usage_kind_for_path`（含纯死计算 `version_marker` :175-179）。
 - 依据：grep 仅命中定义与自测（`feedback_tests.rs:118-145`）。模块头称其为 A28 语义锚。
 - 改法：删除（约 45 行产品＋30 行自测）；或经用户确认保留为语义锚并注明无消费方。同步删除对应测试段。
+- 处理（2026-11-10，判断依据）：**走「保留＋注释」分支，未删**。核实结果：①规格消费方存在——013 规格 M8「涉及模块」明确把「使用分类」列为交付面（`docs/specs/013-memory-system-v1.md:456`「上游 usage.rs 直接移植：…＋使用分类，A27/A28」）；②文档消费方存在——`docs/records/2026-10-19-013-m8-implementation.md` 两处记载移植与「A28 语义不依赖解析器」的登记；③A28 行为验收（仅工具打开不计数）由 `after_user_turn` 保证、不依赖本分类，且本地无遥测消费方。按清单「规格/文档消费方存在→保留、在注释注明无消费方」执行：模块头新增「消费方状态（2026-11-10 简化清单 S3 核实）」段——生产零调用（唯一使用＝自测）、保留为 013 M8 上游移植语义锚。`version_marker` 死计算随函数保留（注释自述「归一语义保留与上游一致」，删之反而偏离上游锚面）。
 
-### S4. memory/store 死方法 `- [ ]`
+### S4. memory/store 死方法 `- [x]`
 - 位置：`src/app/src/memory/store.rs:601-604` `enqueue_global_consolidation` pub 方法零调用（实际只走 `_tx`/`_on`）。
 - 依据：grep 排除 `_on`/`_tx` 仅命中定义与文档注释。上游移植残留。
 - 改法：删除该 pub 方法，保留 `_on`/`_tx`。
+- 处理（2026-11-10）：删除（grep 证据 `s3-s7-grep.txt`：调用仅 ：477/:528 的 `_tx` 变体与 ：603 内部 `_on`；docs 命中均为 m1/m5 实施记录的历史过程叙述，描述 SQL 语义而非该 Rust 方法，非消费方）。
 
-### S5. mcp 死 impl `- [ ]`
+### S5. mcp 死 impl `- [x]`
 - 位置：`src/app/src/mcp/manager.rs:1029-1035` `From<NameAssignError> for String`＋散落 import。
 - 依据：已核实三处调用（`unwrap_or_default`、显式 `match`、测试）均不经它，无 `?`/`into()` 消费点。
 - 改法：删除 impl 与 import。
+- 处理（2026-11-10）：删除（复审 grep `s3-s7-grep.txt`：NameAssignError 命中＝naming.rs 定义/返回类型、mcp_l1.rs 测试直接 `matches!` 变体、manager.rs 仅本 impl——无 `?`/`into()` 消费点）。
 
-### S6. sandbox seccomp 死桩 `- [ ]`
+### S6. sandbox seccomp 死桩 `- [x]`
 - 位置：`src/app/src/sandbox.rs:1420-1425` 非 x86_64 `build_seccomp_filter() -> Option<Vec<u8>> { None }`。
 - 依据：主会话已核实——该 cfg 组合下唯一潜在调用方 `build_seccomp_fd` 恒返回 Err 不调它；x86_64 版被 `build_seccomp_fd` 调用（保留）。桩的文档「返回 Err」与实际 `None` 矛盾。
 - 改法：删除桩；非 x86_64 fail-closed 由 `build_seccomp_fd` 恒 Err 承担。落地时以非 x86_64 目标编译确认（mingw 交叉 check 或 CI）。
+- 处理（2026-11-10）：删除桩，原位留一段注释说明 fail-closed 由 `build_seccomp_fd` 恒 Err 承担＋删除缘由。**未编译验证该 cfg**（本机 rustup 此前联网装组件失败，无 aarch64 target）——静态核实依据：桩的 cfg 为 `not(all(linux, x86_64))`，该组合下全部引用点（tests.rs:831/848 两测试 x86_64 门控、`build_seccomp_fd` 非 x86_64 变体恒 Err 不调用）均不触达；x86_64 构建不受影响（cfg 互斥）。待 038 CI 的 Windows/macOS 腿或交叉 check 首跑时顺带验证。
 
-### S7. prompt/turn 死转发层 `- [ ]`
+### S7. prompt/turn 死转发层 `- [x]`
 - 位置：`src/app/src/prompt.rs:763` `build_turn_request_with_input_host`、`:840` `build_turn_request_with_orchestration`（零外部调用者，链内纯透传）；`src/app/src/turn.rs:909-940` `run_user_turn_with_context_and_host`（唯一调用方是 `run_user_turn_with_context`，文档「CLI 仍走此入口」已失实）。
 - 依据：grep 含 `src/app/tests` 零命中（包装链内部除外）；生产入口 `main.rs:1115`、`tui_host.rs:781` 走 `_and_caps`。
 - 改法：删除三个函数；`_with_tool_search` 尾调用改直连 `_with_agents(...)`；`run_user_turn_with_context` 直调 `..._and_hosts(..., None, None, false, None)`。过时的入口文档句随删。
+- 处理（2026-11-10）：三个函数删除；`_with_memory` 尾调用改 `_with_async_host(..., false, false, false, false)`、`_with_tool_search` 尾调用直连 `_with_agents(..., false, false)`（原经 `_with_orchestration(..., false)` 恒等）；`run_user_turn_with_context` 直调 `_and_hosts(..., None, None, false, None)`——各改接点的实参组合与原透传逐值一致（组装结果逐字节不变，由 prompt_assembly/native_model_apis 既有「关闭路径逐字节一致」测试锚定）。失实文档「CLI 仍走 run_user_turn_with_context_and_host（五工具，仅同步）」删除；`_and_hosts` 文档保留 018/019/021 规格 行（属实）。grep 证据 `s3-s7-grep.txt`。
 
 ### S8. 与代码事实相反的注释（约 25 条，最高价值注释组）`- [ ]`
 - 代表位置：`js_orchestration/runtime.rs:7-11`（A7 定案后处理）；`tui_host.rs:6-9`（「API 非流式」失实、Ctrl+C 语义已改 Esc）；`apply_patch.rs:192-193,236-237,416-418`；`main.rs:682-683`（「关闭旧组」无对应代码，实际机制在 `turn.rs:1437/1941`＋`agents/runtime.rs:235-243`）；`proc_session.rs:1794-1796,1831`；`sandbox.rs:475-478`；`session.rs:1543-1545,1643`；`memory/rollout_input.rs:8-10,151-152`；`memory/workspace.rs:193-195`；`memory/phase2.rs:13-15`；`memory/storage_files.rs:56`；`mcp/transport.rs:304-316`、`connection.rs:280-283`（MCP 取消/回收机制描述失实，A 组无对应行为项，删除并登记「MCP 取消不放行」为开放工作）。

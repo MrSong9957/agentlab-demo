@@ -1,0 +1,7 @@
+# S1 常量零引用核实（2026-11-10）
+## EVENT_CHANNEL_CAPACITY
+src/app/src/agents/mod.rs:88:pub const EVENT_CHANNEL_CAPACITY: usize = 256;
+## GROUP_CLOSEDOWN_BUDGET
+src/app/src/agents/mod.rs:75:pub const GROUP_CLOSEDOWN_BUDGET: usize = 256 * 1024;
+## GROUP_CLOSE_BUDGET
+src/app/src/agents/mod.rs:76:pub const GROUP_CLOSE_BUDGET: usize = 64 * 1024;

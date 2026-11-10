@@ -1033,14 +1033,6 @@ fn sanitize_diagnostic(text: &str, sensitive: &SensitiveValues) -> Option<String
     }
 }
 
-use super::naming::NameAssignError;
-
-impl From<NameAssignError> for String {
-    fn from(e: NameAssignError) -> String {
-        e.to_string()
-    }
-}
-
 #[cfg(test)]
 mod ts30_access_tests {
     use super::*;

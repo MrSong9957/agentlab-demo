@@ -597,12 +597,6 @@ WHERE kind = ?4 AND job_key = ?5
         Ok(updated)
     }
 
-    /// 入队/推进全局合并输入水位（上游 `enqueue_global_consolidation`）。
-    pub fn enqueue_global_consolidation(&self, input_watermark: i64) -> Result<(), String> {
-        let conn = self.lock_conn()?;
-        enqueue_global_consolidation_on(&conn, input_watermark)
-    }
-
     /// 领取全局合并任务（上游 `try_claim_global_phase2_job`，SQL 逐字移植）。
     pub fn try_claim_global_phase2_job(
         &self,

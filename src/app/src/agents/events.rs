@@ -8,7 +8,6 @@
 //! 序号只在提交成功后占用（034 审查 P1-3：保存失败不留空洞）。
 
 use crate::prompt::{AgentEventKind, AgentEventPayload, AgentReport, HistoryItem};
-use serde_json::Value;
 
 /// 构造一条 Agent 事件（不落盘；由 sink 提交成功后才算发生）。
 #[allow(clippy::too_many_arguments)]
@@ -254,12 +253,6 @@ pub fn event_display_line(item: &HistoryItem) -> Option<String> {
         },
         AgentEventKind::GroupClosed => format!("[Agent g{group_id}] 组已关闭"),
     })
-}
-
-/// 调试/测试辅助：事件 → JSON 值。
-#[allow(dead_code)]
-pub(crate) fn event_value(item: &HistoryItem) -> Value {
-    serde_json::to_value(item).unwrap_or(Value::Null)
 }
 
 #[cfg(test)]
