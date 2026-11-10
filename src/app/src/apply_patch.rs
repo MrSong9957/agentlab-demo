@@ -1714,9 +1714,11 @@ fn apply_move(
     let verify = match open_source_nofollow(&src) {
         Ok(Some(f)) => f,
         Ok(None) => {
-            return Err(Failure::mutating(
-                "删除前复核移动源失败：源是符号链接（含悬空），拒绝移动".into(),
-            ));
+            // 029 §1.4-5：变更阶段失败错误须含源、目标绝对路径与失败阶段
+            // （A3：此前本臂缺双路径——S34 回归锚
+            // move_symlink_swap_error_contains_both_paths）。
+            let reason = "源是符号链接（含悬空），拒绝移动";
+            return Err(Failure::mutating(both("删除前复核移动源失败", &reason)));
         }
         Err(e) => return Err(Failure::mutating(both("删除前复核移动源失败", &e))),
     };
@@ -2711,6 +2713,51 @@ mod tests {
             std::fs::read_to_string(&moved_away).unwrap(),
             "ORIGINAL\n",
             "被挪走的原文件保留（用户重读后决定下一步）"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// S34（A3 回归锚，029 §1.4-5）：变更阶段失败的错误必须含源、目标的
+    /// 可确定绝对路径和失败阶段。删除前复核发现源被替换为末端符号链接时，
+    /// 错误此前不含任何路径。before_unlink 屏障给出确定性替换时点。
+    #[test]
+    #[cfg(unix)]
+    fn move_symlink_swap_error_contains_both_paths() {
+        if move_seam_child_mode() {
+            unreachable!("子进程已在 move_seam_child_mode 内退出");
+        }
+        let dir = std::env::temp_dir().join(format!("tchat-movesym-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.txt");
+        let dst = dir.join("dst.txt");
+        std::fs::write(&src, "ORIGINAL\n").unwrap();
+        write_move_patch(&dir, &src, &dst);
+        let mut child = spawn_move_seam_child(
+            "apply_patch::tests::move_symlink_swap_error_contains_both_paths",
+            &dir,
+        );
+        release_move_barrier(&dir, "before_read");
+        release_move_barrier(&dir, "before_create");
+        wait_move_barrier(&dir, "before_unlink", &mut child);
+        // 确定性删源前时点：源替换为悬空末端符号链接——O_NOFOLLOW 复核必须拒绝
+        std::fs::rename(&src, &dir.join("moved-away.txt")).unwrap();
+        std::os::unix::fs::symlink(&dir.join("no-such-target"), &src).unwrap();
+        release_move_barrier(&dir, "before_unlink");
+        let r = collect_move_child(&dir, child);
+        assert_eq!(r["ok"], json!(false), "源被换成符号链接必须失败：{r}");
+        assert_eq!(r["state_known"], json!(false), "复核拒绝＝变更阶段失败：{r}");
+        let err = r["error"].as_str().unwrap();
+        assert!(
+            err.contains(&src.display().to_string()) && err.contains(&dst.display().to_string()),
+            "029 §1.4-5：错误须含源与目标两个绝对路径：{err}"
+        );
+        assert!(err.contains("删除前复核"), "错误须标明失败阶段：{err}");
+        // 磁盘事实：目标已完整写入并保留（不回滚）；替换对象不得被删
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "ORIGINAL\n", "目标保留");
+        assert!(
+            std::fs::symlink_metadata(&src).unwrap().file_type().is_symlink(),
+            "替换的符号链接不得被删除"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

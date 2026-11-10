@@ -30,11 +30,12 @@
 - 改法：预算判定完成后先 drop `core` 守卫再调 `rollback_followup`（或把回滚逻辑改为在已有锁内执行的辅助）。补一条「预算满＋followup」回归用例。
 - 处理：2026-11-10 采纳「判定后释锁再回滚」方案（`message_fits` 局部变量＋块外回滚，判定语义与错误路径不变）。新增回归测试 `a2_followup_budget_full_returns_error_not_deadlock`（tests/multi_agent.rs，直驱＋90s 看门狗，4 接收者×16×16 KiB 恰填满 1 MiB 组字节预算）：先红（followup >90s 无返回、死锁线程持有已预留子槽「60s 未排空」）后绿（0.19s 返回 BUDGET_LIMIT）。证据见 `docs/logs/2026-11-10-simplify-a1a2-s33/`（a2-red.log、a2-green.log）。
 
-### A3. apply_patch Move 错误缺双路径 `- [ ]`
+### A3. apply_patch Move 错误缺双路径 `- [x]`
 - 位置：`src/app/src/apply_patch.rs:1717-1719`（变更阶段失败无路径）；另 `:1637-1646`、`:1669-1671` 等只带源路径；多处手写 `format!` 未走 `ctx`/`both`。
 - 问题：违反规格 029 §1.4 第 5 条（错误含源、目标两个绝对路径）。`apply_patch.rs:1594-1595` 注释声称「全部出错点经 ctx/both 构造」与事实相反。
 - 依据：审查者逐出错点核对＋主会话抽查 `:1717-1719` 确认（「删除前复核移动源失败：源是符号链接（含悬空），拒绝移动」无路径）。
 - 改法：先加失败用例（before_unlink 屏障换源为符号链接，断言错误同时含两个绝对路径，今天失败）→ `:1718` 等改用 `ctx(...)` → 测试通过后删注释。
+- 处理：2026-11-10 逐处核实后确认 **§1.4-5（变更阶段）违规仅 ：1717-1719 `Ok(None)` 臂一处**——其余 mutating 出错点（创建父目录/创建目标/写入目标/复核 Err/换对象/删源）已走 `both(...)` 或含双路径内联；审查提到的读取阶段三处（:1637-1649 超尺寸/短读）属 `Failure::validation`＝§1.4-2 域（变更未开始），按「只修 §1.4-5」不扩大。修复＝该臂改走 `both("删除前复核移动源失败", &reason)`（与其余 mutating 出错点同一实现点；:1594-1595 注释由此恢复属实，保留未删）。证据：S34 先红（错误无路径）后绿（含源/目标＋阶段）；回归 lib apply_patch 38/0、集成 55/0、沙箱 10/0。见 `docs/logs/2026-11-10-simplify-a3-s34/`。
 
 ### A4. apply_patch `lexical_normalize` 丢弃 Windows 盘符 `- [ ]`
 - 位置：`src/app/src/apply_patch.rs:1783`（`Prefix(_) => {}`）vs `src/app/src/sandbox.rs:2306-2326` `absolute_lexical`（明文保留盘符，文档要求「禁止两处定义分叉」）。
@@ -248,8 +249,9 @@
 - 断言：`event_bytes_committed == Σ 已提交事件 event_bytes`。**今天失败**（A1）。A1 修复后此测试转绿，随后删除 `agents/runtime.rs:1743`「审查 N2」矛盾注释。
 - 处理：2026-11-10 落地为 `tests/multi_agent.rs::s33_group_event_billing_charged_exactly_once`（直驱 `execute_control_tool`：spawn→子带工具调用响应→wait→close；断言 Σ已提交非 delivered 事件==计数器，覆盖响应记录与工具结果记录两个双计费点）。配套在 `GroupRuntime` 新增观察面 `event_bytes_committed()`（不改计费行为）。注意：纯文本终文不经 child_record（终文门 Complete 分支直接返回），子脚本必须含工具调用响应才能踩中 A1。先红（1390 vs 2024）后绿；「审查 N2」注释已随 A1 改写为指向本回归锚，未删（现内容属实）。证据见 `docs/logs/2026-11-10-simplify-a1a2-s33/`。
 
-### S34. apply_patch Move 错误双路径 `- [ ]`
+### S34. apply_patch Move 错误双路径 `- [x]`
 - 用例：before_unlink 屏障换源为符号链接，断言错误同时含两个绝对路径。**今天失败**（A3）。修复后删 `apply_patch.rs:1594-1595` 注释。
+- 处理：2026-11-10 落地为 `apply_patch::tests::move_symlink_swap_error_contains_both_paths`（仿 `move_source_swap_detected_before_unlink` 的接缝子进程机制；替换对象＝悬空末端符号链接，另断言 state_known=false、错误含「删除前复核」阶段、目标保留不回滚、替换对象不被删）。先红（错误为「…源是符号链接（含悬空），拒绝移动」无任何路径）后绿。`apply_patch.rs:1594-1595` 注释经 A3 修复后内容恢复属实，按其现状保留（未删）。证据见 `docs/logs/2026-11-10-simplify-a3-s34/`。
 
 ### S35. MCP 污染与重复键 `- [ ]`
 - 两例：含 `"`/`\` 敏感值的工具结果被整份替换为客户端错误（**预计今天失败**，A5）；`env_http_headers` 头名完全相同的重复键被拒绝（**今天失败**，A6）。修复后分别删 `call.rs:8-9`、`config.rs:128-129` 注释。
