@@ -353,6 +353,15 @@ impl GroupRuntime {
         q.drain(..).collect()
     }
 
+    /// 组事件计费累计观察面（035 §1.6「提交后按真实大小计费」——预算
+    /// 回归锚与诊断读取；不改任何计费行为）。
+    pub fn event_bytes_committed(&self) -> u64 {
+        self.core
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .event_bytes_committed
+    }
+
     /// 待转发宿主通知。
     pub fn take_notices(&self) -> Vec<String> {
         std::mem::take(&mut *self.notices.lock().unwrap_or_else(|e| e.into_inner()))
@@ -869,13 +878,16 @@ impl GroupRuntime {
                         format!("全应用子执行槽已满（{MAX_CHILD_SLOTS}），followup 拒绝"),
                     ));
                 }
-                {
+                // 预算判定后即释锁再回滚（A2：rollback_followup 会再锁 core，
+                // 持锁调用＝std Mutex 重入死锁；判定本身不依赖持锁跨回滚）。
+                let message_fits = {
                     let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
-                    if !core.group_message_room(args.message.as_bytes().len()) {
-                        self.rollback_followup(&name, assignment_id, prev_state, &prev_task);
-                        GLOBAL_CHILD_SLOTS.fetch_sub(1, Ordering::SeqCst);
-                        return Err(("BUDGET_LIMIT", "组累计消息预算已满".into()));
-                    }
+                    core.group_message_room(args.message.as_bytes().len())
+                };
+                if !message_fits {
+                    self.rollback_followup(&name, assignment_id, prev_state, &prev_task);
+                    GLOBAL_CHILD_SLOTS.fetch_sub(1, Ordering::SeqCst);
+                    return Err(("BUDGET_LIMIT", "组累计消息预算已满".into()));
                 }
                 let started = self.commit_root_event(
                     history,
@@ -1740,10 +1752,11 @@ fn child_loop(
             },
         ) {
             Ok(event) => {
-                // 响应预留按真实记录大小计费（审查 N2：不再以 0 冲销）。
+                // 响应预留按真实记录大小计费（审查 N2：不再以 0 冲销）——
+                // 计费即本行 release；不得再 account_event（A1：曾双计费，
+                // S33 回归锚 s33_group_event_billing_charged_exactly_once）。
                 let size = event_bytes(&event);
                 runtime.child_release_reserve(reserved, Some(size));
-                runtime.account_event(&event);
             }
             Err(e) => {
                 runtime.child_release_reserve(reserved, None); // 失败释放未用预留
@@ -1820,9 +1833,9 @@ fn child_loop(
             );
             match committed {
                 Ok(event) => {
+                    // 计费即本行 release（同响应记录路径；A1 双计费修复）。
                     let size = event_bytes(&event);
                     runtime.child_release_reserve(call_reserved, Some(size));
-                    runtime.account_event(&event);
                 }
                 Err(_) => {
                     runtime.child_release_reserve(call_reserved, None);
