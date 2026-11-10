@@ -56,6 +56,7 @@
 - 依据：主会话已核实解析结构（server 层 visitor 拒重，Value 层不拒）。
 - 改法：先在 `tests/mcp_config.rs` `a02_duplicate_json_keys_rejected_at_every_level` 加「头名完全相同」断言（今天失败）→ `env_http_headers` 层改用拒绝重复键的 visitor → 通过后删注释。
 - 处理：2026-11-10 修复——`RawServerFields` 增 `env_http_headers: Option<RawHeaderField>`；ServerVisitor 对该键特判，值经 `RawHeaderField`（`deserialize_any`：`visit_map` 在原始条目流上逐键收集并拒绝重复键，错误文案沿用既有「重复配置字段：{key}」；标量/序列/单元降级 `NotObject`）；`parse_http` 增参接收，`NotObject` 按既有文案报「env_http_headers 必须是对象」，对象条目沿用原有校验逐字不变（头名非法/保留头/大小写重复/值非字符串/空白）。config.rs:128-129 注释修复后内容属实（各层确已手动迭代），保留未删（与 S35 原文「删注释」偏差已说明）。先红（解析成功且 `env_http_headers: [("X-A","V2")]` 后值覆盖）后绿（「重复配置字段」拒绝）。**同类缺口：stdio `env_vars` 为数组（无对象内层键），不受影响；其余 Value 值字段无内层对象键。**证据见 `docs/logs/2026-11-10-simplify-a5a6-s35/`。
+- 处理（审查轮，2026-11-10）：独立审查（rules/REVIEW.md 新上下文）发现阻塞 P1——`env_http_headers` 移出 entries 后，stdio 跨传输混用检查 `get(field)` 查不到该字段，`command` 服务器携带头配置被静默接受并忽略（认证头丢失不可见，违反 022 §2.1 HTTP 专用与 A02「跨传输混用拒绝」）；另非阻塞 P2——非空数组经 visit_seq 未消费元素，serde_json 在解析层报 trailing characters 而非下游「必须是对象」（fail-closed 保持但文案不指明字段）。修复：①跨传输检查对 `env_http_headers` 改查特判字段 `raw.env_http_headers.is_some()`（错误文案不变）；②`visit_seq` 排空全部元素（IgnoredAny）再降级。回归锚：`a02_cross_transport_fields_rejected` 追加 command＋env_http_headers 用例、`a02_wrong_types_rejected` 追加非空数组用例——先红（stdio 配置解析成功／trailing characters）后绿。mcp 八套件串行重验全绿（config 17、http 15、stdio 36、turn 26、l1 14、resources 37、stdio_sandbox 2、lib 4）。证据 `review-red.log`、`review-green-*.log`。
 
 ### A7. JS 编排通道无界 `- [ ]`
 - 位置：`src/app/src/js_orchestration/runtime.rs:527`（`mpsc::channel` 无界）vs 模块头 `:7-11`（「有界事件通道」「worker 写 stdout 阻塞形成天然背压」）。
@@ -258,6 +259,7 @@
 ### S35. MCP 污染与重复键 `- [x]`
 - 两例：含 `"`/`\` 敏感值的工具结果被整份替换为客户端错误（**预计今天失败**，A5）；`env_http_headers` 头名完全相同的重复键被拒绝（**今天失败**，A6）。修复后分别删 `call.rs:8-9`、`config.rs:128-129` 注释。
 - 处理：2026-11-10 落地两例——①`tests/mcp_stdio.rs::a16_polluted_escaped_result_rejected_by_leaf_check`（夹具新增 `polluted_result_escaped` 场景回显 `TCHAT_MCP_TOKEN_Q`＝`canary"q\tail`，断言 failed＋标准客户端错误＋canary 不入投影）；②`tests/mcp_config.rs::a02_duplicate_json_keys_rejected_at_every_level` 追加第三段断言（url＋`env_http_headers` 对象内完全同名的重复头）。先红（转义值漏报直通；`[("X-A","V2")]` 静默覆盖）后绿。两条注释（call.rs:8-9、config.rs:128-129）修复后内容属实，保留未删——偏差与理由见 A5/A6 处理记录。证据见 `docs/logs/2026-11-10-simplify-a5a6-s35/`（红绿×4＋8 套件回归日志）。
+- 处理（审查轮，2026-11-10）：独立审查确认 A5 逐叶覆盖与等价性成立（含 is_error 直取与 to_value 失败路径逐字一致）；两条保留注释经代码事实核实成立。**口径内残差登记**（审查 P3，非阻塞）：逐叶检查不再命中「敏感值横跨叶子边界/恰为键名」的巧合结构（旧整串扫描可命中，多为假阳性过拒；023 §5.1.4 已裁定的逐字段口径即逐叶，资源路径同性质已接受）——如需补齐可叠加原序列化串兜底检查（并集），是否采纳由用户决定。`resources.rs:379-381` 对 `_meta` 的串扫经核实均有投影层逐叶兜底，无实际缺口（审查者核实）。
 
 ### S36. 审查标签规则补锚（7 条）`- [ ]`
 - JS seq 连续无空洞（P1-3，`tests/js_orchestration.rs:1179` 附近）；二次 observe 不再截断（P2-8）；followup 满槽保状态文案（N3）；`proc_session.rs:142-143` reap_failed 清除时机；`sandbox.rs:891-892` 成对断言在组装层强制。通过后删除对应标签注释。

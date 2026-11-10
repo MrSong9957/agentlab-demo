@@ -257,8 +257,13 @@ impl<'de> serde::Deserialize<'de> for RawHeaderField {
             }
             fn visit_seq<A: serde::de::SeqAccess<'de>>(
                 self,
-                _: A,
+                mut seq: A,
             ) -> Result<Self::Value, A::Error> {
+                // 排空全部元素再降级（审查 P2）：serde_json 的
+                // deserialize_any 在 visit_seq 返回后校验 end_seq，残留
+                // 元素会在解析层以 trailing characters 失败而非到下游
+                // 「env_http_headers 必须是对象」。
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
                 Ok(RawHeaderField::NotObject)
             }
         }
@@ -418,7 +423,15 @@ fn parse_server(id: &str, raw: RawServerFields) -> Result<McpServerConfig, McpCo
         McpTransport::Http(_) => &["args", "cwd", "env_vars"],
     };
     for field in foreign_fields {
-        if get(field).is_some() {
+        // A6 起 env_http_headers 由 visitor 特判层携带（不在 entries）——
+        // 跨传输混用检查改查特判字段，stdio 携带仍必须拒绝（审查 P1：
+        // 此前该字段被静默忽略＝认证头配置丢失不可见）。
+        let present = if *field == "env_http_headers" {
+            raw.env_http_headers.is_some()
+        } else {
+            get(field).is_some()
+        };
+        if present {
             return Err(err(format!(
                 "服务器 {id}：{field} 与所选传输不匹配（跨传输字段混用）"
             )));
