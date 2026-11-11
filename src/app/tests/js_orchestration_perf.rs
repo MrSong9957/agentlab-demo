@@ -16,23 +16,28 @@ use terminal_chat::js_orchestration::runtime::{
 };
 use terminal_chat::prompt::{HistoryItem, ToolDisplay};
 
-/// 冻结阈值（采样基线 × 2–3 余量；见 docs/logs/034-javascript-tool-orchestration/
-/// 2026-10-29-perf-freeze.md）。
+/// 冻结阈值（2026-11-11 环境漂移重新冻结：本轮实测 p95 中位 ×约 20；见
+/// docs/logs/2026-11-11-c18-refreeze/ 与 docs/logs/034-javascript-tool-orchestration/
+/// 2026-10-29-perf-freeze.md 末修订段）。门禁目的为防回归（数量级劣化），
+/// 非绝对性能承诺。机器或构建变化须重新采样冻结。
 mod frozen {
-    /// 冻结基线（2026-10-29 两轮实测，容器 debug 构建）：轻载采样
-    /// （JS34_PERF_SAMPLE=1 首轮）中位 p95 为冷启动 13.4ms / 1 叶 13.8ms /
-    /// 4 并发 11.8ms / yield→wait 14.1ms / 终止 6.3ms / 追加 249µs；持续
-    /// 运行（每场景 100×3 次 spawn，容器 CPU 配额下）p95 抬升至 100–190ms
-    /// 区间（系统性、可复现，非离群）。阈值按持续运行实测 ×1.5–2 冻结——
-    /// 门禁目的为防回归（数量级劣化），非绝对性能承诺。机器或构建变化须
-    /// 重新采样冻结（见 2026-10-29-perf-freeze.md）。
-    pub const COLD_JS_P95_US: u128 = 300_000;
-    pub const LEAF1_P95_US: u128 = 250_000;
-    pub const LEAF4_P95_US: u128 = 250_000;
-    pub const LEAF31_P95_US: u128 = 700_000;
-    pub const YIELD_WAIT_P95_US: u128 = 400_000;
-    pub const TERMINATE_P95_US: u128 = 30_000;
-    pub const APPEND_100K_P95_US: u128 = 2_000;
+    /// 重冻结基线（2026-11-11 全量 SAMPLE 采样，容器 debug 构建，rustc/cargo
+    /// 1.99.1，16 CPU、cgroup 无 CPU 配额）：三轮 p95 中位为冷启动 336.9ms /
+    /// 1 叶 338.0ms / 4 并发 337.3ms / 31 叶 337.7ms / yield→wait 335.7ms /
+    /// 终止 241.8ms / 追加 202µs / worker RSS 2,180 KiB；三轮 p95 离散度
+    /// ≤8%，无噪声冻结。时序用例统一收敛 ~336ms（每 spawn 固定开销主导，
+    /// 轻载/持续口径在本环境收敛）。前值（2026-10-29，rustc 1.99.0、CPU
+    /// 配额环境）轻载 13.4–14.1ms——环境系统性漂移 ~24 倍；同机干净树对照
+    /// 失败集合一致＝非代码劣化（见 docs/logs/2026-11-10-simplify-a7/
+    /// implementation.md §验证）。
+    pub const COLD_JS_P95_US: u128 = 7_000_000; // 336.9ms ×20.8
+    pub const LEAF1_P95_US: u128 = 7_000_000; // 338.0ms ×20.7
+    pub const LEAF4_P95_US: u128 = 7_000_000; // 337.3ms ×20.8
+    pub const LEAF31_P95_US: u128 = 7_000_000; // 337.7ms ×20.7
+    pub const YIELD_WAIT_P95_US: u128 = 7_000_000; // 335.7ms ×20.9
+    pub const TERMINATE_P95_US: u128 = 5_000_000; // 241.8ms ×20.7
+    pub const APPEND_100K_P95_US: u128 = 4_000; // 202µs ×19.8
+    /// 非 时序阈值（资源门禁）：实测 2,180 KiB，余量 13.8×，维持原值。
     pub const WORKER_RSS_KB: u64 = 30_000;
 }
 
