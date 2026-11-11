@@ -94,6 +94,13 @@
 - 依据：审查者读代码发现，未运行核实。
 - 改法：运行核实（`cargo test project_history_items` 列出实际执行的用例）；若确认，恢复 `#[test]` 标注并跑通过。
 
+### A13. resources `_meta` 污染检查扫序列化串（双层防御一致性，无实际漏报）`- [x]`
+- 位置：`src/app/src/mcp/resources.rs` `meta_polluted`（`serde_json::to_value(meta)` 后 `contains_secret(&value.to_string())`）。
+- 立项假设（2026-11-10，S8 轮新发现）：敏感值含引号/反斜杠时序列化转义掩盖，items 级漏检（A5 同类）。
+- 实证修正（2026-11-11）：**无实际漏报**——读路径下游 `finish_success`（:253）与汇总路径（:597）均对完整投影做 `value_polluted` 逐叶检查，转义敏感值的 `_meta` 仍被整份拒绝（双层防御成立）。探针测试实跑绿：`tests/mcp_resources.rs::m2_and_a13_polluted_results_and_escaped_meta_rejected`（夹具场景 `polluted_meta_escaped`，canary 含引号/反斜杠），兼作双层防御回归锚。证据：`docs/logs/2026-11-10-simplify-a13/a13-probe.log`。
+- 待用户定案：是否仍把 `meta_polluted` 改为 `value_polluted` 逐叶（纵深防御一致性＋提前失败，可观察行为无差异）；不改则现状双层已安全。来源＝S8 轮新发现。
+- 处置（2026-11-11，用户批准口径）：实证无实际漏报（双层防御：items 级串扫＋下游 `finish_success`（:253）/汇总（:597）逐叶兜底）；探针 c3b 落地为回归锚（`m2_and_a13_polluted_results_and_escaped_meta_rejected`＋夹具场景 `polluted_meta_escaped`）；`meta_polluted` 改逐叶属纵深防御增强已登记、不排期；存疑计数对齐（6→10）随本提交。无源码修复。
+
 ---
 
 ## S. 简化清单（37 条，编号连续：1–10 删除、11–32 重构、33–37 编码为测试）
@@ -146,7 +153,7 @@
 - 代表位置：`js_orchestration/runtime.rs:7-11`（A7 定案后处理）；`tui_host.rs:6-9`（「API 非流式」失实、Ctrl+C 语义已改 Esc）；`apply_patch.rs:192-193,236-237,416-418`；`main.rs:682-683`（「关闭旧组」无对应代码，实际机制在 `turn.rs:1437/1941`＋`agents/runtime.rs:235-243`）；`proc_session.rs:1794-1796,1831`；`sandbox.rs:475-478`；`session.rs:1543-1545,1643`；`memory/rollout_input.rs:8-10,151-152`；`memory/workspace.rs:193-195`；`memory/phase2.rs:13-15`；`memory/storage_files.rs:56`；`mcp/transport.rs:304-316`、`connection.rs:280-283`（MCP 取消/回收机制描述失实，A 组无对应行为项，删除并登记「MCP 取消不放行」为开放工作）。
 - 依据：各审查者逐条对照代码与 git blame。
 - 改法：删除失实注释；其中描述今天仍成立约束的片段保留或移至正确位置。**待行为定案的（A7/A8/MCP 取消）随对应缺陷项一并处理，不先删。**
-- 处理（2026-11-10，独立子代理执行）：38 条核实——35 条修正（其中第 2/7/16/27/29/30/31/36 条按「保留属实片段、如实改写」处理而非整段删除，理由与摘录见 docs/logs/2026-11-10-simplify-s8/report.md）；1 条核实属实不改（sandbox.rs:13-14 模块头）；1 条跳过（resources.rs:377-383「逐值检查」实扫序列化串——新发现 A5 同类缺陷嫌疑，注释与代码均未动待用户决定）；第 38 条五处经核实属实保留。相邻同因修正 2 处（apply_patch.rs:174-175、prompt.rs:911-912）。两处暂缓：js_orchestration/runtime.rs:7-11（待 A7 定案）、A4/S27 词法归一化区域注释未动。代码缺陷嫌疑跳过 6 处待用户判断：resources.rs:377-383（_meta 扫序列化串）、permissions.rs:719-722（UNC 三反斜杠）、context.rs:262-266（Windows raw_errno 同体矛盾）、proc_session.rs:2215-2216（WAIT_FAILED catch-all）、proc_session.rs:2385-2409（reader_eof 不累加）、session.rs:285-286（截断片段无上限检查）。审查代理另登记存疑 6 项（deny 路径非 NotFound 静默跳过、MCP 取消后分离任务仍放行、命名失败错误被吞、HTTP 适配器三处未登记差异、013 规格 :121 免剥离结论过时、catalog.rs:106 文档挂错位置属 S9）——详见 report.md 第 3/5 节。验证：cargo check --tests 0 错误、警告 605=基线零新增、lib 单线程 307/0、diff 非注释行零变化断言通过。证据：docs/logs/2026-11-10-simplify-s8/
+- 处理（2026-11-10，独立子代理执行）：38 条核实——35 条修正（其中第 2/7/16/27/29/30/31/36 条按「保留属实片段、如实改写」处理而非整段删除，理由与摘录见 docs/logs/2026-11-10-simplify-s8/report.md）；1 条核实属实不改（sandbox.rs:13-14 模块头）；1 条跳过（resources.rs:377-383「逐值检查」实扫序列化串——新发现 A5 同类缺陷嫌疑，注释与代码均未动待用户决定）；第 38 条五处经核实属实保留。相邻同因修正 2 处（apply_patch.rs:174-175、prompt.rs:911-912）。两处暂缓：js_orchestration/runtime.rs:7-11（待 A7 定案）、A4/S27 词法归一化区域注释未动。代码缺陷嫌疑跳过 6 处待用户判断：resources.rs:377-383（_meta 扫序列化串）、permissions.rs:719-722（UNC 三反斜杠）、context.rs:262-266（Windows raw_errno 同体矛盾）、proc_session.rs:2215-2216（WAIT_FAILED catch-all）、proc_session.rs:2385-2409（reader_eof 不累加）、session.rs:285-286（截断片段无上限检查）。审查代理另登记存疑 10 项（deny 路径非 NotFound 静默跳过、MCP 取消后分离任务仍放行、命名失败错误被吞、HTTP 适配器三处未登记差异、013 规格 :121 免剥离结论过时、catalog.rs:106 文档挂错位置属 S9、session.rs unix 创建路径缺 .read(true)（同名恢复推断 EBADF，未实测）、context_window.rs:627-630 行内注释仍写装载与提交两点、turn.rs:443 未知工具报错文案只列四工具、S8 若干条按保留属实片段改写而非整段删除（计数口径对齐 report.md §5））——详见 report.md 第 3/5 节。验证：cargo check --tests 0 错误、警告 605=基线零新增、lib 单线程 307/0、diff 非注释行零变化断言通过。证据：docs/logs/2026-11-10-simplify-s8/
 
 ### S9. 错挂文档（rustdoc 挂到隔壁函数，约 12 条）`- [ ]`
 - 位置：`sandbox.rs:1462-1469`、`view_image.rs:74`、`proc_session.rs:1675-1683,1025-1026,1829-1830,2389-2390`、`tui_host.rs:857-860,1077-1082`、`api.rs:471-473`、`apply_patch.rs:1770-1771`（删）与 `:1107-1111`（移回 :1123 上方）、`turn.rs:211-214`（删）、`context.rs:85-87`（移到 :114）、`memory/rollout_input.rs:147-152`（移到 :187 上方）。

@@ -520,6 +520,12 @@ def main():
                 w.send({"jsonrpc": "2.0", "id": mid, "result": {"contents": [
                     {"uri": uri, "blob": blob},
                 ]}})
+            # A13: escaped-canary _meta (quotes/backslash) - leaf check must still catch
+            elif uri == "tchat://guide/polluted_meta_escaped":
+                token = os.environ.get("TCHAT_MCP_TOKEN_Q", "")
+                w.send({"jsonrpc": "2.0", "id": mid, "result": {"contents": [
+                    {"uri": uri, "text": "clean"},
+                ], "_meta": {"note": token}}})
             elif uri == "tchat://guide/polluted_meta":
                 token = os.environ.get("TCHAT_MCP_TOKEN_A", "")
                 w.send({"jsonrpc": "2.0", "id": mid, "result": {"contents": [
