@@ -118,6 +118,20 @@ pub fn read_frame<R: Read>(input: &mut R, max_len: u64) -> std::io::Result<Optio
 
 #[cfg(test)]
 mod tests {
+    /// S36 验收补锚：shutdown 帧线格式（u64 LE 前缀＋JSON）roundtrip——
+    /// stdin 写线程（A7 修复）按同格式投递,线格式回归在此锚定。
+    #[test]
+    fn shutdown_frame_wire_roundtrip() {
+        let frame = shutdown_frame("user_cancel");
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &frame, MAX_FRAME_BYTES).expect("写 shutdown 帧");
+        let len = u64::from_le_bytes(buf[..8].try_into().unwrap()) as usize;
+        assert_eq!(buf.len(), 8 + len, "前缀与实际 JSON 长度一致");
+        let back: Value = serde_json::from_slice(&buf[8..]).unwrap();
+        assert_eq!(back.get("t").and_then(Value::as_str), Some("shutdown"));
+        assert_eq!(back.get("reason").and_then(Value::as_str), Some("user_cancel"));
+    }
+
     use super::*;
     use std::io::Cursor;
 

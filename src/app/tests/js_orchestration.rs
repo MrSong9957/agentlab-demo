@@ -306,7 +306,7 @@ fn second_observe_does_not_repeat_truncation() {
     );
 }
 
-/// A8/034 §1.3：一次超分片阈值（TEXT_CHUNK=512 KiB）的 text——worker 后续
+/// A8/034 §1.3：一次超分片阈值（TEXT_CHUNK=160 KiB）的 text——worker 后续
 /// 分片必须走 output_frame_cont（cont=true），宿主合并回一条。修复前全部
 /// output_frame（cont=false 恒定），分片成多条独立交付＝行为与规格相反，
 /// 本测试修复前红。帧级直驱 `--internal-js`（单条 700 KiB 超宿主 64 KiB
@@ -351,7 +351,7 @@ fn multi_chunk_text_frames_carry_cont_flag() {
     let _ = child.wait();
     assert!(
         output_frames.len() >= 2,
-        "700 KiB text 须分片（TEXT_CHUNK=512 KiB）：实际 {output_frames:?}"
+        "700 KiB text 须分片（TEXT_CHUNK=160 KiB）：实际 {output_frames:?}"
     );
     assert!(
         output_frames.iter().skip(1).all(|cont| *cont),

@@ -728,8 +728,8 @@ pub fn latest_auto(dir: &Path) -> Option<String> {
         .max()
 }
 
-/// UTC 基本格式时间戳 `YYYYMMDDTHHMMSS`（字典序＝时间序；chrono 格式化，
-/// 与 032 上下文窗口的 timestamp 口径一致）。
+/// UTC 基本格式时间戳 `YYYYMMDDTHHMMSS`（字典序＝时间序；chrono 格式化。
+/// 口径出处＝007 的 auto 文件命名约定）。
 fn utc_basic_now() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -984,6 +984,14 @@ pub struct Session {
     agent_untracked: usize,
 }
 
+/// untracked 吸收计数种类（S11 验收修正：字符串参量改枚举——编译期消除
+/// 拼错静默丢计数的风险）。
+#[derive(Debug, Clone, Copy)]
+enum UntrackedKind {
+    Orch,
+    Agent,
+}
+
 impl Session {
     pub fn new(dir: PathBuf) -> Self {
         Session {
@@ -1053,8 +1061,8 @@ impl Session {
         line: &str,
         subject: &str,
         advance_over_line: bool,
-        // 游标不越过时的吸收计数（"orch"／"agent"；advance_over_line=true 时忽略）。
-        untracked_kind: &'static str,
+        // 游标不越过时的吸收计数（advance_over_line=true 时忽略）。
+        untracked_kind: Option<UntrackedKind>,
     ) -> Result<usize, String> {
         if line_over_limit(line) {
             return Err(format!(
@@ -1087,9 +1095,9 @@ impl Session {
                 // 事件行由 untracked 计数吸收（内存 push 后 flush 跳过）。
                 self.persisted_upto = history.len();
                 match untracked_kind {
-                "orch" => self.orch_untracked += 1,
-                "agent" => self.agent_untracked += 1,
-                _ => {}
+                Some(UntrackedKind::Orch) => self.orch_untracked += 1,
+                Some(UntrackedKind::Agent) => self.agent_untracked += 1,
+                None => {}
             }
             }
             self.error_reported = false;
@@ -1125,9 +1133,9 @@ impl Session {
                 self.persisted_upto += 1;
             } else {
                 match untracked_kind {
-                "orch" => self.orch_untracked += 1,
-                "agent" => self.agent_untracked += 1,
-                _ => {}
+                Some(UntrackedKind::Orch) => self.orch_untracked += 1,
+                Some(UntrackedKind::Agent) => self.agent_untracked += 1,
+                None => {}
             }
             }
             break Ok(());
@@ -1170,7 +1178,7 @@ impl Session {
     ) -> Result<usize, String> {
         let cp_line = record_line(checkpoint);
         // 游标越过检查点行（调用方回执成功后恰推入一条同名记录）。
-        self.commit_event_line(history, &cp_line, "检查点", true, "")
+        self.commit_event_line(history, &cp_line, "检查点", true, None)
             .map_err(|msg| {
                 // 032 原文案逐字保真（验收审查修正——原 ends_with 判断对
                 // 预检分支误追加、对截回失败分支漏还原）：
@@ -1200,7 +1208,7 @@ impl Session {
     ) -> Result<usize, String> {
         let line = record_line(event);
         // 游标不越过事件行（flush 吸收）。
-        self.commit_event_line(history, &line, "编排事件", false, "orch")
+        self.commit_event_line(history, &line, "编排事件", false, Some(UntrackedKind::Orch))
     }
 
     /// 035：根线程提交一条 Agent 事件（spawn/send/followup/interrupt 等根侧
@@ -1214,7 +1222,7 @@ impl Session {
     ) -> Result<usize, String> {
         let line = record_line(event);
         // 游标不越过事件行（flush 吸收）。
-        self.commit_event_line(history, &line, "Agent 事件", false, "agent")
+        self.commit_event_line(history, &line, "Agent 事件", false, Some(UntrackedKind::Agent))
     }
 
     /// 035：调度泵线程提交一条 Agent 事件（根阻塞于模型/工具/wait 期间）。
@@ -1707,6 +1715,7 @@ mod tests {
             err.contains("检查点提交写入失败") && err.contains("截回失败") && err.contains("停用"),
             "报错须指明写失败＋截回失败＋停用：{err}"
         );
+
         // 游标未越过检查点；停用后普通追加静默（不再尝试写）
         assert_eq!(session.persisted_upto, 1, "游标不因失败推进");
         assert_eq!(session.on_history(&history), None, "停用后无追加");
@@ -1784,6 +1793,43 @@ mod tests {
         .expect_err("超长截断片段必须拒绝");
         assert!(err.contains("截断片段超过 64 KiB"), "{err}");
     }
+
+// S11 验收补锚：检查点失败文案恢复出的「活动视图不变」后缀
+// （正确性审查发现 map_err 三分支曾偏差,此锚钉住逐字保真）。
+#[test]
+fn checkpoint_write_failure_message_keeps_view_note() {
+    let dir = std::env::temp_dir().join(format!("tchat-cp-msg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // Writing 态持只读句柄：写路径失败→截回成功分支。
+    let ro = dir.join("ro.bin");
+    std::fs::write(&ro, b"").unwrap();
+    let dev = std::fs::File::open(&ro).expect("只读夹具");
+    let mut session = Session {
+        version: 3,
+        native_seen: 0,
+        dir: dir.clone(),
+        state: State::Writing { _path: ro, file: dev, _lock: None },
+        persisted_upto: 1,
+        durable_len: 64,
+        error_reported: false,
+        orch_untracked: 0,
+        agent_untracked: 0,
+    };
+    let history = vec![text_user("一"), text_user("二")];
+    let cp = HistoryItem::ContextCheckpoint {
+        context_id: 1,
+        request_call_id: "req-a10".into(),
+        summary: "检查点摘要".into(),
+        seed: vec![],
+    };
+    let err = session.commit_checkpoint(&history, &cp).expect_err("必败");
+    assert!(
+        err.contains("，活动视图不变；截回失败"),
+        "截回失败分支须含「活动视图不变」：{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
 
     /// A11：新建 auto 文件的句柄 unix 侧 append-only（无 read）——同进程
     /// 立即 /resume 命中 same_file 复用分支，从只写句柄读＝EBADF（修复前红）。

@@ -124,7 +124,7 @@ pub fn output_reserve(conn: &EffectiveConnection, model: &ModelInfo) -> Result<u
                 (None, None) => None,
             }
         }
-        "openai-responses" => params.get("max_output_tokens").map(positive_u64),
+        crate::api::PROTOCOL_OPENAI_RESPONSES => params.get("max_output_tokens").map(positive_u64),
         "anthropic-messages" => params.get("max_tokens").map(positive_u64),
         // Gemini generateContent：generationConfig.maxOutputTokens（嵌套对象）
         "google-generate-content" => params
@@ -970,7 +970,7 @@ mod tests {
         assert_eq!(output_reserve(&conn("openai-chat", &[]), &model), Ok(512));
         // Responses / Messages
         assert_eq!(
-            output_reserve(&conn("openai-responses", &[("max_output_tokens", json!(2048))]), &model),
+            output_reserve(&conn(crate::api::PROTOCOL_OPENAI_RESPONSES, &[("max_output_tokens", json!(2048))]), &model),
             Ok(2048)
         );
         assert_eq!(

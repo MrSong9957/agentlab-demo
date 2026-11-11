@@ -2233,7 +2233,7 @@ fn tool(
 /// S36/N3：followup 满槽（全局 3 子执行槽被挂起 Agent 占满）拒绝时——
 /// 目标 Agent 保持原终态与最近任务文案（rollback_followup 不得错置 failed、
 /// 不得毁最近任务展示）。挂起构造：ScriptChild 屏障 n=2 而仅 1 请求到达＝
-/// 模型线程永久等待＝槽持续占用（测试进程退出回收）。
+/// 模型线程卡在屏障等待＝槽持续占用（ScriptChild::send 30s 自限时后释放，SuiteGuard drain 覆盖）。
 #[test]
 fn n3_followup_full_slots_keeps_terminal_state_and_message() {
     let _suite = SuiteGuard::acquire();

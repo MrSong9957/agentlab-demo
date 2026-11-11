@@ -365,11 +365,8 @@ impl ProcessManager {
         if owned.is_empty() {
             return Ok(());
         }
-        for s in &owned {
-            if let Phase::Running { pgid } = s.phase() {
-                request_group_term(pgid);
-            }
-        }
+        // 温和终止由 terminate_sessions_bounded 开头统一发送（S13 验收修正：
+        // 原抽取版调用侧直发＋helper 再发＝同一批两次 SIGTERM，冗余）。
         Self::terminate_sessions_bounded(&owned);
         // S13 验收修正：pending 与移除在同一锁临界区内判定（原抽取版在
         // helper 无锁快照判定，两时刻间被 monitor 终止的会话会「既移除又

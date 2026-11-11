@@ -337,7 +337,19 @@ impl OutputBuffer {
                 last.push_str(&text);
                 self.pending_bytes += text.len();
             }
-            None => self.push(text), // 无前块（已交付/丢弃）：独立成条（沿用上限判定）
+            None => {
+                // 无前块（已交付/丢弃）：独立成条。验收审查（security）修正：
+                // 原委托 push 会把本片二次计入 total_bytes（merge_last 开头已
+                // 计一次）——1 MiB 累计上限被约 2 倍提前触发。此处重复 pending
+                // 上限判定但不再计费。
+                if self.pending_bytes + text.len() > PENDING_OUTPUT_LIMIT {
+                    self.pending_truncated = true;
+                    self.dropping_call = true;
+                    return;
+                }
+                self.pending_bytes += text.len();
+                self.pending.push(text);
+            }
         }
     }
 

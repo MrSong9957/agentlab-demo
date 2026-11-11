@@ -26,7 +26,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// text() 单次值的分块上限（单 IPC 帧 ≤1 MiB；JSON 转义膨胀下取半）。
 /// 单片字节预算（A8）：≤1 MiB 帧限 / JSON 转义上界 6 字符每字节 → 160 KiB。
 const TEXT_CHUNK: usize = 160 * 1024;
 

@@ -186,26 +186,26 @@ impl MemoryStore {
         Ok(store)
     }
 
+    /// 持久化契约 pragma 单点（S26）：busy_timeout 5s＋journal DELETE＋
+    /// synchronous FULL——open 与 open_existing 共用（错误文案逐字保留；
+    /// 两者差异仅在打开标志是否含 CREATE，不在此层）。
+    fn configure_conn(conn: &Connection) -> Result<(), String> {
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(|e| serr("设置 busy_timeout 失败", e))?;
+        conn.pragma_update(None, "journal_mode", "DELETE")
+            .map_err(|e| serr("设置 journal_mode 失败", e))?;
+        conn.pragma_update(None, "synchronous", "FULL")
+            .map_err(|e| serr("设置 synchronous 失败", e))?;
+        Ok(())
+    }
+
     /// 仅打开**既有**记忆库（014 §1）：不建根、不建库（打开标志不含
     /// `SQLITE_OPEN_CREATE`）、不跑迁移。库文件缺失返回 `Ok(None)`，其余
     /// 打开失败返回 `Err`——调用方（反馈路径）据此静默跳过，**不得回退**
     /// 到允许创建的 [`MemoryStore::open`]。`is_file` 预检只为区分
     /// None/Err；真正禁止创建由打开标志承担（预检与打开之间文件被 reset
     /// 删除时，打开失败而非重建）。
-    /// 持久化契约 pragma 单点（S26）：busy_timeout 5s＋journal DELETE＋
-/// synchronous FULL——open 与 open_existing 共用（错误文案逐字保留；
-/// 两者差异仅在打开标志是否含 CREATE，不在此层）。
-fn configure_conn(conn: &Connection) -> Result<(), String> {
-    conn.busy_timeout(Duration::from_secs(5))
-        .map_err(|e| serr("设置 busy_timeout 失败", e))?;
-    conn.pragma_update(None, "journal_mode", "DELETE")
-        .map_err(|e| serr("设置 journal_mode 失败", e))?;
-    conn.pragma_update(None, "synchronous", "FULL")
-        .map_err(|e| serr("设置 synchronous 失败", e))?;
-    Ok(())
-}
-
-pub fn open_existing(root: &Path, clock: Clock) -> Result<Option<Self>, String> {
+    pub fn open_existing(root: &Path, clock: Clock) -> Result<Option<Self>, String> {
         // M1 契约对齐：既有 `open` 经 `init_memories_root` 拒绝符号链接根
         // （m1_open_rejects_symlink_memory_root）——本入口不建根、不 chmod，
         // 但保留同一拒绝；检查为纯 `symlink_metadata`，无任何创建副作用。

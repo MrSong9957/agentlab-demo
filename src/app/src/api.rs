@@ -301,7 +301,7 @@ pub(crate) fn finalize_outbound(
         let mut path = url.path_segments_mut().map_err(|_| "基础地址不能拼接操作路径")?;
         path.pop_if_empty();
         match conn.protocol.as_str() {
-            "openai-responses" => { path.push("responses"); }
+            PROTOCOL_OPENAI_RESPONSES => { path.push("responses"); }
             PROTOCOL_ANTHROPIC => { path.push("messages"); }
             PROTOCOL_GOOGLE_INTERACTIONS => { path.push("interactions"); }
             PROTOCOL_GOOGLE_GENERATE => {
@@ -392,6 +392,7 @@ fn post_chat_json(
 pub(crate) const PROTOCOL_ANTHROPIC: &str = "anthropic-messages";
 pub(crate) const PROTOCOL_GOOGLE_INTERACTIONS: &str = "google-interactions";
 pub(crate) const PROTOCOL_GOOGLE_GENERATE: &str = "google-generate-content";
+pub(crate) const PROTOCOL_OPENAI_RESPONSES: &str = "openai-responses";
 
 /// 鉴权头路由单点（S16）：anthropic＝x-api-key＋anthropic-version；
 /// google 两协议＝x-goog-api-key；其余（openai-chat）＝Authorization。

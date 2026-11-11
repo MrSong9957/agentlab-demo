@@ -17,7 +17,7 @@ pub(super) fn check_saved(message: &HistoryItem, state: &NativeState) -> Result<
     let owner=state.owner.clone();
     let payload=state.payload.clone();
     let decoded=match owner.protocol.as_str() {
-        "openai-responses"=>decode_response(owner,payload),
+        super::PROTOCOL_OPENAI_RESPONSES=>decode_response(owner,payload),
         super::PROTOCOL_ANTHROPIC=>anthropic::decode(owner,payload),
         super::PROTOCOL_GOOGLE_INTERACTIONS=>gemini::decode_interactions(owner,payload),
         super::PROTOCOL_GOOGLE_GENERATE=>gemini::decode_generate(owner,payload,&[],Some(calls)),
@@ -53,14 +53,14 @@ fn image_data(url: &str) -> Result<(&str, &str), String> {
 /// 只转换宿主已经准备的图片；这里不读取文件或访问远端 URL。
 fn content_parts(protocol: &str, text: &str, images: &[&str]) -> Result<Vec<Value>, String> {
     let mut parts = vec![match protocol {
-        "openai-responses" => json!({"type":"input_text","text":text}),
+        super::PROTOCOL_OPENAI_RESPONSES => json!({"type":"input_text","text":text}),
         super::PROTOCOL_GOOGLE_GENERATE => json!({"text":text}),
         _ => json!({"type":"text","text":text}),
     }];
     for url in images {
         let (mime, data) = image_data(url)?;
         parts.push(match protocol {
-            "openai-responses"=>json!({"type":"input_image","image_url":url,"detail":"high"}),
+            super::PROTOCOL_OPENAI_RESPONSES=>json!({"type":"input_image","image_url":url,"detail":"high"}),
             super::PROTOCOL_ANTHROPIC=>json!({"type":"image","source":{"type":"base64","media_type":mime,"data":data}}),
             super::PROTOCOL_GOOGLE_INTERACTIONS=>json!({"type":"image","mime_type":mime,"data":data,"resolution":"high"}),
             _=>json!({"inlineData":{"mimeType":mime,"data":data},"mediaResolution":{"level":"MEDIA_RESOLUTION_HIGH"}}),
@@ -82,7 +82,7 @@ fn user_images(message: &HistoryMessage) -> Vec<&str> {
 pub(super) fn is_native(protocol: &str) -> bool {
     matches!(
         protocol,
-        "openai-responses"
+        super::PROTOCOL_OPENAI_RESPONSES
             | super::PROTOCOL_ANTHROPIC
             | super::PROTOCOL_GOOGLE_INTERACTIONS
             | super::PROTOCOL_GOOGLE_GENERATE
@@ -328,7 +328,7 @@ fn text_message(role: &str, content: &str) -> Value {
 /// 对象参数协议），整块转成明确标注的历史文本；不伪造调用块，不阻断会话。
 /// Responses 的 arguments 本就是字符串，无需转换。
 fn textualize_unexpressible(items: Vec<HistoryItem>, protocol: &str) -> Vec<HistoryItem> {
-    if protocol == "openai-responses" {
+    if protocol == super::PROTOCOL_OPENAI_RESPONSES {
         return items;
     }
     let expressible = |arguments: &str| {
@@ -397,7 +397,7 @@ fn response_input(items: &[HistoryItem], current: &NativeOwner) -> Result<Vec<Va
             HistoryItem::Text(m) => {
                 let images = user_images(m);
                 input.push(if images.is_empty() {text_message(m.role.as_str(),&m.content)} else {
-                    json!({"role":m.role.as_str(),"content":content_parts("openai-responses",&m.content,&images)?})
+                    json!({"role":m.role.as_str(),"content":content_parts(super::PROTOCOL_OPENAI_RESPONSES,&m.content,&images)?})
                 });
             }
             HistoryItem::AssistantToolCalls {
@@ -420,7 +420,7 @@ fn response_input(items: &[HistoryItem], current: &NativeOwner) -> Result<Vec<Va
             } => {
                 let output = if let Some(image) = image {
                     json!(content_parts(
-                        "openai-responses",
+                        super::PROTOCOL_OPENAI_RESPONSES,
                         content,
                         &[&image.image_url]
                     )?)

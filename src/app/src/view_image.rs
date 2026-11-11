@@ -66,6 +66,10 @@ pub struct EncodedImage {
     pub height: u32,
 }
 
+/// 沙箱传输接收上限（A9）：4 MiB 原始经 base64（4/3）＋元数据余量——
+/// 生产接收检查与测试断言共用的单一口径（防双写漂移）。
+pub(crate) const SANDBOX_WIRE_BOUND: usize = MAX_PREPARED_IMAGE_BYTES / 3 * 4 + 4096;
+
 /// 上游 `data_url_from_bytes`：包装为 data URL（本层不解码校验）。
 pub fn data_url_from_bytes(mime: &str, bytes: &[u8]) -> String {
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
@@ -260,12 +264,16 @@ pub fn execute_sandboxed_with_exe(
         }
         // 有界接收：4 MiB 原始经 base64 传输（4/3）＋元数据余量（A9 修复——
         // 原十进制数组 ≈4 倍膨胀使有效上限仅 ≈1 MiB，1.1–4 MiB 图片假拒绝）。
-        let wire_bound = MAX_PREPARED_IMAGE_BYTES / 3 * 4 + 4096;
-        if out.stdout.len() > wire_bound {
+        if out.stdout.len() > SANDBOX_WIRE_BOUND {
             return Err("沙箱图片结果超过有界上限".to_string());
         }
         let encoded: EncodedImage = serde_json::from_slice(&out.stdout)
             .map_err(|e| format!("沙箱图片结果解析失败：{e}"))?;
+        // 防御深度（验收审查）：解码后复验进程内同款 4 MiB 上限（线格式余量
+        // 允许约 3 KiB 偏差；唯一写者＝第一方 worker，仅一致性收口）。
+        if encoded.bytes.len() > MAX_PREPARED_IMAGE_BYTES {
+            return Err("沙箱图片结果超过进程内上限".to_string());
+        }
         if cancelled(cancel) {
             return Err("用户已取消：本调用未完成".into());
         }
@@ -701,7 +709,7 @@ mod tests {
         let wire = serde_json::to_vec(&encoded).unwrap();
         // 断言对象＝沙箱接收上限（A9 修复后口径：base64 4/3＋元数据余量；
         // 修复前旧口径下本测试红：十进制数组 16,777,302 B > 4,195,328 B）。
-        let bound = MAX_PREPARED_IMAGE_BYTES / 3 * 4 + 4096;
+        let bound = SANDBOX_WIRE_BOUND;
         assert!(
             wire.len() <= bound,
             "4 MiB 图编码后 {} B 超接收上限 {bound} B（沙箱有效上限≠进程内）",
