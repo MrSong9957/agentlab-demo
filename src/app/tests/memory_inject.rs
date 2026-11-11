@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use terminal_chat::memory::config::MemoriesConfig;
 use terminal_chat::memory::inject::read_memory_context;
 use terminal_chat::prompt::{
-    build_turn_request, build_turn_request_with_memory, sent_instructions, HistoryItem,
+    build_turn_request, build_turn_request_options, sent_instructions, HistoryItem, TurnRequestOptions,
     HistoryMessage, HistoryRole, ToolCallRecord, ToolDisplay,
 };
 use terminal_chat::turn::{run_tool_turn_with_mode, ToolMode};
@@ -197,8 +197,11 @@ fn m6_d4_only_system_tail_changes_and_none_is_byte_identical() {
     let baseline = build_turn_request(&history);
     let context = read_memory_context(dir.path(), &enabled());
 
-    let none = build_turn_request_with_memory(&history, None);
-    let injected = build_turn_request_with_memory(&history, context.as_deref());
+    let none = build_turn_request_options(&history, &TurnRequestOptions::default());
+    let injected = build_turn_request_options(
+        &history,
+        &TurnRequestOptions { memory_context: context.as_deref(), ..Default::default() },
+    );
 
     assert_eq!(
         serde_json::to_vec(&none).unwrap(),
@@ -832,7 +835,10 @@ fn m6_template_like_paths_and_hostile_text_are_only_context_data() {
         "路径中的占位符不得再展开"
     );
     let history = vec![user("独立用户消息")];
-    let req = build_turn_request_with_memory(&history, Some(&context));
+    let req = build_turn_request_options(
+        &history,
+        &TurnRequestOptions { memory_context: Some(&context), ..Default::default() },
+    );
     assert_eq!(req["messages"].as_array().unwrap().len(), 2);
     assert_eq!(
         req["messages"][1],

@@ -298,9 +298,11 @@
 
 - 处置（2026-11-11，重构组）：TOOL_NAME×6/BTreeMap::is_empty×2/is_affirmative×3+1/SLASH_COMMAND_HINT 共享。验证：tui_host 14/0。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
 
-### S31. prompt 参数膨胀链收敛 `- [ ]`
+### S31. prompt 参数膨胀链收敛 `- [x]`
 - 位置：`prompt.rs:751-939`（7 层包装、终端函数 13 参数需 allow；S7 先删两层）。
 - 改法：能力布尔与 tool_search/mcp_tools 收进 `Default` 开关结构体，单一组装入口；4 个测试文件机械更新。**改动面大，单独一轮并经用户确认。**
+
+- 处置（2026-11-11，批 1）：TurnRequestOptions（Default）＋build_turn_request_options 单一入口替代 7 层包装（13 参→具名字段）；turn.rs 两用户轮形态合一；测试机械同步 3 文件（memory_inject/native_model_apis/prompt_assembly）。行为不变（工具追加顺序逐行保留；Default＝原 build_turn_request）。验证：0 错误、警告 580 零新增（两处测试内警告经 HEAD 对照为存量）、prompt_assembly 19/0、memory_inject 18/0、native_model_apis 33/0、llm_flow 51/0、context_management 43/0。证据：docs/logs/2026-11-11-simplify-batches/s31/report.md。
 
 ### S32. 跨模块符号统一 `- [x]`
 - `agents/runtime.rs:1959-1967` `with_native` 逐字副本 → 复用 `turn.rs:25-32`（提 `pub(crate)`）；`agents/events.rs:206-211` 状态名词表 → `AgentState` 单一来源（`from_display` 或常量数组，V3 装载校验防漂移）；`api.rs` 四协议裸字符串 42 处 → 常量（拼写错误静默落 `_` 臂的现状消除）；`turn.rs:267-288,2010-2019` `ParsedToolCall` → `pub use prompt::ToolCallRecord` 别名（恒等映射搬移消除）。

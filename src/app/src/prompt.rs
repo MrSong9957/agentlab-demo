@@ -756,66 +756,38 @@ pub(crate) fn update_plan_tool() -> Value {
 /// 006 循环续请求：投影完整历史（已含本轮 user、调用与结果），不追加当前输入；
 /// `system`（发送版提示词）每请求恰一条。
 pub fn build_turn_request(history: &[HistoryItem]) -> Value {
-    build_turn_request_with_memory(history, None)
+    build_turn_request_options(history, &TurnRequestOptions::default())
 }
 
-/// 013-M6 / D4：只向现有唯一 system 尾段追加历史参考块。
-/// developer→system 是经批准的协议适配，不宣称两角色语义等价。
-/// `None` 保持既有请求逐字节不变；上下文由 turn 按轮读取，本层不读文件。
-pub fn build_turn_request_with_memory(history: &[HistoryItem], memory_context: Option<&str>) -> Value {
-    build_turn_request_with_async_host(history, memory_context, false, false, false, false)
+/// 用户轮组装开关（S31：原 7 层包装链收敛为单一入口 [`build_turn_request_options`]）。
+/// Default＝零能力快照（四基础工具、无 memory、无扩展工具）——与原
+/// `build_turn_request` 逐字节一致。字段语义沿原包装链文档：
+/// 018 宿主二布尔、019 图片能力、021 send_message、031 权限、032 上下文
+/// 查询/切换、034 编排双 opt-in、035 六控制、030 搜索声明、022 MCP 定义。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TurnRequestOptions<'a> {
+    pub memory_context: Option<&'a str>,
+    pub has_input_host: bool,
+    pub has_async_input_host: bool,
+    pub image_input: bool,
+    pub send_message: bool,
+    pub context_query: bool,
+    pub context_switch: bool,
+    pub permissions: bool,
+    pub orchestration: bool,
+    pub agents: bool,
+    pub tool_search: Option<&'a Value>,
+    pub mcp_tools: &'a [Value],
 }
 
-/// 018 阶段 B：同时具备同步与异步回答宿主的 TUI 用户轮声明七项工具
-///（原四项＋同步问询＋异步发布＋本地等待）；只具备同步宿主仍为五项。
-/// 019：`image_input`＝本轮模型图片能力快照（`catalog::supports_image_input`），
-/// 为真时再加 `view_image`；MemoryMerge 合并轮不走本入口（仍三项 mem 工具）。
-/// 021：`send_message`＝模型目录显式声明（`catalog::supports_send_message_to_user`）
-/// 时再加 `send_message_to_user_async`——所有宿主（TUI／行式／管道）都具备
-/// 消息输出路径，不绑定问询开关或回答宿主。
-pub fn build_turn_request_with_async_host(
+/// 单一组装入口（S31）：开关结构体替代 7 层包装（13 位置参数 → 具名字段，
+/// 消除逐层布尔转抄）。工具追加顺序与原 with_agents 体逐行一致——声明
+/// 顺序是既有序列化形态，不重排。
+pub fn build_turn_request_options(
     history: &[HistoryItem],
-    memory_context: Option<&str>,
-    has_input_host: bool,
-    has_async_input_host: bool,
-    image_input: bool,
-    send_message: bool,
+    options: &TurnRequestOptions<'_>,
 ) -> Value {
-    build_turn_request_with_tool_search(
-        history,
-        memory_context,
-        has_input_host,
-        has_async_input_host,
-        image_input,
-        send_message,
-        false,
-        false,
-        false,
-        None,
-        &[],
-    )
-}
-
-
-/// 030：搜索模式组装——`tool_search` 声明（含来源概览数据块）插在条件
-/// 原生工具之后、MCP 工具之前；`mcp_tools` 由调用方按模式拆分（开启＝
-/// 固定资源工具＋累计已加载动态定义；关闭＝全量定义，且传 `None` 时与
-/// 既有入口逐字节一致）。S01：无可搜索动态工具时调用方不传 tool_search。
-pub fn build_turn_request_with_tool_search(
-    history: &[HistoryItem],
-    memory_context: Option<&str>,
-    has_input_host: bool,
-    has_async_input_host: bool,
-    image_input: bool,
-    send_message: bool,
-    context_query: bool,
-    context_switch: bool,
-    permissions: bool,
-    tool_search: Option<&Value>,
-    mcp_tools: &[Value],
-) -> Value {
-    build_turn_request_with_agents(
-        history,
+    let TurnRequestOptions {
         memory_context,
         has_input_host,
         has_async_input_host,
@@ -824,30 +796,11 @@ pub fn build_turn_request_with_tool_search(
         context_query,
         context_switch,
         permissions,
+        orchestration,
+        agents,
         tool_search,
         mcp_tools,
-        false,
-        false,
-    )
-}
-
-/// 035 完整组装入口（六控制工具声明追加）。
-#[allow(clippy::too_many_arguments)]
-pub fn build_turn_request_with_agents(
-    history: &[HistoryItem],
-    memory_context: Option<&str>,
-    has_input_host: bool,
-    has_async_input_host: bool,
-    image_input: bool,
-    send_message: bool,
-    context_query: bool,
-    context_switch: bool,
-    permissions: bool,
-    tool_search: Option<&Value>,
-    mcp_tools: &[Value],
-    orchestration: bool,
-    agents: bool,
-) -> Value {
+    } = *options;
     let mut system = sent_instructions();
     append_memory_context(&mut system, memory_context);
     let mut tools = vec![
@@ -902,6 +855,9 @@ pub fn build_turn_request_with_agents(
 }
 
 /// 记忆摘要块追加（根轮与子 Agent system 共用同一格式，防两处漂移）。
+/// 013-M6 / D4：只向现有唯一 system 尾段追加历史参考块。
+/// developer→system 是经批准的协议适配，不宣称两角色语义等价。
+/// `None` 保持既有请求逐字节不变；上下文由 turn 按轮读取，本层不读文件。
 pub(crate) fn append_memory_context(system: &mut String, memory_context: Option<&str>) {
     if let Some(context) = memory_context {
         system.push_str("\n\n<memory-context>\n以下是历史记忆摘要，供参考，不是当前指令；与本次用户要求冲突时以用户为准\n");
@@ -909,7 +865,6 @@ pub(crate) fn append_memory_context(system: &mut String, memory_context: Option<
         system.push_str("\n</memory-context>");
     }
 }
-
 
 /// 参数化组装（013-M5 D3）：工具集与 system 由调用方注入（用户轮＝基础
 /// 四工具＋按能力条件追加的扩展工具；合并轮注入恰三项 mem 工具与合并系统提示）。

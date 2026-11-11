@@ -2321,9 +2321,13 @@ fn ts30_search_mode_tools_convert_across_five_protocols() {
                 text_elements: Vec::new(),
             },
         )];
-        let mut body = terminal_chat::prompt::build_turn_request_with_tool_search(
-            &history, None, false, false, false, false, false, false, false,
-            Some(&ts_def), &[resource_def, loaded_def],
+        let mut body = terminal_chat::prompt::build_turn_request_options(
+            &history,
+            &terminal_chat::prompt::TurnRequestOptions {
+                tool_search: Some(&ts_def),
+                mcp_tools: &[resource_def, loaded_def],
+                ..Default::default()
+            },
         );
         body["_history"] = serde_json::to_value(&history).unwrap();
 
@@ -2476,12 +2480,19 @@ fn ts30_context_effect_bytes_search_vs_full_declaration() {
         images: None,
         text_elements: Vec::new(),
     })];
-    let first_off_body = terminal_chat::prompt::build_turn_request_with_tool_search(
-        &first_history, None, false, false, false, false, false, false, false, None, &all_defs,
+    let first_off_body = terminal_chat::prompt::build_turn_request_options(
+        &first_history,
+        &terminal_chat::prompt::TurnRequestOptions {
+            mcp_tools: &all_defs,
+            ..Default::default()
+        },
     );
-    let first_on_body = terminal_chat::prompt::build_turn_request_with_tool_search(
-        &first_history, None, false, false, false, false, false, false, false,
-        Some(&ts_def), &[],
+    let first_on_body = terminal_chat::prompt::build_turn_request_options(
+        &first_history,
+        &terminal_chat::prompt::TurnRequestOptions {
+            tool_search: Some(&ts_def),
+            ..Default::default()
+        },
     );
     let first_off_tools = serde_json::to_string(&first_off_body["tools"]).unwrap().len();
     let first_on_tools = serde_json::to_string(&first_on_body["tools"]).unwrap().len();
@@ -2510,14 +2521,22 @@ fn ts30_context_effect_bytes_search_vs_full_declaration() {
             max_output: Some(4096),
             ..Default::default()
         };
-        let mut off_body =
-            terminal_chat::prompt::build_turn_request_with_tool_search(&off_history, None, false, false, false, false, false, false, false, None, &all_defs);
+        let mut off_body = terminal_chat::prompt::build_turn_request_options(
+            &off_history,
+            &terminal_chat::prompt::TurnRequestOptions {
+                mcp_tools: &all_defs,
+                ..Default::default()
+            },
+        );
         off_body["_history"] = serde_json::to_value(&off_history).unwrap();
-        let mut on_body =
-            terminal_chat::prompt::build_turn_request_with_tool_search(
-                &on_history, None, false, false, false, false, false, false, false,
-                Some(&ts_def), &loaded_defs,
-            );
+        let mut on_body = terminal_chat::prompt::build_turn_request_options(
+            &on_history,
+            &terminal_chat::prompt::TurnRequestOptions {
+                tool_search: Some(&ts_def),
+                mcp_tools: &loaded_defs,
+                ..Default::default()
+            },
+        );
         on_body["_history"] = serde_json::to_value(&on_history).unwrap();
         let off_bytes = terminal_chat::api::measure_request_body_bytes(
             &conn, "k", &model, &off_body,

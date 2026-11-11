@@ -1653,42 +1653,32 @@ fn turn_body_inner(
         let orch_declared = orch_extras.is_some();
         // 035：六工具声明与执行同门（extras 装配＝目录六名全配＋共享会话）。
         let agents_declared = agent_runtime.is_some();
+        // S31：两用户轮形态仅 memory_context 不同——开关结构体合一。
+        let options = crate::prompt::TurnRequestOptions {
+            memory_context: match &mode {
+                ToolMode::UserWithMemory { .. } => memory_context.as_deref(),
+                _ => None,
+            },
+            has_input_host: input_host.is_some(),
+            has_async_input_host: async_host.is_some(),
+            image_input,
+            send_message,
+            context_query,
+            context_switch,
+            permissions: permissions_declared,
+            orchestration: orch_declared,
+            agents: agents_declared,
+            tool_search: tool_search_definition.as_ref(),
+            mcp_tools: mcp_definitions,
+            ..Default::default()
+        };
         let mut body = match &mode {
-            ToolMode::User => crate::prompt::build_turn_request_with_agents(
-                &active_items,
-                None,
-                input_host.is_some(),
-                async_host.is_some(),
-                image_input,
-                send_message,
-                context_query,
-                context_switch,
-                permissions_declared,
-                tool_search_definition.as_ref(),
-                mcp_definitions,
-                orch_declared,
-                agents_declared,
-            ),
-            ToolMode::UserWithMemory { .. } => crate::prompt::build_turn_request_with_agents(
-                &active_items,
-                memory_context.as_deref(),
-                input_host.is_some(),
-                async_host.is_some(),
-                image_input,
-                send_message,
-                context_query,
-                context_switch,
-                permissions_declared,
-                tool_search_definition.as_ref(),
-                mcp_definitions,
-                orch_declared,
-                agents_declared,
-            ),
             ToolMode::MemoryMerge { system, .. } => build_turn_request_with(
                 &active_items,
                 &crate::memory::mem_tools::tool_definitions(),
                 system,
             ),
+            _ => crate::prompt::build_turn_request_options(&active_items, &options),
         };
         // 024：共同历史作为宿主数据交给适配器；兼容的 messages 投影仍供旧发送者
         // 使用。此字段和原生状态绝不直接出现在厂商请求中。032：与 messages 同用
