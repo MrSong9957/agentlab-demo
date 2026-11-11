@@ -1943,9 +1943,6 @@ mod tests {
         }
     }
 
-    /// 032：恢复历史中的上下文检查点——渲染为已应用边界＋摘要（完整
-    /// transcript 含归档前缀，seed 用户输入已作为真实记录展示，不经 seed 重画）。
-    #[test]
     /// 034 C16：编排事件投影行携带源码、叶子参数与真实结果摘要（哨兵区分
     /// 应显示内容；运行中/关闭状态行如实呈现）。
     #[test]
@@ -2008,6 +2005,9 @@ mod tests {
         assert!(text[3].contains("cell-abc-1 关闭"), "{}", text[3]);
     }
 
+    /// 032：恢复历史中的上下文检查点——渲染为已应用边界＋摘要（完整
+    /// transcript 含归档前缀，seed 用户输入已作为真实记录展示，不经 seed 重画）。
+    #[test]
     fn project_history_items_renders_checkpoint_boundary() {
         use tchat_tui::chat_driver::HostHistoryItem as H;
         let history = vec![

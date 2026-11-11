@@ -90,11 +90,12 @@
 - 依据：审查者推断，未运行验证。
 - 改法：补用例（新建 auto 后立即 `/resume`）确认；修则加 `.read(true)`（unix 侧行为微变，登记）；两处过时注释随 S1… 处理（此处指 session 注释组）。
 
-### A12. 疑似从未运行的测试 `- [ ]`
+### A12. 疑似从未运行的测试 `- [x]`
 - 位置：`src/app/src/tui_host.rs:1946-1951`。
 - 问题：两个 `#[test]` 连同 032 文档块堆在 `project_history_items_renders_orchestration_group` 头上，`project_history_items_renders_checkpoint_boundary` 疑似失去 `#[test]`——检查点投影断言可能从未执行。
 - 依据：审查者读代码发现，未运行核实。
 - 改法：运行核实（`cargo test project_history_items` 列出实际执行的用例）；若确认，恢复 `#[test]` 标注并跑通过。
+- 处理（2026-11-11）：确认失联并恢复——032 场景文档＋`#[test]` 随迁至 `renders_checkpoint_boundary`（文字零改动），orchestration_group 保留 034 文档＋单属性；断言零改动。**实跑一次通过**（project_history_items 组 8/0，单测过滤 3/0）——无过时断言、无真实缺陷。附带发现：修复前双重 `#[test]` 使 orchestration_group 被 libtest **重复收集为两行同名条目**（--list 表面总数 310 的来源），修复后消除；集合差核实唯一变化＝+checkpoint_boundary、零丢失。验证：check --tests 0 错误；警告 **604＝基线 605−1**（消失项＝该 fn 修复前的 dead_code「never used」，stash 对照坐实）零新增；lib 单线程 309 passed/1 ignored 全绿；tui_host 组 14/0。证据：docs/logs/2026-11-10-simplify-a12/report.md。
 
 ### A13. resources `_meta` 污染检查扫序列化串（双层防御一致性，无实际漏报）`- [x]`
 - 位置：`src/app/src/mcp/resources.rs` `meta_polluted`（`serde_json::to_value(meta)` 后 `contains_secret(&value.to_string())`）。
