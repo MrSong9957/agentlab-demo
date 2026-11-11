@@ -1871,7 +1871,12 @@ fn turn_body_inner(
                         on_record,
                         "root_final_with_active_children",
                     );
-                    close_exit!(orch_first task_completed);
+                    // S17 验收修正：本站为 agents 侧收尾（close_for_turn_exit 非
+                    // close_orch!），原序 steer→pending 且**不动 orch_cell**——
+                    // 误用 close_exit!(orch_first) 会在 orch_cell 有值时额外关闭
+                    // 编排 cell（行为变化）。还原显式两行。
+                    close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_TASK_COMPLETED);
+                    close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_TASK_COMPLETED);
                     return Err(
                         "模型已给出最终回复，但仍有活动子 Agent 任务未收尾：整组已按收尾关闭（已发生事实与真实副作用保留，不回滚，未完成子工作不报告为完成）"
                             .into(),
