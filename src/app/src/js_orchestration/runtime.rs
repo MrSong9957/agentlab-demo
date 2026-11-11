@@ -6,9 +6,14 @@
 //! 事件保存（cell_started/call_started/call_finished/cell_closed）与 JS 兑现
 //! （leaf 回包）都发生在这一线程；worker 读线程只把帧回送到有界事件通道
 //! （不保存、不执行——「主轮驱动保存/通知，工作线程经有界事件队列回送」）。
-//! 让出（无人观察）期间：worker 自行继续 JS 计算；已在途叶子照常完成但结果
-//! 兑现等下一次观察；新叶子请求只留在有界队列——worker 写 stdout 阻塞形成
-//! 天然背压（输出限额另有显式缓冲管理，§1.7）。
+//! 让出（无人观察）期间：worker 自行继续 JS 计算，已在途叶子照常完成但结果
+//! 兑现等下一次观察；事件通道容量 [`EVENT_CHANNEL_CAPACITY`]（16 帧×≤1 MiB，
+//! [`event_channel`] 单点构造，A7）——满后读线程停等 send，worker 阻塞在
+//! stdout 写形成背压，宿主内存不随产出无限增长（可观察差异：长输出 worker
+//! 让出期最多缓存 16 帧后停等，可能早于无界时代触墙钟；034 §1.4 已登记）。
+//! 滞留 send 的读线程由接收端 drop 收尾——handle 是 turn 局部、close 后即
+//! 置 None，worker 死亡/runtime drop/轮终止三路径必达（无 join，线程退出
+//! 靠 send 报 Err）。输出限额另有显式缓冲管理（§1.7，与通道容量是两层上限）。
 //!
 //! 父进程是唯一能力与执行事实来源：叶子经注入的 [`LeafDispatcher`]（M2 从
 //! turn.rs 抽取的共用分派）执行；宿主逐次核对冻结目录、额度（cell 31/轮
@@ -38,6 +43,10 @@ pub const MAX_INFLIGHT_LEAVES: usize = 4;
 pub const PENDING_OUTPUT_LIMIT: usize = 64 * 1024;
 /// cell 累计生成输出上限（含丢弃部分；超过关闭失败；§1.7）。
 pub const CELL_TOTAL_OUTPUT_LIMIT: usize = 1024 * 1024;
+/// 事件通道容量（A7 定案，N=16；§1.7 有界队列）：16 帧×单帧 ≤1 MiB＝积压
+/// 上界 16 MiB；满后读线程停等 send、worker 阻塞在 stdout 写形成背压。与
+/// PENDING_OUTPUT_LIMIT（观察合并侧缓冲）是两层不同上限。
+pub(crate) const EVENT_CHANNEL_CAPACITY: usize = 16;
 
 /// 叶子调用执行状态（§1.3：不诱导自动重试未知副作用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,6 +243,13 @@ enum Msg {
     ReaderDead(String),
 }
 
+/// 事件通道构造单点（A7）：容量＝[`EVENT_CHANNEL_CAPACITY`]。接收端 drop 后
+/// 发送端 send/try_send 报错——读线程与叶子线程在三条终止路径上的退出机制
+/// （有界性锚测试锁定容量与断连语义）。
+fn event_channel() -> (mpsc::SyncSender<Msg>, mpsc::Receiver<Msg>) {
+    mpsc::sync_channel(EVENT_CHANNEL_CAPACITY)
+}
+
 struct InflightLeaf {
     /// worker 侧调用 id（回包寻址）。
     call_id: u64,
@@ -389,8 +405,9 @@ pub struct CellHandle {
     cleanup_error: Option<String>,
     stdin: Option<std::process::ChildStdin>,
     reader_rx: mpsc::Receiver<Msg>,
-    /// 事件通道发送端（叶子执行线程回送 LeafDone）。
-    event_tx: mpsc::Sender<Msg>,
+    /// 事件通道发送端（叶子执行线程回送 LeafDone；有界——满时叶子线程停等，
+    /// 观察/收割消费腾容量后自动恢复；接收端 drop 后 send 报 Err）。
+    event_tx: mpsc::SyncSender<Msg>,
     /// cell 出生时冻结的工具目录（资格＋串行标记；深拷贝）。
     catalog: Vec<ToolCatalogEntry>,
     inflight: Vec<InflightLeaf>,
@@ -524,7 +541,7 @@ pub fn spawn_cell(
         .stdout
         .take()
         .expect("spawn 已 piped stdout");
-    let (tx, rx) = mpsc::channel::<Msg>();
+    let (tx, rx) = event_channel();
     let event_tx = tx.clone();
     std::thread::Builder::new()
         .name("tchat-js-reader".into())
@@ -533,8 +550,10 @@ pub fn spawn_cell(
             loop {
                 match read_frame(&mut reader, MAX_FRAME_BYTES) {
                     Ok(Some(frame)) => {
+                        // 满时停等（背压，容量＝EVENT_CHANNEL_CAPACITY）；
+                        // Err＝观察方已放弃（接收端 drop——三终止路径的退出机制）。
                         if tx.send(Msg::Worker(frame)).is_err() {
-                            return; // 观察方已放弃
+                            return;
                         }
                     }
                     Ok(None) => {
@@ -1878,6 +1897,28 @@ impl CellHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A7 有界性锚（无时序依赖）：构造单点 `event_channel` 的容量＝常量——
+    /// 容量内 send 全成、超容量 try_send 被拒；接收端 drop 后 send 报 Err
+    /// （读线程/叶子线程在 worker 死亡、runtime drop、轮终止三路径上的退出
+    /// 机制，模块头论证的机制前提）。
+    #[test]
+    fn event_channel_is_bounded_at_declared_capacity() {
+        let (tx, rx) = event_channel();
+        for i in 0..EVENT_CHANNEL_CAPACITY {
+            tx.send(Msg::Worker(Value::from(i)))
+                .expect("容量内 send 必成功");
+        }
+        assert!(
+            tx.try_send(Msg::Worker(Value::Bool(true))).is_err(),
+            "超容量必被拒：通道有界性＝EVENT_CHANNEL_CAPACITY"
+        );
+        drop(rx);
+        assert!(
+            tx.send(Msg::Worker(Value::Bool(false))).is_err(),
+            "接收端 drop 后 send 必报 Err——读线程退出依据"
+        );
+    }
 
     /// 输出缓冲：待交付段溢出丢弃＋标记；累计超限标记；预算截断按 UTF-8 边界。
     #[test]
