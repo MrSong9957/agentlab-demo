@@ -80,8 +80,6 @@ fn ensure_within_dir(dir: &Path, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-// ---------- 装载与修复 ----------
-
 /// 文件尾形态（续写尾置处理的依据，§3）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TailState {
@@ -107,7 +105,6 @@ pub struct Loaded {
 }
 
 impl Loaded {
-    /// 装载成功输出的单行摘要。
     pub fn summary(&self) -> String {
         format!(
             "恢复 {} 条（跳过 {} 行，修复 {} 处）",
@@ -669,8 +666,6 @@ pub fn load_session_file(path: &Path) -> Result<Loaded, String> {
     load_from_reader(file)
 }
 
-// ---------- 名称与路径 ----------
-
 /// 通用名称校验：`^[A-Za-z0-9._-]{1,64}$`（/resume 有名与 /save 共用）。
 pub fn validate_session_name(name: &str) -> Result<(), String> {
     let count = name.chars().count();
@@ -700,8 +695,6 @@ fn session_file_path(dir: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-// ---------- 列表与最近 auto ----------
-
 /// 列出会话（readdir＋stat，不打开任何会话正文）：名称（stem）＋文件字节数，按名称排序。
 pub fn list_sessions(dir: &Path) -> Vec<(String, u64)> {
     let mut out = Vec::new();
@@ -729,8 +722,6 @@ pub fn latest_auto(dir: &Path) -> Option<String> {
         .filter(|stem| stem.starts_with("auto-"))
         .max()
 }
-
-// ---------- auto 命名提供者（可注入） ----------
 
 /// UTC 基本格式时间戳 `YYYYMMDDTHHMMSS`（字典序＝时间序；无 chrono 依赖，
 /// Howard Hinnant civil_from_days 算法）。
@@ -888,8 +879,6 @@ fn try_flock(path: &Path, _file: &File) -> (LockOutcome, Option<SessionLock>) {
     }
 }
 
-// ---------- 手动快照（/save） ----------
-
 /// tmp＋rename 原子替换（`catalog.rs write_atomic` 模式最小适配：独立 tmp 0600、
 /// 流式逐记录写入、失败仅清 tmp——保存失败不得损坏旧快照）。返回记录条数。
 pub fn save_snapshot(dir: &Path, name: &str, history: &[HistoryItem]) -> Result<usize, String> {
@@ -942,8 +931,6 @@ pub fn save_snapshot(dir: &Path, name: &str, history: &[HistoryItem]) -> Result<
     result
 }
 
-// ---------- 会话写入器 ----------
-
 /// 记录序列化行（含结尾 `\n`）。
 fn record_line(item: &HistoryItem) -> String {
     let mut line =
@@ -965,7 +952,6 @@ enum State {
     Disabled,
 }
 
-/// `/resume` 结果。
 #[derive(Debug)]
 pub struct ResumeInfo {
     pub loaded: Loaded,

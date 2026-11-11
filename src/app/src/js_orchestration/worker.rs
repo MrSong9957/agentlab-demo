@@ -113,7 +113,6 @@ pub fn run_internal_js() -> i32 {
     }
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout().lock();
-    // init 帧（≤10 MiB）：源码＋工具目录。
     let first_frame = read_frame(&mut input, MAX_INIT_FRAME_BYTES);
     restore_worker_process_name();
     let init = match first_frame {

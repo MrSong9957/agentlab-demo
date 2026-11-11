@@ -599,7 +599,6 @@ pub fn measure_request_body_bytes_bounded(
     let outbound = finalize_outbound(conn, body)?;
     let mut counter = LimitCountingWriter { written: 0, limit };
     if serde_json::to_writer(&mut counter, &outbound.body).is_err() {
-        return Ok(None); // 超限即停
     }
     Ok(Some(counter.written))
 }

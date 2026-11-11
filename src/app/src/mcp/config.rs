@@ -29,7 +29,6 @@ pub const RESERVED_HTTP_HEADERS: &[&str] = &[
     "mcp-session-id",
 ];
 
-/// stdio 传输配置。
 #[derive(Debug, Clone, PartialEq)]
 pub struct StdioConfig {
     /// 程序：绝对路径，或从受控 PATH 查找的裸程序名（带路径的相对形式已拒绝）。

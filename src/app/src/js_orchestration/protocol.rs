@@ -32,8 +32,6 @@ pub fn observation_budget(max_tokens: u64) -> usize {
     (max_tokens.saturating_mul(4)) as usize
 }
 
-// ---------- 宿主 → worker ----------
-
 /// 初始化：源码＋工具目录（条目为 `{name, description, parameters}`）。
 pub fn init_frame(code: &str, tools: &[Value]) -> Value {
     serde_json::json!({
@@ -57,8 +55,6 @@ pub fn shutdown_frame(reason: &str) -> Value {
     serde_json::json!({ "t": "shutdown", "reason": reason })
 }
 
-// ---------- worker → 宿主 ----------
-
 /// 叶子调用请求（参数必须是 JSON 对象；宿主按冻结目录核对资格）。
 pub fn call_frame(id: u64, tool: &str, args: &Value) -> Value {
     serde_json::json!({ "t": "call", "id": id, "tool": tool, "args": args })
@@ -81,8 +77,6 @@ pub fn output_frame_cont(text: &str, json: bool) -> Value {
 pub fn done_frame(ok: bool, error: Option<&str>, unawaited: usize) -> Value {
     serde_json::json!({ "t": "done", "ok": ok, "error": error, "unawaited": unawaited })
 }
-
-// ---------- 帧编解码（共用） ----------
 
 /// 写一帧（长度前缀＋JSON）。超过 `max_len` 的帧是发送侧缺陷：显式失败。
 pub fn write_frame<W: Write>(out: &mut W, frame: &Value, max_len: u64) -> std::io::Result<()> {

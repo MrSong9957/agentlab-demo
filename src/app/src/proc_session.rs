@@ -116,8 +116,7 @@ struct MgrInner {
     /// 启动至会话登记期间串行化；确认闸等待时释放 state 锁，close 先标记关闭再等此锁。
     start_gate: Mutex<()>,
     /// 工具进程创建线程的请求通道（033 生命周期修复，见 [`ProcessManager::new`]
-    /// 内线程注释）。Mutex 仅弥补 std mpsc Sender 非 Sync（发送为 O(1) 入队）；
-    /// 接收端为专属长寿线程，退出条件＝全部管理器克隆 Drop（通道关闭）。
+    /// 内线程注释）。接收端为专属长寿线程，退出条件＝全部管理器克隆 Drop（通道关闭）。
     spawner_tx: Mutex<std::sync::mpsc::Sender<SpawnJob>>,
 }
 
@@ -1116,8 +1115,6 @@ fn cancelled_before_start(cancel: Option<&AtomicBool>) -> Option<ExecResult> {
         })
 }
 
-// ---- 会话记录 ----
-
 /// 一次受管理的进程执行：生命周期状态＋待取输出缓存＋输入通道。
 struct Session {
     id: String,
@@ -1653,8 +1650,6 @@ fn ceil_char_boundary(s: &str, limit: usize) -> usize {
     }
     i
 }
-
-// ---- 启动与后台线程 ----
 
 /// 一次成功启动的产物。
 struct Spawned {

@@ -270,8 +270,6 @@ impl TurnGrants {
     }
 }
 
-// ---------- 严格 JSON（递归重复键拒绝） ----------
-
 /// 递归严格 Value：每个对象层拒绝重复键（serde_json Map 会静默合并——022
 /// 配置侧先例在策略/请求侧同样成立）。非对象根由各层校验拒绝。
 fn parse_strict_json(text: &str) -> Result<Value, String> {
@@ -332,8 +330,6 @@ impl<'de> serde::de::Visitor<'de> for StrictVisitor {
     }
 }
 
-// ---------- Value 校验辅助 ----------
-
 fn expect_object<'a>(v: &'a Value, ctx: &str) -> Result<&'a serde_json::Map<String, Value>, String> {
     v.as_object()
         .ok_or_else(|| format!("{ctx} 必须是对象（收到 {v}）"))
@@ -378,8 +374,6 @@ fn validate_text_bytes(s: &str, ctx: &str) -> Result<(), String> {
     }
     Ok(())
 }
-
-// ---------- 策略解析 ----------
 
 impl Policy {
     /// 严格解析策略文本（§1.3：version=1；重复键/未知字段/矛盾规则拒绝；

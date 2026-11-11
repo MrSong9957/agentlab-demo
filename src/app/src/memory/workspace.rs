@@ -74,7 +74,6 @@ fn git_program() -> String {
 /// git stdout 捕获上限（Unicode 码点；差异文件渲染另有 4 MiB 合同上限，
 /// 此处仅界内存。真实记忆根远小于此）。
 const GIT_OUTPUT_LIMIT_CHARS: usize = 32 * 1024 * 1024;
-/// git stderr 捕获上限。
 const GIT_STDERR_LIMIT_CHARS: usize = 1024 * 1024;
 /// 轮询间隔与读线程收尾宽限（003 同款；宽限防孙进程持有管道使 join 无限等待）。
 const POLL_INTERVAL: Duration = Duration::from_millis(10);

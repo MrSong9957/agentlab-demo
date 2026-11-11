@@ -37,7 +37,6 @@ pub fn project_result(result: &CallToolResult) -> String {
     }
 }
 
-/// 给定已投影的结果 JSON，产出工具文本。
 pub fn value_to_tool_text(value: &Value) -> String {
     value.to_string()
 }

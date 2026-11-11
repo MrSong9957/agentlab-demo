@@ -756,8 +756,6 @@ pub fn build_turn_request(history: &[HistoryItem]) -> Value {
 /// developer→system 是经批准的协议适配，不宣称两角色语义等价。
 /// `None` 保持既有请求逐字节不变；上下文由 turn 按轮读取，本层不读文件。
 pub fn build_turn_request_with_memory(history: &[HistoryItem], memory_context: Option<&str>) -> Value {
-    // 原 `_with_input_host` 中间层已删（简化清单 S7）：无宿主能力＝
-    // has_input_host/async/send_message 全 false，语义不变。
     build_turn_request_with_async_host(history, memory_context, false, false, false, false)
 }
 
@@ -809,8 +807,6 @@ pub fn build_turn_request_with_tool_search(
     tool_search: Option<&Value>,
     mcp_tools: &[Value],
 ) -> Value {
-    // 原 `_with_orchestration` 中间层已删（简化清单 S7）：本入口无
-    // orchestration 参数（恒 false），直连终端组装面语义不变。
     build_turn_request_with_agents(
         history,
         memory_context,

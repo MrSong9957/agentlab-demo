@@ -891,8 +891,6 @@ pub fn run_user_turn_with_context(
     sources: &crate::context::ContextSources,
     procs: &ProcessManager,
 ) -> Result<String, String> {
-    // 原 `_and_host` 中间层已删（简化清单 S7）：无宿主/无图/无附件语义
-    // 直连 `_and_hosts`，行为不变。
     run_user_turn_with_context_and_hosts(
         history,
         current_input,
@@ -2633,7 +2631,6 @@ struct PendingSwitch {
 /// 检查点保存成功并收到宿主回执后才把检查点推入内存历史（此后活动视图＝
 /// seed＋其后真实历史；会话已在提交内落盘，on_record 无新增可写）。
 /// Err＝未应用原因（旧视图保留，候选不复活）。
-#[allow(clippy::too_many_arguments)]
 fn commit_context_switch(
     history: &mut Vec<HistoryItem>,
     on_record: &mut dyn FnMut(&[HistoryItem]),

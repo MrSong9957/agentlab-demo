@@ -197,7 +197,6 @@ struct Inner {
     servers: Vec<ServerState>,
 }
 
-/// MCP 管理器。
 pub struct McpManager {
     runtime: tokio::runtime::Runtime,
     inner: Mutex<Inner>,
@@ -955,8 +954,6 @@ impl McpManager {
         }
     }
 }
-
-// ---- 目录发布（连接与重列共用） ----
 
 fn publish_tools(
     config: &McpServerConfig,

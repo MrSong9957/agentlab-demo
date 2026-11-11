@@ -29,8 +29,6 @@ use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 
-// ---- JSON 工具边界 ----
-
 /// apply_patch 工具入参：只接受 patch 字段，多余字段视为非法。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApplyPatchArgs {
@@ -1032,8 +1030,6 @@ fn compute_new_content(
     source.apply_replacements(&replacements);
     Ok(source.into_contents())
 }
-
-// ---- 顺序执行器 ----
 
 /// 单块失败：区分“未发生写入”（清单仍可信）与“变更操作失败”（须重读）。
 struct Failure {

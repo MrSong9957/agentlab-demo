@@ -163,10 +163,11 @@
 - 改法：内容属实的整块搬回原函数上方；内容失实的删除（已在 S8 计）。
 - 处理（2026-11-11）：搬移 13 处（含 view_image.rs:74、tui_host.rs:857-860 两处按句拆分挂接）＋核销 1 处（apply_patch.rs:1770-1771 已随 A4/S27 删除）＋改判 1 处（turn.rs:211-214 清单标注「删」，核实内容属实且目标 skipped_without_execution 原无文档，按改法通则搬回——偏差依据记录供裁定）。文字零改动（无指代词需微调情形）；行号漂移按内容定位（proc_session 漂移系同日 S8 修正所致）。验证：cargo check --tests 0 错误、警告 605＝基线零新增、非注释行零变化断言＋注释行多重集相等断言通过（净删 1 孤儿空行＝apply_patch.rs 搬移残留清理）、lib 单线程 309/0（沿 S8 口径；默认并行 3 失败为存量——干净树对照同失败集合，隔离运行两树均过）、--test apply_patch 55/0。逐条依据见 docs/logs/2026-11-10-simplify-s9/report.md。
 
-### S10. 低价值注释约 210 条 `- [ ]`
+### S10. 低价值注释约 210 条 `- [x]`
 - 构成：复述代码约 90 条；分节标题约 50 条；里程碑/任务历史无现存约束约 40 条；无效果语句辩护（`let _` 系列）约 8 条；过时 lint 抑制（`agents/runtime.rs:1449` `message_label`、`turn.rs:2666` 恒不触发的 `too_many_arguments` 等）；无效果排序＋注释（`mcp/secrets.rs:28-30`）。
 - 代表：`proc_session.rs:119-121`（mpsc Sender 自 Rust 1.72 起 Sync）、`sandbox.rs:1331-1358`（seccomp 魔数注释可换 `libc::SYS_*` 常量，编号已逐个核对无错号；解释 unshare 原因与跳转逻辑的注释保留）。
 - 改法：随其他改动顺带处理，或单独一轮集中清理。**不动**带规格引用与今天仍成立约束的注释（项目规范要求保留）。
+- 处理（2026-11-11）：实际处置 **56 处**（纯删 53＋压缩 1＋豁免属性 2，22 个源文件）——agents/runtime.rs `#[allow(dead_code)]`（message_label 有 3 调用点）、turn.rs `#[allow(too_many_arguments)]`（commit_context_switch 恰 7 参恒不触发）按点名删除；proc_session.rs spawner_tx 过时 Mutex-Sync 半句压缩（保留 033 引用与接收端退出条件约束）；secrets.rs 排序辩护注释删除（全消费方顺序无关已核实，排序代码本身不动登记未排期）；其余 49 处为纯分节标题/名称直译/复述/S7 历史叙述（6 组并行探查 47 文件约 5,300 注释行逐行核实＋人工逐条执行）。**与「约 210」差异**：审计期估计无逐条明细，本轮按「规格链接一律保留」严口径实测，各目录候选率 0.2%–2%，存疑约 60 条保守保留未凑数。**上报**：tui_host.rs `renders_checkpoint_boundary` 缺 `#[test]`（属性错挂相邻测试，从未运行）——真实属性错位，超范围未动待裁决；Mutex 移除与无效排序为代码改动登记未排期。验证：非注释行零变化断言通过（豁免 allow×2＋api.rs 行尾注释特判）、check --tests 0 错误、警告 605＝基线零新增（删 allow 无新增）、lib 单线程 309/0、e2e_acceptance 150/0。证据：docs/logs/2026-11-10-simplify-s10/report.md。
 
 ### 重构
 

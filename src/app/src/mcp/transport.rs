@@ -80,8 +80,6 @@ pub fn build_child_env(env_vars: &[String]) -> (Vec<(String, String)>, Vec<Strin
     (list, missing)
 }
 
-// ---- 有界 stdio 传输（移植 Codex bounded_stdio_transport）----
-
 pub struct BoundedStdioTransport {
     stdin: Arc<AsyncMutex<Option<ChildStdin>>>,
     stdout: BufReader<ChildStdout>,
@@ -459,8 +457,6 @@ fn spawn_stderr_drain(stderr: tokio::process::ChildStderr, tail: Arc<Mutex<Vec<u
     });
 }
 
-// ---- SSE 单事件限额（移植 SDK client_side_sse.rs 的 SseEventSizeLimiter）----
-
 /// 移植 SDK `SseEventSizeLimiter`：逐字节跟踪当前事件累计尺寸（注释行不计），
 /// 空行结束事件。事件超过上限即失败（在完整解析前拒绝）。
 #[derive(Debug)]
@@ -592,8 +588,6 @@ fn bounded_sse_stream(stream: reqwest::Response) -> BoxStream<'static, Result<Ss
     SseStream::from_bytes_stream(bounded).boxed()
 }
 
-// ---- 有界 Streamable HTTP 客户端（移植 SDK reqwest 适配器＋JSON 体限额）----
-
 #[derive(Debug)]
 pub enum HttpError {
     Reqwest(reqwest::Error),
@@ -618,7 +612,6 @@ impl From<reqwest::Error> for HttpError {
     }
 }
 
-/// reqwest 错误统一包装为客户端错误变体。
 fn client_err(e: reqwest::Error) -> StreamableHttpError<HttpError> {
     StreamableHttpError::Client(HttpError::Reqwest(e))
 }

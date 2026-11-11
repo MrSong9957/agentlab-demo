@@ -71,7 +71,6 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("--internal-js") {
         std::process::exit(terminal_chat::js_orchestration::worker::run_internal_js());
     }
-    // .env 是环境变量的可选来源：启动时载入，已存在的变量不覆盖
     catalog::load_dotenv_from(std::path::Path::new(".env"));
     // 031：可信策略装配（§1.2：CLI/TUI 分流前统一加载并冻结；两宿主取得同
     // 一快照，dotenv 不能重配信任根）。设置 TCHAT_PERMISSION_POLICY 而装配

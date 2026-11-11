@@ -31,7 +31,6 @@ use crate::proc_session::ProcessManager;
 use crate::turn::SteerChannel as _;
 use crate::{api, catalog, session, turn};
 
-/// 是否应进入 TUI 模式。
 pub fn tui_should_run() -> bool {
     use std::io::IsTerminal;
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {

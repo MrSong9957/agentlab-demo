@@ -18,8 +18,6 @@ static TEST_TMP_PIN: std::sync::Mutex<Option<(u32, u64)>> = std::sync::Mutex::ne
 /// 当前实际支持的协议；未支持的协议明确报错。
 pub const SUPPORTED_PROTOCOL: &str = "openai-chat";
 
-// ---------- 数据结构 ----------
-
 /// 模型记录：能力查不到就留空表示未知，不按模型名称猜。
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -225,8 +223,6 @@ pub struct FinalDict {
     pub selected_provider: Option<String>,
     pub selected_model: Option<String>,
 }
-
-// ---------- 凭证与指纹 ----------
 
 /// 信任根控制变量：目录解析与公共目录地址的运行时入口（含默认目录回退）。
 /// 只允许来自可信的启动环境——项目 .env 是不可信输入（可能随克隆仓库携带），
@@ -572,8 +568,6 @@ pub fn ensure_catalog_origin_authorized(
     }
 }
 
-// ---------- 内置资料 ----------
-
 /// 内置兜底资料：能力字段来自厂商接口返回，未知就留空。
 pub fn builtin() -> BTreeMap<String, AutoProvider> {
     let mut providers = BTreeMap::new();
@@ -628,8 +622,6 @@ pub fn builtin() -> BTreeMap<String, AutoProvider> {
     );
     providers
 }
-
-// ---------- 合并 ----------
 
 /// 步骤 1：合并厂商连接信息（内置资料 → 自动目录基础资料 → 手动覆盖）。
 pub fn effective_connection(
@@ -796,8 +788,6 @@ pub fn merge_final(manual: &ManualRoot, auto: &AutoCatalog) -> FinalDict {
     }
 }
 
-// ---------- 最终字典 ----------
-
 /// 从配置目录加载手动配置与自动目录，在内存中合成最终字典。
 pub fn build_final() -> Result<FinalDict, String> {
     let dir = config_dir();
@@ -805,8 +795,6 @@ pub fn build_final() -> Result<FinalDict, String> {
     let auto = load_auto(&dir)?;
     Ok(merge_final(&manual, &auto))
 }
-
-// ---------- 请求路由 ----------
 
 /// 请求前路由检查：密钥能读到、模型未禁用；返回本次调用的固定快照。
 /// 通过后由调用方发起请求；失败原因明确说明。
@@ -837,8 +825,6 @@ pub fn route(dict: &FinalDict) -> Result<(Resolved, Credential, ModelInfo), Stri
     })?;
     Ok((prov.clone(), cred, model.clone()))
 }
-
-// ---------- 参数能力 ----------
 
 /// 019：模型图片输入能力判断——只有用户在配置中明确声明 `input_modalities`
 /// 含 `image` 才开放（缺字段＝未知、只 text＝关闭，均返回 false）；
@@ -1016,8 +1002,6 @@ pub fn check_request_param(model: &ModelInfo, param: &str) -> Result<(), String>
         Some(_) => Err(format!("参数 {param} 已确认不被模型 {} 支持", model.id)),
     }
 }
-
-// ---------- 文件保存与加载 ----------
 
 pub fn config_dir() -> PathBuf {
     std::env::var("TCHAT_CONFIG_DIR")
@@ -1290,8 +1274,6 @@ fn write_atomic(dir: &Path, name: &str, content: &str) -> Result<(), String> {
     }
     result
 }
-
-// ---------- 自动更新 ----------
 
 /// 刷新报告：逐厂商说明成功、失败或跳过原因。
 #[derive(Default, Debug)]
@@ -1694,8 +1676,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ---------- 暴露用例：先钉住正确业务预期，再最小修复 ----------
-
     #[test]
     fn debug_output_redacts_key() {
         let cred = Credential { name: "K".into(), value: "sk-victim-secret".into() };
@@ -2036,8 +2016,6 @@ mod tests {
         std::env::remove_var("TCHAT_TEST_KEY");
     }
 
-    // ---------- 六类清单补测 ----------
-
     #[test]
     fn validate_base_url_rules() {
         assert!(validate_base_url("https://api.deepseek.com").is_ok());
@@ -2267,8 +2245,6 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
-
-    // ---------- 高风险清单补充（2026-10-10）----------
 
     /// NET-B03：回环豁免名单精确性——127.0.0.2 属 127/8 回环段但不在项目名单内，
     /// 按本地契约必须拒绝明文 HTTP（名单为 localhost/127.0.0.1/[::1] 三者）。

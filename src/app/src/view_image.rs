@@ -350,7 +350,6 @@ pub fn compose_cli_user_message(
     (content, elements)
 }
 
-/// 相对路径以会话工作目录解析；绝对路径按原义使用。
 fn resolve_path(cwd: &Path, path: &str) -> PathBuf {
     let p = Path::new(path);
     if p.is_absolute() {
@@ -932,8 +931,6 @@ mod tests {
             .unwrap();
         cursor.into_inner()
     }
-
-    // ---------- execute 契约 ----------
 
     fn write_png(dir: &Path, name: &str) -> PathBuf {
         let p = dir.join(name);

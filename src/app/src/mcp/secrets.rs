@@ -25,8 +25,6 @@ impl SensitiveValues {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
-        // 长值优先检查：短值可能是长值的平凡子串，先命中长值便于内部定位；
-        // contains 判定本身与顺序无关。
         values.sort_by_key(|v| std::cmp::Reverse(v.len()));
         SensitiveValues { values }
     }
