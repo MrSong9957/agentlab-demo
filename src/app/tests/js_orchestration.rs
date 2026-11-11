@@ -64,6 +64,8 @@ impl LeafDispatcher for MapDispatcher {
 /// 记录型 sink：事件入 Vec；可注入保存失败（指定事件 kinds 失败）。
 struct RecordingSink {
     events: Mutex<Vec<EventKind>>,
+    /// S36/P1-3 锚用：(kind, seq) 序列——保存失败不占号可观察。
+    seqs: Mutex<Vec<(EventKind, u64)>>,
     fail_on: Vec<EventKind>,
 }
 
@@ -71,6 +73,7 @@ impl RecordingSink {
     fn new() -> Self {
         Self {
             events: Mutex::new(Vec::new()),
+            seqs: Mutex::new(Vec::new()),
             fail_on: Vec::new(),
         }
     }
@@ -78,8 +81,14 @@ impl RecordingSink {
     fn failing(fail_on: Vec<EventKind>) -> Self {
         Self {
             events: Mutex::new(Vec::new()),
+            seqs: Mutex::new(Vec::new()),
             fail_on,
         }
+    }
+
+    /// S36/P1-3：(kind, seq) 序列（含被拒绝事件到达时的 seq）。
+    fn seqs(&self) -> Vec<(EventKind, u64)> {
+        self.seqs.lock().unwrap().clone()
     }
 
     fn kinds(&self) -> Vec<EventKind> {
@@ -93,6 +102,7 @@ impl OrchestrationSink for RecordingSink {
         event: &Event<'_>,
         _history: &[terminal_chat::prompt::HistoryItem],
     ) -> Result<(), String> {
+        self.seqs.lock().unwrap().push((event.kind, event.seq));
         if self.fail_on.contains(&event.kind) {
             return Err("注入的保存失败".into());
         }
@@ -241,6 +251,59 @@ fn pure_js_text_output_completes() {
     assert!(kinds.contains(&EventKind::CellStarted));
     assert!(kinds.contains(&EventKind::CellClosed));
     assert_eq!(kinds.iter().filter(|k| **k == EventKind::CellStarted).count(), 1);
+}
+
+/// S36/P1-3：保存失败不占序号——call_finished 拒绝后，关闭事件的 seq
+/// 复用同一号（无空洞；修复前若失败也递增则 closed.seq=3）。
+#[test]
+fn persist_failure_does_not_leave_seq_hole() {
+    let dispatcher = MapDispatcher::new(&[("n", r#"{"ok":true}"#)]);
+    let mut sink = RecordingSink::failing(vec![EventKind::CallFinished]);
+    let cfg = config(
+        r#"await tools["n"]({}); "done""#,
+        vec![catalog_entry("n", false)],
+        dispatcher,
+        turn_budget(),
+    );
+    let empty_history: Vec<terminal_chat::prompt::HistoryItem> = Vec::new();
+    let mut cell = spawn_cell(&cfg, &mut sink, &empty_history).expect("spawn");
+    let observation = drive_to_terminal(&mut cell, &mut sink);
+    assert_eq!(observation.status, CellStatus::Failed, "{observation:?}");
+    let seqs = sink.seqs();
+    let closed = seqs
+        .iter()
+        .find(|(k, _)| *k == EventKind::CellClosed)
+        .map(|(_, s)| *s)
+        .expect("关闭事件必到达 sink");
+    // 语义：CallFinished 构造时 seq=3，被拒不占用；CellClosed 复用 3（若
+    // 失败也递增则 closed=4＝空洞）。序列 [(CellStarted,1),(CallStarted,2),
+    // (CallFinished,3 被拒),(CellClosed,3)]＝无空洞。
+    assert_eq!(closed, 3, "CellClosed 复用被拒 CallFinished 的 seq（无空洞）：{seqs:?}");
+}
+
+/// S36/P2-8：预算截断标记不粘——首次 observe 交付截断（truncated=true），
+/// 二次 observe 无新溢出则不再截断（「交付即复位」非粘性语义锚）。
+#[test]
+fn second_observe_does_not_repeat_truncation() {
+    let dispatcher = MapDispatcher::new(&[]);
+    let mut sink = RecordingSink::new();
+    let code = r#"text("x".repeat(100 * 1024)); await new Promise(r => setTimeout(r, 500)); "done""#;
+    let cfg = config(code, vec![], dispatcher, turn_budget());
+    let empty_history: Vec<terminal_chat::prompt::HistoryItem> = Vec::new();
+    let mut cell = spawn_cell(&cfg, &mut sink, &empty_history).expect("spawn");
+    let first = cell.observe(1_000, 64 * 1024, &mut sink, None, &empty_history);
+    assert!(
+        first.output_truncated,
+        "100 KiB 条超 64 KiB 待交付上限：首次观察必带截断标记：{:?}",
+        first.output_truncated
+    );
+    // 第二次观察（让出期内或终态交付）：无新溢出＝不再截断。
+    let second = cell.observe(30_000, 64 * 1024, &mut sink, None, &empty_history);
+    assert!(
+        !second.output_truncated,
+        "P2-8：二次 observe 不再截断（非粘性）：{:?}",
+        second.output_truncated
+    );
 }
 
 /// A8/034 §1.3：一次超分片阈值（TEXT_CHUNK=512 KiB）的 text——worker 后续

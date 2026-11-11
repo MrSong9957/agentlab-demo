@@ -1549,7 +1549,7 @@ impl CellHandle {
         };
         match sink.commit(&event, history) {
             Ok(()) => {
-                self.event_seq += 1; // 成功才占用序号（失败由后续事件复用，防 seq 空洞——审查 P1-3）
+                self.event_seq += 1; // 成功才占用序号（失败由后续事件复用，防 seq 空洞）
                 self.committed_events.push(event_to_history_item(&event));
             }
             Err(reason) => {
@@ -1648,7 +1648,7 @@ impl CellHandle {
         };
         match sink.commit(&event, history) {
             Ok(()) => {
-                self.event_seq += 1; // 成功才占用序号（审查 P1-3）
+                self.event_seq += 1; // 成功才占用序号（失败由后续事件复用，防 seq 空洞）
                 self.committed_events
                     .push(event_to_history_item(&event));
                 self.deliver_leaf_result(&InflightLeafStub { call_id }, outcome)

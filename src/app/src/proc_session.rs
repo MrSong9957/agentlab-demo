@@ -2400,6 +2400,23 @@ fn spawn_reader<R: Read + AsRawFd + Send + 'static>(session: Arc<Session>, mut p
 
 #[cfg(test)]
 mod tests {
+    /// S36：reap_failed 闩锁清除时机——再次 reap（即使无额外权限会话）
+    /// 成功即清除（:302 早退路径），宿主可开始下一用户轮。
+    #[test]
+    fn reap_extra_clears_failed_latch_even_without_extras() {
+        let mgr = ProcessManager::new();
+        {
+            let mut st = mgr.lock_mgr();
+            st.reap_failed = Some("注入的收尾失败".into());
+        }
+        assert!(mgr.extra_reap_gate().is_some(), "置位后可读");
+        mgr.reap_extra_permission_sessions().unwrap();
+        assert!(
+            mgr.lock_mgr().reap_failed.is_none(),
+            "再次 reap 成功（无 extras）即清除闩锁"
+        );
+    }
+
     /// S37 锚 1（Windows）：`ChildHandle::try_wait` 的 WAIT_TIMEOUT 分支可达——
     /// 打开本进程自身的 SYNCHRONIZE 句柄（自身未终止），0ms 等待必落
     /// WAIT_TIMEOUT 臂返回 Ok(None)；WAIT_FAILED 导入缺失为 Windows 编译错

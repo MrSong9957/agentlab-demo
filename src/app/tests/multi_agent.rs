@@ -2230,6 +2230,84 @@ fn tool(
     execute_control_tool(runtime, name, &args.to_string(), history, ctx, &|| false)
 }
 
+/// S36/N3：followup 满槽（全局 3 子执行槽被挂起 Agent 占满）拒绝时——
+/// 目标 Agent 保持原终态与最近任务文案（rollback_followup 不得错置 failed、
+/// 不得毁最近任务展示）。挂起构造：ScriptChild 屏障 n=2 而仅 1 请求到达＝
+/// 模型线程永久等待＝槽持续占用（测试进程退出回收）。
+#[test]
+fn n3_followup_full_slots_keeps_terminal_state_and_message() {
+    let _suite = SuiteGuard::acquire();
+    let dir = std::env::temp_dir().join(format!("tchat-035-n3-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let manager = AgentManager::new();
+    let session = Arc::new(Mutex::new(Session::new(dir.clone())));
+    let procs = terminal_chat::proc_session::ProcessManager::new();
+    let runtime = manager.begin_turn(session, procs);
+    // 终态目标：final 响应＝completed（N3 区分「错置 failed」——prev 必须非 failed）。
+    let done_factory = || -> Box<dyn ChildModelSender> {
+        Box::new(ScriptChild::new(vec![child_final("done1 完成")]))
+    };
+    let ctx = direct_ctx(&done_factory);
+    let mut history = Vec::new();
+    let out = tool(
+        &runtime,
+        "spawn_agent",
+        json!({ "task_name": "done1", "message": "任务 done1", "fork_turns": "none" }),
+        &mut history,
+        &ctx,
+    );
+    assert!(out.contains("\"error\":null"), "终态目标 spawn：{out}");
+    let out = tool(&runtime, "wait_agent", json!({ "timeout_ms": 8000 }), &mut history, &ctx);
+    assert!(!out.contains("\"timeout\""), "终态目标应完成：{out}");
+    // 挂起 ×3 占满全局槽（屏障等待＝模型线程卡住）。
+    for name in ["hang1", "hang2", "hang3"] {
+        let factory = {
+            let child = ScriptChild::new(vec![]).with_barrier(2);
+            move || -> Box<dyn ChildModelSender> { Box::new(child.clone()) }
+        };
+        let hang_ctx = direct_ctx(&factory);
+        let out = tool(
+            &runtime,
+            "spawn_agent",
+            json!({ "task_name": name, "message": format!("任务 {name}"), "fork_turns": "none" }),
+            &mut history,
+            &hang_ctx,
+        );
+        assert!(out.contains("\"error\":null"), "{name} 挂起 spawn：{out}");
+    }
+    // followup 终态目标：满槽拒绝（文案含槽数），状态/文案不被破坏。
+    let out = tool(
+        &runtime,
+        "followup_task",
+        json!({ "target": "/root/done1", "message": "续接任务" }),
+        &mut history,
+        &ctx,
+    );
+    assert!(
+        out.contains("CAPACITY_LIMIT") && out.contains("全应用子执行槽已满（3）"),
+        "满槽 followup 应拒绝：{out}"
+    );
+    let listing = tool(&runtime, "list_agents", json!({}), &mut history, &ctx);
+    let v: serde_json::Value = serde_json::from_str(&listing).unwrap();
+    let done1 = v["data"]["agents"]
+        .as_array()
+        .and_then(|a| {
+            a.iter()
+                .find(|a| a["agent_name"] == json!("/root/done1"))
+                .cloned()
+        })
+        .expect("list_agents 含 done1");
+    assert_eq!(
+        done1["state"], json!("completed"),
+        "N3：拒绝后保持原终态（不得错置 failed）：{done1}"
+    );
+    assert_eq!(
+        done1["last_task_message"], json!("任务 done1"),
+        "N3：最近任务文案不毁：{done1}"
+    );
+}
+
 /// S33（A1 回归锚）：组事件计费恰一次。035 §1.6「提交后按真实大小计费并
 /// 释放未用预留」——已提交事件（除 MessageDelivered 通知，其不属于计费面）
 /// 的 event_bytes 之和必须等于 event_bytes_committed。A1（child_record 在

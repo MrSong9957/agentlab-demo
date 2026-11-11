@@ -976,7 +976,7 @@ impl GroupRuntime {
     }
 
     /// followup 启动失败回滚：assignment 额度归还，Agent 回到**前一终态与
-    /// 原任务文案**（审查 N3——不得错置 failed、不得毁最近任务展示）。
+    /// 原任务文案**（不得错置 failed、不得毁最近任务展示）。
     fn rollback_followup(&self, name: &str, assignment_id: u64, prev: AgentState, prev_task: &str) {
         let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
         core.assignments_started = core.assignments_started.saturating_sub(1);

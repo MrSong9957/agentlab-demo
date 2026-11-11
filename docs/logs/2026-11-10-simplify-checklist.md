@@ -332,8 +332,10 @@
 - 处理：2026-11-10 落地两例——①`tests/mcp_stdio.rs::a16_polluted_escaped_result_rejected_by_leaf_check`（夹具新增 `polluted_result_escaped` 场景回显 `TCHAT_MCP_TOKEN_Q`＝`canary"q\tail`，断言 failed＋标准客户端错误＋canary 不入投影）；②`tests/mcp_config.rs::a02_duplicate_json_keys_rejected_at_every_level` 追加第三段断言（url＋`env_http_headers` 对象内完全同名的重复头）。先红（转义值漏报直通；`[("X-A","V2")]` 静默覆盖）后绿。两条注释（call.rs:8-9、config.rs:128-129）修复后内容属实，保留未删——偏差与理由见 A5/A6 处理记录。证据见 `docs/logs/2026-11-10-simplify-a5a6-s35/`（红绿×4＋8 套件回归日志）。
 - 处理（审查轮，2026-11-10）：独立审查确认 A5 逐叶覆盖与等价性成立（含 is_error 直取与 to_value 失败路径逐字一致）；两条保留注释经代码事实核实成立。**口径内残差登记**（审查 P3，非阻塞）：逐叶检查不再命中「敏感值横跨叶子边界/恰为键名」的巧合结构（旧整串扫描可命中，多为假阳性过拒；023 §5.1.4 已裁定的逐字段口径即逐叶，资源路径同性质已接受）——如需补齐可叠加原序列化串兜底检查（并集），是否采纳由用户决定。`resources.rs:379-381` 对 `_meta` 的串扫经核实均有投影层逐叶兜底，无实际缺口（审查者核实）。
 
-### S36. 审查标签规则补锚（7 条）`- [ ]`
+### S36. 审查标签规则补锚（7 条）`- [x]`
 - JS seq 连续无空洞（P1-3，`tests/js_orchestration.rs:1179` 附近）；二次 observe 不再截断（P2-8）；followup 满槽保状态文案（N3）；`proc_session.rs:142-143` reap_failed 清除时机；`sandbox.rs:891-892` 成对断言在组装层强制。通过后删除对应标签注释。
+
+- 处置（2026-11-11，批 4）：5 锚——P1-3 seq 复用（首跑红＝锚预期算错，规则已落实，未改规则）、P2-8 非粘性、N3 满槽保状态文案（屏障挂起占满 3 槽＋completed 目标）、reap_failed 清除时机、成对断言（已存在 pid_namespace_and_proc_paired）；对应标签注释已删（事实保留）。验证：js_orchestration 45/0、multi_agent 25/0、proc_session 24/0、警告 580 零新增。证据：docs/logs/2026-11-11-simplify-batches/batch4/report.md。
 
 ### S37. Windows 夹具回归锚 `- [x]`
 - 三件（配 A10）：WAIT_TIMEOUT 分支可达；Windows 读取线程累加 `reader_eof`；UNC 还原两反斜杠。需 Windows runner（038 工作流）执行。
