@@ -370,11 +370,17 @@ impl ProcessManager {
                 request_group_term(pgid);
             }
         }
-        let pending = Self::terminate_sessions_bounded(&owned);
+        Self::terminate_sessions_bounded(&owned);
+        // S13 验收修正：pending 与移除在同一锁临界区内判定（原抽取版在
+        // helper 无锁快照判定，两时刻间被 monitor 终止的会话会「既移除又
+        // 报 pending」——伪失败 Err）。helper 只负责终止；最终判定在此。
+        let mut pending = Vec::new();
         {
             let mut st = self.lock_mgr();
             for s in &owned {
-                if !matches!(s.phase(), Phase::Running { .. }) {
+                if matches!(s.phase(), Phase::Running { .. }) {
+                    pending.push(s.id.clone());
+                } else {
                     st.sessions.remove(&s.id);
                 }
             }

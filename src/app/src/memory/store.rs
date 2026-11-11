@@ -1179,7 +1179,9 @@ WHERE kind = ?1 AND job_key = ?2
     /// 013-M7：threads 登记行的更新时间（毫秒）——登记写入侧与测试观察面。
     pub fn thread_updated_at_ms(&self, thread_id: &str) -> Result<Option<i64>, String> {
         let conn = self.lock_conn()?;
-        // S26：沿同文件 optional() 先例；行取值错误文案单列保真。
+        // S26：沿同文件 optional() 先例。已知差异（验收审查登记）：行取值
+        // 失败的独立文案（「读取登记时间失败」）并入「查询 threads 登记失败」
+        // ——query_row 单一错误通道，类型错误路径几乎不可达。
         conn.query_row(
             "SELECT updated_at_ms FROM threads WHERE thread_id = ?1",
             params![thread_id],

@@ -638,7 +638,10 @@ impl McpManager {
                             (projected, is_error)
                         }
                     }
-                    Err(e) => (call::client_error_json("协议", &e), true),
+                    // 序列化失败（理论不可达）差异登记（验收审查）：A5 前该分支过污染检查且
+            // is_error=false；现直接 client_error（错误文本来自序列化器，不含
+            // 用户数据）且 is_error=true——错误态更准确。
+            Err(e) => (call::client_error_json("协议", &e), true),
                 }
             }
             Ok(rmcp::model::ServerResult::InputRequiredResult(_)
@@ -682,10 +685,13 @@ impl McpManager {
 
     fn ensure_loaded(&self) {
         let mut inner = self.lock();
-        inner.snapshot_cache = None;
         if inner.loaded {
             return;
         }
+        // S28 验收修正：失效语句只在**实际装载**时执行（原置于 loaded 检查前
+        // 使每轮 prepare 前缓存恒空——复用路径死代码）。装载后的变更点失效
+        // 由下方 Ok/Err 分支承担。
+        inner.snapshot_cache = None;
         let user_dir = crate::catalog::user_dir();
         match load_mcp_file(&user_dir) {
             Ok(file) => {

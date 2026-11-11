@@ -284,6 +284,11 @@ struct OutputBuffer {
     pending_truncated: bool,
     total_bytes: usize,
     total_over_limit: bool,
+    /// A8 验收修复：cont=false 首片因待交付上限被整片丢弃后置位——同一次
+    /// text 调用的后续 cont 片随之丢弃（034「单次超 64 KiB 的 text 被待交付
+    /// 缓冲丢弃」的整条语义），防止 cont 片误并上一次调用遗留的末条（跨调用
+    /// 内容损坏）。下一个 cont=false 帧（新调用首片成功入队）复位。
+    dropping_call: bool,
 }
 
 impl OutputBuffer {
@@ -294,6 +299,7 @@ impl OutputBuffer {
             pending_truncated: false,
             total_bytes: 0,
             total_over_limit: false,
+            dropping_call: false,
         }
     }
 
@@ -305,8 +311,10 @@ impl OutputBuffer {
         }
         if self.pending_bytes + text.len() > PENDING_OUTPUT_LIMIT {
             self.pending_truncated = true; // 待交付段溢出：丢弃并标记
+            self.dropping_call = true; // 本次调用的 cont 片随之整条丢弃
             return;
         }
+        self.dropping_call = false; // 新调用首片成功入队（A8 修复）
         self.pending_bytes += text.len();
         self.pending.push(text);
     }
@@ -319,12 +327,17 @@ impl OutputBuffer {
             self.total_over_limit = true;
             return;
         }
+        // A8 修复：首片被整片丢弃的调用，后续 cont 片同样丢弃——不并入
+        // 上一次调用遗留的末条（跨调用内容损坏）。
+        if self.dropping_call {
+            return;
+        }
         match self.pending.last_mut() {
             Some(last) => {
                 last.push_str(&text);
                 self.pending_bytes += text.len();
             }
-            None => self.push(text), // 无前块（已交付/丢弃）：独立成条
+            None => self.push(text), // 无前块（已交付/丢弃）：独立成条（沿用上限判定）
         }
     }
 
@@ -397,7 +410,11 @@ pub struct CellHandle {
     worker_cleanup: WorkerCleanup,
     wall_deadline: Instant,
     cleanup_error: Option<String>,
-    stdin: Option<std::process::ChildStdin>,
+    /// A7 验收修复：worker stdin 专用写线程——根线程 reply_leaf 同步写
+    /// 大结果帧（≤256 KiB＞管道 64 KiB）曾与「读线程停等→worker 不读 stdin」
+    /// 互锁（三方死锁：根阻塞在 write、observe 循环不可达、墙钟兜底失效）。
+    /// 根线程只投递字节（无界 mpsc），写线程阻塞在 write 不再牵连 observe。
+    writer_tx: Option<std::sync::mpsc::Sender<Vec<u8>>>,
     reader_rx: mpsc::Receiver<Msg>,
     /// 事件通道发送端（叶子执行线程回送 LeafDone；有界——满时叶子线程停等，
     /// 观察/收割消费腾容量后自动恢复；接收端 drop 后 send 报 Err）。
@@ -533,6 +550,22 @@ pub fn spawn_cell(
         let _ = kill_worker(&mut child, &worker_cleanup);
         return Err(format!("发送初始化帧失败：{e}"));
     }
+    // 写线程：唯一 stdin 写者（init 后）；接收端 drop＝close/Drop，线程随写
+    // 失败退出。
+    let (writer_tx, writer_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::Builder::new()
+        .name("tchat-js-stdin-writer".into())
+        .spawn(move || {
+            for payload in writer_rx {
+                if stdin.write_all(&payload).is_err() {
+                    return; // worker 已断：读线程 ReaderDead 收尾
+                }
+            }
+        })
+        .map_err(|e| {
+            let _ = kill_worker(&mut child, &worker_cleanup);
+            format!("启动 worker stdin 写线程失败：{e}")
+        })?;
     let stdout = child
         .stdout
         .take()
@@ -600,7 +633,7 @@ pub fn spawn_cell(
         worker_cleanup,
         wall_deadline: Instant::now() + Duration::from_millis(WORKER_WALL_LIMIT_MS),
         cleanup_error: None,
-        stdin: Some(stdin),
+        writer_tx: Some(writer_tx),
         reader_rx: rx,
         event_tx,
         catalog: config.catalog.clone(),
@@ -1690,9 +1723,14 @@ impl CellHandle {
 
     fn reply_leaf(&mut self, id: u64, outcome: Result<Value, Value>) {
         let frame = leaf_frame(id, outcome);
-        if let Some(stdin) = self.stdin.as_mut() {
-            if write_frame(stdin, &frame, MAX_FRAME_BYTES).is_err() {
-                self.stdin = None; // worker 已断：读线程 ReaderDead 收尾
+        if let Some(tx) = self.writer_tx.as_mut() {
+            // 线格式＝u64 LE 长度前缀＋JSON（与 protocol::write_frame 一致）。
+            let json = serde_json::to_vec(&frame).unwrap_or_default();
+            let mut payload = Vec::with_capacity(8 + json.len());
+            payload.extend_from_slice(&(json.len() as u64).to_le_bytes());
+            payload.extend_from_slice(&json);
+            if json.len() as u64 > MAX_FRAME_BYTES || tx.send(payload).is_err() {
+                self.writer_tx = None; // worker 已断：读线程 ReaderDead 收尾
             }
         }
     }
@@ -1849,10 +1887,17 @@ impl CellHandle {
             }
         }
         // worker 终止与回收（shutdown 帧尽力发送；killpg 兜底）。
-        if let Some(stdin) = self.stdin.as_mut() {
-            let _ = write_frame(stdin, &shutdown_frame(reason.as_str()), MAX_FRAME_BYTES);
+        if let Some(tx) = self.writer_tx.as_mut() {
+            // shutdown 帧尽力发送（线格式同 write_frame：u64 LE 前缀＋JSON）。
+            let json = serde_json::to_vec(&shutdown_frame(reason.as_str())).unwrap_or_default();
+            if json.len() as u64 <= MAX_FRAME_BYTES {
+                let mut payload = Vec::with_capacity(8 + json.len());
+                payload.extend_from_slice(&(json.len() as u64).to_le_bytes());
+                payload.extend_from_slice(&json);
+                let _ = tx.send(payload);
+            }
         }
-        self.stdin = None;
+        self.writer_tx = None; // 弃置接收端：写线程随 recv Err 退出
         if let Err(error) = kill_worker(&mut self.child, &self.worker_cleanup) {
             self.cleanup_error = Some(error);
             return;
@@ -1893,6 +1938,26 @@ impl CellHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A8 验收锚：首片超限整条丢弃后，cont 片不得并入上一次调用的末条
+    /// （dropping_call 机制——跨调用内容损坏回归锚）。
+    #[test]
+    fn cont_frames_never_merge_across_calls_after_drop() {
+        let mut buf = OutputBuffer::new();
+        buf.push("small".into());
+        // 调用 2：首片 160 KiB 超 64 KiB 待交付上限＝整片丢弃＋dropping 置位。
+        buf.push("x".repeat(160 * 1024));
+        buf.merge_last("y".repeat(60 * 1024)); // cont 片须随调用丢弃
+        // 调用 3：新首片复位 dropping；cont 片正常并入。
+        buf.push("z".into());
+        buf.merge_last("w".into());
+        assert_eq!(
+            buf.pending,
+            vec!["small".to_string(), "zw".to_string()],
+            "丢弃调用的 cont 片不得污染上一条；新调用 cont 正常合并：{:?}",
+            buf.pending
+        );
+    }
 
     /// A7 有界性锚（无时序依赖）：构造单点 `event_channel` 的容量＝常量——
     /// 容量内 send 全成、超容量 try_send 被拒；接收端 drop 后 send 报 Err

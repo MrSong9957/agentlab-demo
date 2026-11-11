@@ -22,7 +22,7 @@
    （`raw_os_error().unwrap_or(-1)`）而注释声称「恒返回不可能匹配的值」；
    调用方 :148 比对 `libc::ELOOP`，Win32 错误码域理论可撞 POSIX 值。修：
    Windows 版恒返回 -1（与注释一致；ELOOP 提示分支确定不触发，统一「读取
-   失败」提示——034「非 unix 平台维持 std File::open 行为不变」不受影响）。
+   失败」提示——context.rs :138「非 unix 平台维持 std File::open（行为不变）」注释事实不受影响（治理规格为 027 的 openat/O_NOFOLLOW 链与 ELOOP 分类；批 3 报告初版误引 034——验收审查修正））。
 5. **session 截断片段无上限**：证实——`validate_orchestration_chain` 仅拒
    「>64 KiB 且未标 truncated」；超长片段携 truncated=true 可通过。写入侧
    SNIPPET（orchestration）保证正常路径恒 ≤64 KiB，校验加严不破坏现有数据。

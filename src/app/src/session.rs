@@ -1172,11 +1172,18 @@ impl Session {
         // 游标越过检查点行（调用方回执成功后恰推入一条同名记录）。
         self.commit_event_line(history, &cp_line, "检查点", true, "")
             .map_err(|msg| {
-                // 检查点失败额外说明「活动视图不变」（032 原文案，逐字保留）。
-                if msg.ends_with("自动保存已停用，文件尾部半行将由下次装载按坏行跳过") {
-                    msg
-                } else {
+                // 032 原文案逐字保真（验收审查修正——原 ends_with 判断对
+                // 预检分支误追加、对截回失败分支漏还原）：
+                // - 写入失败（截回成功）＝「…未提交，活动视图不变」；
+                // - 截回失败＝「…未提交，活动视图不变；截回失败…」（原 msg
+                //   在「：未提交」后直接接「；截回失败」，此处精准插回）；
+                // - 预检/停用等分支原样（原版无后缀）。
+                if msg.contains("；截回失败") {
+                    msg.replacen("：未提交", "：未提交，活动视图不变", 1)
+                } else if msg.starts_with("检查点提交写入失败") {
                     format!("{msg}，活动视图不变")
+                } else {
+                    msg
                 }
             })
     }
@@ -1436,7 +1443,7 @@ impl Session {
     ) -> Result<(PathBuf, File, u64, Option<SessionLock>), String> {
         // S11：与 create_v3_target_with_tail 同构——仅 meta 版本（self.version
         // vs 3）、错误前缀两处差异；开篇尾行差异由调用面承担。
-        self.create_target(history, self.version, &[], "")
+        self.create_target(history, self.version, &[], "", "自动会话文件名持续冲突，自动保存已停用")
     }
 
     /// 新 V3 目标创建单点（S11）：meta(meta_version)＋完整 transcript＋可选
@@ -1447,6 +1454,7 @@ impl Session {
         meta_version: u64,
         tail_lines: &[&str],
         failure_prefix: &str,
+        conflict_err: &str,
     ) -> Result<(PathBuf, File, u64, Option<SessionLock>), String> {
         catalog::ensure_private_dir(&self.dir)
             .map_err(|e| format!("自动会话目录初始化失败：{e}"))?;
@@ -1536,7 +1544,7 @@ impl Session {
                 }
             }
         }
-        Err("自动会话文件名持续冲突，自动保存已停用".into())
+        Err(conflict_err.to_string())
     }
 
     /// 032 迁移原语（034 起 S11 通用）：新 V3 目标＝meta 3＋完整 transcript
@@ -1547,7 +1555,7 @@ impl Session {
         history: &[HistoryItem],
         tail_lines: &[&str],
     ) -> Result<(PathBuf, File, u64, Option<SessionLock>), String> {
-        self.create_target(history, 3, tail_lines, "提交检查点失败：")
+        self.create_target(history, 3, tail_lines, "提交检查点失败：", "自动会话文件名持续冲突，检查点未提交（自动保存不受影响）")
     }
 
 

@@ -621,6 +621,10 @@ pub fn measure_request_body_bytes_bounded(
     let outbound = finalize_outbound(conn, body)?;
     let mut counter = LimitCountingWriter { written: 0, limit };
     if serde_json::to_writer(&mut counter, &outbound.body).is_err() {
+        // 超限即停（032 审查修复 #9）：返回 Ok(None)＝真实 body 超过 limit 的
+        // 有界下界结论（S10 曾误删本行——尾注释行被清理脚本误判，验收审查
+        // 抓回；调用方 switch_size_verdict 以 None 跳过 strict-shrink 比较）。
+        return Ok(None);
     }
     Ok(Some(counter.written))
 }
