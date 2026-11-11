@@ -1,16 +1,16 @@
-# S3 MemoriesUsageKind 全仓（含 docs/规格消费方核实）
+## S3 MemoriesUsageKind / memory_usage_kind_for_path / version_marker (whole repo incl docs)
 src/app/src/memory/feedback.rs:8://! A28（指标分离，手册 §12.3）：[`memory_usage_kind_for_path`] 的读取分类
-src/app/src/memory/feedback.rs:151:/// 读取分类（上游 `MemoriesUsageKind`：观测指标面，A28——不计数）。
-src/app/src/memory/feedback.rs:153:pub enum MemoriesUsageKind {
-src/app/src/memory/feedback.rs:161:impl MemoriesUsageKind {
-src/app/src/memory/feedback.rs:175:pub fn memory_usage_kind_for_path(path: &str) -> Option<MemoriesUsageKind> {
-src/app/src/memory/feedback.rs:177:    let version_marker = path.contains("memories_v2/");
-src/app/src/memory/feedback.rs:179:    let _ = version_marker; // 本地仅 V1；归一语义保留与上游一致
-src/app/src/memory/feedback.rs:181:        Some(MemoriesUsageKind::MemoryMd)
-src/app/src/memory/feedback.rs:183:        Some(MemoriesUsageKind::MemorySummary)
-src/app/src/memory/feedback.rs:185:        Some(MemoriesUsageKind::RawMemories)
-src/app/src/memory/feedback.rs:187:        Some(MemoriesUsageKind::RolloutSummaries)
-src/app/src/memory/feedback.rs:189:        Some(MemoriesUsageKind::Skills)
+src/app/src/memory/feedback.rs:156:/// 读取分类（上游 `MemoriesUsageKind`：观测指标面，A28——不计数）。
+src/app/src/memory/feedback.rs:158:pub enum MemoriesUsageKind {
+src/app/src/memory/feedback.rs:166:impl MemoriesUsageKind {
+src/app/src/memory/feedback.rs:180:pub fn memory_usage_kind_for_path(path: &str) -> Option<MemoriesUsageKind> {
+src/app/src/memory/feedback.rs:182:    let version_marker = path.contains("memories_v2/");
+src/app/src/memory/feedback.rs:184:    let _ = version_marker; // 本地仅 V1；归一语义保留与上游一致
+src/app/src/memory/feedback.rs:186:        Some(MemoriesUsageKind::MemoryMd)
+src/app/src/memory/feedback.rs:188:        Some(MemoriesUsageKind::MemorySummary)
+src/app/src/memory/feedback.rs:190:        Some(MemoriesUsageKind::RawMemories)
+src/app/src/memory/feedback.rs:192:        Some(MemoriesUsageKind::RolloutSummaries)
+src/app/src/memory/feedback.rs:194:        Some(MemoriesUsageKind::Skills)
 src/app/src/memory/feedback_tests.rs:123:        memory_usage_kind_for_path("/x/memories/MEMORY.md"),
 src/app/src/memory/feedback_tests.rs:124:        Some(MemoriesUsageKind::MemoryMd)
 src/app/src/memory/feedback_tests.rs:127:        memory_usage_kind_for_path("memories/memory_summary.md"),
@@ -24,33 +24,27 @@ src/app/src/memory/feedback_tests.rs:140:        Some(MemoriesUsageKind::Skills)
 src/app/src/memory/feedback_tests.rs:143:    assert_eq!(memory_usage_kind_for_path("src/main.rs"), None);
 src/app/src/memory/feedback_tests.rs:144:    assert_eq!(memory_usage_kind_for_path("memories/other.txt"), None);
 src/app/src/memory/feedback_tests.rs:145:    assert_eq!(MemoriesUsageKind::MemoryMd.as_tag(), "memory_md");
-docs/records/2026-10-19-013-m8-implementation.md:21:| `src/app/src/memory/feedback.rs`（新，226 行） | 上游 `citations.rs` 移植（`parse_memory_citation`：多块合并、`rollout_ids` 跨块去重保序、兼容旧 `<thread_ids>`、双空→None、条目行解析容错）＋`extract_citation_blocks`（`<oai-mem-citation>` 块提取，未闭合不解析）＋`is_local_thread_id`（上游 UUID 严格格式的本地对应＝`^auto-([0-9]{8}T[0-9]{6}-[0-9]+|[a-z0-9][a-z0-9._-]*)$`，≤128 字节；权威忽略仍由 SQL 缺行承担）＋`cited_thread_ids`＋`memory_usage_kind_for_path`（上游 `usage.rs` 五类分类的路径级移植，`memories_v2/` 归一保留；仅观测语义）＋`after_user_turn`（enabled gate→开库→解析→计数，全失败静默） |
-docs/records/2026-10-19-013-m8-implementation.md:39:| `feedback.rs::memory_usage_kind_for_path` | `memories/read/src/usage.rs`（75 行）`get_memory_usage` | 五类匹配＋`memories_v2/` 归一移植为路径级；**shell 脚本解析器（`parse_shell_script`）未移植**——本地无遥测消费方（上游仅 `core/src/memory_usage.rs` 发 counter），如实登记；A28 语义不依赖解析器 |
-## A28 在规格中的记载
-docs/specs/013-memory-system-v1.md:147:| `memories/read/src/{citations.rs,usage.rs}`（＋各自测试） | `oai-mem-citation` 解析＋使用分类 | M8 | 直接移植 | 类型映射 | 引用解析�
-docs/specs/013-memory-system-v1.md:456:- **涉及模块**：`memory/feedback.rs`（上游 `memories/read/src/{citations.rs,usage.rs}` 直接移植：`oai-mem-citation` 解析＋使用分类，A27/A28 
-docs/specs/013-memory-system-v1.md:457:- **先失败的测试**：有效引用计数＋缺失 ID 忽略（A27）；仅工具打开不计数（A28）；便条空正文/非法名/重名拒绝且不覆�
-docs/specs/013-memory-system-v1.md:461:**准备状态（2026-10-19 M8 实施前确认轮）**：实际基线 main @ `1ea1a3bf78c7a54527bf2cbdfe0af44ae13bd3f3`（＝预期 `1a45d5d`＋1 笔并发提交
-docs/specs/013-memory-system-v1.md:463:**实施状态（2026-10-19 M8 实施轮，D12-A 批准边界内）**：上段为准备轮历史（「本轮未实施」以本段为准更新）。落地＝`src/
-docs/specs/013-memory-system-v1.md:501:| 引用反馈 | 用户回复引用原始来源 B 的 ID；走实际完成位点/共享反馈核心，usage 恰 +1、last_usage 为同一受控时钟；仅打开
-docs/specs/013-memory-system-v1.md:551:| A27–A28（引用反馈/指标分离） | M8 | M9 实跑 `memory_feedback` 4/4、feedback/store 单测、S89/S90 两真实驱动；同链重复引用 B 恰 +1
-# S4 enqueue_global_consolidation
+docs/records/2026-10-19-013-m8-implementation.md:21:| `src/app/src/memory/feedback.rs`（新，226 行） | 上游 `citations.rs` 移植（`parse_memory_citation`：多块合并、`rollout_ids` 跨块去重保序、兼容旧 `<thread_ids>`、双空→None、条目行解...
+docs/records/2026-10-19-013-m8-implementation.md:39:| `feedback.rs::memory_usage_kind_for_path` | `memories/read/src/usage.rs`（75 行）`get_memory_usage` | 五类匹配＋`memories_v2/` 归一移植为路径级；**shell 脚本解析器（`par...
+## A28 in specs/lessons
+docs/specs/013-memory-system-v1.md:147:| `memories/read/src/{citations.rs,usage.rs}`（＋各自测试） | `oai-mem-citation` 解析＋使用分类 | M8 | 直接移植 | 类型映射 | 引用解析语义（A27/A28 锚） |
+docs/specs/013-memory-system-v1.md:456:- **涉及模块**：`memory/feedback.rs`（上游 `memories/read/src/{citations.rs,usage.rs}` 直接移植：`oai-mem-citation` 解析＋使用分类，A27/A28 锚＝上游同文件测试移植）、注入指引（M6 模板已含引用格式）；便条写入＝主会话现有工...
+docs/specs/013-memory-system-v1.md:457:- **先失败的测试**：有效引用计数＋缺失 ID 忽略（A27）；仅工具打开不计数（A28）；便条空正文/非法名/重名拒绝且不覆盖（A25）；便条存在时合并输入含变化。
+docs/specs/013-memory-system-v1.md:461:**准备状态（2026-10-19 M8 实施前确认轮）**：实际基线 main @ `1ea1a3bf78c7a54527bf2cbdfe0af44ae13bd3f3`（＝预期 `1a45d5d`＋1 笔并发提交 `1ea1a3b` 证据精简归类——仅 docs/ 证据与引用同步、零生产代码，对 M8 无影响）；工作区...
+docs/specs/013-memory-system-v1.md:463:**实施状态（2026-10-19 M8 实施轮，D12-A 批准边界内）**：上段为准备轮历史（「本轮未实施」以本段为准更新）。落地＝`src/app/src/memory/feedback.rs`（上游 `citations.rs` 解析/去重/非法 ID 语义＋`usage.rs` 路径分类观测面＋本地 `auto...
+docs/specs/013-memory-system-v1.md:501:| 引用反馈 | 用户回复引用原始来源 B 的 ID；走实际完成位点/共享反馈核心，usage 恰 +1、last_usage 为同一受控时钟；仅打开文件不计数（A27/A28）；两驱动接线仍由真实 CLI/PTY e2e 检查 |
+docs/specs/013-memory-system-v1.md:551:| A27–A28（引用反馈/指标分离） | M8 | M9 实跑 `memory_feedback` 4/4、feedback/store 单测、S89/S90 两真实驱动；同链重复引用 B 恰 +1、last_usage 同 Clock、实际工具打开前不计数。两驱动夹具按上次合并已选中来源修正，原计数断言保留（M9 ...
+## S4 enqueue_global_consolidation
 src/app/src/memory/store.rs:477:        enqueue_global_consolidation_tx(&tx, source_updated_at)?;
 src/app/src/memory/store.rs:528:            enqueue_global_consolidation_tx(&tx, source_updated_at)?;
-src/app/src/memory/store.rs:600:    /// 入队/推进全局合并输入水位（上游 `enqueue_global_consolidation`）。
-src/app/src/memory/store.rs:601:    pub fn enqueue_global_consolidation(&self, input_watermark: i64) -> Result<(), String> {
-src/app/src/memory/store.rs:603:        enqueue_global_consolidation_on(&conn, input_watermark)
-src/app/src/memory/store.rs:1438:/// 上游 `enqueue_global_consolidation_with_executor` 的 SQL（逐字移植，占位符序号形式）。
-src/app/src/memory/store.rs:1472:fn enqueue_global_consolidation_on(conn: &Connection, input_watermark: i64) -> Result<(), String> {
-src/app/src/memory/store.rs:1487:fn enqueue_global_consolidation_tx(tx: &Transaction<'_>, input_watermark: i64) -> Result<(), String> {
-src/app/src/memory/store.rs:1488:    enqueue_global_consolidation_on(tx, input_watermark)
-docs/records/2026-10-18-013-m5-implementation.md:135:- **P1 enqueue 水位 +1**：`mark_stage1_job_succeeded` 触发的 `enqueue_global_consolidation` 对「旧版本新输入」走 `COALESCE(input_watermark,0)+1`（上游逐字 SQL）——成功水位可高于全部源时间戳（实测 T0-99＞T0-100）。语义：新输入到达即推进、防旧水位短路。测试据此断言。
-docs/records/2026-10-18-013-m1-implementation.md:10:  - `store.rs`＝上游 `MemoryStore` M1 面移植：`try_claim_stage1_job`（13 参绑定序与上游一致）、`mark_stage1_job_succeeded(_no_output)`、`mark_stage1_job_failed`、`enqueue_global_consolidation(_tx)`、`try_claim_global_phase2_job`、`heartbeat`、`mark_global_phase2_job_succeeded/failed(_if_unowned)`、`register_thread`/`thread_memory_mode`、观测读取（`stage1_output`/`job_row`）。SQL 逐字（`?` 位置形式→`?N` 序号形式，语义等价）；
-docs/records/2026-10-18-013-m1-implementation.md:56:- Standards 判断性（已处置）：`system_clock` 无效预检＋`SystemClockError` 零引用→删除简化；enqueue conn/tx 双份包装→合一（`enqueue_global_consolidation_on`）；`memories_dir`/`MEMORIES_DIR` 零调用→删（M7 接线时按 D5 恢复一行）；system_clock 真实时间单测→删。
-# S5 From<NameAssignError>
-src/app/src/mcp/manager.rs:1036:use super::naming::NameAssignError;
-src/app/src/mcp/manager.rs:1038:impl From<NameAssignError> for String {
-src/app/src/mcp/manager.rs:1039:    fn from(e: NameAssignError) -> String {
+src/app/src/memory/store.rs:1432:/// 上游 `enqueue_global_consolidation_with_executor` 的 SQL（逐字移植，占位符序号形式）。
+src/app/src/memory/store.rs:1466:fn enqueue_global_consolidation_on(conn: &Connection, input_watermark: i64) -> Result<(), String> {
+src/app/src/memory/store.rs:1481:fn enqueue_global_consolidation_tx(tx: &Transaction<'_>, input_watermark: i64) -> Result<(), String> {
+src/app/src/memory/store.rs:1482:    enqueue_global_consolidation_on(tx, input_watermark)
+docs/records/2026-10-18-013-m1-implementation.md:10:  - `store.rs`＝上游 `MemoryStore` M1 面移植：`try_claim_stage1_job`（13 参绑定序与上游一致）、`mark_stage1_job_succeeded(_no_o...
+docs/records/2026-10-18-013-m1-implementation.md:56:- Standards 判断性（已处置）：`system_clock` 无效预检＋`SystemClockError` 零引用→删除简化；enqueue conn/tx 双份包装→合一（`enqueue_global...
+docs/records/2026-10-18-013-m5-implementation.md:135:- **P1 enqueue 水位 +1**：`mark_stage1_job_succeeded` 触发的 `enqueue_global_consolidation` 对「旧版本新输入」走 `COALESCE(...
+## S5 NameAssignError
 src/app/src/mcp/naming.rs:62:) -> Result<Vec<String>, NameAssignError> {
 src/app/src/mcp/naming.rs:66:            return Err(NameAssignError::DuplicateRaw {
 src/app/src/mcp/naming.rs:96:            return Err(NameAssignError::UnresolvableCollision(name.clone()));
@@ -58,18 +52,11 @@ src/app/src/mcp/naming.rs:103:pub enum NameAssignError {
 src/app/src/mcp/naming.rs:110:impl std::fmt::Display for NameAssignError {
 src/app/tests/mcp_l1.rs:12:use terminal_chat::mcp::naming::{assign_model_names, sanitize_part, NameAssignError};
 src/app/tests/mcp_l1.rs:136:    assert!(matches!(err, NameAssignError::DuplicateRaw { .. }));
-# S6 build_seccomp_filter
-src/app/src/sandbox.rs:1382:pub fn build_seccomp_filter() -> Vec<u8> {
-src/app/src/sandbox.rs:1423:pub fn build_seccomp_filter() -> Option<Vec<u8>> {
-src/app/src/sandbox.rs:1439:    let filter = build_seccomp_filter();
+## S6 build_seccomp_filter
 src/app/src/sandbox/tests.rs:834:    let filter = build_seccomp_filter();
 src/app/src/sandbox/tests.rs:853:    let filter = build_seccomp_filter();
 src/app/src/sandbox/tests.rs:926:    let mut bytes = vec![0u8; build_seccomp_filter().len()];
-# S7 三转发层
-src/app/src/prompt.rs:759:    build_turn_request_with_input_host(history, memory_context, false)
-src/app/src/prompt.rs:763:pub fn build_turn_request_with_input_host(
-src/app/src/prompt.rs:819:    build_turn_request_with_orchestration(
-src/app/src/prompt.rs:840:pub fn build_turn_request_with_orchestration(
-src/app/src/turn.rs:893:    run_user_turn_with_context_and_host(
-src/app/src/turn.rs:911:pub fn run_user_turn_with_context_and_host(
-src/app/src/turn.rs:943:/// CLI 仍走 [`run_user_turn_with_context_and_host`]（五工具，仅同步）。
+src/app/src/sandbox.rs:1382:pub fn build_seccomp_filter() -> Vec<u8> {
+src/app/src/sandbox.rs:1423:// build_seccomp_filter 桩：该 cfg 组合下无任何调用方，且文档声称
+src/app/src/sandbox.rs:1438:    let filter = build_seccomp_filter();
+## S7 three forwarding layers
