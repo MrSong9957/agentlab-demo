@@ -1600,8 +1600,8 @@ fn apply_move(
         format!("{}：{detail}", ctx(stage))
     };
 
-    // 1. 同路径拒绝：词法归一后比较（`./`、`..`）；其余别名等价由排他创建兜底
-    if lexical_normalize(&src) == lexical_normalize(&dst) {
+    // 1. 同路径拒绝：词法归一后比较（`./`、`..`；Windows 盘符/UNC 前缀保留——跨盘 Move 不再被误判同路径，A4/S27）；实现单点＝`sandbox::absolute_lexical`；其余别名等价由排他创建兜底
+    if crate::sandbox::absolute_lexical(&src) == crate::sandbox::absolute_lexical(&dst) {
         return Err(Failure::validation(ctx("移动源与目标为同一路径，按目标冲突拒绝")));
     }
     // 目标存在预检：任何目录项（常规/目录/符号链接/悬空/硬链接）均拒绝
@@ -1769,26 +1769,7 @@ fn open_source_nofollow(target: &Path) -> std::io::Result<Option<std::fs::File>>
     std::fs::File::open(target).map(Some)
 }
 
-/// 末端符号链接拒绝的错误判定（unix＝ELOOP；Windows＝本模块 FilesystemLoop
-/// 哨兵，见 [`open_source_nofollow`]）。
 
-/// 词法归一（消 `.`/`..`）比较两路径是否同一目标——用于移动的自路径拒绝；
-/// 不触文件系统（符号链接别名等价由 `create_new` 排他创建兜底）。
-fn lexical_normalize(p: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in p.components() {
-        match component {
-            std::path::Component::RootDir => out.push("/"),
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            std::path::Component::Normal(part) => out.push(part),
-            std::path::Component::Prefix(_) => {}
-        }
-    }
-    out
-}
 
 /// 029 Move 窗口测试同步接缝（**仅测试构建**，与 f2_seam 同构）：具名屏障，
 /// 控制端在确定性的时点完成抢占/替换——

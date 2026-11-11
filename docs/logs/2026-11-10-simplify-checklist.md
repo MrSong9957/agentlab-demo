@@ -37,11 +37,12 @@
 - 改法：先加失败用例（before_unlink 屏障换源为符号链接，断言错误同时含两个绝对路径，今天失败）→ `:1718` 等改用 `ctx(...)` → 测试通过后删注释。
 - 处理：2026-11-10 逐处核实后确认 **§1.4-5（变更阶段）违规仅 ：1717-1719 `Ok(None)` 臂一处**——其余 mutating 出错点（创建父目录/创建目标/写入目标/复核 Err/换对象/删源）已走 `both(...)` 或含双路径内联；审查提到的读取阶段三处（:1637-1649 超尺寸/短读）属 `Failure::validation`＝§1.4-2 域（变更未开始），按「只修 §1.4-5」不扩大。修复＝该臂改走 `both("删除前复核移动源失败", &reason)`（与其余 mutating 出错点同一实现点；:1594-1595 注释由此恢复属实，保留未删）。证据：S34 先红（错误无路径）后绿（含源/目标＋阶段）；回归 lib apply_patch 38/0、集成 55/0、沙箱 10/0。见 `docs/logs/2026-11-10-simplify-a3-s34/`。
 
-### A4. apply_patch `lexical_normalize` 丢弃 Windows 盘符 `- [ ]`
+### A4. apply_patch `lexical_normalize` 丢弃 Windows 盘符 `- [x]`
 - 位置：`src/app/src/apply_patch.rs:1783`（`Prefix(_) => {}`）vs `src/app/src/sandbox.rs:2306-2326` `absolute_lexical`（明文保留盘符，文档要求「禁止两处定义分叉」）。
 - 问题：跨盘 Move（`C:\x`→`D:\x`）两侧归一后同形，被误判「同一路径」拒绝。安全语义不变（符号链接别名仍由 `create_new` 排他创建兜底）。
 - 依据：主会话已对照两函数逐组件分支。
 - 改法：与 S27 合并处理（改用 `absolute_lexical`＋规格登记 Windows 行为变化）。
+- 处置（2026-11-11，方案 a）：lexical_normalize 分叉副本删除，apply_move 同路径比较改接 sandbox::absolute_lexical 单点（Unix 输入域逐字节等价核实：RootDir 常量同值、Prefix 臂 Unix 不可达；Windows 盘符/UNC 保留、跨盘 Move 误判已修——方向为修正）；cfg(windows) 单测＋unix 归一化单测新增；029 §1.4 末尾登记修订。Windows 未编译验证（无 target），待 038 CI 腿。证据：docs/logs/2026-11-10-simplify-a4-s27/verification.md。
 
 ### A5. MCP 工具结果污染检查在序列化后做 `- [x]`
 - 位置：`src/app/src/mcp/manager.rs:627-628`（对投影 JSON 字符串 `contains_secret`）；注释 `mcp/call.rs:8-9` 声称「检查发生在投影之前」。
@@ -237,9 +238,10 @@
 - 位置：`store.rs:182-187` vs `:218-223`（pragma 三连重复，持久化契约单点化；`open_existing` 无 CREATE 的差异保留）；`store.rs:1183-1195` 改 `query_row(...).optional()`（同文件 16 处先例）；`workspace.rs:509-573`（diff 开关向量 3 份＋错误臂 2 份）＋ `:415-424` env 隔离块重复。
 - 改法：`configure_conn`、optional() 改写、`diff_args_base()`/`isolate_env()`。
 
-### S27. apply_patch 词法归一化复用（含 Windows 行为修正）`- [ ]`
+### S27. apply_patch 词法归一化复用（含 Windows 行为修正）`- [x]`
 - 位置：`apply_patch.rs:1775-1789` `lexical_normalize` vs `sandbox::absolute_lexical`（`pub(crate)`，`permissions.rs:791` 已复用）。
 - 改法：apply_move 改用 `absolute_lexical`；**行为变化**：Windows 跨盘 Move 由误拒变放行（方向为修正），在 029 规格登记；符号链接别名仍由 `create_new` 排他创建兜底。单用户确认后执行。
+- 处置（2026-11-11，随 A4 方案 a 落地）：lexical_normalize 已删，单一实现点达成；sandbox 侧文档补 029 消费方与分叉史；S8 暂缓的区域内失实注释（错挂「末端符号链接拒绝」残留文档）一并删除。验证同 A4 处置行。
 
 ### S28. 效率三强项 `- [ ]`
 - `api.rs:540-549`：每请求整体深拷贝 request（messages 即被覆盖）＋ `_history` 二次克隆 → 选择性克隆＋一次移交给 `from_value`；`:547` `json!(messages)` → `Value::Array(messages)` 直移。

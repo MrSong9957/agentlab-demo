@@ -2297,7 +2297,9 @@ fn path_depth(path: &Path) -> usize {
 
 /// 纯词法规范化（本项目补充：上游策略层在 codex-protocol 内完成等价处理）——
 /// 消除 `.`/`..`，保证 starts_with 关系与 bwrap 目标一致。
-/// 031：permissions 模块的路径规范化共用（同一包含语义，禁止两处定义分叉）。
+/// 031：permissions 模块；029：apply_move 同路径比较（2026-11-11 起，原
+/// apply_patch `lexical_normalize` 分叉副本已删——Windows 盘符丢弃曾致跨盘
+/// Move 误判同路径）。同一包含语义，禁止再定义分叉。
 pub(crate) fn absolute_lexical(path: &Path) -> PathBuf {
     let mut current = PathBuf::new();
     for component in path.components() {

@@ -18,6 +18,32 @@ fn tmp_ws(tag: &str) -> PathBuf {
     fs::canonicalize(&dir).unwrap()
 }
 
+#[test]
+fn absolute_lexical_unix_dedot_keeps_root_and_relative_shape() {
+    use crate::sandbox::absolute_lexical;
+    assert_eq!(
+        absolute_lexical(std::path::Path::new("/a/../b")).to_str(),
+        Some("/b")
+    );
+    // 顶层之上的 `..` 就地消除（不产生前导 ..）。
+    assert_eq!(absolute_lexical(std::path::Path::new("a/../../b")).to_str(), Some("b"));
+    assert_eq!(absolute_lexical(std::path::Path::new("")).to_str(), Some(""));
+}
+
+/// A4/S27：Windows 盘符/UNC 前缀保留——跨盘 Move 不再误判同路径。
+/// 依赖 Windows CI 腿（continue-on-error）；本机 linux target 不编译此 cfg。
+#[cfg(windows)]
+#[test]
+fn absolute_lexical_preserves_windows_prefix_cross_drive() {
+    use crate::sandbox::absolute_lexical;
+    let c = absolute_lexical(std::path::Path::new(r"C:\x"));
+    let d = absolute_lexical(std::path::Path::new(r"D:\x"));
+    assert_ne!(c, d, "跨盘两路径不得归一为同形：{c:?} vs {d:?}");
+    assert_eq!(c.to_str(), Some(r"C:\x"));
+    let unc = absolute_lexical(std::path::Path::new(r"\\srv\share\x"));
+    assert_eq!(unc.to_str(), Some(r"\\srv\share\x"));
+}
+
 /// T1 策略 argv：全盘只读 ＋ 工作区可写 ＋ .env 遮蔽，参数顺序与上游 mount 层级
 /// 一致（ro-bind 根→dev→bind 可写根→根内 deny 遮蔽→会话/命名空间→cap-drop→--）。
 /// 手写单可写根策略以精确断言层级（policy_for 的 temp 可写根另测）。
