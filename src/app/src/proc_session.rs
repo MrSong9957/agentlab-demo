@@ -32,7 +32,9 @@ use std::time::{Duration, Instant};
 
 // 038 ConPTY：ChildHandle::Raw 的句柄级 wait/退出码读取与伪终端拆除。
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 #[cfg(windows)]
 use windows_sys::Win32::System::Console::{ClosePseudoConsole, HPCON};
 #[cfg(windows)]
@@ -2356,6 +2358,12 @@ fn spawn_reader<R: Read + Send + 'static>(session: Arc<Session>, mut pipe: R) {
                 }
             }
         }
+        // A10 修复：EOF／错误退出同样累加 reader_eof（与 unix 版同构）——
+        // 缺失时 collect_done 每会话多等满 COLLECT_GRACE（2 秒）。
+        let mut st = session.lock();
+        st.reader_eof += 1;
+        drop(st);
+        session.cv.notify_all();
     });
 }
 
@@ -2392,6 +2400,73 @@ fn spawn_reader<R: Read + AsRawFd + Send + 'static>(session: Arc<Session>, mut p
 
 #[cfg(test)]
 mod tests {
+    /// S37 锚 1（Windows）：`ChildHandle::try_wait` 的 WAIT_TIMEOUT 分支可达——
+    /// 打开本进程自身的 SYNCHRONIZE 句柄（自身未终止），0ms 等待必落
+    /// WAIT_TIMEOUT 臂返回 Ok(None)；WAIT_FAILED 导入缺失为 Windows 编译错
+    /// （A10 修复），由本测试所在目标编译兜底。待 038 Windows CI 验证。
+    #[cfg(windows)]
+    #[test]
+    fn try_wait_wait_timeout_branch_reachable() {
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::System::Threading::{OpenProcess, SYNCHRONIZE};
+        let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, std::process::id()) };
+        assert!(!(handle as isize).is_negative(), "OpenProcess 自身失败");
+        let mut child = ChildHandle::Raw { process: handle as HANDLE, pid: std::process::id(), hpc: std::ptr::null_mut() };
+        let first = child.try_wait().expect("首次 try_wait");
+        assert!(first.is_none(), "自身句柄未终止：0ms 等待应落 WAIT_TIMEOUT 臂");
+        unsafe { CloseHandle(handle as HANDLE) };
+    }
+
+    /// S37 锚 2（Windows）：读取线程 EOF 后累加 `reader_eof`（A10 修复——
+    /// 缺失时 collect_done 每会话多等满 COLLECT_GRACE）。待 038 Windows CI 验证。
+    #[cfg(windows)]
+    #[test]
+    fn windows_reader_eof_accumulates_on_eof() {
+        let session = std::sync::Arc::new(Session::new(
+            "s37-reader".into(),
+            "cmd".into(),
+            1,
+            1,
+            None,
+            1,
+            false,
+            OwnerTag::Root,
+        ));
+        spawn_reader(session.clone(), std::io::Cursor::new(Vec::new()));
+        // 轮询等待（读取线程异步；空游标立即 EOF，但线程调度有延迟）。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let eof = session.st.lock().unwrap().reader_eof;
+            if eof == 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "reader_eof 未在 5 秒内累加（实际 {eof}）"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// S37 锚 3（Windows）：UNC verbatim 还原为**两反斜杠**原生形态
+    /// （A10 修复——原 `\\\\\{rest}` 产生三个反斜杠）。纯函数锚。
+    #[cfg(windows)]
+    #[test]
+    fn unc_verbatim_restores_two_backslashes() {
+        assert_eq!(
+            super::strip_verbatim_prefix(r"\\?\UNC\srv\share"),
+            std::path::PathBuf::from(r"\\srv\share")
+        );
+        assert_eq!(
+            super::strip_verbatim_prefix(r"\\?\C:\dir\f"),
+            std::path::PathBuf::from(r"C:\dir\f")
+        );
+        assert_eq!(
+            super::strip_verbatim_prefix(r"C:\plain\path"),
+            std::path::PathBuf::from(r"C:\plain\path")
+        );
+    }
+
     use super::*;
 
     #[cfg(target_os = "linux")]

@@ -689,19 +689,23 @@ fn canonical_long(p: &Path) -> PathBuf {
 
 /// fail-closed 变体（038 安全测试 B4）：canonicalize 失败时返回错误而非静默
 /// 保留原形态——策略装载路径用它恢复「拒绝启动」语义。
+/// verbatim 前缀剥离（A10 抽取为纯函数，S37 锚定）：`\\?\UNC\srv\share`
+/// 还原为原生 **两反斜杠** `\\srv\share`（修复前 `\\\\\{rest}` 产生三个
+/// 反斜杠——path_covers 的 starts_with 对齐失效）；`\\?\C:\…` 剥离为
+/// `C:\…`；其余原样。
+#[cfg(windows)]
+fn strip_verbatim_prefix(s: &str) -> std::path::PathBuf {
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return std::path::PathBuf::from(format!(r"\\{rest}"));
+    }
+    std::path::PathBuf::from(s.strip_prefix(r"\\?\").map(String::from).unwrap_or_else(|| s.to_string()))
+}
+
 fn canonical_long_checked(p: &Path) -> std::io::Result<PathBuf> {
     let canon = std::fs::canonicalize(p)?;
     #[cfg(windows)]
     {
-        let s = canon.to_string_lossy().into_owned();
-        // UNC 特判（038 安全测试 B2）：\\?\UNC\srv\share 剥离后是「服务器名
-        // 为 UNC」的畸形形态——还原为原生 \\srv\share 形态
-        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-            return Ok(std::path::PathBuf::from(format!("\\\\\\{rest}")));
-        }
-        Ok(std::path::PathBuf::from(
-            s.strip_prefix(r"\\?\").map(String::from).unwrap_or(s),
-        ))
+        Ok(strip_verbatim_prefix(&canon.to_string_lossy()))
     }
     #[cfg(not(windows))]
     Ok(canon)

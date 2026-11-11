@@ -363,10 +363,15 @@ pub(crate) fn validate_orchestration_chain(history: &[HistoryItem]) -> Result<()
                     return Err(format!("cell {cell_id} 叶子 {leaf} 重复 call_finished"));
                 }
                 if let Some(result) = result {
-                    if result.content.len() > 64 * 1024 && !result.truncated {
-                        return Err(format!(
-                            "cell {cell_id} 叶子 {leaf} 结果超过 64 KiB 但未标记 truncated"
-                        ));
+                    // A10：截断片段本身也须 ≤64 KiB（写入侧 SNIPPET/LIMIT 保证
+                    // 片段即截断后形态；缺失检查使超长片段可携 truncated=true
+                    // 通过校验——文档 :282「result 片段 ≤64 KiB」的落实）。
+                    if result.content.len() > 64 * 1024 {
+                        return Err(if result.truncated {
+                            format!("cell {cell_id} 叶子 {leaf} 截断片段超过 64 KiB")
+                        } else {
+                            format!("cell {cell_id} 叶子 {leaf} 结果超过 64 KiB 但未标记 truncated")
+                        });
                     }
                     if result.truncated
                         && (result.original_bytes.is_none() || result.sha256.is_none())
@@ -1699,6 +1704,77 @@ mod tests {
         assert_eq!(session.on_history(&history), None, "停用后无追加");
         assert_eq!(session.flush_final(&history), Ok(()), "停用态排空＝无操作");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A10：截断片段自身也须 ≤64 KiB（修复前超长片段携 truncated=true 可
+    /// 通过校验——文档「result 片段 ≤64 KiB」的落实；写入侧 SNIPPET 保证
+    /// 正常路径恒不超限，本锚锁定校验面）。
+    #[test]
+    fn validate_rejects_oversized_truncated_fragment() {
+        let event = |seq: u64, content_len: usize, truncated: bool| {
+            HistoryItem::OrchestrationEvent {
+                kind: crate::prompt::OrchestrationEventKind::CallFinished,
+                cell_id: "cell-a10".into(),
+                exec_call_id: "exec-a10".into(),
+                seq,
+                leaf_id: Some(1),
+                tool_name: Some("leaf".into()),
+                arguments: Some("{}".into()),
+                result: Some(crate::prompt::OrchestrationEventResult {
+                    content: "x".repeat(content_len),
+                    original_bytes: truncated.then_some(1_000_000),
+                    sha256: truncated.then_some("0".repeat(64)),
+                    truncated,
+                    display: None,
+                    execution: "unknown".into(),
+                }),
+                close_reason: None,
+            }
+        };
+        // 前置链：cell 开篇＋call_started（validate 的次序与配对要求）。
+        let cell_started = HistoryItem::OrchestrationEvent {
+            kind: crate::prompt::OrchestrationEventKind::CellStarted,
+            cell_id: "cell-a10".into(),
+            exec_call_id: "exec-a10".into(),
+            seq: 1,
+            leaf_id: None,
+            tool_name: None,
+            arguments: Some("{}".into()),
+            result: None,
+            close_reason: None,
+        };
+        let call_started = HistoryItem::OrchestrationEvent {
+            kind: crate::prompt::OrchestrationEventKind::CallStarted,
+            cell_id: "cell-a10".into(),
+            exec_call_id: "exec-a10".into(),
+            seq: 2,
+            leaf_id: Some(1),
+            tool_name: Some("leaf".into()),
+            arguments: Some("{}".into()),
+            result: None,
+            close_reason: None,
+        };
+        // 合法：≤64 KiB 片段（truncated 标记与否则均可）
+        assert!(super::validate_orchestration_chain(&[
+            cell_started.clone(),
+            call_started.clone(),
+            event(3, 64 * 1024, false)
+        ])
+        .is_ok());
+        assert!(super::validate_orchestration_chain(&[
+            cell_started.clone(),
+            call_started.clone(),
+            event(3, 64 * 1024, true)
+        ])
+        .is_ok());
+        // 超 64 KiB 且 truncated=true：修复前通过（无上限检查）——红转绿锚。
+        let err = super::validate_orchestration_chain(&[
+            cell_started,
+            call_started,
+            event(3, 64 * 1024 + 1, true),
+        ])
+        .expect_err("超长截断片段必须拒绝");
+        assert!(err.contains("截断片段超过 64 KiB"), "{err}");
     }
 
     /// A11：新建 auto 文件的句柄 unix 侧 append-only（无 read）——同进程

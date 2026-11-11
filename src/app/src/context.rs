@@ -259,11 +259,13 @@ fn raw_errno(e: &std::io::Error) -> i32 {
     e.raw_os_error().unwrap_or(-1)
 }
 
-/// Windows 版：std 打开路径无 O_NOFOLLOW 链（无 ELOOP 语义），恒返回
-/// 不可能匹配的值——ELOOP 提示分支不触发，统一走「读取失败」提示。
+/// Windows 版：std 打开路径无 O_NOFOLLOW 链（无 ELOOP 语义）——恒返回 -1
+///（A10 修复：原与 unix 同体返回 raw_os_error，Win32 码域与 POSIX ELOOP 值
+/// 理论可撞；恒 -1 与本注释一致，ELOOP 提示分支确定不触发，统一走「读取
+/// 失败」提示）。
 #[cfg(windows)]
-fn raw_errno(e: &std::io::Error) -> i32 {
-    e.raw_os_error().unwrap_or(-1)
+fn raw_errno(_e: &std::io::Error) -> i32 {
+    -1
 }
 
 /// 预算耗尽后停止加载（015 §1）：不再打开任何后续来源文件；仅以元数据判定

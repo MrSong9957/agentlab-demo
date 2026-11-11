@@ -82,11 +82,13 @@
 
 - 处置（2026-11-11，批 2，先红后绿）：红 16,777,302B>4,195,328B（4 倍膨胀实证）→绿 base64 传输＋上限 4/3×4MiB+4KiB；031 view_image 行修订段登记；4MiB 真图端到端未跑（单元级＋常规路径覆盖，如实标注）。view_image 24/0+15/0、e2e_sandbox 7/0。 证据：docs/logs/2026-11-11-simplify-batches/batch2/。
 
-### A10. Windows 三处静态疑点 `- [ ]`
+### A10. Windows 三处静态疑点 `- [x]`
 - 位置：`proc_session.rs:36,2221-2222`（`WAIT_FAILED` 未导入成 catch-all 绑定，超时分支不可达）；`proc_session.rs:2391`（Windows 读取线程不累加 `reader_eof`，每会话退出多等 2 秒 COLLECT_GRACE）；`permissions.rs:718-721`（UNC 还原 `format!("\\\\\\{rest}")` 产生三个反斜杠）。
 - 问题：注释声称的 Windows 行为与代码不符；CI Windows 为 continue-on-error 且只跑 `cargo check`，无 `-D warnings`，不可达分支告警不拦截。
 - 依据：静态阅读，未在 Windows 编译运行（本容器无 Windows 工具链）。
 - 改法：修代码＋在 Windows runner 验证（配 S37）；或先在注释/登记本中记录，待 038 Windows 轮处理。
+
+- 处置（2026-11-11，批 3，静态核实后修）：UNC 三反斜杠（strip_verbatim_prefix 纯函数，2 反斜杠）；WAIT_FAILED import 缺失（Windows 编译错，补导入；try_wait catch-all 语义正确）；reader_eof Windows 退出累加（同构 unix）；context raw_errno Windows 恒 -1（与注释一致，消除 Win32 码域撞 ELOOP）；session 截断片段 ≤64 KiB 校验加严（写入侧 SNIPPET 保证，锚定测试）。**本机无 Windows 工具链——静态核实＋linux 编译通过；实跑待 038 Windows CI（如实标注）**。验证：0 错误、警告 580 零新增、proc_session 24/0、context 15/0、session 29/0+40/0、request_permissions 38/0、security_attack_031 7/0。证据：docs/logs/2026-11-11-simplify-batches/batch3/。
 
 ### A11. session auto 文件句柄只写（推断）`- [x]`
 - 位置：`src/app/src/session.rs:1535-1539`、`:1635-1639`（unix 新建 auto 文件未加 `.read(true)`）；`:1543-1545`、`:1643` 注释用「LockFileEx 需要 GENERIC_READ」解释（Windows 已改命名互斥体，前提失效）。
@@ -333,7 +335,7 @@
 ### S36. 审查标签规则补锚（7 条）`- [ ]`
 - JS seq 连续无空洞（P1-3，`tests/js_orchestration.rs:1179` 附近）；二次 observe 不再截断（P2-8）；followup 满槽保状态文案（N3）；`proc_session.rs:142-143` reap_failed 清除时机；`sandbox.rs:891-892` 成对断言在组装层强制。通过后删除对应标签注释。
 
-### S37. Windows 夹具回归锚 `- [ ]`
+### S37. Windows 夹具回归锚 `- [x]`
 - 三件（配 A10）：WAIT_TIMEOUT 分支可达；Windows 读取线程累加 `reader_eof`；UNC 还原两反斜杠。需 Windows runner（038 工作流）执行。
 
 ---
@@ -345,3 +347,5 @@
 ## 处理日志
 
 （每完成一项在此追加：`<编号> <日期> <结果>`；全部完成后按 AGENTS.md 全量验证并报告通过/失败/跳过数量。）
+
+- 处置（2026-11-11，批 3）：三 cfg(windows) 锚入 proc_session tests（WAIT_TIMEOUT 分支可达／reader_eof 累加／UNC 两反斜杠纯函数锚）；Windows CI 实跑待 038。证据同批 3。
