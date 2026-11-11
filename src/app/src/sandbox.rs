@@ -1459,14 +1459,6 @@ fn build_seccomp_fd() -> std::io::Result<Option<SeccompFd>> {
     Ok(Some(guard))
 }
 
-/// 031 逐启动 PID 命名空间验证（§1.6）：**验证对象是 bwrap 的直接 namespace
-/// init 回收器**——直连 bwrap 进程在新 pid ns 之外的监督位，其自身 ns 与主
-/// 进程相同属正常形态（实测实证；不能只凭启动时一次探测判定）。经
-/// `/proc/<bwrap>/task/*/children` 找到回收器的宿主 pid，其 `ns/pid` 必须与主进程不同。bwrap 自身
-/// 多次 re-exec：spawn 返回时载荷可能尚未出现——有界轮询（≤200ms）；
-/// bwrap 已退出＝自身 fail-hard 已生效（载荷未运行），返回 Ok；超时仍无任
-/// 何异 ns 子进程且进程存活＝隔离未建立：killpg 整组终止＋waitpid 回收并返
-/// 回 Err（模型命令拒绝）。
 /// 038 exec 的可信 gate 命令。setsid 与 shell 在用户命令之前建立独立 session
 /// 和进程组；shell 原位停止，确认后才 exec 原始命令字符串。
 #[cfg(target_os = "linux")]
@@ -1573,6 +1565,14 @@ pub fn confirm_sandbox_isolation_and_release(
     )
 }
 
+/// 031 逐启动 PID 命名空间验证（§1.6）：**验证对象是 bwrap 的直接 namespace
+/// init 回收器**——直连 bwrap 进程在新 pid ns 之外的监督位，其自身 ns 与主
+/// 进程相同属正常形态（实测实证；不能只凭启动时一次探测判定）。经
+/// `/proc/<bwrap>/task/*/children` 找到回收器的宿主 pid，其 `ns/pid` 必须与主进程不同。bwrap 自身
+/// 多次 re-exec：spawn 返回时载荷可能尚未出现——有界轮询（≤200ms）；
+/// bwrap 已退出＝自身 fail-hard 已生效（载荷未运行），返回 Ok；超时仍无任
+/// 何异 ns 子进程且进程存活＝隔离未建立：killpg 整组终止＋waitpid 回收并返
+/// 回 Err（模型命令拒绝）。
 #[cfg(target_os = "linux")]
 pub(crate) fn confirm_sandbox_with_release(
     leader_pid: u32,

@@ -855,10 +855,6 @@ impl TuiHost {
         });
     }
 
-    /// 斜杠命令（TUI 内）：与行式路径同一语义/实现，输出改为多行文本。
-    /// 斜杠命令（/exit 已由驱动内建；其余与行式路径同一语义）。
-    /// /resume 成功时返回 [`CommandOutcome::ReplaceCells`]——驱动据此把投影 cells
-    /// 立即渲染进 transcript（装载历史不重放工具，007）。
     /// 022：`/mcp` 状态与 `/mcp reload`。reload 只在空闲时执行（接续槽位
     /// Open＝当前轮运行中→明确返回忙）；管理器 runtime 的 block_on 不得在
     /// TUI runtime 上下文内执行，经独立线程桥接后取回结果。
@@ -886,6 +882,8 @@ impl TuiHost {
         }
     }
 
+    /// 斜杠命令（TUI 内）：与行式路径同一语义/实现，输出改为多行文本。
+    /// 斜杠命令（/exit 已由驱动内建；其余与行式路径同一语义）。
     pub fn run_command(&self, full: &str) -> tchat_tui::chat_driver::CommandOutcome {
         let raw = full.split_whitespace().next().unwrap_or("");
         // 008-ADAPT：驱动经母本通道回传的命令名不带前导斜杠——规范化
@@ -1011,6 +1009,8 @@ impl TuiHost {
         }
     }
 
+    /// /resume 成功时返回 [`CommandOutcome::ReplaceCells`]——驱动据此把投影 cells
+    /// 立即渲染进 transcript（装载历史不重放工具，007）。
     fn cmd_resume(&self, name: &str) -> tchat_tui::chat_driver::CommandOutcome {
         use tchat_tui::chat_driver::CommandOutcome;
         let target = if name.is_empty() { None } else { Some(name) };
@@ -1075,12 +1075,6 @@ impl TuiHost {
     }
 }
 
-/// 历史投影（012）：文本直映；工具结果按 id→（name, arguments）配对后，经与
-/// 实时 ToolEnd **同一转换**（[`tool_end_item`]）产出 HostHistoryItem——恢复视图与
-/// 实时终态同源同投影（需求⑤）。调用参数不重放（007：恢复只投影不执行）。
-/// 018-B：带来源标记的回答/关闭文本（正文与标记 request_id 一致）合并进对应
-/// 异步发布调用的同一展示，不作为普通用户文本重复出现；孤儿/重复/矛盾记录
-/// 不伪造已答，按普通文本保留。
 /// 032：TUI 检查点提交宿主——与 on_record 共享同一 `Arc<Mutex<Session>>`
 ///（轮线程内顺序加锁，无竞争；提交失败候选不进内存历史）。
 struct TuiCheckpointSink(std::sync::Arc<std::sync::Mutex<session::Session>>);
@@ -1115,6 +1109,12 @@ impl crate::js_orchestration::runtime::OrchestrationSink for TuiOrchestrationSin
     }
 }
 
+/// 历史投影（012）：文本直映；工具结果按 id→（name, arguments）配对后，经与
+/// 实时 ToolEnd **同一转换**（[`tool_end_item`]）产出 HostHistoryItem——恢复视图与
+/// 实时终态同源同投影（需求⑤）。调用参数不重放（007：恢复只投影不执行）。
+/// 018-B：带来源标记的回答/关闭文本（正文与标记 request_id 一致）合并进对应
+/// 异步发布调用的同一展示，不作为普通用户文本重复出现；孤儿/重复/矛盾记录
+/// 不伪造已答，按普通文本保留。
 fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
     use std::collections::HashMap;
     // 018-B 预扫：request_id → 首条有效 answer/closed 事件

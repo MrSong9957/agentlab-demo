@@ -1104,12 +1104,6 @@ fn open_validated_regular(target: &Path) -> std::io::Result<std::fs::File> {
     )
 }
 
-/// 有界源读入核心（Update/Move 共用，审查 #7 收敛）：fd 级 fstat 预检＋take
-/// 有限读取＋字节门（N5）；并核对**读取字节数与 fstat 尺寸一致**——常规文件
-/// 的读取结果不可能偏离其元数据尺寸：超出＝procfs/sysfs 类伪文件（S_IFREG、
-/// st_size=0 而读取有内容，安全修复 F-2），不足＝fstat 与读取之间被并发截断
-/// （审查 #8，data-loss：短读残片曾被当完整内容移动并删源）。两向都保守拒绝。
-
 enum BoundedReadError {
     /// fstat 尺寸超过上限
     OversizeSize(u64),
@@ -1120,6 +1114,11 @@ enum BoundedReadError {
     Io(std::io::Error),
 }
 
+/// 有界源读入核心（Update/Move 共用，审查 #7 收敛）：fd 级 fstat 预检＋take
+/// 有限读取＋字节门（N5）；并核对**读取字节数与 fstat 尺寸一致**——常规文件
+/// 的读取结果不可能偏离其元数据尺寸：超出＝procfs/sysfs 类伪文件（S_IFREG、
+/// st_size=0 而读取有内容，安全修复 F-2），不足＝fstat 与读取之间被并发截断
+/// （审查 #8，data-loss：短读残片曾被当完整内容移动并删源）。两向都保守拒绝。
 fn read_bounded(file: &std::fs::File) -> Result<(Vec<u8>, u64), BoundedReadError> {
     // fstat 等价：句柄级元数据（Windows 为 GetFileInformationByHandle 路径，
     // 与 unix fstat 同为"绑定已打开对象"的尺寸来源，不受路径替换影响）。

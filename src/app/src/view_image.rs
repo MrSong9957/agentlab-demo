@@ -71,7 +71,6 @@ fn error_summary(error: &str) -> String {
     serde_json::json!({ "ok": false, "error": error }).to_string()
 }
 
-/// 能力关闭（text-only／未知）时的结果：不读取文件（§3.2——声明与执行两层关闭）。
 /// 以错误摘要构造结果（031 编码失败等调用方侧失败；不读取文件）。
 pub fn error_outcome(error: &str) -> ViewImageOutcome {
     ViewImageOutcome {
@@ -80,6 +79,7 @@ pub fn error_outcome(error: &str) -> ViewImageOutcome {
     }
 }
 
+/// 能力关闭（text-only／未知）时的结果：不读取文件（§3.2——声明与执行两层关闭）。
 pub fn unsupported_outcome() -> ViewImageOutcome {
     ViewImageOutcome {
         summary: error_summary(

@@ -146,12 +146,6 @@ fn process_line(line: &[u8], items: &mut Vec<HistoryItem>, remaining: &mut usize
     true
 }
 
-/// 序列化过滤后的提炼输入（上游 V1 路径 `serialize_filtered_rollout_response_items`）：
-/// 过滤→逐条投影为模型面 JSON→数组序列化→整体秘密替换。
-/// `tool_result.display` 展示数据经投影排除（012：绝不进入模型请求）。
-/// 过滤时机与上游差异：上游在读取侧剔除注入消息（不占 8 MiB 预算），本地
-/// 在序列化侧过滤（已计入预算）——015 起注入块确实落本地会话（读取时占
-/// 预算、序列化侧剔除），预算口径差异登记备查。
 /// 032：上下文管理控制工具名（其调用/结果不作为用户/工具经历）。
 /// 034：exec/wait 编排外壳同列——脚本源码不当成已执行的工具；真实叶子
 /// 事实改由编排事件（call_started/call_finished）合成提取（§1.6）。
@@ -186,6 +180,12 @@ fn call_arguments_of(
     })
 }
 
+/// 序列化过滤后的提炼输入（上游 V1 路径 `serialize_filtered_rollout_response_items`）：
+/// 过滤→逐条投影为模型面 JSON→数组序列化→整体秘密替换。
+/// `tool_result.display` 展示数据经投影排除（012：绝不进入模型请求）。
+/// 过滤时机与上游差异：上游在读取侧剔除注入消息（不占 8 MiB 预算），本地
+/// 在序列化侧过滤（已计入预算）——015 起注入块确实落本地会话（读取时占
+/// 预算、序列化侧剔除），预算口径差异登记备查。
 pub fn serialize_filtered_history_items(items: &[HistoryItem]) -> Result<String, String> {
     // 032 §1.6（审查修复 #3：按调用粒度过滤）：ContextCheckpoint（连同 seed
     //——seed 只存在于检查点内，不会以顶层记录出现）与上下文管理控制调用及

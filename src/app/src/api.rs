@@ -468,9 +468,6 @@ fn request_has_image_content(request: &Value) -> bool {
         })
 }
 
-/// 完整请求体对话（006 工具循环）：`request` 为 005 组装产物 `{messages, tools}`，
-/// 附上 `model` 与已校验的 request_params 后发送，返回完整响应 JSON（含 tool_calls）。
-/// 协议检查、鉴权、重定向拒绝与错误映射与 `chat` 完全一致；`chat` 原行为不变。
 pub fn chat_with_provider_body(
     provider_id: &str,
     conn: &EffectiveConnection,
@@ -484,6 +481,9 @@ pub fn chat_with_provider_body(
     chat_with_body(conn, key, model, &request, agent)
 }
 
+/// 完整请求体对话（006 工具循环）：`request` 为 005 组装产物 `{messages, tools}`，
+/// 附上 `model` 与已校验的 request_params 后发送，返回完整响应 JSON（含 tool_calls）。
+/// 协议检查、鉴权、重定向拒绝与错误映射与 `chat` 完全一致；`chat` 原行为不变。
 pub fn chat_with_body(
     conn: &EffectiveConnection,
     key: &str,

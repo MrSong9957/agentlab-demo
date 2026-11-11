@@ -1021,8 +1021,6 @@ fn test_gate_wait(session: &Session) {
     }
 }
 
-/// 终止进程组的受检入口：返回 Ok（已发信号）／Gone（组已不存在）／Failed
-///（失败，含 errno）。测试注入仅对 [`TEST_KILLPG_FAIL_PGD`] 匹配的组生效。
 /// 组硬终止（unix＝killpg(SIGKILL)＋errno 分类；Windows＝作业对象整树终止——
 /// 后代默认继承作业，TerminateJobObject 覆盖整树；组不存在＝句柄已关闭）。
 #[cfg(unix)]
@@ -1082,6 +1080,8 @@ fn request_group_interrupt(pgid: GroupId) -> std::io::Result<()> {
     }
 }
 
+/// 终止进程组的受检入口：返回 Ok（已发信号）／Gone（组已不存在）／Failed
+///（失败，含 errno）。测试注入仅对 [`TEST_KILLPG_FAIL_PGD`] 匹配的组生效。
 fn kill_group_checked(pgid: GroupId) -> KillOutcome {
     #[cfg(test)]
     {
@@ -1671,18 +1671,6 @@ struct Spawned {
     stderr: Option<std::process::ChildStderr>,
 }
 
-/// 033：构造 exec_command 的启动命令——普通模式 `/bin/sh -c <cmd>`（既有行为，
-/// 环境按现状继承）；沙箱模式（`TCHAT_SANDBOX` 非空）`<bwrap> <沙箱参数> --
-/// /bin/sh -c <cmd>`：Command env_clear＋白名单环境（PATH/HOME/TERM，主进程
-/// 凭据 env 不进工具——027 R1 环境面防线在此保留）；沙箱不可用时返回 Err，
-/// 由调用侧显式报错（禁止静默回退到无沙箱执行）。策略锚定主进程 cwd（G1 修
-/// 复），workdir 仅作沙箱内 --chdir，不参与策略。
-/// 031：`policy` 携带时改走 [`crate::sandbox::permission_launch_argv`]（受限
-/// 读树＋deny 优先＋网络开关＋seccomp 的动态策略入口）；seccomp fd 守卫须
-/// 存活到 spawn 返回——本函数内联完成 spawn 前‥后的全部时序。
-/// 启动参数中间形态（038 ConPTY）：std Command 无读取接口，Windows PTY 路径
-/// 需要原始 program/argv/env 交给 CreateProcessW——两个消费方（std Command
-/// 构造与 ConPTY 启动）共用同一决策，行为零分歧。
 struct ToolArgv {
     program: String,
     args: Vec<String>,
@@ -1695,6 +1683,18 @@ struct ToolArgv {
     seccomp: Option<crate::sandbox::SeccompFd>,
 }
 
+/// 033：构造 exec_command 的启动命令——普通模式 `/bin/sh -c <cmd>`（既有行为，
+/// 环境按现状继承）；沙箱模式（`TCHAT_SANDBOX` 非空）`<bwrap> <沙箱参数> --
+/// /bin/sh -c <cmd>`：Command env_clear＋白名单环境（PATH/HOME/TERM，主进程
+/// 凭据 env 不进工具——027 R1 环境面防线在此保留）；沙箱不可用时返回 Err，
+/// 由调用侧显式报错（禁止静默回退到无沙箱执行）。策略锚定主进程 cwd（G1 修
+/// 复），workdir 仅作沙箱内 --chdir，不参与策略。
+/// 031：`policy` 携带时改走 [`crate::sandbox::permission_launch_argv`]（受限
+/// 读树＋deny 优先＋网络开关＋seccomp 的动态策略入口）；seccomp fd 守卫须
+/// 存活到 spawn 返回——本函数内联完成 spawn 前‥后的全部时序。
+/// 启动参数中间形态（038 ConPTY）：std Command 无读取接口，Windows PTY 路径
+/// 需要原始 program/argv/env 交给 CreateProcessW——两个消费方（std Command
+/// 构造与 ConPTY 启动）共用同一决策，行为零分歧。
 fn tool_argv(
     cmd: &str,
     workdir: &std::path::Path,
@@ -1821,8 +1821,6 @@ fn spawn_piped(
     })
 }
 
-/// PTY 模式：分配真实伪终端作为控制终端；会话组长自身成组
-///（pre_exec setsid，不用 process_group——setpgid 后 setsid 会失败）。
 /// Windows 版（038 ConPTY，008 A6 的 Windows 等价实现）：CreatePseudoConsole
 /// ＋PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE 属性清单＋CreateProcessW。会话语义
 /// 对齐 unix 版：ConPTY 输出端＝读取线程通道；输入端＝master（Arc<File> 输入
@@ -2030,6 +2028,8 @@ fn quote_windows_arg(arg: &str) -> String {
     out
 }
 
+/// PTY 模式：分配真实伪终端作为控制终端；会话组长自身成组
+///（pre_exec setsid，不用 process_group——setpgid 后 setsid 会失败）。
 #[cfg(unix)]
 fn spawn_pty(
     cmd: &str,
@@ -2381,7 +2381,6 @@ fn terminate_sandbox_payload(
 }
 
 /// 读取线程：poll＋读取一路输出通道直到 EOF；持续推入待取缓存并唤醒等待方。
-/// `readers_may_stop` 置位后退出（宽限已过，通道由后代持有时不无限等待）。
 /// Windows 读取线程：阻塞 Read 直到 EOF（树终止后管道关闭必然 EOF；
 /// 宽限语义由 collect_done 的自然退出覆盖，无需 poll 中断）。
 #[cfg(windows)]
@@ -2409,6 +2408,7 @@ fn spawn_reader<R: Read + Send + 'static>(session: Arc<Session>, mut pipe: R) {
     });
 }
 
+/// `readers_may_stop` 置位后退出（宽限已过，通道由后代持有时不无限等待）。
 #[cfg(unix)]
 fn spawn_reader<R: Read + AsRawFd + Send + 'static>(session: Arc<Session>, mut pipe: R) {
     std::thread::spawn(move || {

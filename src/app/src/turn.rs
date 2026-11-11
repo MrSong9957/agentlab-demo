@@ -209,10 +209,6 @@ pub fn tool_activity_line(name: &str, id: &str) -> String {
 /// `build_request` 另有一处属 005 既有契约文本）。
 const BLANK_INPUT_ERROR: &str = "当前用户输入不能为空或全为空白";
 
-/// 取消后未执行调用的结果：按对应工具的既定结果结构记录未执行原因——
-/// exec_command/apply_patch 构造各自结果结构体序列化（字段与错误语义同工具本体同源）；
-/// 其他名称（未知工具）与未知工具回传通道一致：单 `error` 字段通用结构，
-/// 不伪装成 exec 结果。
 /// 取消跳过的固定消息（012：恢复投影以此常量精确识别"未执行取消"——
 /// 单一生产者 [`skipped_without_execution`]，非模糊文本匹配）。
 pub const SKIPPED_BY_CANCEL_MESSAGE: &str = "用户取消，本调用未执行";
@@ -221,6 +217,10 @@ pub const SKIPPED_BY_CANCEL_MESSAGE: &str = "用户取消，本调用未执行";
 /// 宿主以此常量判定"取消当前轮"，不反解析消息文本（012 教训）。
 pub const CANCELLED_TURN_ERROR_PREFIX: &str = "用户已取消";
 
+/// 取消后未执行调用的结果：按对应工具的既定结果结构记录未执行原因——
+/// exec_command/apply_patch 构造各自结果结构体序列化（字段与错误语义同工具本体同源）；
+/// 其他名称（未知工具）与未知工具回传通道一致：单 `error` 字段通用结构，
+/// 不伪装成 exec 结果。
 fn skipped_without_execution(
     name: &str,
     mode: &ToolMode<'_>,

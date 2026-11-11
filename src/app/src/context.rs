@@ -82,9 +82,6 @@ fn skip_notice(path: &Path, reason: &str) -> String {
     format!("上下文加载：跳过 {}（{reason}）", path.display())
 }
 
-/// 有界读取并解码：至多 `read_limit` 字节（调用方给剩余预算＋3，用于多字节
-/// 边界判定）。文件长于读取上限且缓冲尾是不完整多字节序列时按字符边界收尾
-/// （读取边界，非文件损坏）；文件本身非法 UTF-8 或读取失败则跳过并记原因。
 /// macOS：/var、/tmp、/etc 为系统级符号链接（root 所有，指向 /private/*），
 /// std::env::temp_dir()（/var/folders/…）落在 /var 前缀——027 B⑥ 逐组件检查
 /// 与 O_NOFOLLOW 打开链会把系统前缀误判为注入通道（macOS 首跑实证：临时目录
@@ -111,6 +108,9 @@ fn resolve_darwin_system_prefix(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// 有界读取并解码：至多 `read_limit` 字节（调用方给剩余预算＋3，用于多字节
+/// 边界判定）。文件长于读取上限且缓冲尾是不完整多字节序列时按字符边界收尾
+/// （读取边界，非文件损坏）；文件本身非法 UTF-8 或读取失败则跳过并记原因。
 fn load_source_text(
     path: &Path,
     file_size: u64,

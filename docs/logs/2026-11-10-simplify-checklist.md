@@ -157,10 +157,11 @@
 - 改法：删除失实注释；其中描述今天仍成立约束的片段保留或移至正确位置。**待行为定案的（A7/A8/MCP 取消）随对应缺陷项一并处理，不先删。**
 - 处理（2026-11-10，独立子代理执行）：38 条核实——35 条修正（其中第 2/7/16/27/29/30/31/36 条按「保留属实片段、如实改写」处理而非整段删除，理由与摘录见 docs/logs/2026-11-10-simplify-s8/report.md）；1 条核实属实不改（sandbox.rs:13-14 模块头）；1 条跳过（resources.rs:377-383「逐值检查」实扫序列化串——新发现 A5 同类缺陷嫌疑，注释与代码均未动待用户决定）；第 38 条五处经核实属实保留。相邻同因修正 2 处（apply_patch.rs:174-175、prompt.rs:911-912）。两处暂缓均已收尾（2026-11-11）：js_orchestration/runtime.rs:7-11 随 A7 方案 a 按有界事实改写（见 A7 处置）、A4/S27 词法归一化区域失实注释随 A4/S27 删除（见 S27 处置）。代码缺陷嫌疑跳过 6 处待用户判断：resources.rs:377-383（_meta 扫序列化串）、permissions.rs:719-722（UNC 三反斜杠）、context.rs:262-266（Windows raw_errno 同体矛盾）、proc_session.rs:2215-2216（WAIT_FAILED catch-all）、proc_session.rs:2385-2409（reader_eof 不累加）、session.rs:285-286（截断片段无上限检查）。审查代理另登记存疑 10 项（deny 路径非 NotFound 静默跳过、MCP 取消后分离任务仍放行、命名失败错误被吞、HTTP 适配器三处未登记差异、013 规格 :121 免剥离结论过时、catalog.rs:106 文档挂错位置属 S9、session.rs unix 创建路径缺 .read(true)（同名恢复推断 EBADF，未实测）、context_window.rs:627-630 行内注释仍写装载与提交两点、turn.rs:443 未知工具报错文案只列四工具、S8 若干条按保留属实片段改写而非整段删除（计数口径对齐 report.md §5））——详见 report.md 第 3/5 节。验证：cargo check --tests 0 错误、警告 605=基线零新增、lib 单线程 307/0、diff 非注释行零变化断言通过。证据：docs/logs/2026-11-10-simplify-s8/
 
-### S9. 错挂文档（rustdoc 挂到隔壁函数，约 12 条）`- [ ]`
+### S9. 错挂文档（rustdoc 挂到隔壁函数，约 12 条）`- [x]`
 - 位置：`sandbox.rs:1462-1469`、`view_image.rs:74`、`proc_session.rs:1675-1683,1025-1026,1829-1830,2389-2390`、`tui_host.rs:857-860,1077-1082`、`api.rs:471-473`、`apply_patch.rs:1770-1771`（删）与 `:1107-1111`（移回 :1123 上方）、`turn.rs:211-214`（删）、`context.rs:85-87`（移到 :114）、`memory/rollout_input.rs:147-152`（移到 :187 上方）。
 - 依据：git blame 显示插入新条目后文档未随移。
 - 改法：内容属实的整块搬回原函数上方；内容失实的删除（已在 S8 计）。
+- 处理（2026-11-11）：搬移 13 处（含 view_image.rs:74、tui_host.rs:857-860 两处按句拆分挂接）＋核销 1 处（apply_patch.rs:1770-1771 已随 A4/S27 删除）＋改判 1 处（turn.rs:211-214 清单标注「删」，核实内容属实且目标 skipped_without_execution 原无文档，按改法通则搬回——偏差依据记录供裁定）。文字零改动（无指代词需微调情形）；行号漂移按内容定位（proc_session 漂移系同日 S8 修正所致）。验证：cargo check --tests 0 错误、警告 605＝基线零新增、非注释行零变化断言＋注释行多重集相等断言通过（净删 1 孤儿空行＝apply_patch.rs 搬移残留清理）、lib 单线程 309/0（沿 S8 口径；默认并行 3 失败为存量——干净树对照同失败集合，隔离运行两树均过）、--test apply_patch 55/0。逐条依据见 docs/logs/2026-11-10-simplify-s9/report.md。
 
 ### S10. 低价值注释约 210 条 `- [ ]`
 - 构成：复述代码约 90 条；分节标题约 50 条；里程碑/任务历史无现存约束约 40 条；无效果语句辩护（`let _` 系列）约 8 条；过时 lint 抑制（`agents/runtime.rs:1449` `message_label`、`turn.rs:2666` 恒不触发的 `too_many_arguments` 等）；无效果排序＋注释（`mcp/secrets.rs:28-30`）。
