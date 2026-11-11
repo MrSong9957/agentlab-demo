@@ -300,49 +300,16 @@ impl ProcessManager {
             self.lock_mgr().reap_failed = None;
             return Ok(());
         }
-        // 统一温和终止（一次发齐）。
-        for s in &extras {
-            if let Phase::Running { pgid } = s.phase() {
-                request_group_term(pgid);
-            }
+        let pending = Self::terminate_sessions_bounded(&extras);
+        if pending.is_empty() {
+            return Ok(());
         }
-        // 共享有界窗口。
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            if extras.iter().all(|s| !matches!(s.phase(), Phase::Running { .. })) {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        // 升级强杀（monitor 回收），再短窗核实。
-        for s in &extras {
-            if matches!(s.phase(), Phase::Running { .. }) {
-                s.request_kill(KillReq::Terminate);
-            }
-        }
-        let hard_deadline = Instant::now() + Duration::from_millis(500);
-        loop {
-            let pending: Vec<String> = extras
-                .iter()
-                .filter(|s| matches!(s.phase(), Phase::Running { .. }))
-                .map(|s| s.id.clone())
-                .collect();
-            if pending.is_empty() {
-                return Ok(());
-            }
-            if Instant::now() >= hard_deadline {
-                let msg = format!(
-                    "额外权限进程未能全部终止（{}）：不宣称已安全撤销，拒绝开始下一轮",
-                    pending.join("、")
-                );
-                self.lock_mgr().reap_failed = Some(msg.clone());
-                return Err(msg);
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        let msg = format!(
+            "额外权限进程未能全部终止（{}）：不宣称已安全撤销，拒绝开始下一轮",
+            pending.join("、")
+        );
+        self.lock_mgr().reap_failed = Some(msg.clone());
+        Err(msg)
     }
 
     /// 035 §1.5：回收一个 assignment 的命令进程（子轮终态/中断调用）——
@@ -401,38 +368,11 @@ impl ProcessManager {
                 request_group_term(pgid);
             }
         }
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            if owned.iter().all(|s| !matches!(s.phase(), Phase::Running { .. })) {
-                break;
-            }
-            if Instant::now() >= deadline {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        for s in &owned {
-            if matches!(s.phase(), Phase::Running { .. }) {
-                s.request_kill(KillReq::Terminate);
-            }
-        }
-        let hard_deadline = Instant::now() + Duration::from_millis(500);
-        loop {
-            if owned.iter().all(|s| !matches!(s.phase(), Phase::Running { .. })) {
-                break;
-            }
-            if Instant::now() >= hard_deadline {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let mut pending = Vec::new();
+        let pending = Self::terminate_sessions_bounded(&owned);
         {
             let mut st = self.lock_mgr();
             for s in &owned {
-                if matches!(s.phase(), Phase::Running { .. }) {
-                    pending.push(s.id.clone());
-                } else {
+                if !matches!(s.phase(), Phase::Running { .. }) {
                     st.sessions.remove(&s.id);
                 }
             }
@@ -444,7 +384,48 @@ impl ProcessManager {
         }
     }
 
-    /// [`ProcessManager::start`] 的 031 变体：`policy`＝出生策略快照（调用
+    /// 终止收尾骨架单点（S13）：温和终止一批会话（一次发齐）→ 3 秒共享有界
+/// 窗口轮询（20ms）→ 到期升级强杀（monitor 回收）→ 500ms 短窗核实（20ms）。
+/// 返回仍未终止的会话 id；记录移除、错误文案与失败标记由调用方处理。
+fn terminate_sessions_bounded(sessions: &[Arc<Session>]) -> Vec<String> {
+    for s in sessions {
+        if let Phase::Running { pgid } = s.phase() {
+            request_group_term(pgid);
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if sessions.iter().all(|s| !matches!(s.phase(), Phase::Running { .. })) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for s in sessions {
+        if matches!(s.phase(), Phase::Running { .. }) {
+            s.request_kill(KillReq::Terminate);
+        }
+    }
+    let hard_deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        if sessions.iter().all(|s| !matches!(s.phase(), Phase::Running { .. })) {
+            break;
+        }
+        if Instant::now() >= hard_deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    sessions
+        .iter()
+        .filter(|s| matches!(s.phase(), Phase::Running { .. }))
+        .map(|s| s.id.clone())
+        .collect()
+}
+
+/// [`ProcessManager::start`] 的 031 变体：`policy`＝出生策略快照（调用
     /// 开始时构建，经创建线程携带——不临时重读授权）；`extra`＝是否使用基线
     /// 之外的额外授权（到期收尾只针对此类进程，§1.7-5——016 对该条的修订：
     /// 额外权限进程不跨用户轮存活）。毒丸快照＝显式错误，零命令执行。
@@ -1533,7 +1514,10 @@ fn drain(st: &mut SessionState, max_output_chars: usize, final_drain: bool) -> (
 struct PendingBuffer {
     decoder_pending: Vec<u8>,
     head: String,
+    /// 尾部缓存＋已省略前端偏移（S28：超限后省略改为偏移推进＋达阈值才
+    /// 物理收缩——避免每次追加对 ~1 MiB 尾串全量 memmove；take() 输出逐字节不变）。
     tail: String,
+    tail_offset: usize,
     omitted: u64,
 }
 
@@ -1543,6 +1527,7 @@ impl PendingBuffer {
             decoder_pending: Vec::new(),
             head: String::new(),
             tail: String::new(),
+            tail_offset: 0,
             omitted: 0,
         }
     }
@@ -1591,7 +1576,7 @@ impl PendingBuffer {
         let head_cap = PENDING_CAP / 2;
         if self.head.len() < head_cap {
             let remaining = head_cap - self.head.len();
-            let cut = floor_char_boundary(s, remaining);
+            let cut = s.floor_char_boundary(remaining);
             self.head.push_str(&s[..cut]);
             let rest = &s[cut..];
             if !rest.is_empty() {
@@ -1600,11 +1585,17 @@ impl PendingBuffer {
         } else {
             self.tail.push_str(s);
         }
-        let over = (self.head.len() + self.tail.len()) as i64 - PENDING_CAP as i64;
+        let live = self.tail.len() - self.tail_offset;
+        let over = (self.head.len() + live) as i64 - PENDING_CAP as i64;
         if over > 0 {
-            let evict = ceil_char_boundary(&self.tail, over as usize);
-            self.tail.drain(..evict);
+            let evict = self.tail[self.tail_offset..].ceil_char_boundary(over as usize);
+            self.tail_offset += evict;
             self.omitted += evict as u64;
+            if self.tail_offset >= PENDING_CAP {
+                // 批量物理收缩（摊还 O(n)）：偏移过半即整理一次。
+                self.tail.drain(..self.tail_offset);
+                self.tail_offset = 0;
+            }
         }
     }
 
@@ -1620,35 +1611,12 @@ impl PendingBuffer {
         if truncated {
             out.push_str(&format!("\n…[已省略 {} 字节输出]…\n", self.omitted));
         }
-        out.push_str(&self.tail);
+        out.push_str(&self.tail[self.tail_offset..]);
         self.tail.clear();
+        self.tail_offset = 0;
         self.omitted = 0;
         (out, truncated)
     }
-}
-
-/// 不超过 `limit` 的最大字符边界（s 为合法 UTF-8）。
-fn floor_char_boundary(s: &str, limit: usize) -> usize {
-    if limit >= s.len() {
-        return s.len();
-    }
-    let mut i = limit;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
-/// 不小于 `limit` 的最小字符边界（用于从头省略整字符）。
-fn ceil_char_boundary(s: &str, limit: usize) -> usize {
-    if limit >= s.len() {
-        return s.len();
-    }
-    let mut i = limit;
-    while i < s.len() && !s.is_char_boundary(i) {
-        i += 1;
-    }
-    i
 }
 
 /// 一次成功启动的产物。
@@ -1748,19 +1716,7 @@ fn build_tool_command(
         // 031：seccomp fd 守卫须存活到 spawn——经返回值交给调用方。
         //（两个变体的 fd 处理语义见 sandbox.rs 中对应函数文档。）
         #[cfg(unix)]
-        match t.seccomp.as_ref() {
-            Some(guard) => {
-                let fd = guard.raw();
-                unsafe {
-                    c.pre_exec(move || {
-                        crate::sandbox::close_inherited_fds_except_cloexec(fd)
-                    });
-                }
-            }
-            None => unsafe {
-                c.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
-            },
-        }
+        crate::sandbox::apply_spawn_fd_hygiene(&mut c, t.seccomp.as_ref());
         #[cfg(windows)]
         let _ = &c;
     }
@@ -3336,11 +3292,11 @@ mod tests {
 
     #[test]
     fn char_boundary_helpers() {
-        assert_eq!(floor_char_boundary("a🎉b", 2), 1); // 🎉 前
-        assert_eq!(floor_char_boundary("a🎉b", 10), 6);
-        assert_eq!(ceil_char_boundary("a🎉b", 1), 1);
-        assert_eq!(ceil_char_boundary("a🎉b", 2), 5); // 跳过 🎉（字节 1..5）
-        assert_eq!(ceil_char_boundary("a🎉b", 10), 6);
+        assert_eq!("a🎉b".floor_char_boundary(2), 1); // 🎉 前
+        assert_eq!("a🎉b".floor_char_boundary(10), 6);
+        assert_eq!("a🎉b".ceil_char_boundary(1), 1);
+        assert_eq!("a🎉b".ceil_char_boundary(2), 5); // 跳过 🎉（字节 1..5）
+        assert_eq!("a🎉b".ceil_char_boundary(10), 6);
     }
 
 // ---------- 016 剩余验收：可控时间接缝 / 终止失败注入（单测）----------

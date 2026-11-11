@@ -112,6 +112,20 @@ fn parse_arguments(arguments: &str) -> Result<String, String> {
 /// 工作目录，绝对＝原义，不作 shell 展开）→ 有界读取 → 图片准备 → 摘要与载荷。
 /// 取消检查点：读取前、读取后、结果提交前（解码为有界同步处理，途中取消在
 /// 下一检查点生效）。
+/// run() 结果 → 工具结果装配（execute 与 execute_sandboxed 共用；错误＝摘要、无图）。
+fn to_outcome(run: Result<(PathBuf, EncodedImage), String>) -> ViewImageOutcome {
+    match run {
+        Ok((resolved, encoded)) => ViewImageOutcome {
+            summary: ok_summary(&resolved, &encoded),
+            image: Some(ToolResultImage {
+                image_url: data_url_from_bytes(&encoded.mime, &encoded.bytes),
+                detail: "high".into(),
+            }),
+        },
+        Err(error) => ViewImageOutcome { summary: error_summary(&error), image: None },
+    }
+}
+
 pub fn execute(arguments: &str, cwd: &Path, cancel: Option<&AtomicBool>) -> ViewImageOutcome {
     let run = || -> Result<(PathBuf, EncodedImage), String> {
         let path = parse_arguments(arguments)?;
@@ -125,16 +139,7 @@ pub fn execute(arguments: &str, cwd: &Path, cancel: Option<&AtomicBool>) -> View
         }
         Ok((resolved, encoded))
     };
-    match run() {
-        Ok((resolved, encoded)) => ViewImageOutcome {
-            summary: ok_summary(&resolved, &encoded),
-            image: Some(ToolResultImage {
-                image_url: data_url_from_bytes(&encoded.mime, &encoded.bytes),
-                detail: "high".into(),
-            }),
-        },
-        Err(error) => ViewImageOutcome { summary: error_summary(&error), image: None },
-    }
+    to_outcome(run())
 }
 
 /// 从已解析路径准备单张图片（020：与工具共用核心——普通文件检查、
@@ -206,22 +211,7 @@ pub fn execute_sandboxed_with_exe(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            unsafe {
-                match launch.seccomp.as_ref() {
-                    Some(g) => {
-                        let fd = g.raw();
-                        cmd.pre_exec(move || {
-                            crate::sandbox::close_inherited_fds_except_cloexec(fd)
-                        });
-                    }
-                    None => {
-                        cmd.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
-                    }
-                }
-            }
-        }
+        crate::sandbox::apply_spawn_fd_hygiene(&mut cmd, launch.seccomp.as_ref());
         // seccomp fd 守卫存活到 spawn 完成（memfd 非 CLOEXEC 穿越 execve）。
         let child = cmd
             .spawn()
@@ -256,16 +246,7 @@ pub fn execute_sandboxed_with_exe(
         }
         Ok((resolved, encoded))
     };
-    match run() {
-        Ok((resolved, encoded)) => ViewImageOutcome {
-            summary: ok_summary(&resolved, &encoded),
-            image: Some(ToolResultImage {
-                image_url: data_url_from_bytes(&encoded.mime, &encoded.bytes),
-                detail: "high".into(),
-            }),
-        },
-        Err(error) => ViewImageOutcome { summary: error_summary(&error), image: None },
-    }
+    to_outcome(run())
 }
 
 /// `--internal-view-image <path>` 子进程入口：读取并准备单张图片，编码 JSON

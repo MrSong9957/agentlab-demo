@@ -60,6 +60,9 @@ struct TurnSteerChannel {
     peeked: std::cell::RefCell<Vec<turn::SteerInput>>,
 }
 
+/// 未知斜杠命令提示的可用清单（TUI 与行式两宿主共用同一文案）。
+pub const SLASH_COMMAND_HINT: &str = "可用：/models、/refresh、/save <名称>、/resume [名称]、/sessions、/memory-status、/memory-reset confirm、/mcp [reload]";
+
 impl TurnSteerChannel {
     fn drain_rx(&self) -> Vec<turn::SteerInput> {
         let mut out = std::mem::take(&mut *self.peeked.borrow_mut());
@@ -538,7 +541,7 @@ impl TuiHost {
                         // 021：消息工具无运行活动可展示——成功路径直接投影为
                         // 消息 cell，失败原因在 ToolEnd 显式呈现；不打印无信息
                         // 量的活动行（成功通知不重复打印正文）。
-                        if name == "send_message_to_user_async" {
+                        if name == crate::message_to_user::TOOL_NAME {
                             None
                         } else {
                             let ev = if name == "write_stdin" {
@@ -574,7 +577,7 @@ impl TuiHost {
                                 Some(item) => Some(DriverEvent::ToolEnd { id, item }),
                                 // 021：消息工具失败/取消/结果未知——活动行已被抑制，
                                 // 这里显式呈现原因，不静默（展示副本过终端过滤）
-                                None if name == "send_message_to_user_async" => Some(DriverEvent::Info(
+                                None if name == crate::message_to_user::TOOL_NAME => Some(DriverEvent::Info(
                                     crate::display::sanitize_for_terminal(
                                         &crate::message_to_user::failure_line(&result),
                                     ),
@@ -718,16 +721,15 @@ impl TuiHost {
                         agent_sender_snapshot.clone(),
                     ))
                 };
-            let agents_context_message = crate::context::build_context_message(
-                &crate::context::ContextSources::from_env(),
-            )
-            .message;
             let agents_extras = if agents_ready {
+                // S21：agents 上下文仅在就绪时构建（复用本轮 context_sources；
+                // 产物仅 AgentExtras 消费，纯函数无副作用）。
                 Some(crate::agents::runtime::AgentExtras {
                     manager: agents_manager_arc.as_ref(),
                     session: autosave.clone(),
                     sender_factory: &agent_factory,
-                    context_message: agents_context_message,
+                    context_message: crate::context::build_context_message(&context_sources)
+                        .message,
                     mcp: mcp_snapshot.clone(),
                 })
             } else {
@@ -907,7 +909,7 @@ impl TuiHost {
             }
             "/mcp" => Outcome::Output(self.cmd_mcp(args)),
             other => Outcome::Output(format!(
-                "未知命令 {other}，可用：/models、/refresh、/save <名称>、/resume [名称]、/sessions、/memory-status、/memory-reset confirm、/mcp [reload]"
+                "未知命令 {other}，{SLASH_COMMAND_HINT}"
             )),
         }
     }
@@ -1300,7 +1302,7 @@ fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
                 });
                 let is_send_message = paired
                     .as_ref()
-                    .is_some_and(|(name, _)| name == "send_message_to_user_async");
+                    .is_some_and(|(name, _)| name == crate::message_to_user::TOOL_NAME);
                 let restored = paired.and_then(|(name, arguments)| {
                     if name == "request_user_input_async" {
                         restored_async_item(tool_call_id, &arguments, content, async_event)
@@ -1701,7 +1703,7 @@ fn tool_end_item(
         // 021：消息成功结果→AssistantMessage（实时终态与 /resume 恢复同一转换；
         // 只展示不重发）。失败/取消/结果未知返回 None——实时路径显式呈现原因，
         // 恢复路径按普通文本降级，不推定发送成功。
-        "send_message_to_user_async" => crate::message_to_user::sent_message_from_record(
+        crate::message_to_user::TOOL_NAME => crate::message_to_user::sent_message_from_record(
             arguments,
             result,
         )

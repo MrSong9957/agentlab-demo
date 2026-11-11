@@ -239,7 +239,7 @@ pub fn execute(
             }
             finish_success(entry, projected)
         }
-        Err(failure) => (failure_to_client_error(&failure, &entry.sensitive), true),
+        Err(failure) => (failure.to_client_error(&entry.sensitive), true),
     }
 }
 
@@ -318,7 +318,7 @@ fn execute_read(
             }
             finish_success(entry, projected)
         }
-        Err(failure) => (failure_to_client_error(&failure, &entry.sensitive), true),
+        Err(failure) => (failure.to_client_error(&entry.sensitive), true),
     }
 }
 
@@ -627,13 +627,4 @@ fn failure_into_abort(
     }
 }
 
-/// 失败分类 → 标准客户端错误（脱敏；022 §2.4 同源语义）。
-fn failure_to_client_error(failure: &CallFailure, sensitive: &SensitiveValues) -> String {
-    let (kind, detail) = match failure {
-        CallFailure::NotSent(d) => ("未发送", d.clone()),
-        CallFailure::SentUnknown(d) => ("状态未知", d.clone()),
-        CallFailure::SentRejected(d) => ("协议", d.clone()),
-        CallFailure::Unsupported(d) => ("协议", d.clone()),
-    };
-        client_error_json(kind, &super::secrets::sanitize_detail(detail.as_str(), sensitive))
-}
+

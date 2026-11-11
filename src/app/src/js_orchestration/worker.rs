@@ -287,10 +287,7 @@ async fn run_module<R: Read, W: Write>(
                     let queued_all = true;
                     loop {
                         let (chunk, tail) = if rest.len() > TEXT_CHUNK {
-                            let mut cut = TEXT_CHUNK;
-                            while !rest.is_char_boundary(cut) {
-                                cut -= 1;
-                            }
+                            let cut = rest.floor_char_boundary(TEXT_CHUNK);
                             (&rest[..cut], Some(&rest[cut..]))
                         } else {
                             (rest, None)

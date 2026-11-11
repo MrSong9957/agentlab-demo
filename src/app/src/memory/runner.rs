@@ -140,7 +140,7 @@ fn flock_root(root: &Path, _exclusive: bool) -> Option<RootLock> {
     let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
     let name: String = format!(
         "Local\\tchat-memory-{}\0",
-        digest.iter().take(16).map(|b| format!("{b:02x}")).collect::<String>()
+        crate::hex::hex_encode(&digest[..16])
     );
     let wide: Vec<u16> = name.encode_utf16().collect();
     let handle = unsafe { CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };

@@ -133,6 +133,44 @@ struct GitOutput {
 
 /// 运行一条 git 命令（固定 argv、锚定记忆根、隔离环境、超时/取消/输出上限）。
 /// 退出码原样返回（`rev-parse --verify` 的非零是判定信号，不是错误）。
+/// git 子进程环境隔离单点（S26）：env_clear＋继承 PATH（缺省 /usr/bin:
+/// /bin:/usr/local/bin）＋LC_ALL=C＋禁用外部 git 配置（GIT_CONFIG_*——
+/// 钩子经 run_git argv 的 hooksPath=-c 另行禁用，027 B⑤）。
+fn isolate_env(command: &mut Command) -> &mut Command {
+    command
+        .env_clear()
+        .env(
+            "PATH",
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/local/bin".into()),
+        )
+        .env("LC_ALL", "C")
+        .env("GIT_CONFIG_COUNT", "0")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+}
+/// git diff 公共开关基底（S26）：状态列表与统一 diff 两个变体各自追加
+/// 专属开关（状态列表另加 --name-status -z）。
+fn diff_args_base() -> Vec<String> {
+    vec![
+        "diff".to_string(),
+        "HEAD".to_string(),
+        "--no-renames".to_string(),
+        "--no-color".to_string(),
+        "--no-ext-diff".to_string(),
+        "--no-textconv".to_string(),
+    ]
+}
+
+/// 状态列表失败→错误文案单点（S26；两站点逐字一致）。
+fn name_status_error(out: &GitOutput) -> String {
+    format!(
+        "git diff --name-status 退出码 {}：{}",
+        out.exit_code,
+        out.stderr.trim()
+    )
+}
+
 fn run_git(root: &Path, args: &[&str], cancel: Option<&AtomicBool>) -> Result<GitOutput, String> {
     run_git_env(root, args, cancel, &[])
 }
@@ -169,19 +207,10 @@ fn run_git_env(
     ];
     argv.extend_from_slice(args);
 
-    let path_env = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/local/bin".into());
     let program = git_program();
     let mut command = Command::new(&program);
-    command
-        .args(&argv)
-        .current_dir(root)
-        .env_clear()
-        .env("PATH", &path_env)
-        .env("LC_ALL", "C")
-        .env("GIT_CONFIG_COUNT", "0")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1");
+    command.args(&argv).current_dir(root);
+    isolate_env(&mut command);
     for (k, v) in extra_env {
         command.env(k, v);
     }
@@ -406,19 +435,10 @@ fn ensure_baseline(root: &Path, cancel: Option<&AtomicBool>) -> Result<(), Strin
     }
     // `git init` 在记忆根内创建（init 不向上发现仓库；无需锚定参数）
     let init_program = git_program();
-    let init = Command::new(&init_program)
-        .args(["init"])
-        .current_dir(root)
-        .env_clear()
-        .env(
-            "PATH",
-            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin:/usr/local/bin".into()),
-        )
-        .env("LC_ALL", "C")
-        .env("GIT_CONFIG_COUNT", "0")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
+    let mut init = Command::new(&init_program);
+    init.args(["init"]).current_dir(root);
+    isolate_env(&mut init);
+    let init = init
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -504,25 +524,13 @@ pub fn memory_workspace_diff(
     stage_all(root, cancel)?;
 
     // 状态列表（-z：NUL 分隔，无引号转义歧义；--no-renames 保证恰 A/M/D）
-    let mut args = vec![
-        "diff".to_string(),
-        "HEAD".to_string(),
-        "--no-renames".to_string(),
-        "--no-color".to_string(),
-        "--no-ext-diff".to_string(),
-        "--no-textconv".to_string(),
-        "--name-status".to_string(),
-        "-z".to_string(),
-    ];
+    let mut args = diff_args_base();
+    args.extend(["--name-status".to_string(), "-z".to_string()]);
     args.extend(diff_pathspec().into_iter().map(String::from));
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let status_out = run_git(root, &refs, cancel)?;
     if status_out.exit_code != 0 {
-        return Err(format!(
-            "git diff --name-status 退出码 {}：{}",
-            status_out.exit_code,
-            status_out.stderr.trim()
-        ));
+        return Err(name_status_error(&status_out));
     }
     let mut changes = parse_name_status_entries(&status_out.stdout)?;
 
@@ -534,37 +542,18 @@ pub fn memory_workspace_diff(
         .into_iter()
         .map(|path| format!(":(exclude,literal){path}"))
         .collect();
-    let mut unified_args = vec![
-        "diff".to_string(),
-        "HEAD".to_string(),
-        "--no-renames".to_string(),
-        "--no-color".to_string(),
-        "--no-ext-diff".to_string(),
-        "--no-textconv".to_string(),
-    ];
+    let mut unified_args = diff_args_base();
     unified_args.extend(diff_pathspec().into_iter().map(String::from));
     if !invalid_note_excludes.is_empty() {
         // 状态列表按同一排除集重算（无过滤时不付第二次 git 代价）
-        let mut status_args = vec![
-            "diff".to_string(),
-            "HEAD".to_string(),
-            "--no-renames".to_string(),
-            "--no-color".to_string(),
-            "--no-ext-diff".to_string(),
-            "--no-textconv".to_string(),
-            "--name-status".to_string(),
-            "-z".to_string(),
-        ];
+        let mut status_args = diff_args_base();
+        status_args.extend(["--name-status".to_string(), "-z".to_string()]);
         status_args.extend(diff_pathspec().into_iter().map(String::from));
         status_args.extend(invalid_note_excludes.iter().cloned());
         let refs: Vec<&str> = status_args.iter().map(String::as_str).collect();
         let status_out = run_git(root, &refs, cancel)?;
         if status_out.exit_code != 0 {
-            return Err(format!(
-                "git diff --name-status 退出码 {}：{}",
-                status_out.exit_code,
-                status_out.stderr.trim()
-            ));
+            return Err(name_status_error(&status_out));
         }
         changes = parse_name_status_entries(&status_out.stdout)?;
         unified_args.extend(invalid_note_excludes.iter().cloned());

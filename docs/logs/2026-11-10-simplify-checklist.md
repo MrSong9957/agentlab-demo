@@ -172,100 +172,140 @@
 
 ### 重构
 
-### S11. session 持久化孪生管线（约 220 行重复）`- [ ]`
+### S11. session 持久化孪生管线（约 220 行重复）`- [x]`
 - 位置：`session.rs:1071-1293`（commit_checkpoint / commit_orchestration_event / commit_agent_event_root 三胞胎，diff 仅文案＋计数器）＋ `:1515-1600` vs `:1616-1701`（create_auto_file / create_v3_target_with_tail 86 行孪生，仅 meta 版本、tail、错误前缀 3 处差异）。
 - 依据：审查者逐段 diff。034/035 各克隆过一次，第四类事件会再克隆。
 - 改法：抽私有提交原语（参数＝主语文案、尾行、游标处理、meta 版本、错误前缀），三个 pub 方法薄委托；两个 create_* 合并带参函数。错误文案逐字保留（「自动保存已停用」路径语义不同）。
 
-### S12. agents spawn/followup 启动记账重复（泄槽风险）`- [ ]`
+- 处置（2026-11-11，重构组）：commit_event_line 原语单点（subject/advance_over_line/untracked_kind 参量化，文案逐字保留）＋create_target(meta_version,tail_lines,failure_prefix) 单点，三胞胎与 create 双子薄委托，create_v3_target_with_checkpoint 别名删。验证：session lib 27/0＋集成 40/0、e2e 150/0。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
+
+### S12. agents spawn/followup 启动记账重复（泄槽风险）`- [x]`
 - 位置：`agents/runtime.rs:615-651` vs `:914-948`（35 行：计数→起线程→失败回滚→PERSISTENCE_FAILED）；另 `:277-327` commit_root/commit_child 25 行孪生；`:690-719` vs `:820-855` 入队＋计费 25 行重复。
 - 依据：逐行比对，仅 4 处细节差异（agent 名、initial_task、文案、查找键）。槽位/存活计数只改一处即泄漏。
 - 改法：提取 `launch_child(spec)` 与共享 helper；槽位释放顺序（live_children→GLOBAL_CHILD_SLOTS→core）不变。
 
-### S13. proc_session 终止收尾骨架两份（已漂移）`- [ ]`
+- 处置（2026-11-11，重构组）：launch_child/commit_with(persist 闭包参量化)/enqueue_message 三单点；文案与查找键差异留调用方；槽位释放顺序不变。验证：agents 14/0、multi_agent 24/0（瞬态失败复跑过，见报告）。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
+
+### S13. proc_session 终止收尾骨架两份（已漂移）`- [x]`
 - 位置：`proc_session.rs:296-348` vs `:389-447`。
 - 依据：轮询间隔一处 10ms、一处 20ms。
 - 改法：提取 `terminate_sessions_bounded(&[Arc<Session>]) -> Vec<id>`；「移除记录＋Err」与「闩锁＋格式化 Err」的后处理留在各自调用方。
 
-### S14. catalog capability 谓词重复 9 函数 `- [ ]`
+- 处置（2026-11-11，重构组）：terminate_sessions_bounded 单点；10ms→20ms 漂移统一（记录）；早退不清 reap_failed、后处理留调用方。验证：proc_session 23/0、exec_command 18/0。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
+
+### S14. catalog capability 谓词重复 9 函数 `- [x]`
 - 位置：`catalog.rs:856-958`。
 - 依据：主会话确认 28 处 `experimental_supported_tools` 引用集中于此。
 - 改法：`fn declares_tool(model, name)`；单名开关变一行；`js_orchestration`/`multi_agent` 的「部分缺≠全缺」语义差异保留，不合并。
 
-### S15. mcp 错误映射与初始化重复 `- [ ]`
+- 处置（2026-11-11，重构组）：declares_tool 单点＋9 谓词薄委托；双 opt-in/整组语义保留。验证：catalog 37/0。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
+
+### S15. mcp 错误映射与初始化重复 `- [x]`
 - 位置：`manager.rs:672-684` vs `resources.rs:639-647`（CallFailure→客户端错误逐字相同）；`manager.rs:524-536` vs `:703-715`（13 行 ServerState 初始化）；`:288-311` 断连标记（既有 `note_connection_down` 未复用）；`:111-153` 两个弱引用解析 match。
 - 改法：`CallFailure::to_client_error`（connection.rs 已依赖 secrets 无环）、`fresh_server_states`、复用 `note_connection_down`、`upgraded_manager` helper。
 
-### S16. api 鉴权头/文案/文本化重复 `- [ ]`
+- 处置（2026-11-11，重构组）：to_client_error/fresh_server_state/upgraded_manager/note_connection_down 复用四单点。验证：mcp_l1 14/0、mcp_resources 37/0、mcp_turn 26/0。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
+
+### S16. api 鉴权头/文案/文本化重复 `- [x]`
 - 位置：`api.rs:345-351` vs `:647-650`（鉴权头路由两份，`anthropic-version` 字面量两处）；`:407-411,504-508,569-573,594-597,631-635`「协议未支持」5 处；`api/native.rs:262-276,289-293` vs `:328-340,349-353`（历史工具调用文本化 ×2）。
 - 改法：`with_auth_headers`、`unsupported_protocol`、`textualized_calls`/`textualized_result` helper（`historical_text` 已共用）。协议域内 `starts_with("google-")` 与 `matches!` 等价已核实。
 
-### S17. turn 出口三连与入史重复 `- [ ]`
+- 处置（2026-11-11，重构组）：with_auth_headers/unsupported_protocol/textualized_calls/textualized_result 四单点。验证：llm_flow 51/0、mcp_turn 26/0。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
+
+### S17. turn 出口三连与入史重复 `- [x]`
 - 位置：`turn.rs` `close_steer_restore`×25、`close_orch!`×28，出口三连约 19 处；assistant 文本入史 5 处逐字重复（`:1889-1896,1920-1927,1957-1964,1984-1991,1997-2004`）。
 - 依据：主会话核实计数。**4 处出口顺序不同（:1843、:1859、:1869、:1906 先 close_orch）——入史顺序是可观察行为，必须逐站点保留原顺序。**
 - 改法：仿既有 `close_orch!` 加统一出口宏（逐站点按原顺序展开）；提取 `push_assistant_text`/`push_host_notice`。
 
-### S18. UTF-8 边界截断统一 `- [ ]`
+- 处置（2026-11-11，重构组）：close_exit! 宏（5 变体；4 处 orch_first 站点逐站点保留原顺序）＋push_assistant_text 单点（5 处）；close_orch! 宏体加 allow（never-read 假阳性 25 处统一抑制）。验证：turn 18/0、llm_flow 51/0、context_management 43/0。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
+
+### S18. UTF-8 边界截断统一 `- [x]`
 - 位置：`proc_session.rs:1635-1656` 私有 `floor_char_boundary`/`ceil_char_boundary`（已有 std 方法，rustc 1.99.1 在用；审查者称 1.91 稳定，落地时编译确认）；agents/events+runtime、js runtime+worker 共 6 处手写回退循环。
 - 改法：调用点改 `str::floor_char_boundary`（或共享 `pub(crate)` helper）；各调用点均有 `len > limit` 前置守卫，语义等价已核对。落地前跑一次编译＋相关测试。
 
-### S19. hex 编码 6 处手写 `- [ ]`
+- 处置（2026-11-11，重构组）：std floor/ceil_char_boundary（1.99.1 探针确认）；6 处循环＋私有 fn×2 删。验证：proc_session 23/0（含边界断言）。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
+
+### S19. hex 编码 6 处手写 `- [x]`
 - 位置：`catalog.rs:295`、`agents/events.rs:61`、`js runtime.rs:138`、`mcp/naming.rs:51`、`session.rs:871`、`memory/runner.rs:143`。
 - 依据：grep `02x` 仅这 6 处；sha2 0.11 无 hex。
 - 改法：共享 `hex_encode(&[u8]) -> String`，调用方自定截断（前 16 字节 vs 前 16 字符的差异各自保留）。
 
-### S20. sent_instructions 每请求重算 `- [ ]`
+- 处置（2026-11-11，重构组）：hex.rs hex_encode 单点＋6 站点；截断差异留调用方。验证：lib 全量。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
+
+### S20. sent_instructions 每请求重算 `- [x]`
 - 位置：`prompt.rs:594-597`（调用点 `:888`，每轮最多 8 次；静态资源 20,903 字节的确定性纯函数）。
 - 改法：`static SENT: OnceLock<String>` 首算后 `clone()`；两条 assert 保留在首算内。输出逐字节相同。
 
-### S21. agents_context_message 每轮重复构建 `- [ ]`
+- 处置（2026-11-11，重构组）：OnceLock 缓存＋clone；assert 保留首算内。验证：prompt_assembly 19/0。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
+
+### S21. agents_context_message 每轮重复构建 `- [x]`
 - 位置：`tui_host.rs:721-724`（复用 `:621` 已有 `context_sources`）＋ agents 关闭时白做磁盘遍历（3 审查者收敛）；`main.rs:1057-1068` 同款移入 `agents_ready` 分支。
 - 依据：`from_env`＋`build_context_message` 含逐级 `symlink_metadata` 找 .git＋读规则文件；产物仅 agents_ready 时消费。纯函数无副作用，移入分支行为不变（跨 UTC 零点时钟读数一致性反而变好）。
 
-### S22. permissions 重复构造 `- [ ]`
+- 处置（2026-11-11，重构组）：两宿主 agents 上下文移入 agents_ready 分支（tui 复用本轮 context_sources）。验证：tui_host 14/0。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
+
+### S22. permissions 重复构造 `- [x]`
 - 位置：`permissions.rs:1236-1244` vs `:1260-1266`（trial 构造两次，中间仅只读 confirm）；`:527-550` vs `:561-596`（parse_path_spec/parse_deny_paths 20 行同构）。
 - 改法：确认前计算一次 trial 复用；提取 `parse_existing_abs_path(raw, ctx)`（文案逐字保留）。
 
-### S23. sandbox env 白名单与 fd 收口重复 `- [ ]`
+- 处置（2026-11-11，重构组）：trial 确认前一次构造复用；parse_existing_abs_path 单点（文案逐字）。验证：request_permissions 38/0。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
+
+### S23. sandbox env 白名单与 fd 收口重复 `- [x]`
 - 位置：`sandbox.rs:102-114` vs `:966-978`（仅 HOME 值不同）；seccomp fd 收口接线在 `proc_session.rs:1757-1770`、`view_image.rs:208-224`、`apply_patch.rs:180-189`、`mcp/transport.rs:255-265` 四处重复。
 - 改法：`whitelist_env(home)`；`apply_spawn_fd_hygiene(cmd, seccomp)`（tokio 站点可选）。收口语义不削弱。
 
-### S24. view_image 收尾重复 `- [ ]`
+- 处置（2026-11-11，重构组）：whitelist_env/apply_spawn_fd_hygiene 单点＋3 std 站点（tokio 站点留原接线，登记未排期）。验证：exec_sandbox 关联链（exec_command 18/0）＋e2e 150/0。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
+
+### S24. view_image 收尾重复 `- [x]`
 - 位置：`view_image.rs:128-137` vs `:259-268`（10 行结果装配逐字相同）。
 - 改法：提取 `to_outcome(Result<...>) -> ViewImageOutcome`。
 
-### S25. session utc_basic_now 手写历法 `- [ ]`
+- 处置（2026-11-11，重构组）：to_outcome 单点两站委托。验证：view_image 22/0。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
+
+### S25. session utc_basic_now 手写历法 `- [x]`
 - 位置：`session.rs:737-758`；chrono 已是直接依赖（`context.rs:354-357` 同款先例）。
 - 改法：改 `chrono::DateTime::<Utc>::from_timestamp(secs,0).format("%Y%m%dT%H%M%S")`；输出逐字节一致（u64 秒域内非 None）；补固定秒数断言（0→`19700101T000000`）；删「无 chrono 依赖」注释。
 
-### S26. memory store/workspace 重复 `- [ ]`
+- 处置（2026-11-11，重构组）：chrono 化＋utc_basic_from_secs＋epoch 0 断言；「无 chrono 依赖」注释删。验证：session lib 27/0。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
+
+### S26. memory store/workspace 重复 `- [x]`
 - 位置：`store.rs:182-187` vs `:218-223`（pragma 三连重复，持久化契约单点化；`open_existing` 无 CREATE 的差异保留）；`store.rs:1183-1195` 改 `query_row(...).optional()`（同文件 16 处先例）；`workspace.rs:509-573`（diff 开关向量 3 份＋错误臂 2 份）＋ `:415-424` env 隔离块重复。
 - 改法：`configure_conn`、optional() 改写、`diff_args_base()`/`isolate_env()`。
+
+- 处置（2026-11-11，重构组）：configure_conn/optional()/isolate_env/diff_args_base/name_status_error 单点。验证：memory lib 49/0、memory_phase2 45/0。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
 
 ### S27. apply_patch 词法归一化复用（含 Windows 行为修正）`- [x]`
 - 位置：`apply_patch.rs:1775-1789` `lexical_normalize` vs `sandbox::absolute_lexical`（`pub(crate)`，`permissions.rs:791` 已复用）。
 - 改法：apply_move 改用 `absolute_lexical`；**行为变化**：Windows 跨盘 Move 由误拒变放行（方向为修正），在 029 规格登记；符号链接别名仍由 `create_new` 排他创建兜底。单用户确认后执行。
 - 处置（2026-11-11，随 A4 方案 a 落地）：lexical_normalize 已删，单一实现点达成；sandbox 侧文档补 029 消费方与分叉史；S8 暂缓的区域内失实注释（错挂「末端符号链接拒绝」残留文档）一并删除。验证同 A4 处置行。
 
-### S28. 效率三强项 `- [ ]`
+### S28. 效率三强项 `- [x]`
 - `api.rs:540-549`：每请求整体深拷贝 request（messages 即被覆盖）＋ `_history` 二次克隆 → 选择性克隆＋一次移交给 `from_value`；`:547` `json!(messages)` → `Value::Array(messages)` 直移。
 - `proc_session.rs:1591-1613`：`PendingBuffer` 超 1 MiB 后每 8KiB 追加全量 memmove（大输出热路径 O(n²)，022 同类坑）→ 前端偏移缓冲或阈值批量收缩（`take()` 输出逐字节不变）。
 - `mcp/manager.rs:795-905`：每轮无条件重建快照（每工具 3 次 Schema 深克隆）→ 变更点清缓存的 `Arc<McpSnapshot>` 复用（快照不可变，Arc 身份不可观察；每轮仍重查断连原子量）。
 
-### S29. 效率次强项 `- [ ]`
+- 处置（2026-11-11，重构组）：api 选择性克隆＋Value::Array 直移；PendingBuffer 偏移缓冲（take 输出逐字节不变）；McpSnapshot 缓存＋9 可变取锁统一失效（断连每轮仍重查）。验证：llm_flow 51/0、proc_session 23/0、mcp 四套件全绿。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
+
+### S29. 效率次强项 `- [x]`
 - `tool_search.rs:392-400` 序列化回析（Value 恒等）＋ `:434-472` `build_search_text` 每条目两遍；`agents/runtime.rs:1613` 子轮上下文整体深克隆（锁内构建即可）；`js runtime.rs:452-458` init 帧序列化两遍（上限 10 MiB）；`agents/runtime.rs:285-335` 事件每次提交 2-3 次完整序列化＋克隆入队（与 S12/A1 联动：commit 内序列化一次返回字节数）。
 - 改法：各自按条目改；输出与错误逐字节不变。
 
-### S30. 裸串与同体 helper `- [ ]`
+- 处置（2026-11-11，重构组）：回析消除/搜索文本单建/锁内构建/init 帧单序列化（S29.1-4）；S29.5 字节口径随 S11 线登记未排期。验证：tool_search 1/0、agents 14/0、js_orchestration 42/0。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
+
+### S30. 裸串与同体 helper `- [x]`
 - 位置：`tui_host.rs:541,577,1303,1704`＋`main.rs:843,856` 裸串 `"send_message_to_user_async"` → `message_to_user::TOOL_NAME`；`catalog.rs:105-107,144-146` 同体 serde helper → `BTreeMap::is_empty`；`main.rs:318,361,467` y/yes 谓词 ×3 → `is_affirmative`；`tui_host.rs:911-913` vs `main.rs:592-594` 未知命令提示串共享常量。
 - 改法：纯等价替换。
+
+- 处置（2026-11-11，重构组）：TOOL_NAME×6/BTreeMap::is_empty×2/is_affirmative×3+1/SLASH_COMMAND_HINT 共享。验证：tui_host 14/0。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
 
 ### S31. prompt 参数膨胀链收敛 `- [ ]`
 - 位置：`prompt.rs:751-939`（7 层包装、终端函数 13 参数需 allow；S7 先删两层）。
 - 改法：能力布尔与 tool_search/mcp_tools 收进 `Default` 开关结构体，单一组装入口；4 个测试文件机械更新。**改动面大，单独一轮并经用户确认。**
 
-### S32. 跨模块符号统一 `- [ ]`
+### S32. 跨模块符号统一 `- [x]`
 - `agents/runtime.rs:1959-1967` `with_native` 逐字副本 → 复用 `turn.rs:25-32`（提 `pub(crate)`）；`agents/events.rs:206-211` 状态名词表 → `AgentState` 单一来源（`from_display` 或常量数组，V3 装载校验防漂移）；`api.rs` 四协议裸字符串 42 处 → 常量（拼写错误静默落 `_` 臂的现状消除）；`turn.rs:267-288,2010-2019` `ParsedToolCall` → `pub use prompt::ToolCallRecord` 别名（恒等映射搬移消除）。
+
+- 处置（2026-11-11，重构组）：with_native 复用/AgentState::from_display 单源/协议常量×3（23 处）/ParsedToolCall 别名化（外部引用零改动）。验证：agents 14/0、llm_flow 51/0。 证据：docs/logs/2026-11-11-simplify-refactor/report.md。
 
 ### 编码为测试（先写测试，通过后删对应注释；多数今天失败＝A 组回归锚）
 

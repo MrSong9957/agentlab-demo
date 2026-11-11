@@ -389,13 +389,16 @@ pub fn success_result(hits: &[&CatalogEntry]) -> Result<Value, String> {
     let mut bytes = PREFIX.len();
     let mut tools = Vec::with_capacity(hits.len());
     for (i, hit) in hits.iter().enumerate() {
-        let definition = serde_json::to_string(&hit.definition())
+        // S29：definition 本就是 Value——序列化仅用于字节计量，Value 不再
+        // 经字符串回析（to_string(Value) 恒等往返，直接持有原值）。
+        let definition_value = hit.definition();
+        let definition = serde_json::to_string(&definition_value)
             .map_err(|e| format!("定义序列化失败：{e}"))?;
         bytes += definition.len() + usize::from(i + 1 < hits.len()); // 逗号
         if bytes + SUFFIX.len() > MAX_RESULT_JSON_BYTES {
             return Err("搜索结果超过 1 MiB 上限：请缩小 limit 后重试".into());
         }
-        tools.push(serde_json::from_str::<Value>(&definition).expect("定义可回析"));
+        tools.push(definition_value);
     }
     Ok(json!({"ok": true, "tools": tools, "error": null}))
 }
@@ -432,18 +435,24 @@ pub fn check_snapshot_capacity(
     snapshot: &crate::mcp::manager::McpSnapshot,
 ) -> Result<(), String> {
     let all = snapshot.dynamic_entries();
-    let included: Vec<usize> = all
+    // S29：纯函数——每条目的搜索文本只构建一次，过滤与容量计量共用。
+    let search_texts: Vec<String> = all
         .iter()
-        .enumerate()
-        .filter(|(_, entry)| {
-            let search_text = build_search_text(
+        .map(|entry| {
+            build_search_text(
                 &entry.model_name,
                 &entry.raw_tool,
                 &entry.server_id,
                 entry.description.as_deref(),
                 &entry.schema,
-            );
-            !sensitive_hit(&entry.server_id, &search_text, &entry.sensitive)
+            )
+        })
+        .collect();
+    let included: Vec<usize> = all
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| {
+            !sensitive_hit(&all[*i].server_id, &search_texts[*i], &all[*i].sensitive)
         })
         .map(|(i, _)| i)
         .collect();
@@ -455,13 +464,7 @@ pub fn check_snapshot_capacity(
         || {
             let &i = included_iter.next().expect("计数与条目数一致");
             let entry = &all[i];
-            let search_text = build_search_text(
-                &entry.model_name,
-                &entry.raw_tool,
-                &entry.server_id,
-                entry.description.as_deref(),
-                &entry.schema,
-            );
+            let search_text = &search_texts[i];
             let definition = crate::mcp::catalog::build_function_definition(
                 &entry.model_name,
                 entry.description.as_deref(),

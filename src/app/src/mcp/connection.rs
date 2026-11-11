@@ -69,6 +69,20 @@ pub enum CallFailure {
     Unsupported(String),
 }
 
+impl CallFailure {
+    /// 失败分类 → 标准客户端错误 JSON（脱敏；022 §2.4 同源语义）——manager
+    /// 调用与 023 资源聚合共用单点（S15；connection 已依赖 secrets，无环）。
+    pub fn to_client_error(&self, sensitive: &super::secrets::SensitiveValues) -> String {
+        let (kind, detail) = match self {
+            CallFailure::NotSent(d) => ("未发送", super::secrets::sanitize_detail(d, sensitive)),
+            CallFailure::SentUnknown(d) => ("状态未知", super::secrets::sanitize_detail(d, sensitive)),
+            CallFailure::SentRejected(d) => ("协议", super::secrets::sanitize_detail(d, sensitive)),
+            CallFailure::Unsupported(d) => ("协议", super::secrets::sanitize_detail(d, sensitive)),
+        };
+        super::call::client_error_json(kind, &detail)
+    }
+}
+
 impl std::fmt::Display for CallFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

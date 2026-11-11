@@ -138,13 +138,10 @@ pub fn event_to_history_item(event: &Event<'_>) -> crate::prompt::HistoryItem {
                 execution: outcome.execution.as_str().to_string(),
             };
         }
-        let mut cut = SNIPPET;
-        while cut > 0 && !full.is_char_boundary(cut) {
-            cut -= 1;
-        }
+        let cut = full.floor_char_boundary(SNIPPET);
         use sha2::Digest;
         let hash = sha2::Sha256::digest(full.as_bytes());
-        let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+        let hex = crate::hex::hex_encode(&hash);
         OrchestrationEventResult {
             content: full[..cut].to_string(),
             original_bytes: Some(full.len() as u64),
@@ -339,10 +336,7 @@ impl OutputBuffer {
             if used + text.len() > budget {
                 if out.is_empty() && budget > 0 {
                     // 首条即超预算：按 UTF-8 边界截断交付首段
-                    let mut cut = budget.min(text.len());
-                    while cut > 0 && !text.is_char_boundary(cut) {
-                        cut -= 1;
-                    }
+                    let cut = text.floor_char_boundary(budget.min(text.len()));
                     let head = text[..cut].to_string();
                     let rest = text[cut..].to_string();
                     self.pending_bytes -= head.len();
@@ -468,11 +462,13 @@ pub fn spawn_cell(
     // init 帧容量预检（目录序列化超限＝启动前拒绝，不 spawn 进程）。
     let tools: Vec<Value> = config.catalog.iter().map(|t| tool_wire(t)).collect();
     let init = init_frame(config.code, &tools);
-    {
+    // S29：容量预检与实际发送共用同一次序列化（帧字节确定，避免写两遍）。
+    let init_bytes = {
         let mut probe = Vec::new();
         write_frame(&mut probe, &init, MAX_INIT_FRAME_BYTES)
             .map_err(|e| format!("编排初始化帧超限，已拒绝启动：{e}"))?;
-    }
+        probe
+    };
     let worker_exe = config
         .worker_exe
         .clone()
@@ -533,7 +529,7 @@ pub fn spawn_cell(
     }
     let worker_cleanup = worker_cleanup.into_inner();
     let mut stdin = stdin.take().expect("确认成功后仍持有 worker stdin");
-    if let Err(e) = write_frame(&mut stdin, &init, MAX_INIT_FRAME_BYTES) {
+    if let Err(e) = stdin.write_all(&init_bytes) {
         let _ = kill_worker(&mut child, &worker_cleanup);
         return Err(format!("发送初始化帧失败：{e}"));
     }

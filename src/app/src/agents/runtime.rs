@@ -273,15 +273,20 @@ impl GroupRuntime {
             > 0
     }
 
-    /// 根线程提交（有根内存历史：滞留待写段随行写入）。
-    fn commit_root_event(
+    /// 事件提交单点（S12）：序号分配＋事件构建＋2 MiB 大小校验＋落库（通道
+    /// 由调用方经 persist 给出：根侧 commit_agent_event_root 携 history；泵
+    /// 路径 commit_agent_event_pump）＋已提交队列入队。
+    fn commit_with<P>(
         &self,
-        history: &[HistoryItem],
         kind: AgentEventKind,
         agent: Option<&str>,
         assignment: Option<u64>,
         payload: AgentEventPayload,
-    ) -> Result<HistoryItem, String> {
+        persist: P,
+    ) -> Result<HistoryItem, String>
+    where
+        P: FnOnce(&mut Session, &HistoryItem) -> Result<(), String>,
+    {
         let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let seq = writer.next_seq + 1;
         let event = agent_event(kind, self.group_id, seq, agent, assignment, payload);
@@ -289,7 +294,7 @@ impl GroupRuntime {
             return Err("Agent 事件超过 2 MiB 序列化上限，拒绝提交".into());
         }
         let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
-        session.commit_agent_event_root(history, &event)?;
+        persist(&mut session, &event)?;
         writer.next_seq = seq;
         drop(session);
         drop(writer);
@@ -300,6 +305,22 @@ impl GroupRuntime {
         Ok(event)
     }
 
+    /// 根线程提交（有根内存历史：滞留待写段随行写入）。
+    fn commit_root_event(
+        &self,
+        history: &[HistoryItem],
+        kind: AgentEventKind,
+        agent: Option<&str>,
+        assignment: Option<u64>,
+        payload: AgentEventPayload,
+    ) -> Result<HistoryItem, String> {
+        self.commit_with(kind, agent, assignment, payload, |session, event| {
+            // S29.5 备注：commit 的 usize 返回值是历史游标（非字节数）——
+            // 事件序列化字节口径的收敛随 S11 提交原语（返回字节数→计费复用）落地。
+            session.commit_agent_event_root(history, event).map(|_| ())
+        })
+    }
+
     /// 子线程提交（泵路径：只追加事件行；version 已由首个根侧提交迁移为 3）。
     fn commit_child_event(
         &self,
@@ -308,22 +329,9 @@ impl GroupRuntime {
         assignment: Option<u64>,
         payload: AgentEventPayload,
     ) -> Result<HistoryItem, String> {
-        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-        let seq = writer.next_seq + 1;
-        let event = agent_event(kind, self.group_id, seq, agent, assignment, payload);
-        if !event_size_ok(&event) {
-            return Err("Agent 事件超过 2 MiB 序列化上限，拒绝提交".into());
-        }
-        let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
-        session.commit_agent_event_pump(&event)?;
-        writer.next_seq = seq;
-        drop(session);
-        drop(writer);
-        self.committed
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push_back(event.clone());
-        Ok(event)
+        self.commit_with(kind, agent, assignment, payload, |session, event| {
+            session.commit_agent_event_pump(event)
+        })
     }
 
     /// 组事件负载计费（提交成功后调用：按真实大小入账累计；预留的
@@ -476,10 +484,7 @@ impl GroupRuntime {
         for record in core.agents.values() {
             let over = record.last_task_message.as_bytes().len() > MAX_MESSAGE_BYTES;
             let display = if over {
-                let mut cut = MAX_MESSAGE_BYTES;
-                while cut > 0 && !record.last_task_message.is_char_boundary(cut) {
-                    cut -= 1;
-                }
+                let cut = record.last_task_message.floor_char_boundary(MAX_MESSAGE_BYTES);
                 format!("{}…", &record.last_task_message[..cut])
             } else {
                 record.last_task_message.clone()
@@ -637,30 +642,36 @@ impl GroupRuntime {
             deadline: Instant::now() + Duration::from_secs(super::ASSIGNMENT_WALL_LIMIT_SECS),
             cancel,
         };
-        self.live_children.fetch_add(1, Ordering::SeqCst);
-        if std::thread::Builder::new()
-            .name(format!("tchat-agent-{}", args.task_name))
-            .spawn(move || child_main(spec))
-            .is_err()
-        {
-            // 线程启动失败：释放全局槽与存活计数、记录置 failed（名称已占用，
-            // assignment 已计——如实报告，不伪装受理）。
-            self.live_children.fetch_sub(1, Ordering::SeqCst);
-            GLOBAL_CHILD_SLOTS.fetch_sub(1, Ordering::SeqCst);
-            let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(record) = core.agents.get_mut(&args.task_name) {
-                record.state = AgentState::Failed;
-                record.terminal_emitted = true; // 未能启动，无终态报告
-            }
-            return Err((
+        // 线程启动失败回滚见 launch_child（名称已占用，assignment 已计——
+        // 如实报告，不伪装受理）。
+        self.launch_child(
+            &args.task_name,
+            spec,
+            (
                 "PERSISTENCE_FAILED",
                 "子 Agent 线程启动失败（操作系统资源不足）：记录已保留，任务未执行".into(),
-            ));
-        }
+            ),
+        )?;
         Ok(json!({
             "agent_name": format!("{ROOT_PATH}/{}", args.task_name),
             "assignment_id": assignment_id,
         }))
+    }
+
+    /// message_queued 入队＋计费单点（S12）：事件计账、邮箱入队、组消息
+    /// 预算提交（发送侧两站点共用；返回 json 体由调用方各自构造）。
+    fn enqueue_message(&self, name: &str, message: &str, message_id: u64, event: &HistoryItem) {
+        self.account_event(event);
+        let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(record) = core.agents.get_mut(name) {
+            record.mailbox.push(QueuedMessage {
+                message_id,
+                from: ROOT_PATH.to_string(),
+                to: format!("{ROOT_PATH}/{name}"),
+                content: message.to_string(),
+            });
+        }
+        core.commit_group_message(message.as_bytes().len());
     }
 
     /// send_message（根侧）：只排入目标邮箱，不启动空闲 Agent；保存
@@ -709,17 +720,7 @@ impl GroupRuntime {
         );
         match queued {
             Ok(event) => {
-                self.account_event(&event);
-                let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(record) = core.agents.get_mut(&name) {
-                    record.mailbox.push(QueuedMessage {
-                        message_id,
-                        from: ROOT_PATH.to_string(),
-                        to: format!("{ROOT_PATH}/{name}"),
-                        content: args.message.clone(),
-                    });
-                }
-                core.commit_group_message(args.message.as_bytes().len());
+                self.enqueue_message(&name, &args.message, message_id, &event);
                 Ok(json!({
                     "message_id": message_id,
                     "accepted": true,
@@ -839,22 +840,13 @@ impl GroupRuntime {
                 );
                 match queued {
                     Ok(event) => {
-                        self.account_event(&event);
-                        let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
-                        let assignment = core
-                            .agents
-                            .get(&name)
-                            .map(|r| r.assignment_id)
-                            .unwrap_or(0);
-                        if let Some(record) = core.agents.get_mut(&name) {
-                            record.mailbox.push(QueuedMessage {
-                                message_id,
-                                from: ROOT_PATH.to_string(),
-                                to: format!("{ROOT_PATH}/{name}"),
-                                content: args.message.clone(),
-                            });
-                        }
-                        core.commit_group_message(args.message.as_bytes().len());
+                        // assignment_id 于 spawn 时固定（本分支不改动），读序
+                        // 与入队次序无观察差异（S12 抽取前同锁内先读后入队）。
+                        let assignment = {
+                            let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+                            core.agents.get(&name).map(|r| r.assignment_id).unwrap_or(0)
+                        };
+                        self.enqueue_message(&name, &args.message, message_id, &event);
                         Ok(json!({
                             "message_id": message_id,
                             "accepted": true,
@@ -938,24 +930,14 @@ impl GroupRuntime {
                     deadline: Instant::now() + Duration::from_secs(super::ASSIGNMENT_WALL_LIMIT_SECS),
                     cancel,
                 };
-                self.live_children.fetch_add(1, Ordering::SeqCst);
-                if std::thread::Builder::new()
-                    .name(format!("tchat-agent-{name}"))
-                    .spawn(move || child_main(spec))
-                    .is_err()
-                {
-                    self.live_children.fetch_sub(1, Ordering::SeqCst);
-                    GLOBAL_CHILD_SLOTS.fetch_sub(1, Ordering::SeqCst);
-                    let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(record) = core.agents.get_mut(&name) {
-                        record.state = AgentState::Failed;
-                        record.terminal_emitted = true;
-                    }
-                    return Err((
+                self.launch_child(
+                    &name,
+                    spec,
+                    (
                         "PERSISTENCE_FAILED",
                         "子 Agent 线程启动失败（操作系统资源不足）：任务未执行".into(),
-                    ));
-                }
+                    ),
+                )?;
                 Ok(json!({
                     "message_id": Value::Null,
                     "accepted": true,
@@ -964,6 +946,33 @@ impl GroupRuntime {
                 }))
             }
         }
+    }
+
+    /// 子轮线程启动单点（S12）：存活计数→起线程→失败回滚（释放全局槽与
+    /// 存活计数、记录置 failed——未能启动，无终态报告）。错误码与文案由
+    /// 调用方传入（spawn/followup 措辞不同，逐字保留）。
+    fn launch_child(
+        &self,
+        agent_name: &str,
+        spec: ChildSpec,
+        thread_failed_error: ToolError,
+    ) -> Result<(), ToolError> {
+        self.live_children.fetch_add(1, Ordering::SeqCst);
+        if std::thread::Builder::new()
+            .name(format!("tchat-agent-{agent_name}"))
+            .spawn(move || child_main(spec))
+            .is_err()
+        {
+            self.live_children.fetch_sub(1, Ordering::SeqCst);
+            GLOBAL_CHILD_SLOTS.fetch_sub(1, Ordering::SeqCst);
+            let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(record) = core.agents.get_mut(agent_name) {
+                record.state = AgentState::Failed;
+                record.terminal_emitted = true; // 未能启动，无终态报告
+            }
+            return Err(thread_failed_error);
+        }
+        Ok(())
     }
 
     /// followup 启动失败回滚：assignment 额度归还，Agent 回到**前一终态与
@@ -1616,11 +1625,15 @@ fn child_loop(
             return ChildTerminal::Failed(e);
         }
         let reserved = super::RESPONSE_RESERVE_BYTES;
-        // 组装（复用普通函数编码；_history 供五协议原生投影）。
-        let items = spec.ctx.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        // 组装（复用普通函数编码；_history 供五协议原生投影）。S29：锁内
+        // 借用构建，子上下文不再整体深克隆＋二次序列化（锁内无重入）。
         let tools = child_tool_definitions(&spec.tools);
-        let mut body = crate::prompt::build_turn_request_with(&items, &tools, &spec.system);
-        body["_history"] = serde_json::to_value(&items).expect("子上下文可序列化");
+        let mut body = {
+            let items = spec.ctx.lock().unwrap_or_else(|e| e.into_inner());
+            let mut body = crate::prompt::build_turn_request_with(&items, &tools, &spec.system);
+            body["_history"] = serde_json::to_value(&*items).expect("子上下文可序列化");
+            body
+        };
         let resp = match spec.sender.send(&body) {
             Ok(resp) => resp,
             Err(e) => {
@@ -1708,7 +1721,7 @@ fn child_loop(
                     spec.ctx
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .push(with_native(
+                        .push(crate::turn::with_native(
                             HistoryItem::Text(HistoryMessage {
                                 images: None,
                                 text_elements: Vec::new(),
@@ -1727,7 +1740,7 @@ fn child_loop(
         }
         // 合法批：assistant 入子上下文（原生状态同条保留——子原生块只回该
         // 子 Agent 的相同连接），child_record 落盘。
-        let assistant_item = with_native(
+        let assistant_item = crate::turn::with_native(
             HistoryItem::AssistantToolCalls {
                 tool_calls: calls.clone(),
                 content,
@@ -1961,17 +1974,6 @@ fn dispatch_child_tool(
         None,
         owner,
     )
-}
-
-/// 与根轮 with_native 相同的包装（子上下文内保留原生状态）。
-fn with_native(message: HistoryItem, state: &Option<crate::prompt::NativeState>) -> HistoryItem {
-    match state {
-        Some(state) => HistoryItem::NativeAssistant {
-            message: Box::new(message),
-            state: Some(state.clone()),
-        },
-        None => message,
-    }
 }
 
 /// 六工具名判定（turn 分派门）。

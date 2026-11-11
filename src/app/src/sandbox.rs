@@ -99,18 +99,25 @@ pub fn tool_launch_argv(
 /// 沙箱子进程白名单环境：PATH/TERM 继承（非凭据；工具可用性优先），HOME 定为
 /// 工作区。主进程经 .env dotenv 加载的凭据变量**不在白名单**——027 R1 的环境面
 /// 防线（「凭据 env 不进工具」）在沙箱模式下由本函数＋调用侧 `env_clear` 保留。
-fn tool_child_env(workspace: &Path) -> Vec<(String, String)> {
+/// 沙箱子进程白名单环境单点（S23）：PATH 继承（缺省 /usr/bin:/bin）、
+/// HOME 由调用方指定（033＝工具工作区；031＝沙箱私有 /tmp）、TERM 继承。
+/// 凭据 env 不进白名单——027 R1 环境面防线（调用侧 env_clear 保留）。
+fn whitelist_env(home: &str) -> Vec<(String, String)> {
     let mut env = vec![
         (
             "PATH".to_string(),
             std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string()),
         ),
-        ("HOME".to_string(), workspace.to_string_lossy().into_owned()),
+        ("HOME".to_string(), home.to_string()),
     ];
     if let Ok(term) = std::env::var("TERM") {
         env.push(("TERM".to_string(), term));
     }
     env
+}
+
+fn tool_child_env(workspace: &Path) -> Vec<(String, String)> {
+    whitelist_env(&workspace.to_string_lossy())
 }
 
 /// 033-B2（2026-10-27 加固）：沙箱工具子进程 fd 收口——pre_exec 内以
@@ -190,6 +197,30 @@ pub fn close_inherited_fds_except_cloexec(skip: std::os::fd::RawFd) -> std::io::
 #[cfg(all(unix, not(target_os = "linux")))]
 pub fn close_inherited_fds_except_cloexec(_skip: std::os::fd::RawFd) -> std::io::Result<()> {
     Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
+}
+
+/// 033-B2 fd 收口接线单点（S23）：有 seccomp fd＝仅保留该 fd（其余标记
+/// CLOEXEC，execve 时关闭）；无＝全量标记 CLOEXEC。std Command 站点共用；
+/// tokio 站点语义相同、类型不同，接线各自展开。
+#[cfg(unix)]
+pub(crate) fn apply_spawn_fd_hygiene(
+    cmd: &mut std::process::Command,
+    seccomp: Option<&SeccompFd>,
+) {
+    use std::os::unix::process::CommandExt;
+    match seccomp {
+        Some(g) => {
+            let fd = g.raw();
+            // SAFETY：pre_exec 回调在 fork 后 exec 前的子进程副本中运行，
+            // 仅做 fd 标记操作（异步信号安全路径）。
+            unsafe {
+                cmd.pre_exec(move || close_inherited_fds_except_cloexec(fd));
+            }
+        }
+        None => unsafe {
+            cmd.pre_exec(close_inherited_fds_mark_cloexec);
+        },
+    }
 }
 
 // ---------- bwrap 探测（failIfUnavailable） ----------
@@ -965,17 +996,7 @@ pub(crate) fn permission_launch_argv_with_payload_program(
 /// 031 沙箱子进程白名单环境：PATH/TERM 继承（非凭据）；HOME＝沙箱私有
 /// `/tmp`（可写暂存；宿主用户目录不进沙箱——凭据防线与 033 R1 同源）。
 fn permission_child_env() -> Vec<(String, String)> {
-    let mut env = vec![
-        (
-            "PATH".to_string(),
-            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string()),
-        ),
-        ("HOME".to_string(), "/tmp".to_string()),
-    ];
-    if let Ok(term) = std::env::var("TERM") {
-        env.push(("TERM".to_string(), term));
-    }
-    env
+    whitelist_env("/tmp")
 }
 
 /// 受限读树挂载布局（§1.6；M0 restricted-read 实证布局）：

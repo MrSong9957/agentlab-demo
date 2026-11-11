@@ -31,6 +31,21 @@ pub enum AgentState {
 }
 
 impl AgentState {
+    /// V3 装载侧状态名词表单源（S32）：与 [`AgentState::as_str`] 互逆，
+    /// events 校验与展示名共用，防漂移。
+    pub fn from_display(state: &str) -> Option<Self> {
+        Some(match state {
+            "starting" => Self::Starting,
+            "running" => Self::Running,
+            "stopping" => Self::Stopping,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "interrupted" => Self::Interrupted,
+            "closed" => Self::Closed,
+            _ => return None,
+        })
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Starting => "starting",

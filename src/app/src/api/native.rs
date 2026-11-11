@@ -18,9 +18,9 @@ pub(super) fn check_saved(message: &HistoryItem, state: &NativeState) -> Result<
     let payload=state.payload.clone();
     let decoded=match owner.protocol.as_str() {
         "openai-responses"=>decode_response(owner,payload),
-        "anthropic-messages"=>anthropic::decode(owner,payload),
-        "google-interactions"=>gemini::decode_interactions(owner,payload),
-        "google-generate-content"=>gemini::decode_generate(owner,payload,&[],Some(calls)),
+        super::PROTOCOL_ANTHROPIC=>anthropic::decode(owner,payload),
+        super::PROTOCOL_GOOGLE_INTERACTIONS=>gemini::decode_interactions(owner,payload),
+        super::PROTOCOL_GOOGLE_GENERATE=>gemini::decode_generate(owner,payload,&[],Some(calls)),
         _=>return Err("原生状态协议无效，不能续接".into()),
     }.map_err(|e|format!("原生状态无效，不能续接：{e}"))?;
     let decoded_calls=ToolCallRecord::parse_batch(&decoded["assistant"])?;
@@ -54,15 +54,15 @@ fn image_data(url: &str) -> Result<(&str, &str), String> {
 fn content_parts(protocol: &str, text: &str, images: &[&str]) -> Result<Vec<Value>, String> {
     let mut parts = vec![match protocol {
         "openai-responses" => json!({"type":"input_text","text":text}),
-        "google-generate-content" => json!({"text":text}),
+        super::PROTOCOL_GOOGLE_GENERATE => json!({"text":text}),
         _ => json!({"type":"text","text":text}),
     }];
     for url in images {
         let (mime, data) = image_data(url)?;
         parts.push(match protocol {
             "openai-responses"=>json!({"type":"input_image","image_url":url,"detail":"high"}),
-            "anthropic-messages"=>json!({"type":"image","source":{"type":"base64","media_type":mime,"data":data}}),
-            "google-interactions"=>json!({"type":"image","mime_type":mime,"data":data,"resolution":"high"}),
+            super::PROTOCOL_ANTHROPIC=>json!({"type":"image","source":{"type":"base64","media_type":mime,"data":data}}),
+            super::PROTOCOL_GOOGLE_INTERACTIONS=>json!({"type":"image","mime_type":mime,"data":data,"resolution":"high"}),
             _=>json!({"inlineData":{"mimeType":mime,"data":data},"mediaResolution":{"level":"MEDIA_RESOLUTION_HIGH"}}),
         });
     }
@@ -83,9 +83,9 @@ pub(super) fn is_native(protocol: &str) -> bool {
     matches!(
         protocol,
         "openai-responses"
-            | "anthropic-messages"
-            | "google-interactions"
-            | "google-generate-content"
+            | super::PROTOCOL_ANTHROPIC
+            | super::PROTOCOL_GOOGLE_INTERACTIONS
+            | super::PROTOCOL_GOOGLE_GENERATE
     )
 }
 
@@ -139,7 +139,7 @@ pub(super) fn apply_params(
         }
         // stream 与其它可选参数走同一能力门（§1.2/§1.6）：
         // 已确认不支持或能力未知都零 HTTP 本地报错。
-        if !(conn.protocol == "anthropic-messages" && name == "max_tokens") {
+        if !(conn.protocol == super::PROTOCOL_ANTHROPIC && name == "max_tokens") {
             check_request_param(model, name)?;
         }
         body[name] = value.clone();
@@ -259,19 +259,15 @@ pub(super) fn for_owner(
                     tool_calls,
                     content,
                 } => {
-                    let mut text = String::from("[历史工具调用，来自另一模型来源]\n");
-                    if let Some(content) = content {
-                        text.push_str(&content);
-                        text.push('\n');
-                    }
+                    let text = textualized_calls(
+                        "[历史工具调用，来自另一模型来源]\n",
+                        content.as_ref(),
+                        &tool_calls,
+                    );
                     for call in tool_calls {
                         if !pending.insert(call.id.clone()) {
                             return Err("历史调用 ID 重复，不能续接".into());
                         }
-                        text.push_str(&format!(
-                            "{}（{}）：{}\n",
-                            call.name, call.id, call.arguments
-                        ));
                     }
                     output.push(historical_text(HistoryRole::Assistant, text, None));
                 }
@@ -286,11 +282,7 @@ pub(super) fn for_owner(
                 if !pending.remove(&tool_call_id) {
                     return Err("历史工具结果与原生调用不配对，不能续接".into());
                 }
-                output.push(historical_text(
-                    HistoryRole::User,
-                    format!("[历史工具结果 {tool_call_id}]\n{content}"),
-                    image.map(|i| vec![i.image_url]),
-                ));
+                output.push(textualized_result(&tool_call_id, &content, image));
             }
             item => output.push(item),
         }
@@ -299,6 +291,33 @@ pub(super) fn for_owner(
         return Err("未闭合的原生调用链不能跨来源续接".into());
     }
     Ok(output)
+}
+
+/// 历史工具调用文本化单点（S16）：标题＋assistant 正文＋逐调用行
+/// （跨来源续接与不可表达降级共用；差异仅在标题与 pending 语义，留站点）。
+fn textualized_calls(header: &str, content: Option<&String>, tool_calls: &[ToolCallRecord]) -> String {
+    let mut text = String::from(header);
+    if let Some(content) = content {
+        text.push_str(content);
+        text.push('\n');
+    }
+    for call in tool_calls {
+        text.push_str(&format!("{}（{}）：{}\n", call.name, call.id, call.arguments));
+    }
+    text
+}
+
+/// 历史工具结果文本化单点（S16）。
+fn textualized_result(
+    tool_call_id: &str,
+    content: &str,
+    image: Option<crate::prompt::ToolResultImage>,
+) -> HistoryItem {
+    historical_text(
+        HistoryRole::User,
+        format!("[历史工具结果 {tool_call_id}]\n{content}"),
+        image.map(|i| vec![i.image_url]),
+    )
 }
 
 fn text_message(role: &str, content: &str) -> Value {
@@ -325,17 +344,13 @@ fn textualize_unexpressible(items: Vec<HistoryItem>, protocol: &str) -> Vec<Hist
                 tool_calls,
                 content,
             } if tool_calls.iter().any(|c| !expressible(&c.arguments)) => {
-                let mut text = String::from("[历史工具调用，无法按目标协议表达参数]\n");
-                if let Some(content) = content {
-                    text.push_str(&content);
-                    text.push('\n');
-                }
+                let text = textualized_calls(
+                    "[历史工具调用，无法按目标协议表达参数]\n",
+                    content.as_ref(),
+                    &tool_calls,
+                );
                 for call in tool_calls {
                     pending.insert(call.id.clone());
-                    text.push_str(&format!(
-                        "{}（{}）：{}\n",
-                        call.name, call.id, call.arguments
-                    ));
                 }
                 output.push(historical_text(HistoryRole::Assistant, text, None));
             }
@@ -346,11 +361,7 @@ fn textualize_unexpressible(items: Vec<HistoryItem>, protocol: &str) -> Vec<Hist
                 ..
             } if pending.contains(&tool_call_id) => {
                 pending.remove(&tool_call_id);
-                output.push(historical_text(
-                    HistoryRole::User,
-                    format!("[历史工具结果 {tool_call_id}]\n{content}"),
-                    image.map(|i| vec![i.image_url]),
-                ));
+                output.push(textualized_result(&tool_call_id, &content, image));
             }
             item => output.push(item),
         }
@@ -466,9 +477,9 @@ fn native_body(
     conversation: &Conversation,
 ) -> Result<Value, String> {
     match conn.protocol.as_str() {
-        "anthropic-messages" => anthropic::build_body(conn, model, request, conversation),
-        "google-interactions" => gemini::build_interactions_body(conn, model, request, conversation),
-        "google-generate-content" => gemini::build_generate_body(conn, model, request, conversation),
+        super::PROTOCOL_ANTHROPIC => anthropic::build_body(conn, model, request, conversation),
+        super::PROTOCOL_GOOGLE_INTERACTIONS => gemini::build_interactions_body(conn, model, request, conversation),
+        super::PROTOCOL_GOOGLE_GENERATE => gemini::build_generate_body(conn, model, request, conversation),
         _ => build_responses_body(conn, model, request, conversation),
     }
 }
@@ -524,11 +535,11 @@ pub(super) fn request(
     let (response, context) = post_chat_json(conn, key, body, agent)?;
     let owner = conversation.owner.clone();
     match conn.protocol.as_str() {
-        "anthropic-messages" => anthropic::decode(owner, response).map_err(|e| format!("{e}{context}")),
-        "google-interactions" => {
+        super::PROTOCOL_ANTHROPIC => anthropic::decode(owner, response).map_err(|e| format!("{e}{context}")),
+        super::PROTOCOL_GOOGLE_INTERACTIONS => {
             gemini::decode_interactions(owner, response).map_err(|e| format!("{e}{context}"))
         }
-        "google-generate-content" => gemini::decode_generate(
+        super::PROTOCOL_GOOGLE_GENERATE => gemini::decode_generate(
             owner,
             response,
             &conversation.history,

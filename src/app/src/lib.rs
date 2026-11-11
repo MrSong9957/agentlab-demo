@@ -7,6 +7,7 @@ pub mod context;
 pub mod context_window;
 pub mod display;
 pub mod exec;
+pub mod hex;  // S19：sha2 无 hex 输出——全仓唯一下游编码点
 pub mod mcp;
 pub mod memory;
 pub mod message_to_user;

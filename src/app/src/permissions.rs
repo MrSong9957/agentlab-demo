@@ -519,6 +519,24 @@ fn parse_scope(v: &Value, ctx: &str) -> Result<FsScope, String> {
     Ok(FsScope { entries, network })
 }
 
+/// 已存在的绝对实际路径（§1.3）：加载即验证存在并固定 canonical 形态。
+/// 两处策略路径入口共用（S22）；错误文案逐字保留，field_ctx 为完整字段上下文。
+fn parse_existing_abs_path(field_ctx: &str, raw: &str) -> Result<PathBuf, String> {
+    let p = Path::new(raw);
+    if !p.is_absolute() {
+        return Err(format!("{field_ctx} 必须是绝对路径（收到 {raw}）"));
+    }
+    match std::fs::metadata(p) {
+        Ok(_) => canonical_long_checked(p)
+            .map_err(|e| format!("{field_ctx} {} 无法规范化（{e}）：拒绝", p.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(format!(
+            "{field_ctx} {} 不存在：策略路径必须是已存在的绝对实际路径",
+            p.display()
+        )),
+        Err(e) => Err(format!("{field_ctx} {} 状态读取失败（{e}）：拒绝", p.display())),
+    }
+}
+
 fn parse_path_spec(v: &Value, ctx: &str) -> Result<PathBuf, String> {
     let obj = expect_object(v, ctx)?;
     expect_exact_fields(obj, ctx, &["type", "path"], &[])?;
@@ -528,20 +546,8 @@ fn parse_path_spec(v: &Value, ctx: &str) -> Result<PathBuf, String> {
     }
     let raw = expect_string(&obj["path"], &format!("{ctx}.path"))?;
     validate_text_bytes(raw, &format!("{ctx}.path"))?;
-    let p = Path::new(raw);
-    if !p.is_absolute() {
-        return Err(format!("{ctx}.path 必须是绝对路径（收到 {raw}）"));
-    }
     // 已存在的绝对实际路径（§1.3）：加载即验证存在并固定 canonical 形态。
-    match std::fs::metadata(p) {
-        Ok(_) => canonical_long_checked(p)
-            .map_err(|e| format!("{ctx}.path {} 无法规范化（{e}）：拒绝", p.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(format!(
-            "{ctx}.path {} 不存在：策略路径必须是已存在的绝对实际路径",
-            p.display()
-        )),
-        Err(e) => Err(format!("{ctx}.path {} 状态读取失败（{e}）：拒绝", p.display())),
-    }
+    parse_existing_abs_path(&format!("{ctx}.path"), raw)
 }
 
 fn parse_access(v: &Value, ctx: &str) -> Result<Access, String> {
@@ -561,29 +567,7 @@ fn parse_deny_paths(v: &Value) -> Result<Vec<PathBuf>, String> {
     for (i, e) in arr.iter().enumerate() {
         let raw = expect_string(e, &format!("deny_paths[{i}]"))?;
         validate_text_bytes(raw, &format!("deny_paths[{i}]"))?;
-        let p = Path::new(raw);
-        if !p.is_absolute() {
-            return Err(format!(
-                "deny_paths[{i}] 必须是绝对路径（收到 {raw}）"
-            ));
-        }
-        match std::fs::metadata(p) {
-            Ok(_) => out.push(canonical_long_checked(&p).map_err(|e| {
-                format!("deny_paths[{i}] {} 无法规范化（{e}）：拒绝", p.display())
-            })?),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Err(format!(
-                    "deny_paths[{i}] {} 不存在：策略路径必须是已存在的绝对实际路径",
-                    p.display()
-                ));
-            }
-            Err(err) => {
-                return Err(format!(
-                    "deny_paths[{i}] {} 状态读取失败（{err}）：拒绝",
-                    p.display()
-                ));
-            }
-        }
+        out.push(parse_existing_abs_path(&format!("deny_paths[{i}]"), raw)?);
     }
     // 相邻重复去重（Vec::dedup 只合并相邻项；同一路径重复列出不是矛盾）
     out.dedup();
@@ -1228,14 +1212,14 @@ pub fn execute_request_permissions(
     }
     // §1.7-1（审查 #11）：超限在**确认前**失败——预演试算命中 64 上限即
     // 整次 error，不弹确认窗（用户不应为必然失败的申请按下允许）。
-    {
-        let mut trial = TurnGrants {
-            entries: grants.entries.clone(),
-            network: grants.network,
-        };
-        if let Err(e) = trial.grant_all(&norm) {
-            return error_result(&e);
-        }
+    // 预演 trial 确认前一次构造（S22）：确认仅只读，两次构造结果恒等；
+    // Allow 臂复用同一 trial 提交。
+    let mut trial = TurnGrants {
+        entries: grants.entries.clone(),
+        network: grants.network,
+    };
+    if let Err(e) = trial.grant_all(&norm) {
+        return error_result(&e);
     }
     // 宿主确认（默认拒绝；Err＝error，不扩大授权）。
     let view = PermissionRequestView {
@@ -1251,14 +1235,7 @@ pub fn execute_request_permissions(
     match decision {
         PermissionDecision::Deny => denied_result(),
         PermissionDecision::Allow => {
-            // 预演：授予＋编码＋可表达性全部通过后才提交（原子）。
-            let mut trial = TurnGrants {
-                entries: grants.entries.clone(),
-                network: grants.network,
-            };
-            if let Err(e) = trial.grant_all(&norm) {
-                return error_result(&e);
-            }
+            // 预演：编码＋可表达性通过后才提交（授予预演已在确认前完成）。
             if let Err(e) = build_snapshot(policy, &trial, deny_ctx) {
                 return error_result(&format!("生效策略编码失败，本次新增许可未发布：{e}"));
             }

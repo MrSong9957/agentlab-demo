@@ -302,9 +302,9 @@ pub(crate) fn finalize_outbound(
         path.pop_if_empty();
         match conn.protocol.as_str() {
             "openai-responses" => { path.push("responses"); }
-            "anthropic-messages" => { path.push("messages"); }
-            "google-interactions" => { path.push("interactions"); }
-            "google-generate-content" => {
+            PROTOCOL_ANTHROPIC => { path.push("messages"); }
+            PROTOCOL_GOOGLE_INTERACTIONS => { path.push("interactions"); }
+            PROTOCOL_GOOGLE_GENERATE => {
                 let model = body.as_object_mut().and_then(|b| b.remove("model"))
                     .and_then(|v| v.as_str().map(str::to_owned)).ok_or("Gemini 请求缺少模型 ID")?;
                 // 资源名前缀只去一次，其余整体作为一个路径段编码，不解释已有 % 转义。
@@ -315,7 +315,7 @@ pub(crate) fn finalize_outbound(
             _ => { path.push("chat").push("completions"); }
         }
     }
-    if conn.protocol == "google-generate-content" && streaming {
+    if conn.protocol == PROTOCOL_GOOGLE_GENERATE && streaming {
         url.query_pairs_mut().append_pair("alt", "sse");
     }
     Ok(Outbound { url: url.into(), body, streaming })
@@ -342,13 +342,7 @@ fn post_chat_json(
     }
     let req = agent.post(outbound.url.as_str()).set("Content-Type", "application/json")
         .set("Accept",if streaming {"text/event-stream"} else {"application/json"});
-    let req = if conn.protocol == "anthropic-messages" {
-        req.set("x-api-key", key).set("anthropic-version", "2026-10-21")
-    } else if matches!(conn.protocol.as_str(), "google-interactions" | "google-generate-content") {
-        req.set("x-goog-api-key", key)
-    } else {
-        req.set("Authorization", &auth_header(key))
-    };
+    let req = with_auth_headers(req, conn, key);
     match req.send_json(outbound.body) {
         Ok(r) => {
             let status = r.status();
@@ -367,7 +361,7 @@ fn post_chat_json(
                 if value.get("error").is_some_and(|e|!e.is_null()) {
                     return Err("响应包含服务端 error，已拒绝继续".into());
                 }
-                if conn.protocol=="openai-chat" {
+                if conn.protocol==SUPPORTED_PROTOCOL {
                     if let Some(message)=value.pointer("/choices/0/message") {
                         validate_assistant(message)?;
                         if message.get("tool_calls").and_then(Value::as_array).is_some_and(|calls|!calls.is_empty())
@@ -393,6 +387,35 @@ fn post_chat_json(
 }
 
 /// 非流式对话：发送用户输入，返回完整回复文本。
+/// 协议名常量（S32）：裸串比较收敛——拼写错误改为编译错误，不再静默落 `_` 臂。
+/// `openai-chat` 沿用 catalog 的 `SUPPORTED_PROTOCOL`。
+pub(crate) const PROTOCOL_ANTHROPIC: &str = "anthropic-messages";
+pub(crate) const PROTOCOL_GOOGLE_INTERACTIONS: &str = "google-interactions";
+pub(crate) const PROTOCOL_GOOGLE_GENERATE: &str = "google-generate-content";
+
+/// 鉴权头路由单点（S16）：anthropic＝x-api-key＋anthropic-version；
+/// google 两协议＝x-goog-api-key；其余（openai-chat）＝Authorization。
+fn with_auth_headers(req: ureq::Request, conn: &EffectiveConnection, key: &str) -> ureq::Request {
+    if conn.protocol == PROTOCOL_ANTHROPIC {
+        req.set("x-api-key", key).set("anthropic-version", "2026-10-21")
+    } else if matches!(
+        conn.protocol.as_str(),
+        PROTOCOL_GOOGLE_INTERACTIONS | PROTOCOL_GOOGLE_GENERATE
+    ) {
+        req.set("x-goog-api-key", key)
+    } else {
+        req.set("Authorization", &auth_header(key))
+    }
+}
+
+/// 「协议未支持」错误单点（S16）：五站点文案逐字一致。
+fn unsupported_protocol(conn: &EffectiveConnection) -> String {
+    format!(
+        "协议 {} 未支持，当前仅支持 {}",
+        conn.protocol, SUPPORTED_PROTOCOL
+    )
+}
+
 pub fn chat(
     conn: &EffectiveConnection,
     key: &str,
@@ -405,10 +428,7 @@ pub fn chat(
             &json!({"messages":[{"role":"user","content":input}]}), agent)?);
     }
     if conn.protocol != SUPPORTED_PROTOCOL {
-        return Err(format!(
-            "协议 {} 未支持，当前仅支持 {}",
-            conn.protocol, SUPPORTED_PROTOCOL
-        ));
+        return Err(unsupported_protocol(conn));
     }
     let mut body = json!({
         "model": model.id,
@@ -502,10 +522,7 @@ fn chat_with_body_inner(
         return native::request(conn, key, model, request, agent);
     }
     if conn.protocol != SUPPORTED_PROTOCOL {
-        return Err(format!(
-            "协议 {} 未支持，当前仅支持 {}",
-            conn.protocol, SUPPORTED_PROTOCOL
-        ));
+        return Err(unsupported_protocol(conn));
     }
     // 032 M1：纯组装与只读计量共用；图片能力门与密钥头检查留在发送侧。
     let body = build_chat_body(conn, key, model, request)?;
@@ -537,14 +554,25 @@ pub(crate) fn build_chat_body(
     {
         return Err(format!("request_params 不能包含保留字段 {k}"));
     }
-    let mut body = request.clone();
-    if request.get("_history").is_some() {
+    // S28：_history 投影下 messages 字段被整体覆盖——深拷贝跳过该字段（避免
+    // 整份消息先克隆再丢弃）；json!(Vec<Value>) 改 Value::Array 直移。非对象
+    // request 沿原路径（clone 后字段索引行为不变）。
+    let has_history = request.get("_history").is_some();
+    let mut body = match (has_history, request.as_object()) {
+        (true, Some(obj)) => {
+            let mut obj = obj.clone();
+            obj.remove("messages");
+            Value::Object(obj)
+        }
+        _ => request.clone(),
+    };
+    if has_history {
         let current=native::owner(conn,key,model,request);
         let items=native::for_owner(native::history(request)?,&current)?;
         let mut messages:Vec<Value>=request.get("messages").and_then(Value::as_array).into_iter().flatten()
             .filter(|m|m["role"]=="system").cloned().collect();
         messages.extend(crate::prompt::project_history(&items));
-        body["messages"]=json!(messages);
+        body["messages"]=Value::Array(messages);
     }
     body.as_object_mut().ok_or("模型请求必须是对象")?.remove("_history");
     body.as_object_mut().expect("已确认对象").remove("_provider_id");
@@ -567,10 +595,7 @@ pub fn measure_request_body_bytes(
         return native::measure_outbound(conn, key, model, request);
     }
     if conn.protocol != SUPPORTED_PROTOCOL {
-        return Err(format!(
-            "协议 {} 未支持，当前仅支持 {}",
-            conn.protocol, SUPPORTED_PROTOCOL
-        ));
+        return Err(unsupported_protocol(conn));
     }
     let body = build_chat_body(conn, key, model, request)?;
     let outbound = finalize_outbound(conn, body)?;
@@ -591,10 +616,7 @@ pub fn measure_request_body_bytes_bounded(
     } else if conn.protocol == SUPPORTED_PROTOCOL {
         build_chat_body(conn, key, model, request)?
     } else {
-        return Err(format!(
-            "协议 {} 未支持，当前仅支持 {}",
-            conn.protocol, SUPPORTED_PROTOCOL
-        ));
+        return Err(unsupported_protocol(conn));
     };
     let outbound = finalize_outbound(conn, body)?;
     let mut counter = LimitCountingWriter { written: 0, limit };
@@ -628,25 +650,19 @@ pub fn list_models(
     agent: &ureq::Agent,
 ) -> Result<Vec<ModelInfo>, String> {
     if conn.protocol != SUPPORTED_PROTOCOL && !native::is_native(&conn.protocol) {
-        return Err(format!(
-            "协议 {} 未支持，当前仅支持 {}",
-            conn.protocol, SUPPORTED_PROTOCOL
-        ));
+        return Err(unsupported_protocol(conn));
     }
     validate_model_base(&conn.base_url)?;
     check_key_header_safe(key)?;
     let google=conn.protocol.starts_with("google-");
-    let messages=conn.protocol=="anthropic-messages";
+    let messages=conn.protocol==PROTOCOL_ANTHROPIC;
     let base = conn.base_url.trim_end_matches('/');
     let mut url =
         Url::parse(&format!("{base}/models")).map_err(|e| format!("基础地址无效：{e}"))?;
     let mut out = Vec::new();
     let mut cursors=std::collections::HashSet::new();
     for page in 1..=100 {
-        let request=agent.get(url.as_str());
-        let request=if google {request.set("x-goog-api-key",key)}
-            else if messages {request.set("x-api-key",key).set("anthropic-version","2026-10-21")}
-            else {request.set("Authorization",&auth_header(key))};
+        let request=with_auth_headers(agent.get(url.as_str()),conn,key);
         let text = send(request, Some(key))
             .map_err(|e| redact_credential(e, key))?;
         let v: Value = serde_json::from_str(&text)

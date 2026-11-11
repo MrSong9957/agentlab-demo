@@ -96,12 +96,8 @@ pub struct ManualProvider {
     pub key_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_params: Option<BTreeMap<String, serde_json::Value>>,
-    #[serde(default, skip_serializing_if = "map_is_empty")]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, ModelInfo>,
-}
-
-fn map_is_empty(m: &BTreeMap<String, ModelInfo>) -> bool {
-    m.is_empty()
 }
 
 /// 自动目录：内置资料/公共目录写 base，厂商查询写 query，分别保存。
@@ -135,12 +131,8 @@ pub struct BaseData {
     pub protocol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "base_models_is_empty")]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, ModelInfo>,
-}
-
-fn base_models_is_empty(m: &BTreeMap<String, ModelInfo>) -> bool {
-    m.is_empty()
 }
 
 /// 查询名单：绑定查询时的连接身份，可为空名单。
@@ -288,8 +280,7 @@ pub fn load_dotenv_from(path: &Path) -> usize {
 /// 实际凭证的本地不可逆指纹（SHA-256 前 16 位十六进制）。
 pub fn fingerprint(secret: &str) -> String {
     let digest = Sha256::digest(secret.as_bytes());
-    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    hex[..16].to_string()
+    crate::hex::hex_encode(&digest)[..16].to_string()
 }
 
 /// 解析凭证引用：env:名称 读环境变量；file:路径#名称 读 JSON 凭证文件字段。
@@ -826,6 +817,17 @@ pub fn route(dict: &FinalDict) -> Result<(Resolved, Credential, ModelInfo), Stri
     Ok((prov.clone(), cred, model.clone()))
 }
 
+/// experimental_supported_tools 精确匹配单一名称（S14 单点；pub 谓词薄委托，
+/// 双 opt-in/整组语义各自保留）。
+fn declares_tool(model: &ModelInfo, name: &str) -> bool {
+    model
+        .experimental_supported_tools
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .any(|t| t == name)
+}
+
 /// 019：模型图片输入能力判断——只有用户在配置中明确声明 `input_modalities`
 /// 含 `image` 才开放（缺字段＝未知、只 text＝关闭，均返回 false）；
 /// 不按模型名称猜测、不做网络探测。
@@ -840,63 +842,40 @@ pub fn supports_image_input(model: &ModelInfo) -> bool {
 ///（`experimental_supported_tools` 精确匹配该工具名）；缺省/空数组/只含
 /// 其他名称均关闭。不按模型名称猜测、不串用问询能力、不做网络探测。
 pub fn supports_send_message_to_user(model: &ModelInfo) -> bool {
-    model
-        .experimental_supported_tools
-        .as_ref()
-        .is_some_and(|list| list.iter().any(|t| t == crate::message_to_user::TOOL_NAME))
+    declares_tool(model, crate::message_to_user::TOOL_NAME)
 }
 
 /// 032：experimental_supported_tools 精确匹配声明 get_context_remaining
 /// （声明与执行共用同一快照；缺省/空数组/只含其他名＝不声明）。
 pub fn supports_get_context_remaining(model: &ModelInfo) -> bool {
-    model
-        .experimental_supported_tools
-        .as_ref()
-        .is_some_and(|list| {
-            list.iter()
-                .any(|t| t == crate::context_window::QUERY_TOOL_NAME)
-        })
+    declares_tool(model, crate::context_window::QUERY_TOOL_NAME)
 }
 
 /// 032：experimental_supported_tools 精确匹配声明 new_context。
 pub fn supports_new_context(model: &ModelInfo) -> bool {
-    model
-        .experimental_supported_tools
-        .as_ref()
-        .is_some_and(|list| {
-            list.iter().any(|t| t == crate::context_window::SWITCH_TOOL_NAME)
-        })
+    declares_tool(model, crate::context_window::SWITCH_TOOL_NAME)
 }
 
 /// 030：experimental_supported_tools 精确匹配声明 tool_search（§1.2：唯一
 /// 开关来源；缺省/空数组/只含其他名称均保留原全量声明路径，不按模型名或
 /// 协议名猜测）。
 pub fn supports_tool_search(model: &ModelInfo) -> bool {
-    model
-        .experimental_supported_tools
-        .as_ref()
-        .is_some_and(|list| {
-            list.iter()
-                .any(|t| t == crate::tool_search::TOOL_NAME)
-        })
+    declares_tool(model, crate::tool_search::TOOL_NAME)
 }
 
 /// 034：exec/wait 双 opt-in——`experimental_supported_tools` 必须同时显式含
 /// 精确名称 `exec` 与 `wait` 才开放这一对工具；缺省、空数组、只含其一或
 /// 只含其他名称均关闭。
 pub fn supports_js_orchestration(model: &ModelInfo) -> bool {
-    let list = model.experimental_supported_tools.as_deref().unwrap_or(&[]);
-    let has_exec = list.iter().any(|t| t == crate::js_orchestration::EXEC_TOOL_NAME);
-    let has_wait = list.iter().any(|t| t == crate::js_orchestration::WAIT_TOOL_NAME);
-    has_exec && has_wait
+    declares_tool(model, crate::js_orchestration::EXEC_TOOL_NAME)
+        && declares_tool(model, crate::js_orchestration::WAIT_TOOL_NAME)
 }
 
 /// 034：只配了一个时返回缺失的精确名（宿主给一次配置提示用；两者都缺或
 /// 都在时返回 None）。
 pub fn js_orchestration_missing(model: &ModelInfo) -> Option<&'static str> {
-    let list = model.experimental_supported_tools.as_deref().unwrap_or(&[]);
-    let has_exec = list.iter().any(|t| t == crate::js_orchestration::EXEC_TOOL_NAME);
-    let has_wait = list.iter().any(|t| t == crate::js_orchestration::WAIT_TOOL_NAME);
+    let has_exec = declares_tool(model, crate::js_orchestration::EXEC_TOOL_NAME);
+    let has_wait = declares_tool(model, crate::js_orchestration::WAIT_TOOL_NAME);
     match (has_exec, has_wait) {
         (true, true) | (false, false) => None,
         (true, false) => Some(crate::js_orchestration::WAIT_TOOL_NAME),
@@ -909,18 +888,16 @@ pub fn js_orchestration_missing(model: &ModelInfo) -> Option<&'static str> {
 /// interrupt_agent/list_agents）才开放；缺任一即整组关闭（§1.2：只配部分
 /// 时整组关闭并提示一次，不按子集开放）。
 pub fn supports_multi_agent(model: &ModelInfo) -> bool {
-    let list = model.experimental_supported_tools.as_deref().unwrap_or(&[]);
     crate::agents::TOOL_NAMES
         .iter()
-        .all(|name| list.iter().any(|t| t == *name))
+        .all(|name| declares_tool(model, name))
 }
 
 /// 035：返回缺失的精确名列表（部分配置时宿主提示一次；全配或全缺为空）。
 pub fn multi_agent_missing(model: &ModelInfo) -> Vec<&'static str> {
-    let list = model.experimental_supported_tools.as_deref().unwrap_or(&[]);
     let missing: Vec<&'static str> = crate::agents::TOOL_NAMES
         .iter()
-        .filter(|name| !list.iter().any(|t| t == *name))
+        .filter(|name| !declares_tool(model, name))
         .copied()
         .collect();
     // 全缺＝未配置该能力（不提示）；部分缺＝配置不完整（提示缺失名）。
@@ -934,13 +911,7 @@ pub fn multi_agent_missing(model: &ModelInfo) -> Vec<&'static str> {
 /// 031：experimental_supported_tools 精确匹配声明 request_permissions（§1.2-4
 /// 的模型能力半边；实际声明还要求 031 冻结策略与专用交互宿主——见 turn 装配）。
 pub fn supports_request_permissions(model: &ModelInfo) -> bool {
-    model
-        .experimental_supported_tools
-        .as_ref()
-        .is_some_and(|list| {
-            list.iter()
-                .any(|t| t == crate::permissions::TOOL_NAME)
-        })
+    declares_tool(model, crate::permissions::TOOL_NAME)
 }
 
 #[cfg(test)]

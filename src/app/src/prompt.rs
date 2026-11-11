@@ -591,9 +591,16 @@ fn rewrite_agents_md_claim(text: &str) -> String {
 /// 发送版基础提示词＝母本＋行内适配：
 /// ①（017 移除）update_plan 指引节不再剔除；②apply_patch 示例改写；
 /// ③AGENTS.md 声明修正；④sandbox/审批措辞保留原文（无操作）。
+///
+/// 确定性纯函数（静态资源约 20 KiB）：首算后缓存，每请求 `clone()`（S20；
+/// 输出与逐次重算逐字节相同）。两条 assert 保留在首算路径内。
 pub fn sent_instructions() -> String {
-    let adapted = rewrite_apply_patch_example(RAW_BASE_INSTRUCTIONS);
-    rewrite_agents_md_claim(&adapted)
+    static SENT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SENT.get_or_init(|| {
+        let adapted = rewrite_apply_patch_example(RAW_BASE_INSTRUCTIONS);
+        rewrite_agents_md_claim(&adapted)
+    })
+    .clone()
 }
 
 /// exec_command 工具定义（016）：默认可续接——等待时间只决定返回时机；

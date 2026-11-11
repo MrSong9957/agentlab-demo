@@ -172,21 +172,7 @@ pub fn apply_patch_sandboxed_with_exe(
     // pre_exec 为 unix API；非 unix 下沙箱后端不可用（上方 Err／Ok(None)
     // 均已提前返回），不会到达此分支（cfg 门控仅为可编译性）。
     #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            match seccomp_guard.as_ref() {
-                Some(g) => {
-                    let fd = g.raw();
-                    spawn_cmd
-                        .pre_exec(move || crate::sandbox::close_inherited_fds_except_cloexec(fd));
-                }
-                None => {
-                    spawn_cmd.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
-                }
-            }
-        }
-    }
+    crate::sandbox::apply_spawn_fd_hygiene(&mut spawn_cmd, seccomp_guard.as_ref());
     // 审查 #27（§1.6 逐启动确认）：031 分支 spawn 后核验载荷确在新 PID ns。
     let spawn_cmd = spawn_cmd
         .env_clear() // 033：凭据环境不进补丁子进程（027 R1 环境面防线保留）

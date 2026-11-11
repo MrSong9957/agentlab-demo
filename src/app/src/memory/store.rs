@@ -179,12 +179,7 @@ impl MemoryStore {
             std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o600))
                 .map_err(|e| format!("设置数据库文件权限失败：{e}"))?;
         }
-        conn.busy_timeout(Duration::from_secs(5))
-            .map_err(|e| serr("设置 busy_timeout 失败", e))?;
-        conn.pragma_update(None, "journal_mode", "DELETE")
-            .map_err(|e| serr("设置 journal_mode 失败", e))?;
-        conn.pragma_update(None, "synchronous", "FULL")
-            .map_err(|e| serr("设置 synchronous 失败", e))?;
+        Self::configure_conn(&conn)?;
 
         let mut store = Self { conn: Mutex::new(conn), clock };
         store.run_migrations()?;
@@ -197,7 +192,20 @@ impl MemoryStore {
     /// 到允许创建的 [`MemoryStore::open`]。`is_file` 预检只为区分
     /// None/Err；真正禁止创建由打开标志承担（预检与打开之间文件被 reset
     /// 删除时，打开失败而非重建）。
-    pub fn open_existing(root: &Path, clock: Clock) -> Result<Option<Self>, String> {
+    /// 持久化契约 pragma 单点（S26）：busy_timeout 5s＋journal DELETE＋
+/// synchronous FULL——open 与 open_existing 共用（错误文案逐字保留；
+/// 两者差异仅在打开标志是否含 CREATE，不在此层）。
+fn configure_conn(conn: &Connection) -> Result<(), String> {
+    conn.busy_timeout(Duration::from_secs(5))
+        .map_err(|e| serr("设置 busy_timeout 失败", e))?;
+    conn.pragma_update(None, "journal_mode", "DELETE")
+        .map_err(|e| serr("设置 journal_mode 失败", e))?;
+    conn.pragma_update(None, "synchronous", "FULL")
+        .map_err(|e| serr("设置 synchronous 失败", e))?;
+    Ok(())
+}
+
+pub fn open_existing(root: &Path, clock: Clock) -> Result<Option<Self>, String> {
         // M1 契约对齐：既有 `open` 经 `init_memories_root` 拒绝符号链接根
         // （m1_open_rejects_symlink_memory_root）——本入口不建根、不 chmod，
         // 但保留同一拒绝；检查为纯 `symlink_metadata`，无任何创建副作用。
@@ -215,12 +223,7 @@ impl MemoryStore {
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|e| format!("打开既有记忆数据库 {} 失败：{e}", db.display()))?;
-        conn.busy_timeout(Duration::from_secs(5))
-            .map_err(|e| serr("设置 busy_timeout 失败", e))?;
-        conn.pragma_update(None, "journal_mode", "DELETE")
-            .map_err(|e| serr("设置 journal_mode 失败", e))?;
-        conn.pragma_update(None, "synchronous", "FULL")
-            .map_err(|e| serr("设置 synchronous 失败", e))?;
+        Self::configure_conn(&conn)?;
         Ok(Some(Self {
             conn: Mutex::new(conn),
             clock,
@@ -1176,16 +1179,14 @@ WHERE kind = ?1 AND job_key = ?2
     /// 013-M7：threads 登记行的更新时间（毫秒）——登记写入侧与测试观察面。
     pub fn thread_updated_at_ms(&self, thread_id: &str) -> Result<Option<i64>, String> {
         let conn = self.lock_conn()?;
-        let mut stmt = conn
-            .prepare("SELECT updated_at_ms FROM threads WHERE thread_id = ?1")
-            .map_err(|e| serr("查询 threads 登记失败", e))?;
-        let mut rows = stmt
-            .query(params![thread_id])
-            .map_err(|e| serr("查询 threads 登记失败", e))?;
-        match rows.next().map_err(|e| serr("读取 threads 登记失败", e))? {
-            Some(row) => Ok(Some(row.get(0).map_err(|e| serr("读取登记时间失败", e))?)),
-            None => Ok(None),
-        }
+        // S26：沿同文件 optional() 先例；行取值错误文案单列保真。
+        conn.query_row(
+            "SELECT updated_at_ms FROM threads WHERE thread_id = ?1",
+            params![thread_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| serr("查询 threads 登记失败", e))
     }
 
     /// 读取任务行（领取/重试/租期断言）。
