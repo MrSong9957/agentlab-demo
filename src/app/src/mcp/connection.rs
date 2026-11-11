@@ -42,7 +42,7 @@ pub const MAX_CURSOR_BYTES: usize = 64 * 1024;
 /// 取消／超时通知发送任务的最长存活时间（022 §2.4）。
 pub const CANCEL_NOTIFY_BOUND: Duration = Duration::from_secs(1);
 
-/// 连接建立失败（不含凭证值；文本由调用方做污染检查后才可展示）。
+/// 连接建立失败（文本由调用方做污染检查后才可展示）。
 #[derive(Debug, Clone)]
 pub struct McpConnectError(pub String);
 
@@ -278,8 +278,8 @@ impl McpConnection {
                     })
                 });
                 // spawn 移交为分离任务：若本 future 在 await 期间被取消/超时丢弃，
-                // 任务内已启动的进程不得孤儿化——StdioProcess 携带
-                // kill_on_drop(true)（见 transport::spawn），句柄 drop 即回收，
+                // 任务照常完成、其结果（StdioProcess）随即丢弃——Drop impl 按进程
+                // 组回收（kill_on_drop 兜底直接子进程，见 transport::spawn），
                 // 「spawn 成功但登记失败」仍有明确所有者并能回收。
                 let (process, t) = spawn_task
                     .await

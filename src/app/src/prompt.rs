@@ -908,8 +908,8 @@ pub(crate) fn append_memory_context(system: &mut String, memory_context: Option<
 }
 
 
-/// 参数化组装（013-M5 D3）：工具集与 system 由调用方注入（用户轮按回答
-/// 宿主能力声明四或五工具；合并轮注入恰三项 mem 工具与合并系统提示）。
+/// 参数化组装（013-M5 D3）：工具集与 system 由调用方注入（用户轮＝基础
+/// 四工具＋按能力条件追加的扩展工具；合并轮注入恰三项 mem 工具与合并系统提示）。
 /// 消息投影与 006 完全一致。
 pub fn build_turn_request_with(history: &[HistoryItem], tools: &[Value], system: &str) -> Value {
     let mut messages = Vec::with_capacity(history.len() + 1);

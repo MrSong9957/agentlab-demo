@@ -124,8 +124,9 @@ fn tool_child_env(workspace: &Path) -> Vec<(String, String)> {
 ///   静默 exit 1）——故必须 CLOEXEC 标记而非关闭；
 /// - stdio 0/1/2 不在标记范围；载荷运行时自开的 fd 在 execve 之后，不受影响。
 ///
-/// 三处工具 spawn 点（proc_session build_tool_command、mcp transport、
-/// apply_patch internal-apply）仅在**沙箱分支**注入；普通模式行为零变化。
+/// 四处工具 spawn 点（proc_session build_tool_command、mcp transport、
+/// apply_patch internal-apply、view_image 沙箱图片准备）仅在**沙箱分支**
+/// 注入；普通模式行为零变化。
 /// close_range 失败（如旧内核 ENOSYS）＝Err → pre_exec 失败 → std 回传错误、
 /// spawn 返回 Err（沙箱工具显式失败，不静默放行）；部署前提＝内核 ≥5.11
 ///（CLOSE_RANGE_CLOEXEC 引入）＋glibc ≥2.34（close_range 封装；libc 0.2.189
@@ -146,8 +147,7 @@ pub fn close_inherited_fds_mark_cloexec() -> std::io::Result<()> {
 
 /// 非 Linux unix：close_range(2) 为 Linux 特有 syscall，此处＝能力不足，按
 /// 既有 fail-closed 语义显式失败（Os repr ENOSYS，不堆分配——pre_exec 内
-/// 合法），沙箱工具不静默放行。非 unix（Windows）下 tool_launch_argv 恒
-/// None，不会调用本函数。
+/// 合法），沙箱工具不静默放行。
 #[cfg(all(unix, not(target_os = "linux")))]
 pub fn close_inherited_fds_mark_cloexec() -> std::io::Result<()> {
     Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
@@ -472,10 +472,11 @@ fn create_bwrap_command_args(
     create_bwrap_flags(command, policy, command_cwd, mask_wsl_interop)
 }
 
-/// 上游 `create_bwrap_flags`（bwrap.rs:309）的适配版。会话与命名空间标志保留；
-/// WSLg/WSL-interop 遮蔽、`--proc`（本项目保留 PID 命名空间以维持 016 的
-/// killpg 进程组管理，新 procfs 不挂——工具内进程视图受限为已知取舍）、
-/// unshare-pid/net 默认关闭。
+/// 上游 `create_bwrap_flags`（bwrap.rs:309）的适配版。会话标志保留；
+/// user/pid/ipc 命名空间隔离＋成对新 procfs（`--proc /proc`，上游 mount_proc
+/// 语义——保留 `/proc/self/fd` 消费者）恒开启；WSL-interop 遮蔽仅在该目录
+/// 存在（WSL 发行版）时注入；本路径不断网（`--unshare-net` 仅 031 策略路径
+/// 按开关注入）。
 fn create_bwrap_flags(
     command: Vec<String>,
     policy: &SandboxPolicy,
@@ -552,7 +553,7 @@ fn create_filesystem_args(policy: &SandboxPolicy) -> Result<Vec<String>, String>
         .map(|root| {
             // 038 Windows CI 实证：components() 的分量语义（verbatim 路径
             // 「..」不作 ParentDir 解释等平台差异）可让 `sub\..` 穿透词法
-            // 清洁比较。四道判据按序判定：
+            // 清洁比较。三条判据按序判定：
             // ② 字符串级点分段——无条件拒绝（点分段依赖内核回溯，即便存在
             //    符号链接组件，遮蔽排布同样不可信）；
             // ① components 词法走查失配；

@@ -190,9 +190,7 @@ fn run_git_env(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // 独立进程组：超时/取消终止整个进程组（003 同款）。Windows：std 1.87 起
-    // process_group 同样可用（CREATE_NEW_PROCESS_GROUP）——终止经 kill_process_group
-    // 的平台实现；进程组语义两端等价。
+    // 独立进程组：超时/取消终止整个进程组（003 同款）。
     // 038：std 的 process_group 为 unix-only API——Windows 直接终止子进程
     //（git 链路无树派生，见 kill_process_group 平台注释）。
     #[cfg(unix)]

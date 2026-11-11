@@ -679,8 +679,6 @@ fn cmd_resume(
             return;
         }
     }
-    // 035：037 会话切换＝组边界——同轮旧组不可续用（begin_turn 于下一轮
-    // 顶替；此处显式关闭旧组防残留）。
     let outcome = autosave
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -822,8 +820,6 @@ fn cmd_chat(
                     let key = &cred.value;
                     let mut sender =
                         |body: &serde_json::Value| api::chat_with_provider_body(&prov.provider_id, conn, key, &model, body, agent);
-                    // 012：工具活动结构化事件——行式路径保持历史输出逐字节不变
-                    //（ToolBegin 打印同一活动行；ToolEnd 仅落史不打印，与 006 一致）；
                     // 016：运行中／已取消但进程仍存活的工具，明确展示会话编号；
                     // 017：update_plan 的 ToolEnd 打印计划清单/原因（成功快照说明与步骤）。
                     let mut notify = |n: turn::TurnNotify| match n {

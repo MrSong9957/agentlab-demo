@@ -38,7 +38,8 @@ pub struct StdioConfig {
     pub args: Vec<String>,
     /// 已有绝对目录；缺省＝本次宿主启动目录（加载时解析）。
     pub cwd: PathBuf,
-    /// 仅转交列出的宿主环境变量（缺失时该服务器准备失败）。
+    /// 显式转交的宿主环境变量（平台缺省白名单另行转交；列出的变量缺失时
+    /// 该服务器准备失败）。
     pub env_vars: Vec<String>,
 }
 

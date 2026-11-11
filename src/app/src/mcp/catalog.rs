@@ -103,11 +103,11 @@ pub fn build_function_definition(
     json!({ "type": "function", "function": Value::Object(function) })
 }
 
-/// 汇总单服务器目录结果：原始名去重 → Schema 校验 → 污染检查 → 筛选。
+/// 汇总单服务器目录结果：原始名重复检查 → 筛选 → 污染检查 → Schema 校验。
 /// 返回（保留的原始工具＋归一 Schema、被排除原因列表、未知允许名单项）。
 /// 原始名重复返回 Err（服务目录错误，整服务器不可用）。
 pub struct ServerCatalog {
-    /// (原始工具名, Tool 引用, 归一 Schema)
+    /// (原始工具名, Tool, 归一 Schema)
     pub kept: Vec<(String, Tool, Value)>,
     /// 逐项排除原因（状态提示用）。
     pub excluded: Vec<String>,

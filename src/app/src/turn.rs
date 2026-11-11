@@ -31,8 +31,9 @@ fn with_native(message: HistoryItem, state: &Option<crate::prompt::NativeState>)
     }
 }
 
-/// 一轮的工具面（013-M5 D3 参数化；017 四工具）：`User`＝既有用户轮契约
-/// （恰 `exec_command`/`apply_patch`/`write_stdin`/`update_plan`，此外无新工具）；
+/// 一轮的工具面（013-M5 D3 参数化）：`User`＝用户轮契约——基础四工具
+/// `exec_command`/`apply_patch`/`write_stdin`/`update_plan`，另按宿主与模型
+/// 能力条件追加扩展工具（见 prompt.rs `build_turn_request_with_agents`）；
 /// `MemoryMerge`＝内部合并轮（恰 `mem_read`/`mem_write`/`mem_list`，
 /// 限 `root` 记忆根；请求组装注入三项工具与合并系统提示，**不声明也不执行
 /// update_plan**）。**权限在执行分派层生效**：不在当前模式注册表内的工具名
@@ -975,10 +976,10 @@ pub fn run_user_turn_with_context_and_caps(
             notify(TurnNotify::Info(notice.clone()));
         }
         // 032：视图损坏时明确失败（不忽略标记回退全历史）；去重基线直接扫完整
-        // 历史——seed 中的上下文消息是最后一条顶层上下文消息的原样副本
-        //（build_seed 复制 last_context_body(history)），两处扫描结果恒等
-        //（等价性由 m5_context_dedup… 回归锁定），免去每用户轮的整视图深克隆
-        //（审查修复 #16）。
+        // 历史——seed 中的上下文消息＝last_context_body(history) 的规范化正文
+        //（build_seed 复制同一函数结果；替换声明两侧比较前均剥除），两处扫描
+        // 结果恒等（等价性由 m5_context_dedup… 回归锁定），免去每用户轮的
+        // 整视图深克隆（审查修复 #16）。
         crate::context_window::active_view(history).map_err(|reason| reason)?;
         let inject_text = match crate::context::last_context_body(history) {
             Some(previous) if previous == built.message => None,
@@ -2183,8 +2184,8 @@ fn turn_body_inner(
                 let outcome = if image_input {
                     let cwd =
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                    // 031 出生快照（审查 #1：与 execute_tool 同源——以冻结策略
-                    // 为键，无宿主同样执行基线快照）
+                    // 031 出生快照（独立构造，错误呈现与 exec 臂不同：构建失败
+                    // 显式 Err 分支；以冻结策略为键，无宿主同样执行基线快照）
                     let snap = crate::permissions::frozen().map(|f| {
                         let grants = permission_state
                             .as_ref()

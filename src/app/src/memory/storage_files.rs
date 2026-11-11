@@ -53,7 +53,7 @@ impl Stage1FileInput {
     }
 }
 
-/// 输入必须是完整当前快照，按 thread_id 升序（MemoryStore 的快照读取已保证）。
+/// 输入按 thread_id 升序（MemoryStore 的快照读取已保证）。
 /// 告警出口必须交给调用方显示/记录；单个旧件删除失败仍继续，不代表清理完毕。
 /// I/O 错误返回；之前已发生的文件副作用保留。与数据库没有跨存储事务。
 pub fn sync_stage1_snapshot(

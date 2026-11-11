@@ -601,8 +601,6 @@ fn repair_pairs(entries: Vec<Entry>) -> (usize, Vec<HistoryItem>) {
         match entry {
             Entry::Bad => finalize_open_batch(&mut out, &mut open, &mut repairs),
             // 032：检查点只在批次闭合后追加——作为边界处理（先闭合开放批再入列）。
-            // 语义校验（代数/关联/seed 形状）由活动视图读取时裁决（§1.6/§2：
-            // 可展示恢复事实，但不得悄悄丢标记并用错误视图续接）。
             Entry::Item(item @ HistoryItem::ContextCheckpoint { .. }) => {
                 finalize_open_batch(&mut out, &mut open, &mut repairs);
                 out.push(item);
@@ -1540,9 +1538,9 @@ impl Session {
                 }
                 #[cfg(not(unix))]
                 {
-                    // read(true)：Windows LockFileEx 要求句柄具备 GENERIC_READ/
-                    // GENERIC_WRITE；append-only 句柄（仅 FILE_APPEND_DATA）取锁
-                    // 得 ERROR_ACCESS_DENIED——CI 实测（038）自动保存因此停用。
+                    // read(true)：同名恢复（resume 命中同一文件）经本已存句柄
+                    // rewind＋装载读取（read 需 FILE_READ_DATA，append-only 句柄
+                    // 不可读）；锁本身走命名互斥体，不经句柄。
                     std::fs::OpenOptions::new()
                         .append(true)
                         .read(true)
@@ -1640,7 +1638,7 @@ impl Session {
                 }
                 #[cfg(not(unix))]
                 {
-                    // read(true)：同 create_auto_file——LockFileEx 句柄访问权要求。
+                    // read(true)：同 create_auto_file——同名恢复经已存句柄读取。
                     std::fs::OpenOptions::new()
                         .append(true)
                         .read(true)

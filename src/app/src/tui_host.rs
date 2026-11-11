@@ -3,11 +3,12 @@
 //! 契约（008 规格）：
 //! - 交互判定：stdin＋stdout 均为终端且 TERM 非 dumb（未设置按能力探测）才进入 TUI；
 //!   其余走既有行式路径（001/003–007 契约原样）。
-//! - API 非流式、turn 同步：一轮在独立线程运行 `turn::run_tool_turn`（006 契约不变），
-//!   整段回复按换行边界合成 delta 回推（J6；不宣称 SSE）。
-//! - Ctrl+C：TUI 内空闲＝退出（恢复终端后由 main 打印 `再见!`、退出码 0）；
-//!   turn 运行中＝006 N2b 取消（置标志→SIGKILL 进程组→CLI 存活）；在途模型
-//!   请求同受取消（sender 等待侧轮询标志，010 定点轮）。
+//! - API：024 起支持五协议原生 SSE（`stream` 请求参数可直达发送层）；turn
+//!   仍在独立线程同步运行（006 契约不变），回复按换行边界合成 delta 回推
+//!   （J6）——不宣称逐 token 流式渲染。
+//! - Ctrl+C：一律退出（含 turn 运行中，走宿主完整收尾）；轮内取消归 Esc
+//!   ——权威表述见 `tchat_tui::chat_driver` 模块头；空闲退出恢复终端后由
+//!   main 打印 `再见!`（退出码 0）。
 //! - 授权门（003）：进入 TUI 前对所选 provider 完成一次性 origin 授权（普通终端交互）；
 //!   会话中 /refresh 产生的**新增** origin 授权需求按非交互契约拒绝并提示（不静默放行）。
 //! - /resume：装载历史经 `tchat_tui::chat_driver::project_history` 投影（不重放工具，007）。
@@ -452,7 +453,7 @@ impl TuiHost {
             let provider_id = prov.provider_id.clone();
             let conn = prov.conn;
             let key = cred.value;
-            // 010 定点轮＋收尾轮（J10 契约②）：Ctrl+C 取消＝**停止本地等待**——
+            // 010 定点轮＋收尾轮；2026-10-15 按键单一职责轮起轮内取消由 Esc 承担（Ctrl+C 一律退出）：取消＝**停止本地等待**——
             // 当前实现未中止底层 HTTP 请求（等待侧不关 socket、不中断/不 join
             // 辅助线程），请求移入辅助线程执行、等待侧轮询取消标志；取消＝Err
             // 结束本轮（Failed 反馈行如实表述「已停止等待」，不宣称网络请求已
@@ -1062,7 +1063,7 @@ impl TuiHost {
     /// 毒锁感知（定点复核 P2-新1）：run_command 在驱动主线程同步执行——此处裸
     /// unwrap 会以码 101 中止进程并跳过终端恢复；恢复数据继续。
     /// 登记备注（定点复核 P2-新2）：/resume 已由 composer available_during_task
-    /// 门拦截；假想的未来直发通道最坏情形为 :369 阻塞至当前轮结束＋记录一致性
+    /// 门拦截；假想的未来直发通道最坏情形为 阻塞至当前轮结束＋记录一致性
     /// 瑕疵，属纵深防御既定姿态。
     pub fn resumed_projection(&self) -> Vec<tchat_tui::chat_driver::HostCell> {
         let history = self
@@ -1191,7 +1192,7 @@ fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
             }
             // 032：检查点边界——归档前缀与活动视图的分界（完整 transcript 含
             // 归档内容可回看；seed 的用户输入已作为真实记录在前缀中展示，
-            // 不经 seed 复制重画；摘要随边界呈现，M5 细化展示形态）。
+            // 不经 seed 复制重画；摘要随边界呈现）。
             HistoryItem::ContextCheckpoint { context_id, summary, .. } => {
                 out.push(HostHistoryItem::Text {
                     assistant: false,

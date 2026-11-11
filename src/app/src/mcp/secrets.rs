@@ -17,8 +17,7 @@ pub struct SensitiveValues {
 }
 
 impl SensitiveValues {
-    /// 从准备阶段已解析的凭证值构建；空值／缺失不进入集合（该情形下连接
-    /// 准备本身失败，不降为匿名）。
+    /// 从准备阶段已解析的凭证值构建；空值／缺失不进入集合。
     pub fn from_values(values: impl IntoIterator<Item = String>) -> Self {
         let mut values: Vec<String> = values
             .into_iter()
@@ -92,8 +91,8 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
         && haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-/// HTTP 认证解析结果（只含环境变量名到实际值的映射，供传输层使用；
-/// 敏感值集合在连接准备时固定）。
+/// HTTP 认证解析结果（Bearer 值、请求头名到实际值的映射与缺失引用名，供
+/// 传输层使用；敏感值集合在连接准备时固定）。
 pub struct ResolvedHttpAuth {
     /// Bearer 认证头值（`auth_header` 语义：不带 `Bearer ` 前缀）。
     pub auth_header: Option<String>,

@@ -7,8 +7,8 @@
 //! （移植 `rmcp-client/src/utils.rs` 的 Unix 缺省白名单）。
 //! HTTP：函数级移植 SDK `transport/common/reqwest/streamable_http_client.rs`
 //! 的 `StreamableHttpClient` 适配器与 `client_side_sse.rs` 的 SSE 单事件
-//! 限额器（同 rev，Apache-2.0；SDK 版本为 `pub(crate)`，无法直接复用），
-//! 差异仅一处——错误体与 JSON 响应体改为有界读取（8 MiB）；重定向保持禁用。
+//! 限额器（同 rev，Apache-2.0；SDK 版本为 `pub(crate)`，无法直接复用）；
+//! 错误体与 JSON 响应体改为有界读取（8 MiB）；重定向保持禁用。
 //! 环境：只转交平台白名单与显式 `env_vars`，不继承整份宿主环境。
 
 use std::collections::HashMap;
@@ -86,7 +86,7 @@ pub struct BoundedStdioTransport {
     stdin: Arc<AsyncMutex<Option<ChildStdin>>>,
     stdout: BufReader<ChildStdout>,
     pending_line: Vec<u8>,
-    /// 超限或无法解析的行后置位：服务循环结束（连接不可复用，在途请求报错）。
+    /// 超限或无法解析的行后置位（此后连接视为已断、不可复用）。
     poisoned: Arc<AtomicBool>,
 }
 
@@ -140,7 +140,7 @@ impl BoundedStdioTransport {
         let line = line.strip_suffix(b"\r").unwrap_or(&line);
         match serde_json::from_slice(line) {
             Ok(message) => Some(message),
-            // 无法解析的行：按传输损坏处理（结束接收循环，在途调用报错）。
+            // 无法解析的行：置损坏标志；接收循环继续读下一行（坏行跳过）。
             Err(_) => {
                 self.poisoned.store(true, Ordering::SeqCst);
                 None
@@ -218,8 +218,6 @@ impl StdioProcess {
         if sandbox_gate {
             let (g_program, g_args) =
                 crate::sandbox::mcp_stdio_gate_wrap(&command.to_string(), args);
-            // cmd_parts 结构＝[program, args...]（与未包装形态一致——031/033
-            // 分支以 first() 为载荷程序）。
             let mut wrapped: Vec<String> = Vec::with_capacity(g_args.len() + 1);
             wrapped.push(g_program);
             wrapped.extend(g_args);
@@ -301,19 +299,19 @@ impl StdioProcess {
             .stderr(Stdio::piped());
         #[cfg(unix)]
         cmd.process_group(0);
-        // 033 生命周期：spawn 经 runtime worker 分离任务执行（连接建立取消/超时
-        // 丢弃本 future 时，已启动进程的句柄会随任务结果丢弃）——kill_on_drop 使
-        // 「句柄 drop＝进程组后备回收」的既有注释语义真实成立（tokio 默认
-        // kill_on_drop=false 不回收，孤儿进程泄漏）；正常路径句柄由连接持有，
-        // 显式 close/进程组终止不受影响。
+        // 033 生命周期：spawn 经 runtime worker 分离任务执行。句柄丢弃时的回收
+        // 分两层：kill_on_drop 只终止直接子进程（覆盖本函数构造 StdioProcess
+        // 之前的提前返回路径；tokio 默认 false 不回收）；进程组级后备回收由
+        // StdioProcess 的 Drop impl 承担。正常路径句柄由连接持有，显式 close/
+        // 进程组终止不受影响。
         cmd.kill_on_drop(true);
         let mut child = cmd.spawn()?;
         // 038 方案 A：沙箱启动确认闸——载荷自停（包装形态：exec 前已 STOP），
         // 确认「隔离＋清理标识」后放行（SIGCONT）。超时/失败不放行：整组终止
         // ＋有界回收；LeaderGone＝--die-with-parent 级联已生效（载荷未执行）。
-        // 本 spawn 在分离任务内执行（连接取消/超时丢弃 future 即杀），确认循
-        // 环的 cancel 检查由任务丢弃语义承载（任务被丢＝句柄 kill_on_drop 回收
-        // ＝不放行），无独立 cancel 参数。
+        // 确认调用不带 cancel（None）：连接取消/超时只丢 JoinHandle，本分离
+        // 任务照常跑完（确认后可能已放行），回收靠任务结果丢弃时的 Drop
+        // ＋kill_on_drop。
         #[cfg(target_os = "linux")]
         let mut sandbox_payload = None;
         #[cfg(target_os = "linux")]
@@ -644,7 +642,7 @@ async fn bounded_body(mut response: reqwest::Response) -> Result<Vec<u8>, Stream
 }
 
 /// 移植 SDK `impl StreamableHttpClient for reqwest::Client` 的适配器；
-/// 差异：`text()`／`bytes()` 改为 [`bounded_body`]（8 MiB）。
+/// `text()`／`bytes()` 改为 [`bounded_body`]（8 MiB）。
 #[derive(Clone)]
 pub struct BoundedHttpClient {
     inner: reqwest::Client,

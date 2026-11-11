@@ -485,7 +485,8 @@ impl Policy {
         deny.extend(ctx.install_dirs.iter().cloned());
         let mut out: Vec<PathBuf> = Vec::new();
         for p in deny {
-            // 存在性三分类（fail-closed 语义在挂载层；此处 missing＝无对象）
+            // 存在性两分：metadata 成功才进 deny 集；任何错误（含非 NotFound）
+            // 一律跳过＝该路径不进快照、挂载层无从保护
             let Ok(md) = std::fs::metadata(&p) else { continue };
             let _ = md;
             let canon = canonical_long(&p);
@@ -590,7 +591,7 @@ fn parse_deny_paths(v: &Value) -> Result<Vec<PathBuf>, String> {
             }
         }
     }
-    // deny 集去重（同一路径重复列出不是矛盾）
+    // 相邻重复去重（Vec::dedup 只合并相邻项；同一路径重复列出不是矛盾）
     out.dedup();
     Ok(out)
 }

@@ -222,8 +222,8 @@ pub const HANDOFF_MARKER: &str = "[模型生成的交接摘要，非系统/用�
 /// 宿主运行态说明的固定标识（§1.4 seed 第 5 项：宿主提供，非用户输入）。
 pub const RUNTIME_NOTE_MARKER: &str = "[宿主运行状态说明，非用户输入]";
 
-/// 最新成功计划快照（§1.4 seed 第 5 项）：自史尾向前找最近一次 update_plan
-/// 成功调用的参数＋结果（失败/取消不产生快照；找不到返回 None）。
+/// 最新成功计划快照（§1.4 seed 第 5 项）：最近一次 update_plan 成功调用的
+/// 参数＋结果（失败/取消不产生快照；找不到返回 None）。
 fn latest_plan_snapshot(history: &[HistoryItem]) -> Option<String> {
     // 前向单遍，保留最后一次成功（规格 §1.4 第 5 项「最新成功计划快照」；
     // 计划工作流的常态是同轮多次成功更新）
@@ -513,8 +513,8 @@ pub fn switch_call_display_line(result_json: &str) -> String {
         )
     }
 }
-/// 检查点链全量语义校验（032 审查修复 #12：装载与提交两个状态变化点执行；
-/// 请求/查询路径改走 [`active_view`] 的轻量本地校验，不再随归档前缀线性扫描）：
+/// 检查点链全量语义校验（032 审查修复 #12：会话装载时执行；请求/查询路径
+/// 改走 [`active_view`] 的轻量本地校验，不再随归档前缀线性扫描）：
 /// 代数自 1 连续、批位闭合（前缀无未配对调用）、request_call_id 关联成功
 /// 排定的 new_context 调用、seed 仅 User/Assistant 文本（assistant 不带附件）。
 pub fn validate_checkpoint_chain(history: &[HistoryItem]) -> Result<(), String> {

@@ -15,8 +15,7 @@
 //!   等待与读写期间不持有管理器全局锁，取消／查询／退出／终止的竞态经
 //!   会话内互斥锁串行化。
 //!
-//! 平台：仅 Linux 本地执行；Shell 固定 `/bin/sh -c`；句柄绑定本管理器
-//! （宿主实例＋当前对话），跨实例或重启后即失效。
+//! 平台：句柄绑定本管理器（宿主实例＋当前对话），跨实例或重启后即失效。
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -1752,8 +1751,7 @@ fn build_tool_command(
     c.args(&t.args);
     if t.sandbox_wrapped {
         // 031：seccomp fd 守卫须存活到 spawn——经返回值交给调用方。
-        // Some＝close_range 版收口（除 seccomp fd 外全部关闭）；None＝033-B2
-        // 的 CLOEXEC 标记版（launcher 遗留 fd execve 时关闭；仅沙箱分支）。
+        //（两个变体的 fd 处理语义见 sandbox.rs 中对应函数文档。）
         #[cfg(unix)]
         match t.seccomp.as_ref() {
             Some(guard) => {
@@ -1791,9 +1789,6 @@ fn build_tool_command(
 }
 
 /// 管道模式：stdin 关闭，stdout/stderr 管道；独立进程组。
-/// 031：spawn 后 best-effort 验证 bwrap 子进程的 PID 命名空间确已隔离
-///（仍存活且与主进程同 ns ⇒ 立即整组终止并报错——隔离创建失败的执行前
-/// 拒绝链闭合；子进程已退出时以 bwrap 自身 fail-hard 语义为准）。
 fn spawn_piped(
     cmd: &str,
     workdir: &std::path::Path,
@@ -1828,7 +1823,6 @@ fn spawn_piped(
 
 /// PTY 模式：分配真实伪终端作为控制终端；会话组长自身成组
 ///（pre_exec setsid，不用 process_group——setpgid 后 setsid 会失败）。
-/// 031：同管道模式的 spawn 后 PID 命名空间验证（TTY 组终止路径）。
 /// Windows 版（038 ConPTY，008 A6 的 Windows 等价实现）：CreatePseudoConsole
 /// ＋PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE 属性清单＋CreateProcessW。会话语义
 /// 对齐 unix 版：ConPTY 输出端＝读取线程通道；输入端＝master（Arc<File> 输入

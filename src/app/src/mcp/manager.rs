@@ -803,8 +803,7 @@ impl McpManager {
         let manager: Option<Weak<McpManager>> = self.self_weak.get().cloned();
         let inner = self.lock();
         // 聚合全部可用服务器目录，按原始身份稳定排序后**全局**分配模型名：
-        // 跨服务器同名冲突与单服务器内一样经稳定短哈希消解（022 §2.3），
-        // 残余冲突显式拒绝（本轮该工具缺失，不覆盖注册表）。
+        // 跨服务器同名冲突与单服务器内一样经稳定短哈希消解（022 §2.3）。
         let mut flattened: Vec<(
             String,
             String,

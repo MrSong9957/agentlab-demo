@@ -171,8 +171,8 @@ pub fn apply_patch_sandboxed_with_exe(
     spawn_cmd.args(sandbox_args);
     // 033-B2：同 exec 面——继承 fd ≥3 标记 CLOEXEC（execve 时关闭）；仅沙箱
     // 分支。031：seccomp fd 是唯一例外（非 CLOEXEC，bwrap 经 --seccomp 读取）。
-    // pre_exec 为 unix API；非 unix 下 tool_launch_argv 恒 None，不会
-    // 到达此分支（cfg 门控仅为可编译性）。
+    // pre_exec 为 unix API；非 unix 下沙箱后端不可用（上方 Err／Ok(None)
+    // 均已提前返回），不会到达此分支（cfg 门控仅为可编译性）。
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -189,8 +189,7 @@ pub fn apply_patch_sandboxed_with_exe(
             }
         }
     }
-    // 审查 #27（§1.6 逐启动确认）：031 分支 spawn 后核验载荷确在新 PID ns
-    //（033 分支不适用——033 验收契约不含该检查）。
+    // 审查 #27（§1.6 逐启动确认）：031 分支 spawn 后核验载荷确在新 PID ns。
     let spawn_cmd = spawn_cmd
         .env_clear() // 033：凭据环境不进补丁子进程（027 R1 环境面防线保留）
         .envs(child_env);
@@ -234,7 +233,7 @@ pub fn apply_patch_sandboxed_with_exe(
         Err(e) => return err(format!("沙箱执行等待失败：{e}"), false),
     };
     // 040：沙箱分支 program=bwrap，监督进程已收割——就地回收其被收养的
-    // ns-PID-1 reaper（非沙箱分支 program 为补丁程序本体，扫描无匹配）。
+    // ns-PID-1 reaper（非沙箱请求在上方 tool_launch_argv 返回 Ok(None) 时已提前报错）。
     #[cfg(target_os = "linux")]
     crate::sandbox::reap_adopted_bwrap_reapers();
     if !out.status.success() {
@@ -413,9 +412,10 @@ fn run(patch_text: &str) -> (ApplyPatchResult, Vec<crate::prompt::PatchChange>) 
 /// 模型面结果 changed_files 不受影响。
 pub const MAX_DISPLAY_BYTES: usize = 16 * 1024 * 1024;
 
-/// 变更累积器（审查 #6）：changed（结果清单）与 display（展示卡片）必须同序
-/// 同长——该配对不变量由本类型唯一 [`ChangeLog::record`] 入口保证，替代此前
-/// 5 处手写双 push；同时承载展示字节预算（审查 #9）。
+/// 变更累积器（审查 #6）：changed（结果清单）与 display（展示卡片）由本类型
+/// 唯一 [`ChangeLog::record`] 入口统一维护；结果清单始终入列，展示卡片受
+/// 预算约束（预算耗尽时卡片不入列或降级，两者长度可不同）；同时承载展示
+/// 字节预算（审查 #9）。
 #[derive(Default)]
 struct ChangeLog {
     changed: Vec<ChangedFile>,
