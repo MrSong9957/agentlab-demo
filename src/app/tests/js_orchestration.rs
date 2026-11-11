@@ -243,6 +243,60 @@ fn pure_js_text_output_completes() {
     assert_eq!(kinds.iter().filter(|k| **k == EventKind::CellStarted).count(), 1);
 }
 
+/// A8/034 §1.3：一次超分片阈值（TEXT_CHUNK=512 KiB）的 text——worker 后续
+/// 分片必须走 output_frame_cont（cont=true），宿主合并回一条。修复前全部
+/// output_frame（cont=false 恒定），分片成多条独立交付＝行为与规格相反，
+/// 本测试修复前红。帧级直驱 `--internal-js`（单条 700 KiB 超宿主 64 KiB
+/// 待交付上限，观察面无法区分分片，帧序号才可断言）。
+#[test]
+fn multi_chunk_text_frames_carry_cont_flag() {
+    use terminal_chat::js_orchestration::protocol::{
+        init_frame, read_frame, write_frame, MAX_FRAME_BYTES, MAX_INIT_FRAME_BYTES,
+    };
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_terminal-chat"))
+        .arg("--internal-js")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("启动 worker");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = child.stdout.take().expect("stdout");
+    let init = init_frame(r#"text("x".repeat(700 * 1024)); "done""#, &[]);
+    write_frame(&mut stdin, &init, MAX_INIT_FRAME_BYTES).expect("写 init");
+    // 依次读帧：init 确认后的 output 帧序列（≤3 片：512K+188K→2 片＋done）。
+    let mut output_frames: Vec<bool> = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        match read_frame(&mut stdout, MAX_FRAME_BYTES) {
+            Ok(Some(frame)) => {
+                match frame.get("t").and_then(serde_json::Value::as_str) {
+                    Some("output") => {
+                        output_frames.push(
+                            frame.get("cont").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                        );
+                    }
+                    Some("done") => break,
+                    _ => {}
+                }
+            }
+            Ok(None) => break,
+            Err(e) => panic!("读帧失败：{e}"),
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        output_frames.len() >= 2,
+        "700 KiB text 须分片（TEXT_CHUNK=512 KiB）：实际 {output_frames:?}"
+    );
+    assert!(
+        output_frames.iter().skip(1).all(|cont| *cont),
+        "首片后全部 cont=true（034 §1.3 合并链）：{output_frames:?}"
+    );
+    assert!(!output_frames[0], "首片 cont=false");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn sandbox_worker_entry_self_stops_before_init() {

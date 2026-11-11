@@ -66,17 +66,21 @@
 - 改法：`sync_channel`（带界）或显式背压策略——**行为变更（可能引入读线程阻塞语义），先与用户确认方案**；注释按定案后状态修正。
 - 处置（2026-11-11，方案 a，N=16，随定案落地）：通道构造单点 `event_channel()` → `sync_channel(EVENT_CHANNEL_CAPACITY=16)`（积压上界 16 MiB；`CellHandle.event_tx` 改 `SyncSender`）；模块头 ：7-14 按有界事实改写（S8 暂缓项销账）；034 §1.4 末尾登记修订（让出期 16 帧后停等的可观察变化＋三终止路径读线程不悬挂）。send 阻塞缓解选「接受滞留至 runtime drop」：`orch_cell` 为轮函数局部、close 后相邻两行即置 None（turn.rs:1506/1517），三路径（worker 死亡→观察收割腾容量→ReaderDead、墙钟兜底；runtime drop→接收端弃置→send Err；轮终止→close 5 秒有界收割＋弃置）均不悬挂，无死锁（消费侧等待恒有界）。有界性锚测试 `event_channel_is_bounded_at_declared_capacity`（容量＝常量、超容量 try_send 被拒、断连 send 报错；零时序依赖）；「超 N 帧停等」真实 worker 测试需时序断言，不可稳定观测，不硬凑。验证：lib js_orchestration 13/0（含锚）、集成 42/0、security 20/0；check --tests 0 错误、警告 605＝基线零新增；perf 套件 3/7 超冻结阈值为环境漂移存量（干净树对照同失败集合，采样 332.5ms vs 阈值 300ms、基线 13.4ms，toolchain 1.99.0→1.99.1；已于 2026-11-11 重冻结，见 docs/logs/2026-11-11-c18-refreeze/）。证据：docs/logs/2026-11-10-simplify-a7/implementation.md。
 
-### A8. JS 多片输出合并永不发生 `- [ ]`
+### A8. JS 多片输出合并永不发生 `- [x]`
 - 位置：`src/app/src/js_orchestration/worker.rs:299`（所有分片发 `output_frame`，`cont:false` 恒定）；`protocol.rs:75-77` `output_frame_cont` 零调用；宿主 `merge_last`（`runtime.rs:1404-1410`）不可达。
 - 问题：034 §1.3「一次 text 原样合并回一条」未实现；另单次 `text()` 含大量控制字符时 JSON 转义膨胀约 6 倍，超过约 17.5 万控制字符即撑爆 1 MiB 帧上限；任何单次超 64 KiB 的 text 被待交付缓冲丢弃。
 - 依据：审查者 grep 全仓 `output_frame_cont`／`"cont"` 仅命中定义与恒 false 构造。
 - 改法：二选一经用户裁决——(a) worker 首片 `output_frame`、后续片 `output_frame_cont`，使合并语义生效（行为变更，须验证）；(b) 确认多片分开交付可接受，删除 `output_frame_cont`／`merge_last` 死路径（无行为变化）。
 
-### A9. view_image 沙箱图片上限与注释不符 `- [ ]`
+- 处置（2026-11-11，批 2，先红后绿）：帧级红 `[false, false]`→绿 `[false, true…]`（清单方案 a，用户裁决于批 2 目标）；TEXT_CHUNK 512K→160K（转义膨胀同源修）；034 :75 修订段登记。js_orchestration 43/0＋security 20/0。 证据：docs/logs/2026-11-11-simplify-batches/batch2/。
+
+### A9. view_image 沙箱图片上限与注释不符 `- [x]`
 - 位置：`src/app/src/view_image.rs:248-249`（注释 4 MiB＋1024 余量）vs `EncodedImage.bytes` 按 JSON 十进制数组编码（约 3.6 倍膨胀，实际有效上限约 1.1 MiB）。
 - 问题：031 沙箱模式下 1.1–4 MiB 图片报「超过有界上限」，与进程内路径（4 MiB）不一致。
 - 依据：静态推算（审查者），未运行验证。
 - 改法：加单测断言「4 MiB 图片编 JSON 后不超过该常量」（今天失败）→ 改传输编码（base64）或按编码后长度定上限；修好后注释属实并保留。
+
+- 处置（2026-11-11，批 2，先红后绿）：红 16,777,302B>4,195,328B（4 倍膨胀实证）→绿 base64 传输＋上限 4/3×4MiB+4KiB；031 view_image 行修订段登记；4MiB 真图端到端未跑（单元级＋常规路径覆盖，如实标注）。view_image 24/0+15/0、e2e_sandbox 7/0。 证据：docs/logs/2026-11-11-simplify-batches/batch2/。
 
 ### A10. Windows 三处静态疑点 `- [ ]`
 - 位置：`proc_session.rs:36,2221-2222`（`WAIT_FAILED` 未导入成 catch-all 绑定，超时分支不可达）；`proc_session.rs:2391`（Windows 读取线程不累加 `reader_eof`，每会话退出多等 2 秒 COLLECT_GRACE）；`permissions.rs:718-721`（UNC 还原 `format!("\\\\\\{rest}")` 产生三个反斜杠）。
@@ -84,11 +88,13 @@
 - 依据：静态阅读，未在 Windows 编译运行（本容器无 Windows 工具链）。
 - 改法：修代码＋在 Windows runner 验证（配 S37）；或先在注释/登记本中记录，待 038 Windows 轮处理。
 
-### A11. session auto 文件句柄只写（推断）`- [ ]`
+### A11. session auto 文件句柄只写（推断）`- [x]`
 - 位置：`src/app/src/session.rs:1535-1539`、`:1635-1639`（unix 新建 auto 文件未加 `.read(true)`）；`:1543-1545`、`:1643` 注释用「LockFileEx 需要 GENERIC_READ」解释（Windows 已改命名互斥体，前提失效）。
 - 问题：同进程对新建 auto 文件执行 `/resume` 可能 EBADF（从只写句柄读）。现有测试只覆盖经 resume 取得的句柄。
 - 依据：审查者推断，未运行验证。
 - 改法：补用例（新建 auto 后立即 `/resume`）确认；修则加 `.read(true)`（unix 侧行为微变，登记）；两处过时注释随 S1… 处理（此处指 session 注释组）。
+
+- 处置（2026-11-11，批 2，先红后绿）：红 EBADF os error 9 实证（same_file 复用分支从 append-only 句柄读）→绿 unix 加 .read(true)（S11 单点覆盖原两站点）；过时 LockFileEx 注释改写。session lib 28/0＋集成 40/0。 证据：docs/logs/2026-11-11-simplify-batches/batch2/。
 
 ### A12. 疑似从未运行的测试 `- [x]`
 - 位置：`src/app/src/tui_host.rs:1946-1951`。

@@ -32,9 +32,32 @@ const PROMPT_IMAGE_PATCH_SIZE: u32 = 32;
 const HIGH_DETAIL_MAX_DIMENSION: u32 = 2048;
 const HIGH_DETAIL_MAX_PATCHES: usize = 2500;
 
+/// `bytes` 字段的传输编码（A9）：base64 字符串替代 JSON 十进制数组——
+/// 膨胀 4/3 倍而非 ≈4 倍，沙箱传输有效上限与进程内 4 MiB 对齐。
+/// 仅跨进程 stdout 一对消费方（子进程 to_vec／宿主 from_slice），进程内
+/// 不序列化本结构；往返无损由单元测试锚定。
+mod bytes_wire {
+    use base64::Engine as _;
+    pub fn serialize<S: serde::Serializer>(
+        bytes: &[u8],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<u8>, D::Error> {
+        let s = <String as serde::Deserialize>::deserialize(deserializer)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(s.as_bytes())
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// 准备后的图片（上游 `EncodedImage` 的本地形态；无缓存共享故用 Vec）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EncodedImage {
+    #[serde(with = "bytes_wire")]
     pub bytes: Vec<u8>,
     pub mime: String,
     pub source_width: u32,
@@ -235,8 +258,10 @@ pub fn execute_sandboxed_with_exe(
             };
             return Err(format!("沙箱图片准备失败（exit {:?}）：{tail}", out.status.code()));
         }
-        // 有界接收：编码图片上限即进程内同款 4 MiB＋元数据余量
-        if out.stdout.len() > MAX_PREPARED_IMAGE_BYTES + 1024 {
+        // 有界接收：4 MiB 原始经 base64 传输（4/3）＋元数据余量（A9 修复——
+        // 原十进制数组 ≈4 倍膨胀使有效上限仅 ≈1 MiB，1.1–4 MiB 图片假拒绝）。
+        let wire_bound = MAX_PREPARED_IMAGE_BYTES / 3 * 4 + 4096;
+        if out.stdout.len() > wire_bound {
             return Err("沙箱图片结果超过有界上限".to_string());
         }
         let encoded: EncodedImage = serde_json::from_slice(&out.stdout)
@@ -660,6 +685,34 @@ fn cancelled(cancel: Option<&AtomicBool>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A9 红：4 MiB 原始图片（进程内允许上限，:446 同款检查）按十进制数组
+    /// JSON 编码后 ≈3.6 倍膨胀，超沙箱接收上限（4 MiB＋1 KiB）——沙箱路径
+    /// 对 1.1–4 MiB 图片假拒绝（修复前红）。
+    #[test]
+    fn sandbox_transfer_encoding_of_max_prepared_image_fits_bound() {
+        let encoded = EncodedImage {
+            mime: "image/png".into(),
+            bytes: vec![0x89u8; MAX_PREPARED_IMAGE_BYTES],
+            source_width: 1,
+            source_height: 1,
+            width: 1,
+            height: 1,
+        };
+        let wire = serde_json::to_vec(&encoded).unwrap();
+        // 断言对象＝沙箱接收上限（A9 修复后口径：base64 4/3＋元数据余量；
+        // 修复前旧口径下本测试红：十进制数组 16,777,302 B > 4,195,328 B）。
+        let bound = MAX_PREPARED_IMAGE_BYTES / 3 * 4 + 4096;
+        assert!(
+            wire.len() <= bound,
+            "4 MiB 图编码后 {} B 超接收上限 {bound} B（沙箱有效上限≠进程内）",
+            wire.len()
+        );
+        // 往返一致（传输编码改写后仍无损）。
+        let back: EncodedImage = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(back, encoded);
+    }
+
+
     use super::*;
     use image::GenericImageView;
     use image::ImageDecoder;

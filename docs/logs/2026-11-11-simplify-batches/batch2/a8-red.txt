@@ -1,0 +1,2 @@
+thread 'multi_chunk_text_frames_carry_cont_flag' (133727) panicked at src/app/tests/js_orchestration.rs:293:5:
+首片后全部 cont=true（034 §1.3 合并链）：[false, false]

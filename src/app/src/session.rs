@@ -1456,20 +1456,23 @@ impl Session {
             };
             let path = self.dir.join(&name);
             let opened = {
+                // read(true)（A11 修复，unix 行为微变：句柄追加只写→可读写）：
+                // 同名恢复（resume 命中同一文件）经本已存句柄 rewind＋装载读取
+                // ——append-only 句柄读回 EBADF（红测试
+                // resume_same_file_after_fresh_auto_file_reads_back 实证）。
+                // 锁不经句柄（unix flock / Windows 命名互斥体），read 位不影响锁语义。
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::OpenOptionsExt;
                     std::fs::OpenOptions::new()
                         .append(true)
+                        .read(true)
                         .create_new(true)
                         .mode(0o600)
                         .open(&path)
                 }
                 #[cfg(not(unix))]
                 {
-                    // read(true)：同名恢复（resume 命中同一文件）经本已存句柄
-                    // rewind＋装载读取（read 需 FILE_READ_DATA，append-only 句柄
-                    // 不可读）；锁本身走命名互斥体，不经句柄。
                     std::fs::OpenOptions::new()
                         .append(true)
                         .read(true)
@@ -1695,6 +1698,25 @@ mod tests {
         assert_eq!(session.persisted_upto, 1, "游标不因失败推进");
         assert_eq!(session.on_history(&history), None, "停用后无追加");
         assert_eq!(session.flush_final(&history), Ok(()), "停用态排空＝无操作");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A11：新建 auto 文件的句柄 unix 侧 append-only（无 read）——同进程
+    /// 立即 /resume 命中 same_file 复用分支，从只写句柄读＝EBADF（修复前红）。
+    #[test]
+    fn resume_same_file_after_fresh_auto_file_reads_back() {
+        let dir = std::env::temp_dir().join(format!("tchat-a11-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut session = Session::new(dir.clone());
+        let history = vec![text_user("新建即恢复")];
+        assert_eq!(session.on_history(&history), None, "首写建文件");
+        // 同进程立即恢复：写者持锁同名文件，命中 same_file 复用分支。
+        let res = session.resume(None);
+        assert!(res.is_ok(), "新建后立即 resume 不得 EBADF：{res:?}");
+        let info = res.unwrap();
+        assert!(!info.degraded, "same_file 复用＝非降级");
+        assert_eq!(info.loaded.history.len(), 1, "已写记录可读回");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
