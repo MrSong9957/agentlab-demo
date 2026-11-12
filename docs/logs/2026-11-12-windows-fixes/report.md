@@ -68,10 +68,34 @@ Completed 状态而非 Timeout。迭代 35 归因（在案）：并行 spawn 下
   mcp_tls 3/0 复验）；platform-verifier 假设是否成立的最终判定待下一轮 CI。
 - mac 腿本轮为参考（非目标）：同 run mac 失败清单与既有登记族一致。
 
-## 第二轮处置（待定）
+## 第二轮 CI 实证（run 43163771845，753ee83）
 
-- tls hook 修正已提交（随本报告推送）——CI 复验 tls 单项。
-- 批 A-1 15 项＋internal_apply：**按阻断条款停下回报**——产品级缺陷需
-  Windows 环境取证迭代（超出本批「测试侧修复」授权范围），待用户裁决：
-  ①批准 win 取证专项（CI 插桩轮次）；②或接受该 16 项为「产品级待修」
-  登记（038 §5 口径）继续其余目标。
+- **close_kills_all 销号**（10s 冻结轮询窗内完成）——修正「永不完成」的
+  一刀切表述：win 杀树/回收为**秒级到数十秒级且高度不稳定**（同一轮内
+  close_kills 10s 过、explicit_timeout 20s 不过）。
+- **tls 仍败**（Arc 可克隆修正后仍 0 vs 1）——platform-verifier 假设未获
+  证实或另有根因（IP 证书验证/代理/防火墙待查）。停止盲改，归入待取证。
+- m4 报文解码出新证据：产品写入 rollout_path 为「正斜杠＋RUNNER~1 短名」
+  形态（`C:/Users/RUNNER~1/.../sessions/a.jsonl`）——已补第三形态归一
+  （`tmp_fwd`，`753ee83` 之后的提交），linux 复验过。
+
+## 当前台账（第二轮后）
+
+| 组 | 项数 | 状态 |
+|---|---|---|
+| 已销号（批 A-2＋close_kills） | 5 | G2、a17、retention、c15、close_kills_all |
+| 已销号（测试自身缺陷） | （含上） | retention 系测试 bug 非平台差异 |
+| 决策② 待立项 | 2 | pty_write_window、t18 |
+| 瞬态（重跑即绿口径） | 3 | 0xC0000142×3（input_limit/pty_interactive/pty_cancel） |
+| **产品级待修（阻断回报）** | 15 | 批 A-1 的终止/时限族（win monitor 杀树/回收秒级~数十秒级不稳定——explicit_timeout 20s 不冻结、terminate 重试 15s 全超窗；close_kills 偶发 10s 内完成） |
+| **待取证（win 环境盲改两次无效）** | 3 | internal_apply（os87，share 修正无效）、tls（hook/验证器假设未证实）、pty_child（空输出） |
+
+ubuntu 腿三轮全绿（本批零回归）。
+
+## 需用户裁决
+
+1. **批 A-1 的 15 项**：产品级 Windows 杀树/回收缺陷——需要 win 取证专项
+   （CI 插桩轮：monitor 路径加临时诊断输出验证 Job 挂接/TerminateJobObject
+   实效性），或按 038 §5 口径登记「产品级待修」接受 PR 带该清单合并。
+2. **internal_apply/tls/pty_child 三项**：同上，两次盲改无效已停手。
+3. m4 第三形态归一（已提交）待下一轮 CI 销号确认。

@@ -375,17 +375,21 @@ fn m4_a13_m3_parse_store_export_redacts_body_and_exact_slug_projection() {
     let input = Stage1FileInput::from_row(row, path.clone(), "/fixture/project".into(), None).unwrap();
     let db = e.db_bytes();
     sync_stage1_snapshot(&e.root, &[input], &mut |_| {}).unwrap();
-    // 038 Windows：产品侧路径归一（canonical 长名）与夹具词法形态（RUNNER~1
-    // 短名）可能不同——两形态都归一为 /fixture（迭代 32 result_json 同款先例）。
+    // 038 Windows：产品写入 rollout_path 的路径形态经展示层归一——CI 报文
+    // 实证（43163771845）为「正斜杠＋RUNNER~1 短名」（如
+    // C:/Users/RUNNER~1/.../sessions/a.jsonl），而夹具 e.tmp.path() 为反斜杠
+    // 词法形态。三形态都归一为 /fixture：反斜杠词法、canonical 剥 \\?\、
+    // 正斜杠化（迭代 32 result_json 双形态先例的扩展）。
     let tmp_lex = e.tmp.path().to_str().unwrap().to_string();
     let tmp_long = std::fs::canonicalize(e.tmp.path())
         .ok()
         .and_then(|p| p.to_str().map(String::from))
         .map(|s| s.strip_prefix(r"\\?\").map(String::from).unwrap_or(s));
+    let tmp_fwd = tmp_lex.replace('\\', "/");
     let actual: BTreeMap<_, _> = files(&e.root).into_iter().map(|(name, bytes)| {
         assert!(!name.contains(secret));
         let content = String::from_utf8(bytes).unwrap(); assert!(!content.contains(secret));
-        let mut c = content.replace(&tmp_lex, "/fixture");
+        let mut c = content.replace(&tmp_fwd, "/fixture").replace(&tmp_lex, "/fixture");
         if let Some(long) = &tmp_long {
             c = c.replace(long, "/fixture");
         }
