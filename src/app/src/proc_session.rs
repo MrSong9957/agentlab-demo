@@ -2358,18 +2358,10 @@ fn terminate_sandbox_payload(
 fn spawn_reader<R: Read + Send + 'static>(session: Arc<Session>, mut pipe: R) {
     std::thread::spawn(move || {
         let mut buf = [0u8; READ_BUF];
-        // [pty-diag]（038 取证，暂驻）：读链累计字节数（pty_child 空输出归因：
-        // 读到 0 字节＝进程/ConPTY 未产生输出；读到 >0＝宿主收集链丢失）
-        #[cfg(windows)]
-        let mut total: usize = 0;
         loop {
             match pipe.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    #[cfg(windows)]
-                    {
-                        total += n;
-                    }
                     let stop = {
                         let mut st = session.lock();
                         st.pending.push(&buf[..n]);
@@ -2386,9 +2378,6 @@ fn spawn_reader<R: Read + Send + 'static>(session: Arc<Session>, mut pipe: R) {
         }
         // A10 修复：EOF／错误退出同样累加 reader_eof（与 unix 版同构）——
         // 缺失时 collect_done 每会话多等满 COLLECT_GRACE（2 秒）。
-        // [pty-diag]（038 取证，暂驻）
-        #[cfg(windows)]
-        eprintln!("[pty-diag] reader done: total_bytes={total}");
         let mut st = session.lock();
         st.reader_eof += 1;
         drop(st);
