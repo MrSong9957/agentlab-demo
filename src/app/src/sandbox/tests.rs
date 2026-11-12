@@ -18,6 +18,10 @@ fn tmp_ws(tag: &str) -> PathBuf {
     fs::canonicalize(&dir).unwrap()
 }
 
+/// A4/S27：unix 词法去点形态锚。POSIX 路径语义（`/a/../b`→`/b`）仅对
+/// unix 目标成立——Windows 上 `/` 为当前盘根、分隔符归一形态不同（038
+/// Windows CI 实证失败后补门控）；Windows 形态由下方 cross_drive 锚覆盖。
+#[cfg(unix)]
 #[test]
 fn absolute_lexical_unix_dedot_keeps_root_and_relative_shape() {
     use crate::sandbox::absolute_lexical;
