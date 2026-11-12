@@ -831,7 +831,21 @@ impl StreamableHttpClient for BoundedHttpClient {
         if let Some(session_id) = session_id {
             request = request.header("MCP-Session-Id", session_id.as_ref());
         }
-        let response = request.json(&message).send().await.map_err(client_err)?;
+        // [tls-diag]（038 取证，暂驻）：initialize 的 POST 路径——失败透出
+        // reqwest 错误的完整 source chain（TLS 握手根因在其中）
+        let response = match request.json(&message).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let mut chain = String::new();
+                let mut src = std::error::Error::source(&e);
+                while let Some(s) = src {
+                    chain.push_str(&format!(" <- {s}"));
+                    src = s.source();
+                }
+                std::eprintln!("[tls-diag] post_message send err: {e}{chain}");
+                return Err(client_err(e));
+            }
+        };
         let status = response.status();
         if matches!(
             status,
