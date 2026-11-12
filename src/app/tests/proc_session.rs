@@ -80,6 +80,31 @@ fn start_with_transient_retry(
     out.result
 }
 
+/// 038 Windows runner 瞬态第二形态（runner-images#10008 已知间歇问题）：
+/// 0xC0000142（desktop heap／会话资源）也发生在测试**运行中**——powershell/
+/// python 子进程中途崩溃使断言失败，spawn 点重试不可覆盖（0c5436f 实证）。
+/// 此 helper 对整个测试主体做「一次重试」：仅当第一次 panic 报文含
+/// 1073741502（崩溃族特征）时重试，其余 panic 原样抛出（不掩盖真实缺陷）。
+fn with_dll_init_retry<T>(tag: &str, body: impl Fn() -> T) -> T {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(&body)) {
+        Ok(v) => v,
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("")
+                .to_string();
+            if msg.contains("1073741502") {
+                eprintln!("[win-flake] {tag}: 0xC0000142 runner 瞬态——整测试重试");
+                body()
+            } else {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+}
+
 fn stdin_args(session_id: &str) -> WriteStdinArgs {
     WriteStdinArgs::from_value(&json!({ "session_id": session_id })).unwrap()
 }
@@ -425,33 +450,35 @@ fn deadline_survives_cancel() {
 /// 真实 PTY 可交互：程序检测到终端、发出提示；发送回答（含换行）后继续执行。
 #[test]
 fn pty_interactive_read_answer() {
-    let mgr = ProcessManager::new();
-    // 038 Windows：printf/read/echo 为 sh 设施——PowerShell 读行等价（提示
-    // "NAME:"、行读入、回显 HELLO <name>）；断言与流程完全一致。
-    let cmd = if cfg!(windows) {
-        cmd_builder::ps_encoded("'NAME: '; $n = [Console]::In.ReadLine(); \"HELLO $n\"")
-    } else {
-        "printf 'NAME: '; read name; echo \"HELLO $name\"".to_string()
-    };
-    let args = ExecArgs::from_value(&json!({
-        "cmd": cmd,
-        "yield_time_ms": 5000,
-        "tty": true,
-    }))
-    .unwrap();
-    let out = start_with_transient_retry(&mgr, &args, None);
-    assert_eq!(out.status, ExecStatus::Running, "{out:?}");
-    let sid = out.session_id.unwrap();
-    assert!(out.output.contains("NAME:"), "提示已收集：{:?}", out.output);
-    // 发送回答（显式换行）
-    let input = WriteStdinArgs::from_value(&json!({
-        "session_id": sid, "chars": "world\n", "yield_time_ms": 5000
-    }))
-    .unwrap();
-    let r = mgr.interact(&input, None).result;
-    assert_eq!(r.status, ExecStatus::Completed, "{r:?}");
-    assert_eq!(r.exit_code, Some(0));
-    assert!(r.output.contains("HELLO world"), "回答送达原程序：{:?}", r.output);
+    with_dll_init_retry("pty_interactive_read_answer", || {
+        let mgr = ProcessManager::new();
+        // 038 Windows：printf/read/echo 为 sh 设施——PowerShell 读行等价（提示
+        // "NAME:"、行读入、回显 HELLO <name>）；断言与流程完全一致。
+        let cmd = if cfg!(windows) {
+            cmd_builder::ps_encoded("'NAME: '; $n = [Console]::In.ReadLine(); \"HELLO $n\"")
+        } else {
+            "printf 'NAME: '; read name; echo \"HELLO $name\"".to_string()
+        };
+        let args = ExecArgs::from_value(&json!({
+            "cmd": cmd,
+            "yield_time_ms": 5000,
+            "tty": true,
+        }))
+        .unwrap();
+        let out = start_with_transient_retry(&mgr, &args, None);
+        assert_eq!(out.status, ExecStatus::Running, "{out:?}");
+        let sid = out.session_id.unwrap();
+        assert!(out.output.contains("NAME:"), "提示已收集：{:?}", out.output);
+        // 发送回答（显式换行）
+        let input = WriteStdinArgs::from_value(&json!({
+            "session_id": sid, "chars": "world\n", "yield_time_ms": 5000
+        }))
+        .unwrap();
+        let r = mgr.interact(&input, None).result;
+        assert_eq!(r.status, ExecStatus::Completed, "{r:?}");
+        assert_eq!(r.exit_code, Some(0));
+        assert!(r.output.contains("HELLO world"), "回答送达原程序：{:?}", r.output);
+    });
 }
 
 /// PTY 中程序确认 isatty。
@@ -699,85 +726,89 @@ fn pipe_ctrl_c_interrupts_and_terminate_kills_ignoring_process() {
 /// 单次输入上限：恰 64 KiB 通过并由程序完整收到；超限整次拒绝、零写入。
 #[test]
 fn input_limit_exact_passes_over_limit_rejects_with_zero_write() {
-    let dir = temp_dir("input-limit");
-    let payload = dir.join("payload");
-    let mgr = ProcessManager::new();
-    let args = ExecArgs::from_value(&json!({
-        // raw 模式避免行规范缓冲上限，dd 恰读 65536 字节后退出
-        "cmd": format!("stty raw -echo 2>/dev/null; head -c 65536 > {}; echo DD-OK", payload.display()),
-        "yield_time_ms": 5000,
-        "tty": true,
-    }))
-    .unwrap();
-    let out = start_with_transient_retry(&mgr, &args, None);
-    assert_eq!(out.status, ExecStatus::Running, "{out:?}");
-    let sid = out.session_id.unwrap();
-    // ① 超限：参数层整次拒绝（不进入执行，无部分发送路径）
-    let over = WriteStdinArgs::from_value(&json!({
-        "session_id": sid, "chars": "x".repeat(64 * 1024 + 1)
-    }));
-    assert!(over.unwrap_err().contains("整次拒绝"), "超限在发送前拒绝");
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(log_size(&payload), 0, "超限输入零写入");
-    // 会话仍可用
-    let r = query(&mgr, &sid);
-    assert_eq!(r.status, ExecStatus::Running, "拒绝不影响原会话");
-    // ② 恰 64 KiB：通过；dd 收满退出（有界等待终态），echo DD-OK 可见
-    let exact = WriteStdinArgs::from_value(&json!({
-        "session_id": sid, "chars": "x".repeat(64 * 1024), "yield_time_ms": 5000
-    }))
-    .unwrap();
-    let mut r = mgr.interact(&exact, None).result;
-    // 写入后进程随即退出；有界等待终态（空查询最多各等 5s）
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while r.status == ExecStatus::Running {
-        assert!(Instant::now() < deadline, "等待 dd 完成超时");
-        r = query(&mgr, &sid);
-    }
-    assert_eq!(r.status, ExecStatus::Completed, "{r:?}");
-    assert_eq!(fs::metadata(&payload).unwrap().len(), 64 * 1024, "完整送达 64 KiB");
-    assert!(r.output.contains("DD-OK"), "echo DD-OK 可见：{:?}", r.output);
-    let _ = fs::remove_dir_all(&dir);
+    with_dll_init_retry("input_limit_exact_passes_over_limit_rejects_with_zero_write", || {
+        let dir = temp_dir("input-limit");
+        let payload = dir.join("payload");
+        let mgr = ProcessManager::new();
+        let args = ExecArgs::from_value(&json!({
+            // raw 模式避免行规范缓冲上限，dd 恰读 65536 字节后退出
+            "cmd": format!("stty raw -echo 2>/dev/null; head -c 65536 > {}; echo DD-OK", payload.display()),
+            "yield_time_ms": 5000,
+            "tty": true,
+        }))
+        .unwrap();
+        let out = start_with_transient_retry(&mgr, &args, None);
+        assert_eq!(out.status, ExecStatus::Running, "{out:?}");
+        let sid = out.session_id.unwrap();
+        // ① 超限：参数层整次拒绝（不进入执行，无部分发送路径）
+        let over = WriteStdinArgs::from_value(&json!({
+            "session_id": sid, "chars": "x".repeat(64 * 1024 + 1)
+        }));
+        assert!(over.unwrap_err().contains("整次拒绝"), "超限在发送前拒绝");
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(log_size(&payload), 0, "超限输入零写入");
+        // 会话仍可用
+        let r = query(&mgr, &sid);
+        assert_eq!(r.status, ExecStatus::Running, "拒绝不影响原会话");
+        // ② 恰 64 KiB：通过；dd 收满退出（有界等待终态），echo DD-OK 可见
+        let exact = WriteStdinArgs::from_value(&json!({
+            "session_id": sid, "chars": "x".repeat(64 * 1024), "yield_time_ms": 5000
+        }))
+        .unwrap();
+        let mut r = mgr.interact(&exact, None).result;
+        // 写入后进程随即退出；有界等待终态（空查询最多各等 5s）
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while r.status == ExecStatus::Running {
+            assert!(Instant::now() < deadline, "等待 dd 完成超时");
+            r = query(&mgr, &sid);
+        }
+        assert_eq!(r.status, ExecStatus::Completed, "{r:?}");
+        assert_eq!(fs::metadata(&payload).unwrap().len(), 64 * 1024, "完整送达 64 KiB");
+        assert!(r.output.contains("DD-OK"), "echo DD-OK 可见：{:?}", r.output);
+        let _ = fs::remove_dir_all(&dir);
+    });
 }
 
 /// 向不读输入的 PTY 程序写入：等待可取消，不阻塞整个宿主；进程保留。
 #[test]
 fn blocked_input_is_cancellable_and_session_kept() {
-    let mgr = ProcessManager::new();
-    // 程序不读 stdin（sleep 保持运行）；038 Windows：sleep 为 sh 设施——
-    // PowerShell 睡眠等价（无读操作）。
-    let cmd = if cfg!(windows) {
-        cmd_builder::sleep_ms(30_000)
-    } else {
-        "sleep 30".to_string()
-    };
-    let args = ExecArgs::from_value(&json!({
-        "cmd": cmd, "yield_time_ms": 250, "tty": true
-    }))
-    .unwrap();
-    let out = start_with_transient_retry(&mgr, &args, None);
-    assert_eq!(out.status, ExecStatus::Running, "{out:?}");
-    let sid = out.session_id.unwrap();
-    // raw 关闭回显：sleep 不读输入，master 写入缓冲打满后阻塞
-    // （单次 64KiB 大于 pty 缓冲；写入线程阻塞，主等待被取消打断）
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancel_for_thread = cancel.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(400));
-        cancel_for_thread.store(true, Ordering::SeqCst);
+    with_dll_init_retry("blocked_input_is_cancellable_and_session_kept", || {
+        let mgr = ProcessManager::new();
+        // 程序不读 stdin（sleep 保持运行）；038 Windows：sleep 为 sh 设施——
+        // PowerShell 睡眠等价（无读操作）。
+        let cmd = if cfg!(windows) {
+            cmd_builder::sleep_ms(30_000)
+        } else {
+            "sleep 30".to_string()
+        };
+        let args = ExecArgs::from_value(&json!({
+            "cmd": cmd, "yield_time_ms": 250, "tty": true
+        }))
+        .unwrap();
+        let out = start_with_transient_retry(&mgr, &args, None);
+        assert_eq!(out.status, ExecStatus::Running, "{out:?}");
+        let sid = out.session_id.unwrap();
+        // raw 关闭回显：sleep 不读输入，master 写入缓冲打满后阻塞
+        // （单次 64KiB 大于 pty 缓冲；写入线程阻塞，主等待被取消打断）
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_thread = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            cancel_for_thread.store(true, Ordering::SeqCst);
+        });
+        let input = WriteStdinArgs::from_value(&json!({
+            "session_id": sid, "chars": "y".repeat(64 * 1024), "yield_time_ms": 5000
+        }))
+        .unwrap();
+        let started = Instant::now();
+        let r = mgr.interact(&input, Some(&cancel)).result;
+        assert!(started.elapsed() < Duration::from_secs(3), "取消必须及时结束等待");
+        assert_eq!(r.status, ExecStatus::Cancelled, "{r:?}");
+        assert_eq!(r.session_id.as_deref(), Some(sid.as_str()), "进程保留");
+        // 进程仍在：取消后可终止（慢 runner 回收超窗按句柄保留语义重试）
+        let r = terminate_until_terminal(&mgr, &sid);
+        assert_eq!(r.status, ExecStatus::Terminated, "{r:?}");
     });
-    let input = WriteStdinArgs::from_value(&json!({
-        "session_id": sid, "chars": "y".repeat(64 * 1024), "yield_time_ms": 5000
-    }))
-    .unwrap();
-    let started = Instant::now();
-    let r = mgr.interact(&input, Some(&cancel)).result;
-    assert!(started.elapsed() < Duration::from_secs(3), "取消必须及时结束等待");
-    assert_eq!(r.status, ExecStatus::Cancelled, "{r:?}");
-    assert_eq!(r.session_id.as_deref(), Some(sid.as_str()), "进程保留");
-    // 进程仍在：取消后可终止（慢 runner 回收超窗按句柄保留语义重试）
-    let r = terminate_until_terminal(&mgr, &sid);
-    assert_eq!(r.status, ExecStatus::Terminated, "{r:?}");
 }
 
 // ---------- 容量与所有权 ----------
@@ -1212,6 +1243,7 @@ fn exited_undrained_session_still_occupies_capacity() {
 /// 接收侧 cnt 其后的增长只是内核缓冲排空，不计为新发送。
 #[test]
 fn pty_cancel_stops_further_input_submission() {
+    with_dll_init_retry("pty_cancel_stops_further_input_submission", || {
     let dir = temp_dir("pty-cancel-stop");
     let data = dir.join("data.bin");
     let cnt = dir.join("cnt");
@@ -1386,12 +1418,14 @@ fn pty_cancel_stops_further_input_submission() {
     assert_eq!(mgr.interact(&term, None).result.status, ExecStatus::Terminated);
     mgr.close();
     let _ = std::fs::remove_dir_all(&dir);
+    });
 }
 
 /// 016：向不读输入的 PTY 程序写入且不取消——写入等待窗口到期后如实返回
 /// 运行中（不报错、不阻塞宿主），进程保留，随后可终止。
 #[test]
 fn pty_write_window_expiry_returns_running_for_nonreading_program() {
+    with_dll_init_retry("pty_write_window_expiry_returns_running_for_nonreading_program", || {
     let mgr = ProcessManager::new();
     // 038 Windows：stty/sleep 为 sh 设施——等价「不读输入的常驻程序」＝
     // PowerShell 睡眠（无 [Console] 读操作＝不消费输入）。
@@ -1426,4 +1460,5 @@ fn pty_write_window_expiry_returns_running_for_nonreading_program() {
     // 进程保留，随后明确终止成功
     let term = WriteStdinArgs::from_value(&json!({ "session_id": sid, "terminate": true })).unwrap();
     assert_eq!(mgr.interact(&term, None).result.status, ExecStatus::Terminated);
+    });
 }
