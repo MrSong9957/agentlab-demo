@@ -371,7 +371,7 @@ impl McpManager {
                         new_connections.push(connection.clone());
                     }
                     let mut inner = self.lock();
-        inner.snapshot_cache = None;
+                    inner.snapshot_cache = None;
                     if let Some(server) = inner.servers.iter_mut().find(|s| s.id == id) {
                         server.connection = Some(connection);
                         server.listing = Some(Arc::new(listing));
@@ -389,7 +389,7 @@ impl McpManager {
                 }
                 Err(PrepError::Failed(reason)) => {
                     let mut inner = self.lock();
-        inner.snapshot_cache = None;
+                    inner.snapshot_cache = None;
                     if let Some(server) = inner.servers.iter_mut().find(|s| s.id == id) {
                         server.connection = None;
                         server.listing = None;
@@ -504,7 +504,7 @@ impl McpManager {
         // 新连接失败不回用旧配置。
         let old: Vec<Arc<McpConnection>> = {
             let mut inner = self.lock();
-        inner.snapshot_cache = None;
+            inner.snapshot_cache = None;
             inner
                 .servers
                 .drain(..)
@@ -516,7 +516,7 @@ impl McpManager {
         }
         {
             let mut inner = self.lock();
-        inner.snapshot_cache = None;
+            inner.snapshot_cache = None;
             inner.load_error = None;
             inner.loaded = true;
             inner.servers = file
@@ -547,7 +547,7 @@ impl McpManager {
                 Ok((connection, listing, unknown, excluded)) => {
                     let connection = Arc::new(connection);
                     let mut inner = self.lock();
-        inner.snapshot_cache = None;
+                    inner.snapshot_cache = None;
                     if let Some(server) = inner.servers.iter_mut().find(|s| s.id == id) {
                         server.connection = Some(connection);
                         server.listing = Some(Arc::new(listing));
@@ -558,7 +558,7 @@ impl McpManager {
                 Err(PrepError::Cancelled) => unreachable!("reload 不响应取消"),
                 Err(PrepError::Failed(reason)) => {
                     let mut inner = self.lock();
-        inner.snapshot_cache = None;
+                    inner.snapshot_cache = None;
                     if let Some(server) = inner.servers.iter_mut().find(|s| s.id == id) {
                         server.connection = None;
                         server.listing = None;
@@ -580,7 +580,7 @@ impl McpManager {
         let _operate = self.operate.lock().unwrap_or_else(|e| e.into_inner());
         let old: Vec<Arc<McpConnection>> = {
             let mut inner = self.lock();
-        inner.snapshot_cache = None;
+            inner.snapshot_cache = None;
             inner
                 .servers
                 .iter_mut()
