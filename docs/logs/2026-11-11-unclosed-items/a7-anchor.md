@@ -45,3 +45,8 @@ env -u TCHAT_SANDBOX cargo test --test js_orchestration \
   large_leaf_result_through_writer_thread_arrives_intact
 ```
 （`TCHAT_SANDBOX` 既有约定：compose 注入 =1，测试一律 `env -u`。）
+
+## CI 首验
+
+随提交 404198b 进入分支，run 3（43134862237）ubuntu 腿全量 ✅ success
+（第 4 连绿）——锚在 CI 环境真实执行并通过。
