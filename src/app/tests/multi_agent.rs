@@ -1115,9 +1115,15 @@ fn c15_persist_failure_spawn_rejected() {
     })];
     // 一个超限行让保存停用：先在会话中制造 64 MiB 行——代价太高；改用
     // Disabled 状态直接注入：on_history 失败后 state=Disabled 的路径等价于
-    // 用 /dev/full 不可行（Linux 特性）——这里以「会话目录不可写」实现：
-    // /dev/null 下不可建目录（ENOTDIR 对 root 也成立）——确定性 Disabled。
-    let locked_dir = std::path::PathBuf::from("/dev/null/035-locked-sessions");
+    // 用 /dev/full 不可行（Linux 特性）——这里以「会话目录不可写」实现。
+    // 038 Windows 实测（43139153907）：/dev/null 子路径注入为 unix 专属
+    // （Windows 上是可创建的普通路径＝保存成功不触发 Disabled＝error Null）
+    // ——改跨平台等价物：先建同名「文件」再充当会话目录＝在其下建目录必败
+    // （同名文件已存在），任何平台确定性 Disabled。
+    let locked_dir = std::env::temp_dir().join(format!("tchat-c15-{}-locked", std::process::id()));
+    let _ = std::fs::remove_dir_all(&locked_dir);
+    let _ = std::fs::remove_file(&locked_dir);
+    std::fs::write(&locked_dir, b"not a directory").expect("c15 占位文件");
     let session = Arc::new(Mutex::new(Session::new(locked_dir.clone())));
     let manager = Arc::new(AgentManager::new());
     let mut sender = RootSender::new(vec![
@@ -1173,6 +1179,8 @@ fn c15_persist_failure_spawn_rejected() {
         "保存失败不启动：{spawn_result}"
     );
     wait_slots_drained();
+    // 收尾：占位「文件」按文件删除（remove_dir 对文件形态失败）
+    let _ = std::fs::remove_file(&locked_dir);
 }
 
 // ===== C05：send 不启动空闲；终文竞态由邮箱门裁决 =====

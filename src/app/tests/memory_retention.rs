@@ -171,7 +171,16 @@ fn resources_filename_boundary_instructions_and_notes() {
     // 验证该边界，小写删除面由 exact/recent 覆盖。
     let case_insensitive = cfg!(windows) || cfg!(target_os = "macos");
     let case_twin = if case_insensitive {
-        vec!["2023-10-31T22-13-19-old.MD"]
+        // 大小写不敏感 FS：old.md 与 old.MD 同一实体——以 .MD 形态建「非精确
+        // .md 不删」边界；其余保留集（exact/recent/invalid×2）照常写入。
+        // 038 win/mac 实测（43139153907）：漏写保留集致下方 keep 断言必败。
+        vec![
+            "2023-10-31T22-13-19-old.MD",
+            exact,
+            recent,
+            "invalid.md",
+            "2023-02-30T22-13-20-invalid.md",
+        ]
     } else {
         vec![old, exact, recent, "invalid.md", "2023-02-30T22-13-20-invalid.md", "2023-10-31T22-13-19-old.MD"]
     };

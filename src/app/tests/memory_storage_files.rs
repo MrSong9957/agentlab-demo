@@ -375,10 +375,21 @@ fn m4_a13_m3_parse_store_export_redacts_body_and_exact_slug_projection() {
     let input = Stage1FileInput::from_row(row, path.clone(), "/fixture/project".into(), None).unwrap();
     let db = e.db_bytes();
     sync_stage1_snapshot(&e.root, &[input], &mut |_| {}).unwrap();
+    // 038 Windows：产品侧路径归一（canonical 长名）与夹具词法形态（RUNNER~1
+    // 短名）可能不同——两形态都归一为 /fixture（迭代 32 result_json 同款先例）。
+    let tmp_lex = e.tmp.path().to_str().unwrap().to_string();
+    let tmp_long = std::fs::canonicalize(e.tmp.path())
+        .ok()
+        .and_then(|p| p.to_str().map(String::from))
+        .map(|s| s.strip_prefix(r"\\?\").map(String::from).unwrap_or(s));
     let actual: BTreeMap<_, _> = files(&e.root).into_iter().map(|(name, bytes)| {
         assert!(!name.contains(secret));
         let content = String::from_utf8(bytes).unwrap(); assert!(!content.contains(secret));
-        (name, content.replace(e.tmp.path().to_str().unwrap(), "/fixture").into_bytes())
+        let mut c = content.replace(&tmp_lex, "/fixture");
+        if let Some(long) = &tmp_long {
+            c = c.replace(long, "/fixture");
+        }
+        (name, c.into_bytes())
     }).collect();
     assert_eq!(actual, BTreeMap::from([
         ("raw_memories.md".into(), gold("a13_raw.md")),
