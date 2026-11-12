@@ -226,7 +226,10 @@ fn tls_https_round_trip_with_injected_root() {
         move |b| {
             let mut cfg = config.clone();
             cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
-            b.tls_backend_preconfigured(cfg)
+            // 038 取证（43182730985 load_error：「error sending request」）：
+            // win runner 的系统代理会拦截 127.0.0.1 请求（ubuntu 无代理故绿）
+            // ——本地回环自签测试不走代理（产品代理行为不变）。
+            b.no_proxy().tls_backend_preconfigured(cfg)
         },
     ));
     let (url, shutdown) = start_tls_server();

@@ -852,23 +852,41 @@ fn reset_closes_old_and_allows_fresh_start() {
 #[test]
 fn big_dual_stream_completes_and_truncates() {
     let mgr = ProcessManager::new();
+    // 038 Windows：for /l 逐行 echo 在 runner 上每行 ~10-20ms（43182730985：
+    // 2000 行输出停在 959 行即窗耗尽）——改为「预写文件＋type 连续输出」
+    // 形态：单命令内核拷贝秒级完成；两流（stdout+stderr 各一文件）仍超管道
+    // 缓冲、前缀断言与截断上限不变（契约等价，行内容同 seq_lines 形态）。
+    let dir = temp_dir("big-dual");
+    let f1 = dir.join("s1.txt");
+    let f2 = dir.join("s2.txt");
+    let mut content1 = String::new();
+    let mut content2 = String::new();
+    for i in 1..=20_000 {
+        content1.push_str(&format!("{i}\r\n"));
+        content2.push_str(&format!("{i}\r\n"));
+    }
+    fs::write(&f1, &content1).unwrap();
+    fs::write(&f2, &content2).unwrap();
     let args = ExecArgs::from_value(&json!({
-        // 平台等价：Windows for /l 逐行 echo 慢于 seq，行数缩放为 4000×2
-        // （038 win 实测 12000 行在 runner 上超 85s——43175442613 输出停在
-        // 3798 行；两流仍超管道缓冲、前缀断言与截断上限不变）
-        "cmd": cmd_builder::seq(&[
-            cmd_builder::seq_lines(if cfg!(windows) { 2_000 } else { 60_000 }, false),
-            cmd_builder::seq_lines(if cfg!(windows) { 2_000 } else { 60_000 }, true),
-        ]),
-        // 038 Windows：4000 行 for /l 逐行 echo 在 runner 上超出 5s——
-        // 生成窗口放宽（完成＋截断契约不变）
+        "cmd": if cfg!(windows) {
+            cmd_builder::seq(&[
+                format!("type {}", f1.display()),
+                format!("type {} 1>&2", f2.display()),
+            ])
+        } else {
+            cmd_builder::seq(&[
+                cmd_builder::seq_lines(60_000, false),
+                cmd_builder::seq_lines(60_000, true),
+            ])
+        },
+        // 038 Windows：type 连续输出 40 万字节仍超 5s 生成窗——放宽
+        // （完成＋截断契约不变）
         "yield_time_ms": if cfg!(windows) { 25_000 } else { 5_000 },
         "max_output_chars": 5000,
     }))
     .unwrap();
     let out = mgr.start(&args, None);
-    // 038 Windows runner：12000 行两流生成可超 25s 等待窗（Running 形态，
-    // 43139153907）——轮询到完成（有界；完成+截断契约不变）。
+    // 038 Windows runner：超窗轮询到完成（有界；完成+截断契约不变）。
     let mut r = out.result;
     let poll_deadline = Instant::now() + Duration::from_secs(60);
     while r.status == ExecStatus::Running && Instant::now() < poll_deadline {
@@ -879,6 +897,7 @@ fn big_dual_stream_completes_and_truncates() {
     assert!(r.truncated, "超码点上限标记截断");
     assert!(r.output.chars().count() <= 5000);
     assert!(cmd_builder::normalize(&r.output).starts_with("1\n2\n"), "保留前缀");
+    let _ = fs::remove_dir_all(&dir);
 }
 
 /// 超过 1 MiB 待取缓存的输出：仍能完成并返回有界输出（头尾保留语义由

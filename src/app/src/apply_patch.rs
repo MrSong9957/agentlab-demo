@@ -1299,16 +1299,23 @@ fn write_via_validated_fd(
     };
     if wh == INVALID_HANDLE_VALUE {
         let e = std::io::Error::last_os_error();
-        // [os87-diag]（038 取证，暂驻）
+        // [os87-diag]（038 取证，暂驻）：internal-apply 跑在子进程，stderr
+        // 不进测试捕获——步骤标记随错误文案进入 result.error（取证后还原）。
         eprintln!("[os87-diag] ReOpenFile failed: {e} raw={:?}", e.raw_os_error());
-        return Err(e);
+        return Err(std::io::Error::other(format!(
+            "step=reopen {e} raw={:?}",
+            e.raw_os_error()
+        )));
     }
     let mut w = unsafe { std::fs::File::from_raw_handle(wh) };
     // 同一文件对象共享 CurrentByteOffset（读后位于 EOF）；写前归零。
     if let Err(e) = w.seek(std::io::SeekFrom::Start(0)) {
-        // [os87-diag]（038 取证，暂驻）
+        // [os87-diag]（038 取证，暂驻）：step 标记随错误文案进入 result.error
         eprintln!("[os87-diag] seek failed: {e} raw={:?}", e.raw_os_error());
-        return Err(e);
+        return Err(std::io::Error::other(format!(
+            "step=seek {e} raw={:?}",
+            e.raw_os_error()
+        )));
     }
     // 纵深防御：写句柄须与读入句柄为同一文件对象（身份一致）且仍为常规文件。
     if fd_inode(&w) != fd_inode(read_fd) || !fd_is_regular(&w) {
@@ -1318,9 +1325,12 @@ fn write_via_validated_fd(
         ));
     }
     if let Err(e) = w.write_all(data) {
-        // [os87-diag]（038 取证，暂驻）
+        // [os87-diag]（038 取证，暂驻）：step 标记随错误文案进入 result.error
         eprintln!("[os87-diag] write failed: {e} raw={:?}", e.raw_os_error());
-        return Err(e);
+        return Err(std::io::Error::other(format!(
+            "step=write {e} raw={:?}",
+            e.raw_os_error()
+        )));
     }
     Ok(())
 }
