@@ -253,6 +253,53 @@ fn pure_js_text_output_completes() {
     assert_eq!(kinds.iter().filter(|k| **k == EventKind::CellStarted).count(), 1);
 }
 
+/// A7 写线程端到端行为锚（testing_gaps 登记项，批 5 审查 R2 登记）：大结果
+/// （250KiB，≈3.9× 管道容量 64KiB；桥接上限 262144 字节内的最大量级）经
+/// reply_leaf → stdin 写线程 → worker 真实管道不丢帧不损坏。worker 侧对
+/// 收到的字符串做长度＋FNV-1a 摘要回传，宿主以同源摘要对照——帧长前缀
+/// 错位、截断、损坏任一发生即失配或 ReaderDead（cell Failed）。
+#[test]
+fn large_leaf_result_through_writer_thread_arrives_intact() {
+    let payload: String = (0..250_000)
+        .map(|i| (b'a' + (i % 26) as u8) as char)
+        .collect();
+    let result_json = serde_json::json!({ "s": payload }).to_string();
+    let dispatcher = MapDispatcher::new(&[("big", &result_json)]);
+    let mut sink = RecordingSink::new();
+    let cfg = config(
+        r#"
+        const r = await tools.big({});
+        let h = 2166136261;
+        for (let i = 0; i < r.s.length; i++) {
+            h ^= r.s.charCodeAt(i);
+            h = Math.imul(h, 16777619) >>> 0;
+        }
+        text("LEN=" + r.s.length + " DIGEST=" + h.toString(16));
+        "done";
+    "#,
+        vec![catalog_entry("big", false)],
+        dispatcher,
+        turn_budget(),
+    );
+    let empty_history: Vec<terminal_chat::prompt::HistoryItem> = Vec::new();
+    let mut cell = spawn_cell(&cfg, &mut sink, &empty_history).expect("spawn");
+    let observation = drive_to_terminal(&mut cell, &mut sink);
+    assert_eq!(observation.status, CellStatus::Completed, "{observation:?}");
+    assert!(observation.ok);
+    let mut h: u32 = 2166136261;
+    for b in payload.bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(16777619);
+    }
+    let expected = format!("LEN=250000 DIGEST={h:x}");
+    assert_eq!(
+        observation.output,
+        vec![expected],
+        "250KiB 结果经写线程到达 worker 后须逐字节一致"
+    );
+    assert!(cell.is_closed(), "终态交付后句柄释放");
+}
+
 /// S36/P1-3：保存失败不占序号——call_finished 拒绝后，关闭事件的 seq
 /// 复用同一号（无空洞；修复前若失败也递增则 closed.seq=3）。
 #[test]
