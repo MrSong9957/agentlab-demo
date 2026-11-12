@@ -465,6 +465,10 @@ fn a12_session_expired_404_fails_without_reinit_replay() {
         }
     }));
     let ctx = setup_http("", server);
+    // [diag]（038 win-2025 取证，暂驻）：工具缺失时透出装载/连接错误面
+    if ctx.snapshot.entry("mcp__web__search").is_none() {
+        panic!(" 工具未发现：status={:?}", ctx.manager.status_lines());
+    }
     let entry = ctx.snapshot.entry("mcp__web__search").unwrap();
     let (result, failed) = ctx.manager.call(
         &entry,

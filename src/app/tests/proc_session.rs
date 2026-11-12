@@ -447,15 +447,6 @@ fn deadline_survives_cancel() {
 
 // ---------- 输入与控制（PTY） ----------
 
-/// 真实 PTY 可交互：程序检测到终端、发出提示；发送回答（含换行）后继续执行。
-    // 038 Windows §5 用例级门控（偏离登记，非静默跳过；linux/mac 继续运行）：
-    // GitHub hosted Windows runner（windows-2022 镜像）环境下 ConPTY×外部
-    // 解释器（powershell/python）启动确定性崩溃 0xC0000142——插桩实证
-    // （43216678614）：读链 0 字节、exit=Some(-1073741502)、多轮 100% 复现、
-    // spawn/整测试两级重试均无效；runner-images#10008 已知问题族
-    // （desktop heap／会话资源）。产品 ConPTY 管线在真实终端（用户机器）
-    // 已由迭代 35 CI 实证工作——本限制为 runner 托管环境特征。
-#[cfg(not(windows))]
 #[test]
 fn pty_interactive_read_answer() {
     with_dll_init_retry("pty_interactive_read_answer", || {
@@ -489,15 +480,6 @@ fn pty_interactive_read_answer() {
     });
 }
 
-/// PTY 中程序确认 isatty。
-    // 038 Windows §5 用例级门控（偏离登记，非静默跳过；linux/mac 继续运行）：
-    // GitHub hosted Windows runner（windows-2022 镜像）环境下 ConPTY×外部
-    // 解释器（powershell/python）启动确定性崩溃 0xC0000142——插桩实证
-    // （43216678614）：读链 0 字节、exit=Some(-1073741502)、多轮 100% 复现、
-    // spawn/整测试两级重试均无效；runner-images#10008 已知问题族
-    // （desktop heap／会话资源）。产品 ConPTY 管线在真实终端（用户机器）
-    // 已由迭代 35 CI 实证工作——本限制为 runner 托管环境特征。
-#[cfg(not(windows))]
 #[test]
 fn pty_child_sees_terminal() {
     let mgr = ProcessManager::new();
@@ -747,15 +729,6 @@ fn pipe_ctrl_c_interrupts_and_terminate_kills_ignoring_process() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// 单次输入上限：恰 64 KiB 通过并由程序完整收到；超限整次拒绝、零写入。
-    // 038 Windows §5 用例级门控（偏离登记，非静默跳过；linux/mac 继续运行）：
-    // GitHub hosted Windows runner（windows-2022 镜像）环境下 ConPTY×外部
-    // 解释器（powershell/python）启动确定性崩溃 0xC0000142——插桩实证
-    // （43216678614）：读链 0 字节、exit=Some(-1073741502)、多轮 100% 复现、
-    // spawn/整测试两级重试均无效；runner-images#10008 已知问题族
-    // （desktop heap／会话资源）。产品 ConPTY 管线在真实终端（用户机器）
-    // 已由迭代 35 CI 实证工作——本限制为 runner 托管环境特征。
-#[cfg(not(windows))]
 #[test]
 fn input_limit_exact_passes_over_limit_rejects_with_zero_write() {
     with_dll_init_retry("input_limit_exact_passes_over_limit_rejects_with_zero_write", || {
@@ -801,15 +774,6 @@ fn input_limit_exact_passes_over_limit_rejects_with_zero_write() {
     });
 }
 
-/// 向不读输入的 PTY 程序写入：等待可取消，不阻塞整个宿主；进程保留。
-    // 038 Windows §5 用例级门控（偏离登记，非静默跳过；linux/mac 继续运行）：
-    // GitHub hosted Windows runner（windows-2022 镜像）环境下 ConPTY×外部
-    // 解释器（powershell/python）启动确定性崩溃 0xC0000142——插桩实证
-    // （43216678614）：读链 0 字节、exit=Some(-1073741502)、多轮 100% 复现、
-    // spawn/整测试两级重试均无效；runner-images#10008 已知问题族
-    // （desktop heap／会话资源）。产品 ConPTY 管线在真实终端（用户机器）
-    // 已由迭代 35 CI 实证工作——本限制为 runner 托管环境特征。
-#[cfg(not(windows))]
 #[test]
 fn blocked_input_is_cancellable_and_session_kept() {
     with_dll_init_retry("blocked_input_is_cancellable_and_session_kept", || {
@@ -1274,21 +1238,6 @@ fn exited_undrained_session_still_occupies_capacity() {
 }
 
 
-/// 016 验收（三轮强化）：PTY 阻塞写入的取消——以**发送侧真实进度**
-/// （`session_input_written`：写线程每块成功送出的累计字节）证明写操作
-/// 已进入等待：读端收满 1024 字节后停止读取，发送侧进度随之冻结
-/// （两次采样相等且远小于 64 KiB＝正在等待底层输入通道接受数据；内核实测
-/// 无读端时主设备仅接受约 11.5 KiB）；此刻取消。
-/// 发送侧与接收侧进度分别断言：取消后**新发送**字节≤一个在途分块；
-/// 接收侧 cnt 其后的增长只是内核缓冲排空，不计为新发送。
-    // 038 Windows §5 用例级门控（偏离登记，非静默跳过；linux/mac 继续运行）：
-    // GitHub hosted Windows runner（windows-2022 镜像）环境下 ConPTY×外部
-    // 解释器（powershell/python）启动确定性崩溃 0xC0000142——插桩实证
-    // （43216678614）：读链 0 字节、exit=Some(-1073741502)、多轮 100% 复现、
-    // spawn/整测试两级重试均无效；runner-images#10008 已知问题族
-    // （desktop heap／会话资源）。产品 ConPTY 管线在真实终端（用户机器）
-    // 已由迭代 35 CI 实证工作——本限制为 runner 托管环境特征。
-#[cfg(not(windows))]
 #[test]
 fn pty_cancel_stops_further_input_submission() {
     with_dll_init_retry("pty_cancel_stops_further_input_submission", || {
@@ -1469,16 +1418,6 @@ fn pty_cancel_stops_further_input_submission() {
     });
 }
 
-/// 016：向不读输入的 PTY 程序写入且不取消——写入等待窗口到期后如实返回
-/// 运行中（不报错、不阻塞宿主），进程保留，随后可终止。
-    // 038 Windows §5 用例级门控（偏离登记，非静默跳过；linux/mac 继续运行）：
-    // GitHub hosted Windows runner（windows-2022 镜像）环境下 ConPTY×外部
-    // 解释器（powershell/python）启动确定性崩溃 0xC0000142——插桩实证
-    // （43216678614）：读链 0 字节、exit=Some(-1073741502)、多轮 100% 复现、
-    // spawn/整测试两级重试均无效；runner-images#10008 已知问题族
-    // （desktop heap／会话资源）。产品 ConPTY 管线在真实终端（用户机器）
-    // 已由迭代 35 CI 实证工作——本限制为 runner 托管环境特征。
-#[cfg(not(windows))]
 #[test]
 fn pty_write_window_expiry_returns_running_for_nonreading_program() {
     with_dll_init_retry("pty_write_window_expiry_returns_running_for_nonreading_program", || {
