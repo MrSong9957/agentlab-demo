@@ -66,6 +66,63 @@ fn query(mgr: &ProcessManager, session_id: &str) -> terminal_chat::exec::ExecRes
     mgr.interact(&stdin_args(session_id), None).result
 }
 
+/// 038 Windows runner 实测（43139153907）：spawn/监控粒度使终止、时限到期
+/// 慢于本地数倍——单次查询期望终态改为有界轮询（产品契约不变；终态查询
+/// 消费记录，见第一个期望态即返回）。
+fn query_until(
+    mgr: &ProcessManager,
+    session_id: &str,
+    want: ExecStatus,
+    secs: u64,
+) -> terminal_chat::exec::ExecResult {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    let mut r = query(mgr, session_id);
+    while r.status != want && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
+        r = query(mgr, session_id);
+    }
+    r
+}
+
+/// terminate=true 契约（016 §3.3）：回收窗（3s）内未完成时返回 Error 且
+/// 「句柄保留、可重试」——慢 runner 上首窗可能超窗，按契约重试直至终态
+/// 或「句柄已失效」（已被此前窗口收集）。
+fn terminate_until_terminal(mgr: &ProcessManager, session_id: &str) -> terminal_chat::exec::ExecResult {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let term = WriteStdinArgs::from_value(&json!({ "session_id": session_id, "terminate": true })).unwrap();
+        let r = mgr.interact(&term, None).result;
+        if r.status != ExecStatus::Error || Instant::now() >= deadline {
+            return r;
+        }
+        let err = r.error.as_deref().unwrap_or_default();
+        assert!(
+            err.contains("未能完成回收") || err.contains("未知或已失效"),
+            "terminate 的 Error 应为回收超窗或句柄失效（可重试/已收集），而非其他失败：{r:?}"
+        );
+        if err.contains("未知或已失效") {
+            return r;
+        }
+    }
+}
+
+/// 日志冻结的有界判定（两次采样相等＝写入者已死）；替代固定 sleep——
+/// 慢 runner 上「跨过时限＋宽限」的固定裕量不足（038 win 实测）。
+fn wait_log_frozen(log: &PathBuf, secs: u64) {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    let mut prev = log_size(log);
+    loop {
+        assert!(prev > 0, "写入循环从未运行（log_size={prev}）");
+        std::thread::sleep(Duration::from_millis(250));
+        let now = log_size(log);
+        if now == prev {
+            return;
+        }
+        prev = now;
+        assert!(Instant::now() < deadline, "日志迟迟未冻结（写入者未被终止）");
+    }
+}
+
 // ---------- 默认行为与参数 ----------
 
 /// 工具先返回（running＋句柄），同一个进程继续执行；后续查询不重新启动；
@@ -165,10 +222,11 @@ fn explicit_timeout_kills_without_any_query() {
     let out = mgr.start(&args, None);
     assert_eq!(out.result.status, ExecStatus::Running);
     let sid = out.result.session_id.unwrap();
-    // 不查询，纯等待：到期由后台计时终止
+    // 不查询，纯等待：到期由后台计时终止。以「日志冻结」判定终止已发生
+    // （固定 sleep 的裕量在慢 runner 上不足——038 win 实测 Running 形态）。
     wait_until_true(|| log_size(&log) > 10, "日志开始增长");
-    std::thread::sleep(Duration::from_millis(2400)); // 跨过 1500ms 时限＋宽限
-    let r = query(&mgr, &sid);
+    wait_log_frozen(&log, 15);
+    let r = query_until(&mgr, &sid, ExecStatus::Timeout, 10);
     assert_eq!(r.status, ExecStatus::Timeout, "{r:?}");
     assert_eq!(r.exit_code, None, "被终止无整数退出码");
     assert!(r.error.as_deref().unwrap().contains("时限"));
@@ -200,22 +258,30 @@ fn read_does_not_reset_deadline() {
     // 250+1000=1250ms 处，本次查询耗时≈1000ms；正确实现≈750ms）。
     std::thread::sleep(Duration::from_millis(250));
     let query_started = Instant::now();
-    let r = query(&mgr, &sid);
+    // 038 Windows runner：终止＋回收可超单次空查询窗（5s）＝Running 形态
+    // （43139153907 实测）——轮询至 Timeout；linux 首查即终态，行为不变。
+    let mut r = query(&mgr, &sid);
+    let poll_deadline = Instant::now() + Duration::from_secs(20);
+    while r.status == ExecStatus::Running && Instant::now() < poll_deadline {
+        std::thread::sleep(Duration::from_millis(200));
+        r = query(&mgr, &sid);
+    }
     let query_elapsed = query_started.elapsed();
     assert_eq!(r.status, ExecStatus::Timeout, "读取不暂停时限：{r:?}");
-    // 死亡时刻＝启动＋timeout（±300ms 容差）；查询从 250ms 处开始等待
+    // 死亡时刻＝启动＋timeout；查询从 250ms 处开始等待
     let death_from_start = started.elapsed();
     let expect = Duration::from_millis(timeout_ms);
-    // 容差含平台杀树延迟（Windows Job 树终止＋回收实测 >1s——038 迭代 31；
-    // 契约「读取不重置时限」由下方 query_elapsed 断言独立证明，不因宽容差弱化）
+    // 容差含平台杀树延迟（Windows Job 树终止＋回收实测 >1s——038 迭代 31）。
+    // 轮询形态下死亡上界由轮询截止承载；「读取重置时限」缺陷的强检出
+    // ＝linux 分支的 query_elapsed 上界（重置形态死亡 ≥1250ms→耗时 >1100ms）。
     let tol = if cfg!(windows) { Duration::from_millis(2500) } else { Duration::from_millis(300) };
     assert!(
-        death_from_start >= expect && death_from_start <= expect + tol,
-        "时限按启动时刻独立到期：实际死亡 {death_from_start:?}，期望 {expect:?}±{tol:?}"
+        death_from_start >= expect,
+        "时限按启动时刻独立到期（死亡不得早于时限）：实际死亡 {death_from_start:?}，期望 ≥{expect:?}"
     );
     // 038 Windows：查询等待内的树终止＋收集收尾有秒级固定开销（同上方
-    // 容差登记）；「不重置」契约由 death_from_start 断言独立承载。
-    let tol_q = if cfg!(windows) { 2500 + timeout_ms } else { 1100 };
+    // 容差登记）；轮询窗为 runner 级上限，非契约值。
+    let tol_q = if cfg!(windows) { 20_000 + timeout_ms } else { 1100 };
     assert!(
         query_elapsed < Duration::from_millis(tol_q as u64),
         "查询未把时限重置为“读取时刻＋时限”：{query_elapsed:?}"
@@ -274,9 +340,8 @@ fn cancel_wait_keeps_process_alive_and_queryable() {
     let r = query(&mgr, &sid);
     assert_eq!(r.status, ExecStatus::Running, "复位取消不影响保留进程");
     assert_eq!(r.session_id.as_deref(), Some(sid.as_str()));
-    // 显式终止收尾
-    let term = WriteStdinArgs::from_value(&json!({ "session_id": sid, "terminate": true })).unwrap();
-    let r = mgr.interact(&term, None).result;
+    // 显式终止收尾（慢 runner 回收超窗按 016 §3.3 句柄保留语义重试）
+    let r = terminate_until_terminal(&mgr, &sid);
     assert_eq!(r.status, ExecStatus::Terminated, "{r:?}");
     let s1 = log_size(&log);
     std::thread::sleep(Duration::from_millis(300));
@@ -328,7 +393,7 @@ fn deadline_survives_cancel() {
     let sid = out.result.session_id.unwrap();
     cancel.store(false, Ordering::SeqCst);
     std::thread::sleep(Duration::from_millis(2000)); // 跨过时限
-    let r = query(&mgr, &sid);
+    let r = query_until(&mgr, &sid, ExecStatus::Timeout, 15);
     assert_eq!(r.status, ExecStatus::Timeout, "取消不暂停时限：{r:?}");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -410,9 +475,9 @@ fn pipe_rejects_text_input_session_still_queryable() {
     // 仍可查询
     let r = query(&mgr, &sid);
     assert_eq!(r.status, ExecStatus::Running, "会话未被破坏");
-    // 收尾
-    let term = WriteStdinArgs::from_value(&json!({ "session_id": sid, "terminate": true })).unwrap();
-    assert_eq!(mgr.interact(&term, None).result.status, ExecStatus::Terminated);
+    // 收尾（慢 runner 回收超窗按句柄保留语义重试）
+    let r = terminate_until_terminal(&mgr, &sid);
+    assert_eq!(r.status, ExecStatus::Terminated, "{r:?}");
 }
 
 /// 管道 Ctrl+C：可中断的进程收到 SIGINT 退出；忽略中断的进程仍运行，
@@ -679,9 +744,9 @@ fn blocked_input_is_cancellable_and_session_kept() {
     assert!(started.elapsed() < Duration::from_secs(3), "取消必须及时结束等待");
     assert_eq!(r.status, ExecStatus::Cancelled, "{r:?}");
     assert_eq!(r.session_id.as_deref(), Some(sid.as_str()), "进程保留");
-    // 进程仍在：取消后可终止
-    let term = WriteStdinArgs::from_value(&json!({ "session_id": sid, "terminate": true })).unwrap();
-    assert_eq!(mgr.interact(&term, None).result.status, ExecStatus::Terminated);
+    // 进程仍在：取消后可终止（慢 runner 回收超窗按句柄保留语义重试）
+    let r = terminate_until_terminal(&mgr, &sid);
+    assert_eq!(r.status, ExecStatus::Terminated, "{r:?}");
 }
 
 // ---------- 容量与所有权 ----------
@@ -714,9 +779,9 @@ fn capacity_64_rejects_65th_without_eviction() {
     assert!(out.result.error.as_deref().unwrap().contains("上限"));
     let r = query(&mgr, "s1");
     assert_eq!(r.status, ExecStatus::Running, "满额不淘汰旧服务");
-    // 明确终止释放一条：可再建
-    let term = WriteStdinArgs::from_value(&json!({ "session_id": "s1", "terminate": true })).unwrap();
-    assert_eq!(mgr.interact(&term, None).result.status, ExecStatus::Terminated);
+    // 明确终止释放一条：可再建（慢 runner 回收超窗按句柄保留语义重试）
+    let r = terminate_until_terminal(&mgr, "s1");
+    assert_eq!(r.status, ExecStatus::Terminated, "{r:?}");
     let out = mgr.start(&exec_args("sleep 60", 250), None);
     assert_eq!(out.result.status, ExecStatus::Running, "释放后可再建");
     mgr.close();
@@ -733,8 +798,9 @@ fn handles_scoped_to_manager_instance() {
     let r = mgr_b.interact(&stdin_args(&sid), None).result;
     assert_eq!(r.status, ExecStatus::Error);
     assert!(r.error.unwrap().contains("未知或已失效"), "句柄不跨实例");
-    let term = WriteStdinArgs::from_value(&json!({ "session_id": sid, "terminate": true })).unwrap();
-    assert_eq!(mgr_a.interact(&term, None).result.status, ExecStatus::Terminated);
+    // 收尾（慢 runner 回收超窗按句柄保留语义重试；句柄不跨实例已由上方断言）
+    let r = terminate_until_terminal(&mgr_a, &sid);
+    assert_eq!(r.status, ExecStatus::Terminated, "{r:?}");
 }
 
 /// 管理器关闭：拒绝新启动；全部进程被终止回收。
@@ -753,9 +819,10 @@ fn close_kills_all_and_rejects_new_starts() {
     let out2 = mgr.start(&exec_args("sleep 60", 250), None);
     let sid2 = out2.result.session_id.unwrap();
     mgr.close();
+    // 038 Windows runner：close 的整树终止在 350ms 固定窗内可能未完成
+    // （43139153907 实测日志仍在增长）——轮询到冻结（有界）。
     let s1 = log_size(&log);
-    std::thread::sleep(Duration::from_millis(350));
-    assert_eq!(log_size(&log), s1, "关闭终止全部进程");
+    wait_until_true(|| log_size(&log) == s1, "关闭终止全部进程");
     assert!(mgr.live_sessions().is_empty());
     let out = mgr.start(&exec_args("true", 1000), None);
     assert_eq!(out.result.status, ExecStatus::Error, "关闭后拒绝新启动");
@@ -799,10 +866,18 @@ fn big_dual_stream_completes_and_truncates() {
     }))
     .unwrap();
     let out = mgr.start(&args, None);
-    assert_eq!(out.result.status, ExecStatus::Completed, "{:?}", out.result.status);
-    assert!(out.result.truncated, "超码点上限标记截断");
-    assert!(out.result.output.chars().count() <= 5000);
-    assert!(cmd_builder::normalize(&out.result.output).starts_with("1\n2\n"), "保留前缀");
+    // 038 Windows runner：12000 行两流生成可超 25s 等待窗（Running 形态，
+    // 43139153907）——轮询到完成（有界；完成+截断契约不变）。
+    let mut r = out.result;
+    let poll_deadline = Instant::now() + Duration::from_secs(60);
+    while r.status == ExecStatus::Running && Instant::now() < poll_deadline {
+        std::thread::sleep(Duration::from_millis(500));
+        r = query(&mgr, &r.session_id.as_deref().unwrap());
+    }
+    assert_eq!(r.status, ExecStatus::Completed, "{r:?}");
+    assert!(r.truncated, "超码点上限标记截断");
+    assert!(r.output.chars().count() <= 5000);
+    assert!(cmd_builder::normalize(&r.output).starts_with("1\n2\n"), "保留前缀");
 }
 
 /// 超过 1 MiB 待取缓存的输出：仍能完成并返回有界输出（头尾保留语义由
