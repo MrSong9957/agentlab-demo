@@ -58,6 +58,28 @@ fn exec_args(cmd: &str, yield_ms: u64) -> ExecArgs {
     ExecArgs::from_value(&json!({ "cmd": cmd, "yield_time_ms": yield_ms })).unwrap()
 }
 
+/// 038 Windows runner 瞬态（038 迭代 35 归因；43195937333 再证）：powershell
+/// spawn 偶发 DLL 初始化失败＝`Completed + exit_code -1073741502
+/// (0xC0000142 STATUS_DLL_INIT_FAILED) + 无会话`——子进程启动期崩溃，与
+/// 产品代码无关。按「最小重试」口径在 spawn 点重试（换新会话）。
+fn start_with_transient_retry(
+    mgr: &ProcessManager,
+    args: &ExecArgs,
+    cancel: Option<&AtomicBool>,
+) -> terminal_chat::exec::ExecResult {
+    let mut out = mgr.start(args, cancel);
+    for _ in 0..3 {
+        let dll_init_failed = out.result.status == ExecStatus::Completed
+            && out.result.exit_code == Some(-1073741502)
+            && out.result.session_id.is_none();
+        if !dll_init_failed {
+            break;
+        }
+        out = mgr.start(args, cancel);
+    }
+    out.result
+}
+
 fn stdin_args(session_id: &str) -> WriteStdinArgs {
     WriteStdinArgs::from_value(&json!({ "session_id": session_id })).unwrap()
 }
@@ -417,10 +439,10 @@ fn pty_interactive_read_answer() {
         "tty": true,
     }))
     .unwrap();
-    let out = mgr.start(&args, None);
-    assert_eq!(out.result.status, ExecStatus::Running, "{:?}", out.result);
-    let sid = out.result.session_id.unwrap();
-    assert!(out.result.output.contains("NAME:"), "提示已收集：{:?}", out.result.output);
+    let out = start_with_transient_retry(&mgr, &args, None);
+    assert_eq!(out.status, ExecStatus::Running, "{out:?}");
+    let sid = out.session_id.unwrap();
+    assert!(out.output.contains("NAME:"), "提示已收集：{:?}", out.output);
     // 发送回答（显式换行）
     let input = WriteStdinArgs::from_value(&json!({
         "session_id": sid, "chars": "world\n", "yield_time_ms": 5000
@@ -449,13 +471,22 @@ fn pty_child_sees_terminal() {
         ExecArgs::from_value(&json!({ "cmd": cmd, "yield_time_ms": 10_000, "tty": tty })).unwrap()
     };
     let args = tty_probe(true);
-    let out = mgr.start(&args, None);
+    // 038 win 瞬态变体（43195937333）：ConPTY 下 powershell 偶发 Completed
+    // 但零输出（DLL 初始化失败的另一形态）——语义重试：输出不含任一探针
+    // 词即重来（换新会话）。
+    let mut out = mgr.start(&args, None);
+    for _ in 0..3 {
+        if out.result.output.contains("ISATTY") || out.result.output.contains("NOTTY") {
+            break;
+        }
+        out = mgr.start(&args, None);
+    }
     assert_eq!(out.result.status, ExecStatus::Completed);
     assert!(out.result.output.contains("ISATTY"), "{:?}", out.result.output);
     // 管道模式（tty=false）不是终端
-    let out = mgr.start(&tty_probe(false), None);
-    assert_eq!(out.result.status, ExecStatus::Completed);
-    assert!(out.result.output.contains("NOTTY"), "{:?}", out.result.output);
+    let out2 = start_with_transient_retry(&mgr, &tty_probe(false), None);
+    assert_eq!(out2.status, ExecStatus::Completed);
+    assert!(out2.output.contains("NOTTY"), "{:?}", out2.output);
 }
 
 /// 管道会话拒绝文字输入，但原会话仍可查询；仅 Ctrl+C（\u0003）以中断信号发送。
@@ -678,9 +709,9 @@ fn input_limit_exact_passes_over_limit_rejects_with_zero_write() {
         "tty": true,
     }))
     .unwrap();
-    let out = mgr.start(&args, None);
-    assert_eq!(out.result.status, ExecStatus::Running, "{:?}", out.result);
-    let sid = out.result.session_id.unwrap();
+    let out = start_with_transient_retry(&mgr, &args, None);
+    assert_eq!(out.status, ExecStatus::Running, "{out:?}");
+    let sid = out.session_id.unwrap();
     // ① 超限：参数层整次拒绝（不进入执行，无部分发送路径）
     let over = WriteStdinArgs::from_value(&json!({
         "session_id": sid, "chars": "x".repeat(64 * 1024 + 1)
@@ -724,9 +755,9 @@ fn blocked_input_is_cancellable_and_session_kept() {
         "cmd": cmd, "yield_time_ms": 250, "tty": true
     }))
     .unwrap();
-    let out = mgr.start(&args, None);
-    assert_eq!(out.result.status, ExecStatus::Running, "{:?}", out.result);
-    let sid = out.result.session_id.unwrap();
+    let out = start_with_transient_retry(&mgr, &args, None);
+    assert_eq!(out.status, ExecStatus::Running, "{out:?}");
+    let sid = out.session_id.unwrap();
     // raw 关闭回显：sleep 不读输入，master 写入缓冲打满后阻塞
     // （单次 64KiB 大于 pty 缓冲；写入线程阻塞，主等待被取消打断）
     let cancel = Arc::new(AtomicBool::new(false));
@@ -1230,9 +1261,9 @@ fn pty_cancel_stops_further_input_submission() {
         "cmd": cmd, "yield_time_ms": 5000, "tty": true
     }))
     .unwrap();
-    let out = mgr.start(&args, None);
-    assert_eq!(out.result.status, ExecStatus::Running, "{:?}", out.result);
-    let sid = out.result.session_id.unwrap();
+    let out = start_with_transient_retry(&mgr, &args, None);
+    assert_eq!(out.status, ExecStatus::Running, "{out:?}");
+    let sid = out.session_id.unwrap();
 
     // 交互线程：写入 64 KiB（读端已停止——发送侧必然阻塞于内核容量）
     let cancel = Arc::new(AtomicBool::new(false));
@@ -1375,9 +1406,9 @@ fn pty_write_window_expiry_returns_running_for_nonreading_program() {
         "tty": true,
     }))
     .unwrap();
-    let out = mgr.start(&args, None);
-    assert_eq!(out.result.status, ExecStatus::Running, "{:?}", out.result);
-    let sid = out.result.session_id.unwrap();
+    let out = start_with_transient_retry(&mgr, &args, None);
+    assert_eq!(out.status, ExecStatus::Running, "{out:?}");
+    let sid = out.session_id.unwrap();
     // 64 KiB 写入、等待窗口 250ms：程序不读输入 → 窗口到期如实返回运行中
     let input = WriteStdinArgs::from_value(&json!({
         "session_id": sid, "chars": "x".repeat(64 * 1024), "yield_time_ms": 250
