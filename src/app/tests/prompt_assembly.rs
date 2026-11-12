@@ -336,9 +336,7 @@ fn s9_blank_input_rejected() {
 
 // ---------- 019：view_image 图片附件投影与工具声明 ----------
 
-use terminal_chat::prompt::{
-    build_turn_request_with_async_host, ToolCallRecord, ToolResultImage,
-};
+use terminal_chat::prompt::{build_turn_request_options, ToolCallRecord, ToolResultImage, TurnRequestOptions};
 
 fn tc_rec(id: &str, name: &str) -> ToolCallRecord {
     ToolCallRecord { id: id.into(), name: name.into(), arguments: "{}".into() }
@@ -378,7 +376,7 @@ fn s10_image_attachment_follows_full_paired_batch() {
         tool_result("call-b", r#"{"status":"completed"}"#, None),
         msg(HistoryRole::Assistant, "分析完成"),
     ];
-    let body = build_turn_request_with_async_host(&history, None, false, false, false, false);
+    let body = build_turn_request_options(&history, &TurnRequestOptions::default());
     let msgs = body["messages"].as_array().unwrap();
     let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
     assert_eq!(
@@ -423,7 +421,7 @@ fn s11_two_images_attach_in_call_order_and_failure_attaches_nothing() {
         tool_result("call-3", &view_ok_content("/3.png", 8, 8), Some(img("data:image/png;base64,Q0ND"))),
         msg(HistoryRole::Assistant, "完"),
     ];
-    let body = build_turn_request_with_async_host(&history, None, false, false, false, false);
+    let body = build_turn_request_options(&history, &TurnRequestOptions::default());
     let msgs = body["messages"].as_array().unwrap();
     // system + assistant + 3 tool + 2 附件 + assistant
     assert_eq!(msgs.len(), 8, "形状：{msgs:?}");
@@ -450,7 +448,7 @@ fn s11b_multi_batch_attachments_stay_within_their_batch() {
         tool_result("b2", &view_ok_content("/2.png", 3, 3), Some(img("data:image/png;base64,Qg=="))),
         msg(HistoryRole::Assistant, "完"),
     ];
-    let body = build_turn_request_with_async_host(&history, None, false, false, false, false);
+    let body = build_turn_request_options(&history, &TurnRequestOptions::default());
     let msgs = body["messages"].as_array().unwrap();
     let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
     assert_eq!(
@@ -475,7 +473,7 @@ fn s11c_attachment_path_control_chars_filtered() {
         tool_result("hc", hostile, Some(img("data:image/png;base64,QQ=="))),
         msg(HistoryRole::Assistant, "完"),
     ];
-    let body = build_turn_request_with_async_host(&history, None, false, false, false, false);
+    let body = build_turn_request_options(&history, &TurnRequestOptions::default());
     let text = serde_json::to_string(&body).unwrap();
     let annotation = body["messages"]
         .as_array()
@@ -512,7 +510,7 @@ fn s12_image_field_serialization_optional() {
 #[test]
 fn s13_view_image_tool_declared_only_when_capable() {
     let history = vec![msg(HistoryRole::User, "hi")];
-    let off = build_turn_request_with_async_host(&history, None, false, false, false, false);
+    let off = build_turn_request_options(&history, &TurnRequestOptions::default());
     let names: Vec<&str> = off["tools"]
         .as_array()
         .unwrap()
@@ -522,7 +520,7 @@ fn s13_view_image_tool_declared_only_when_capable() {
     assert_eq!(names, vec!["exec_command", "apply_patch", "write_stdin", "update_plan"]);
     let body = serde_json::to_string(&off).unwrap();
     assert!(!body.contains("image_url"), "纯文本请求不出现 image_url");
-    let on = build_turn_request_with_async_host(&history, None, false, false, true, false);
+    let on = build_turn_request_options(&history, &TurnRequestOptions { image_input: true, ..Default::default() });
     let names: Vec<&str> = on["tools"]
         .as_array()
         .unwrap()
@@ -606,7 +604,7 @@ fn s15_user_image_projection_shape() {
         img_msg("", vec![u1.clone()], vec![]),
         msg(HistoryRole::User, "纯文本"),
     ];
-    let body = build_turn_request_with_async_host(&history, None, false, false, false, false);
+    let body = build_turn_request_options(&history, &TurnRequestOptions::default());
     let msgs = body["messages"].as_array().unwrap();
     // system + user(数组) + user(数组) + user(字符串)
     let m0 = &msgs[1];
@@ -640,7 +638,7 @@ fn s16_handwritten_marker_without_payload_projects_plain_text() {
         img_msg("[Image #1] 手写的标记", Vec::new(), Vec::new()),
         msg(HistoryRole::User, "另一条 [Image #9] 也一样"),
     ];
-    let body = build_turn_request_with_async_host(&history, None, false, false, false, false);
+    let body = build_turn_request_options(&history, &TurnRequestOptions::default());
     let raw = serde_json::to_string(&body).unwrap();
     assert!(!raw.contains("image_url"), "无载荷标记不产生图片部件：{raw}");
     assert!(!raw.contains("data:"), "无 data URL：{raw}");
@@ -653,7 +651,7 @@ fn s16_handwritten_marker_without_payload_projects_plain_text() {
 fn s17_send_message_declaration_follows_capability_snapshot() {
     let history: Vec<terminal_chat::prompt::HistoryItem> = Vec::new();
     // true：声明且 Schema 与上游映射一致
-    let body = build_turn_request_with_async_host(&history, None, false, false, false, true);
+    let body = build_turn_request_options(&history, &TurnRequestOptions { send_message: true, ..Default::default() });
     let tools = body["tools"].as_array().unwrap();
     let tool = tools
         .iter()
@@ -677,12 +675,12 @@ fn s17_send_message_declaration_follows_capability_snapshot() {
         "描述保留上游使用指引：{tool}"
     );
     // false：不声明
-    let body = build_turn_request_with_async_host(&history, None, false, false, false, false);
+    let body = build_turn_request_options(&history, &TurnRequestOptions::default());
     assert!(!body["tools"].as_array().unwrap().iter().any(|t| {
         t["function"]["name"] == json!("send_message_to_user_async")
     }));
     // 与问询开关独立：仅消息能力（无问询宿主）也声明消息工具
-    let body = build_turn_request_with_async_host(&history, None, false, false, false, true);
+    let body = build_turn_request_options(&history, &TurnRequestOptions { send_message: true, ..Default::default() });
     assert!(body["tools"].as_array().unwrap().iter().any(|t| {
         t["function"]["name"] == json!("send_message_to_user_async")
     }));
@@ -693,9 +691,6 @@ fn s17_send_message_declaration_follows_capability_snapshot() {
 
 // ---------- 030 M2：搜索开关与首次声明 ----------
 
-use terminal_chat::prompt::build_turn_request_with_agents;
-use terminal_chat::prompt::build_turn_request_with_tool_search;
-
 #[test]
 fn s30_search_mode_declaration_split() {
     // 开启且有可搜索动态工具：声明＝内置＋tool_search＋[资源 defs＋已加载 defs]；
@@ -704,10 +699,13 @@ fn s30_search_mode_declaration_split() {
     let ts_def = terminal_chat::tool_search::tool_definition(overview);
     let resource_def = json!({"type": "function", "function": {"name": "list_mcp_resources"}});
     let loaded_def = json!({"type": "function", "function": {"name": "mcp__fx__echo"}});
-    let body = build_turn_request_with_tool_search(
-        &[], None, false, false, false, false, false, false, false,
-        Some(&ts_def),
-        &[resource_def.clone(), loaded_def.clone()],
+    let body = build_turn_request_options(
+        &[],
+        &TurnRequestOptions {
+            tool_search: Some(&ts_def),
+            mcp_tools: &[resource_def.clone(), loaded_def.clone()],
+            ..Default::default()
+        },
     );
     let tools = body["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 7, "4 内置＋tool_search＋资源＋已加载＝7");
@@ -731,11 +729,10 @@ fn s30_off_mode_appends_mcp_defs_without_injecting_search() {
     // （审查 #13：原断言比较转发壳与其委托目标，恒真。）
     let history = [msg(HistoryRole::User, "任务")];
     let dyn_def = json!({"type": "function", "function": {"name": "mcp__fx__echo"}});
-    let baseline = build_turn_request_with_tool_search(
-        &history, None, false, false, false, false, false, false, false, None, &[],
-    );
-    let with_mcp = build_turn_request_with_tool_search(
-        &history, None, false, false, false, false, false, false, false, None, &[dyn_def.clone()],
+    let baseline = build_turn_request_options(&history, &TurnRequestOptions::default());
+    let with_mcp = build_turn_request_options(
+        &history,
+        &TurnRequestOptions { mcp_tools: &[dyn_def.clone()], ..Default::default() },
     );
     assert_eq!(with_mcp["messages"], baseline["messages"], "messages 不变");
     // system 在 messages[0]，已随上断言覆盖；tools 结构对照：
@@ -757,12 +754,8 @@ fn s20_multi_agent_tool_declaration_and_event_projection_filter() {
     use terminal_chat::agents::events::agent_event;
     use terminal_chat::prompt::{AgentEventKind, AgentEventPayload};
     let history = [msg(HistoryRole::User, "任务")];
-    let baseline = build_turn_request_with_agents(
-        &history, None, false, false, false, false, false, false, false, None, &[], false, false,
-    );
-    let with_agents = build_turn_request_with_agents(
-        &history, None, false, false, false, false, false, false, false, None, &[], false, true,
-    );
+    let baseline = build_turn_request_options(&history, &TurnRequestOptions::default());
+    let with_agents = build_turn_request_options(&history, &TurnRequestOptions { agents: true, ..Default::default() });
     assert_eq!(with_agents["messages"], baseline["messages"], "messages 不变");
     let base_tools = baseline["tools"].as_array().unwrap().clone();
     let agent_tools = with_agents["tools"].as_array().unwrap().clone();
@@ -799,10 +792,7 @@ fn s20_multi_agent_tool_declaration_and_event_projection_filter() {
             task: "t".into(),
         },
     );
-    let with_event = build_turn_request_with_agents(
-        &[event.clone()],
-        None, false, false, false, false, false, false, false, None, &[], false, false,
-    );
+    let with_event = build_turn_request_options(&[event.clone()], &TurnRequestOptions::default());
     let msgs = serde_json::to_string(&with_event["messages"]).unwrap();
     assert!(!msgs.contains("agent_created"), "事件不进投影：{msgs}");
     assert_eq!(with_event["messages"].as_array().unwrap().len(), 1, "仅 system");

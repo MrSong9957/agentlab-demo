@@ -8,7 +8,7 @@
 //! 序号只在提交成功后占用（034 审查 P1-3：保存失败不留空洞）。
 
 use crate::prompt::{AgentEventKind, AgentEventPayload, AgentReport, HistoryItem};
-use serde_json::Value;
+use super::registry::AgentState;
 
 /// 构造一条 Agent 事件（不落盘；由 sink 提交成功后才算发生）。
 #[allow(clippy::too_many_arguments)]
@@ -35,10 +35,7 @@ pub fn agent_event(
 pub fn terminal_report(content: &str, cleanup_note: &str) -> AgentReport {
     const LIMIT: usize = super::MAX_REPORT_BYTES;
     let bounded_cleanup: String = if cleanup_note.as_bytes().len() > super::MAX_CLEANUP_NOTE_BYTES {
-        let mut cut = super::MAX_CLEANUP_NOTE_BYTES;
-        while cut > 0 && !cleanup_note.is_char_boundary(cut) {
-            cut -= 1;
-        }
+        let cut = cleanup_note.floor_char_boundary(super::MAX_CLEANUP_NOTE_BYTES);
         format!("{}…（收尾说明截断）", &cleanup_note[..cut])
     } else {
         cleanup_note.to_string()
@@ -52,13 +49,10 @@ pub fn terminal_report(content: &str, cleanup_note: &str) -> AgentReport {
             cleanup: bounded_cleanup,
         };
     }
-    let mut cut = LIMIT;
-    while cut > 0 && !content.is_char_boundary(cut) {
-        cut -= 1;
-    }
+    let cut = content.floor_char_boundary(LIMIT);
     use sha2::Digest;
     let hash = sha2::Sha256::digest(content.as_bytes());
-    let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+    let hex = crate::hex::hex_encode(&hash);
     AgentReport {
         content: format!("{}…（终态报告超长，原文未完整保存）", &content[..cut]),
         original_bytes: Some(content.as_bytes().len() as u64),
@@ -204,10 +198,7 @@ pub fn validate_agent_chain(history: &[HistoryItem]) -> Result<(), String> {
 }
 
 fn valid_state_name(state: &str) -> bool {
-    matches!(
-        state,
-        "starting" | "running" | "stopping" | "completed" | "failed" | "interrupted" | "closed"
-    )
+    AgentState::from_display(state).is_some()
 }
 
 /// 根 messages/_history/五协议投影的事件过滤判定（prompt/api/memory 共用）：
@@ -254,12 +245,6 @@ pub fn event_display_line(item: &HistoryItem) -> Option<String> {
         },
         AgentEventKind::GroupClosed => format!("[Agent g{group_id}] 组已关闭"),
     })
-}
-
-/// 调试/测试辅助：事件 → JSON 值。
-#[allow(dead_code)]
-pub(crate) fn event_value(item: &HistoryItem) -> Value {
-    serde_json::to_value(item).unwrap_or(Value::Null)
 }
 
 #[cfg(test)]

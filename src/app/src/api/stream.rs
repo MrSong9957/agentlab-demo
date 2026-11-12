@@ -42,7 +42,7 @@ pub(super) fn decode(protocol: &str, text: &str) -> Result<Value, String> {
     })?;
     let output = match protocol {
         "openai-chat" => chat(events, done),
-        "openai-responses" => responses(events),
+        super::PROTOCOL_OPENAI_RESPONSES => responses(events),
         "anthropic-messages" => messages(events),
         "google-interactions" => interactions(events),
         "google-generate-content" => generate(events),

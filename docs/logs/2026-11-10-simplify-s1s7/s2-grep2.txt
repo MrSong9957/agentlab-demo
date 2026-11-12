@@ -1,0 +1,26 @@
+## wall_limit 精确（不过滤）
+src/app/src/agents/runtime.rs:638:            wall_limit: Duration::from_secs(super::ASSIGNMENT_WALL_LIMIT_SECS),
+src/app/src/agents/runtime.rs:940:                    wall_limit: Duration::from_secs(super::ASSIGNMENT_WALL_LIMIT_SECS),
+src/app/src/agents/runtime.rs:1482:    wall_limit: Duration,
+## seq 在 agents 内
+src/app/src/agents/registry.rs:106:    pub seq: u64,
+src/app/src/agents/registry.rs:135:            seq: 0,
+src/app/src/agents/events.rs:18:    seq: u64,
+src/app/src/agents/events.rs:26:        seq,
+src/app/src/agents/events.rs:102:/// - 每组 seq 自 1 连续递增（按文件顺序）；
+src/app/src/agents/events.rs:121:            seq,
+src/app/src/agents/events.rs:137:                "组 {group_id} 事件序号不连续（第 {idx} 条为 {seq}，期望 {}）",
+src/app/src/agents/events.rs:280:    fn created(group: u64, seq: u64, name: &str) -> HistoryItem {
+src/app/src/agents/events.rs:284:            seq,
+src/app/src/agents/events.rs:324:        // seq 空洞
+src/app/src/agents/runtime.rs:9://! session 使用只在批末瞬时持锁），seq 在 writer 域内分配＝文件顺序，
+src/app/src/agents/runtime.rs:167:/// 组写者域：seq 分配与提交串行化（seq 只在提交成功后占用——034 审查
+src/app/src/agents/runtime.rs:287:        let event = agent_event(kind, self.group_id, seq, agent, assignment, payload);
+src/app/src/agents/runtime.rs:313:        let event = agent_event(kind, self.group_id, seq, agent, assignment, payload);
+## mailbox.rs 全文行号
+5://! accepted 后丢弃）；中断/组关闭时未交付补充输入记 abandoned，不在未来
+28:    delivered: usize,
+62:    pub fn drain(&mut self) -> Vec<QueuedMessage> {
+65:        self.delivered += out.len();
+69:    /// 中断/组关闭：放弃未交付补充输入（调用方负责记录 abandoned 事件与
+71:    pub fn abandon(&mut self) -> Vec<QueuedMessage> {

@@ -308,10 +308,13 @@ fn m2_read_preserves_contents_blob_meta_and_routes_template_uri() {
     assert_eq!(reads[3]["params"]["uri"], "tchat://guide/config");
 }
 
+/// A13（清单 2026-11-10）：敏感值含引号/反斜杠的资源 _meta——items 级
+/// `meta_polluted` 串扫漏检时，下游逐叶兜底必须仍整份拒绝。
 #[test]
-fn m2_polluted_resource_results_are_rejected_wholesale() {
+fn m2_and_a13_polluted_results_and_escaped_meta_rejected() {
     std::env::set_var(common::mcp_fixtures::CANARY, common::mcp_fixtures::CANARY_VALUE);
-    let ctx = setup("resources_only", r#", "env_vars": ["TCHAT_MCP_TOKEN_A"]"#);
+    std::env::set_var("TCHAT_MCP_TOKEN_Q", "canary\"q\\tail");
+    let ctx = setup("resources_only", r#", "env_vars": ["TCHAT_MCP_TOKEN_A", "TCHAT_MCP_TOKEN_Q"]"#);
     let (reply, history, bodies) = run_resource_turn(
         &ctx,
         vec![
@@ -334,6 +337,13 @@ fn m2_polluted_resource_results_are_rejected_wholesale() {
                     "read_mcp_resource",
                     serde_json::json!({"server": "fx", "uri": "tchat://guide/polluted_meta"}),
                 ),
+                // A13：服务端 _meta 含转义敏感值（引号＋反斜杠）——items 级串扫漏检，
+                // 下游逐叶兜底必须仍整份拒绝。
+                call(
+                    "c3b",
+                    "read_mcp_resource",
+                    serde_json::json!({"server": "fx", "uri": "tchat://guide/polluted_meta_escaped"}),
+                ),
                 // 列举结果污染（资源描述含凭证）也整份拒绝。
                 call(
                     "c4",
@@ -345,7 +355,7 @@ fn m2_polluted_resource_results_are_rejected_wholesale() {
         ],
     );
     assert!(reply.is_ok(), "{reply:?}");
-    for id in ["c1", "c2", "c3"] {
+    for id in ["c1", "c2", "c3", "c3b"] {
         let result = tool_result(&history, id);
         assert_eq!(result["isError"], true, "{id} 应整份拒绝：{result}");
         let text = serde_json::to_string(&result).unwrap();

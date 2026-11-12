@@ -32,8 +32,6 @@ pub fn observation_budget(max_tokens: u64) -> usize {
     (max_tokens.saturating_mul(4)) as usize
 }
 
-// ---------- 宿主 → worker ----------
-
 /// 初始化：源码＋工具目录（条目为 `{name, description, parameters}`）。
 pub fn init_frame(code: &str, tools: &[Value]) -> Value {
     serde_json::json!({
@@ -57,8 +55,6 @@ pub fn shutdown_frame(reason: &str) -> Value {
     serde_json::json!({ "t": "shutdown", "reason": reason })
 }
 
-// ---------- worker → 宿主 ----------
-
 /// 叶子调用请求（参数必须是 JSON 对象；宿主按冻结目录核对资格）。
 pub fn call_frame(id: u64, tool: &str, args: &Value) -> Value {
     serde_json::json!({ "t": "call", "id": id, "tool": tool, "args": args })
@@ -81,8 +77,6 @@ pub fn output_frame_cont(text: &str, json: bool) -> Value {
 pub fn done_frame(ok: bool, error: Option<&str>, unawaited: usize) -> Value {
     serde_json::json!({ "t": "done", "ok": ok, "error": error, "unawaited": unawaited })
 }
-
-// ---------- 帧编解码（共用） ----------
 
 /// 写一帧（长度前缀＋JSON）。超过 `max_len` 的帧是发送侧缺陷：显式失败。
 pub fn write_frame<W: Write>(out: &mut W, frame: &Value, max_len: u64) -> std::io::Result<()> {
@@ -124,6 +118,20 @@ pub fn read_frame<R: Read>(input: &mut R, max_len: u64) -> std::io::Result<Optio
 
 #[cfg(test)]
 mod tests {
+    /// S36 验收补锚：shutdown 帧线格式（u64 LE 前缀＋JSON）roundtrip——
+    /// stdin 写线程（A7 修复）按同格式投递,线格式回归在此锚定。
+    #[test]
+    fn shutdown_frame_wire_roundtrip() {
+        let frame = shutdown_frame("user_cancel");
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &frame, MAX_FRAME_BYTES).expect("写 shutdown 帧");
+        let len = u64::from_le_bytes(buf[..8].try_into().unwrap()) as usize;
+        assert_eq!(buf.len(), 8 + len, "前缀与实际 JSON 长度一致");
+        let back: Value = serde_json::from_slice(&buf[8..]).unwrap();
+        assert_eq!(back.get("t").and_then(Value::as_str), Some("shutdown"));
+        assert_eq!(back.get("reason").and_then(Value::as_str), Some("user_cancel"));
+    }
+
     use super::*;
     use std::io::Cursor;
 

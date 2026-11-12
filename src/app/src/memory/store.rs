@@ -179,16 +179,24 @@ impl MemoryStore {
             std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o600))
                 .map_err(|e| format!("设置数据库文件权限失败：{e}"))?;
         }
+        Self::configure_conn(&conn)?;
+
+        let mut store = Self { conn: Mutex::new(conn), clock };
+        store.run_migrations()?;
+        Ok(store)
+    }
+
+    /// 持久化契约 pragma 单点（S26）：busy_timeout 5s＋journal DELETE＋
+    /// synchronous FULL——open 与 open_existing 共用（错误文案逐字保留；
+    /// 两者差异仅在打开标志是否含 CREATE，不在此层）。
+    fn configure_conn(conn: &Connection) -> Result<(), String> {
         conn.busy_timeout(Duration::from_secs(5))
             .map_err(|e| serr("设置 busy_timeout 失败", e))?;
         conn.pragma_update(None, "journal_mode", "DELETE")
             .map_err(|e| serr("设置 journal_mode 失败", e))?;
         conn.pragma_update(None, "synchronous", "FULL")
             .map_err(|e| serr("设置 synchronous 失败", e))?;
-
-        let mut store = Self { conn: Mutex::new(conn), clock };
-        store.run_migrations()?;
-        Ok(store)
+        Ok(())
     }
 
     /// 仅打开**既有**记忆库（014 §1）：不建根、不建库（打开标志不含
@@ -215,12 +223,7 @@ impl MemoryStore {
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|e| format!("打开既有记忆数据库 {} 失败：{e}", db.display()))?;
-        conn.busy_timeout(Duration::from_secs(5))
-            .map_err(|e| serr("设置 busy_timeout 失败", e))?;
-        conn.pragma_update(None, "journal_mode", "DELETE")
-            .map_err(|e| serr("设置 journal_mode 失败", e))?;
-        conn.pragma_update(None, "synchronous", "FULL")
-            .map_err(|e| serr("设置 synchronous 失败", e))?;
+        Self::configure_conn(&conn)?;
         Ok(Some(Self {
             conn: Mutex::new(conn),
             clock,
@@ -595,12 +598,6 @@ WHERE kind = ?4 AND job_key = ?5
         }
         tx.commit().map_err(|e| serr("提交事务失败", e))?;
         Ok(updated)
-    }
-
-    /// 入队/推进全局合并输入水位（上游 `enqueue_global_consolidation`）。
-    pub fn enqueue_global_consolidation(&self, input_watermark: i64) -> Result<(), String> {
-        let conn = self.lock_conn()?;
-        enqueue_global_consolidation_on(&conn, input_watermark)
     }
 
     /// 领取全局合并任务（上游 `try_claim_global_phase2_job`，SQL 逐字移植）。
@@ -1182,16 +1179,16 @@ WHERE kind = ?1 AND job_key = ?2
     /// 013-M7：threads 登记行的更新时间（毫秒）——登记写入侧与测试观察面。
     pub fn thread_updated_at_ms(&self, thread_id: &str) -> Result<Option<i64>, String> {
         let conn = self.lock_conn()?;
-        let mut stmt = conn
-            .prepare("SELECT updated_at_ms FROM threads WHERE thread_id = ?1")
-            .map_err(|e| serr("查询 threads 登记失败", e))?;
-        let mut rows = stmt
-            .query(params![thread_id])
-            .map_err(|e| serr("查询 threads 登记失败", e))?;
-        match rows.next().map_err(|e| serr("读取 threads 登记失败", e))? {
-            Some(row) => Ok(Some(row.get(0).map_err(|e| serr("读取登记时间失败", e))?)),
-            None => Ok(None),
-        }
+        // S26：沿同文件 optional() 先例。已知差异（验收审查登记）：行取值
+        // 失败的独立文案（「读取登记时间失败」）并入「查询 threads 登记失败」
+        // ——query_row 单一错误通道，类型错误路径几乎不可达。
+        conn.query_row(
+            "SELECT updated_at_ms FROM threads WHERE thread_id = ?1",
+            params![thread_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| serr("查询 threads 登记失败", e))
     }
 
     /// 读取任务行（领取/重试/租期断言）。

@@ -6,9 +6,14 @@
 //! 事件保存（cell_started/call_started/call_finished/cell_closed）与 JS 兑现
 //! （leaf 回包）都发生在这一线程；worker 读线程只把帧回送到有界事件通道
 //! （不保存、不执行——「主轮驱动保存/通知，工作线程经有界事件队列回送」）。
-//! 让出（无人观察）期间：worker 自行继续 JS 计算；已在途叶子照常完成但结果
-//! 兑现等下一次观察；新叶子请求只留在有界队列——worker 写 stdout 阻塞形成
-//! 天然背压（输出限额另有显式缓冲管理，§1.7）。
+//! 让出（无人观察）期间：worker 自行继续 JS 计算，已在途叶子照常完成但结果
+//! 兑现等下一次观察；事件通道容量 [`EVENT_CHANNEL_CAPACITY`]（16 帧×≤1 MiB，
+//! [`event_channel`] 单点构造，A7）——满后读线程停等 send，worker 阻塞在
+//! stdout 写形成背压，宿主内存不随产出无限增长（可观察差异：长输出 worker
+//! 让出期最多缓存 16 帧后停等，可能早于无界时代触墙钟；034 §1.4 已登记）。
+//! 滞留 send 的读线程由接收端 drop 收尾——handle 是 turn 局部、close 后即
+//! 置 None，worker 死亡/runtime drop/轮终止三路径必达（无 join，线程退出
+//! 靠 send 报 Err）。输出限额另有显式缓冲管理（§1.7，与通道容量是两层上限）。
 //!
 //! 父进程是唯一能力与执行事实来源：叶子经注入的 [`LeafDispatcher`]（M2 从
 //! turn.rs 抽取的共用分派）执行；宿主逐次核对冻结目录、额度（cell 31/轮
@@ -38,6 +43,10 @@ pub const MAX_INFLIGHT_LEAVES: usize = 4;
 pub const PENDING_OUTPUT_LIMIT: usize = 64 * 1024;
 /// cell 累计生成输出上限（含丢弃部分；超过关闭失败；§1.7）。
 pub const CELL_TOTAL_OUTPUT_LIMIT: usize = 1024 * 1024;
+/// 事件通道容量（A7 定案，N=16；§1.7 有界队列）：16 帧×单帧 ≤1 MiB＝积压
+/// 上界 16 MiB；满后读线程停等 send、worker 阻塞在 stdout 写形成背压。与
+/// PENDING_OUTPUT_LIMIT（观察合并侧缓冲）是两层不同上限。
+pub(crate) const EVENT_CHANNEL_CAPACITY: usize = 16;
 
 /// 叶子调用执行状态（§1.3：不诱导自动重试未知副作用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,13 +138,10 @@ pub fn event_to_history_item(event: &Event<'_>) -> crate::prompt::HistoryItem {
                 execution: outcome.execution.as_str().to_string(),
             };
         }
-        let mut cut = SNIPPET;
-        while cut > 0 && !full.is_char_boundary(cut) {
-            cut -= 1;
-        }
+        let cut = full.floor_char_boundary(SNIPPET);
         use sha2::Digest;
         let hash = sha2::Sha256::digest(full.as_bytes());
-        let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+        let hex = crate::hex::hex_encode(&hash);
         OrchestrationEventResult {
             content: full[..cut].to_string(),
             original_bytes: Some(full.len() as u64),
@@ -234,6 +240,13 @@ enum Msg {
     ReaderDead(String),
 }
 
+/// 事件通道构造单点（A7）：容量＝[`EVENT_CHANNEL_CAPACITY`]。接收端 drop 后
+/// 发送端 send/try_send 报错——读线程与叶子线程在三条终止路径上的退出机制
+/// （有界性锚测试锁定容量与断连语义）。
+fn event_channel() -> (mpsc::SyncSender<Msg>, mpsc::Receiver<Msg>) {
+    mpsc::sync_channel(EVENT_CHANNEL_CAPACITY)
+}
+
 struct InflightLeaf {
     /// worker 侧调用 id（回包寻址）。
     call_id: u64,
@@ -271,6 +284,11 @@ struct OutputBuffer {
     pending_truncated: bool,
     total_bytes: usize,
     total_over_limit: bool,
+    /// A8 验收修复：cont=false 首片因待交付上限被整片丢弃后置位——同一次
+    /// text 调用的后续 cont 片随之丢弃（034「单次超 64 KiB 的 text 被待交付
+    /// 缓冲丢弃」的整条语义），防止 cont 片误并上一次调用遗留的末条（跨调用
+    /// 内容损坏）。下一个 cont=false 帧（新调用首片成功入队）复位。
+    dropping_call: bool,
 }
 
 impl OutputBuffer {
@@ -281,6 +299,7 @@ impl OutputBuffer {
             pending_truncated: false,
             total_bytes: 0,
             total_over_limit: false,
+            dropping_call: false,
         }
     }
 
@@ -292,8 +311,10 @@ impl OutputBuffer {
         }
         if self.pending_bytes + text.len() > PENDING_OUTPUT_LIMIT {
             self.pending_truncated = true; // 待交付段溢出：丢弃并标记
+            self.dropping_call = true; // 本次调用的 cont 片随之整条丢弃
             return;
         }
+        self.dropping_call = false; // 新调用首片成功入队（A8 修复）
         self.pending_bytes += text.len();
         self.pending.push(text);
     }
@@ -306,12 +327,29 @@ impl OutputBuffer {
             self.total_over_limit = true;
             return;
         }
+        // A8 修复：首片被整片丢弃的调用，后续 cont 片同样丢弃——不并入
+        // 上一次调用遗留的末条（跨调用内容损坏）。
+        if self.dropping_call {
+            return;
+        }
         match self.pending.last_mut() {
             Some(last) => {
                 last.push_str(&text);
                 self.pending_bytes += text.len();
             }
-            None => self.push(text), // 无前块（已交付/丢弃）：独立成条
+            None => {
+                // 无前块（已交付/丢弃）：独立成条。验收审查（security）修正：
+                // 原委托 push 会把本片二次计入 total_bytes（merge_last 开头已
+                // 计一次）——1 MiB 累计上限被约 2 倍提前触发。此处重复 pending
+                // 上限判定但不再计费。
+                if self.pending_bytes + text.len() > PENDING_OUTPUT_LIMIT {
+                    self.pending_truncated = true;
+                    self.dropping_call = true;
+                    return;
+                }
+                self.pending_bytes += text.len();
+                self.pending.push(text);
+            }
         }
     }
 
@@ -323,10 +361,7 @@ impl OutputBuffer {
             if used + text.len() > budget {
                 if out.is_empty() && budget > 0 {
                     // 首条即超预算：按 UTF-8 边界截断交付首段
-                    let mut cut = budget.min(text.len());
-                    while cut > 0 && !text.is_char_boundary(cut) {
-                        cut -= 1;
-                    }
+                    let cut = text.floor_char_boundary(budget.min(text.len()));
                     let head = text[..cut].to_string();
                     let rest = text[cut..].to_string();
                     self.pending_bytes -= head.len();
@@ -387,10 +422,15 @@ pub struct CellHandle {
     worker_cleanup: WorkerCleanup,
     wall_deadline: Instant,
     cleanup_error: Option<String>,
-    stdin: Option<std::process::ChildStdin>,
+    /// A7 验收修复：worker stdin 专用写线程——根线程 reply_leaf 同步写
+    /// 大结果帧（≤256 KiB＞管道 64 KiB）曾与「读线程停等→worker 不读 stdin」
+    /// 互锁（三方死锁：根阻塞在 write、observe 循环不可达、墙钟兜底失效）。
+    /// 根线程只投递字节（无界 mpsc），写线程阻塞在 write 不再牵连 observe。
+    writer_tx: Option<std::sync::mpsc::Sender<Vec<u8>>>,
     reader_rx: mpsc::Receiver<Msg>,
-    /// 事件通道发送端（叶子执行线程回送 LeafDone）。
-    event_tx: mpsc::Sender<Msg>,
+    /// 事件通道发送端（叶子执行线程回送 LeafDone；有界——满时叶子线程停等，
+    /// 观察/收割消费腾容量后自动恢复；接收端 drop 后 send 报 Err）。
+    event_tx: mpsc::SyncSender<Msg>,
     /// cell 出生时冻结的工具目录（资格＋串行标记；深拷贝）。
     catalog: Vec<ToolCatalogEntry>,
     inflight: Vec<InflightLeaf>,
@@ -451,11 +491,13 @@ pub fn spawn_cell(
     // init 帧容量预检（目录序列化超限＝启动前拒绝，不 spawn 进程）。
     let tools: Vec<Value> = config.catalog.iter().map(|t| tool_wire(t)).collect();
     let init = init_frame(config.code, &tools);
-    {
+    // S29：容量预检与实际发送共用同一次序列化（帧字节确定，避免写两遍）。
+    let init_bytes = {
         let mut probe = Vec::new();
         write_frame(&mut probe, &init, MAX_INIT_FRAME_BYTES)
             .map_err(|e| format!("编排初始化帧超限，已拒绝启动：{e}"))?;
-    }
+        probe
+    };
     let worker_exe = config
         .worker_exe
         .clone()
@@ -516,15 +558,31 @@ pub fn spawn_cell(
     }
     let worker_cleanup = worker_cleanup.into_inner();
     let mut stdin = stdin.take().expect("确认成功后仍持有 worker stdin");
-    if let Err(e) = write_frame(&mut stdin, &init, MAX_INIT_FRAME_BYTES) {
+    if let Err(e) = stdin.write_all(&init_bytes) {
         let _ = kill_worker(&mut child, &worker_cleanup);
         return Err(format!("发送初始化帧失败：{e}"));
     }
+    // 写线程：唯一 stdin 写者（init 后）；接收端 drop＝close/Drop，线程随写
+    // 失败退出。
+    let (writer_tx, writer_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::Builder::new()
+        .name("tchat-js-stdin-writer".into())
+        .spawn(move || {
+            for payload in writer_rx {
+                if stdin.write_all(&payload).is_err() {
+                    return; // worker 已断：读线程 ReaderDead 收尾
+                }
+            }
+        })
+        .map_err(|e| {
+            let _ = kill_worker(&mut child, &worker_cleanup);
+            format!("启动 worker stdin 写线程失败：{e}")
+        })?;
     let stdout = child
         .stdout
         .take()
         .expect("spawn 已 piped stdout");
-    let (tx, rx) = mpsc::channel::<Msg>();
+    let (tx, rx) = event_channel();
     let event_tx = tx.clone();
     std::thread::Builder::new()
         .name("tchat-js-reader".into())
@@ -533,8 +591,10 @@ pub fn spawn_cell(
             loop {
                 match read_frame(&mut reader, MAX_FRAME_BYTES) {
                     Ok(Some(frame)) => {
+                        // 满时停等（背压，容量＝EVENT_CHANNEL_CAPACITY）；
+                        // Err＝观察方已放弃（接收端 drop——三终止路径的退出机制）。
                         if tx.send(Msg::Worker(frame)).is_err() {
-                            return; // 观察方已放弃
+                            return;
                         }
                     }
                     Ok(None) => {
@@ -585,7 +645,7 @@ pub fn spawn_cell(
         worker_cleanup,
         wall_deadline: Instant::now() + Duration::from_millis(WORKER_WALL_LIMIT_MS),
         cleanup_error: None,
-        stdin: Some(stdin),
+        writer_tx: Some(writer_tx),
         reader_rx: rx,
         event_tx,
         catalog: config.catalog.clone(),
@@ -1534,7 +1594,7 @@ impl CellHandle {
         };
         match sink.commit(&event, history) {
             Ok(()) => {
-                self.event_seq += 1; // 成功才占用序号（失败由后续事件复用，防 seq 空洞——审查 P1-3）
+                self.event_seq += 1; // 成功才占用序号（失败由后续事件复用，防 seq 空洞）
                 self.committed_events.push(event_to_history_item(&event));
             }
             Err(reason) => {
@@ -1633,7 +1693,7 @@ impl CellHandle {
         };
         match sink.commit(&event, history) {
             Ok(()) => {
-                self.event_seq += 1; // 成功才占用序号（审查 P1-3）
+                self.event_seq += 1; // 成功才占用序号（失败由后续事件复用，防 seq 空洞）
                 self.committed_events
                     .push(event_to_history_item(&event));
                 self.deliver_leaf_result(&InflightLeafStub { call_id }, outcome)
@@ -1675,9 +1735,14 @@ impl CellHandle {
 
     fn reply_leaf(&mut self, id: u64, outcome: Result<Value, Value>) {
         let frame = leaf_frame(id, outcome);
-        if let Some(stdin) = self.stdin.as_mut() {
-            if write_frame(stdin, &frame, MAX_FRAME_BYTES).is_err() {
-                self.stdin = None; // worker 已断：读线程 ReaderDead 收尾
+        if let Some(tx) = self.writer_tx.as_mut() {
+            // 线格式＝u64 LE 长度前缀＋JSON（与 protocol::write_frame 一致）。
+            let json = serde_json::to_vec(&frame).unwrap_or_default();
+            let mut payload = Vec::with_capacity(8 + json.len());
+            payload.extend_from_slice(&(json.len() as u64).to_le_bytes());
+            payload.extend_from_slice(&json);
+            if json.len() as u64 > MAX_FRAME_BYTES || tx.send(payload).is_err() {
+                self.writer_tx = None; // worker 已断：读线程 ReaderDead 收尾
             }
         }
     }
@@ -1834,10 +1899,17 @@ impl CellHandle {
             }
         }
         // worker 终止与回收（shutdown 帧尽力发送；killpg 兜底）。
-        if let Some(stdin) = self.stdin.as_mut() {
-            let _ = write_frame(stdin, &shutdown_frame(reason.as_str()), MAX_FRAME_BYTES);
+        if let Some(tx) = self.writer_tx.as_mut() {
+            // shutdown 帧尽力发送（线格式同 write_frame：u64 LE 前缀＋JSON）。
+            let json = serde_json::to_vec(&shutdown_frame(reason.as_str())).unwrap_or_default();
+            if json.len() as u64 <= MAX_FRAME_BYTES {
+                let mut payload = Vec::with_capacity(8 + json.len());
+                payload.extend_from_slice(&(json.len() as u64).to_le_bytes());
+                payload.extend_from_slice(&json);
+                let _ = tx.send(payload);
+            }
         }
-        self.stdin = None;
+        self.writer_tx = None; // 弃置接收端：写线程随 recv Err 退出
         if let Err(error) = kill_worker(&mut self.child, &self.worker_cleanup) {
             self.cleanup_error = Some(error);
             return;
@@ -1878,6 +1950,48 @@ impl CellHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A8 验收锚：首片超限整条丢弃后，cont 片不得并入上一次调用的末条
+    /// （dropping_call 机制——跨调用内容损坏回归锚）。
+    #[test]
+    fn cont_frames_never_merge_across_calls_after_drop() {
+        let mut buf = OutputBuffer::new();
+        buf.push("small".into());
+        // 调用 2：首片 160 KiB 超 64 KiB 待交付上限＝整片丢弃＋dropping 置位。
+        buf.push("x".repeat(160 * 1024));
+        buf.merge_last("y".repeat(60 * 1024)); // cont 片须随调用丢弃
+        // 调用 3：新首片复位 dropping；cont 片正常并入。
+        buf.push("z".into());
+        buf.merge_last("w".into());
+        assert_eq!(
+            buf.pending,
+            vec!["small".to_string(), "zw".to_string()],
+            "丢弃调用的 cont 片不得污染上一条；新调用 cont 正常合并：{:?}",
+            buf.pending
+        );
+    }
+
+    /// A7 有界性锚（无时序依赖）：构造单点 `event_channel` 的容量＝常量——
+    /// 容量内 send 全成、超容量 try_send 被拒；接收端 drop 后 send 报 Err
+    /// （读线程/叶子线程在 worker 死亡、runtime drop、轮终止三路径上的退出
+    /// 机制，模块头论证的机制前提）。
+    #[test]
+    fn event_channel_is_bounded_at_declared_capacity() {
+        let (tx, rx) = event_channel();
+        for i in 0..EVENT_CHANNEL_CAPACITY {
+            tx.send(Msg::Worker(Value::from(i)))
+                .expect("容量内 send 必成功");
+        }
+        assert!(
+            tx.try_send(Msg::Worker(Value::Bool(true))).is_err(),
+            "超容量必被拒：通道有界性＝EVENT_CHANNEL_CAPACITY"
+        );
+        drop(rx);
+        assert!(
+            tx.send(Msg::Worker(Value::Bool(false))).is_err(),
+            "接收端 drop 后 send 必报 Err——读线程退出依据"
+        );
+    }
 
     /// 输出缓冲：待交付段溢出丢弃＋标记；累计超限标记；预算截断按 UTF-8 边界。
     #[test]

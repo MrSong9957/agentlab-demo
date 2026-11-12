@@ -5,10 +5,12 @@
 //! 读取边界（总量 8 MiB、单条 1 MiB、先从最近向前扫描再恢复来源顺序、
 //! 头部须为有效会话元数据）与 V1 序列化路径（过滤→JSON 数组→整体脱敏，
 //! `phase1.rs::serialize_filtered_rollout_response_items`）。适配：
-//! ①输入类型＝本地 `HistoryItem`（text/tool_calls/tool_result 三形态），
-//! 上游的 InterAgent/Context 碎片等 V2 概念在本地会话不存在（§2.2-7
-//! 「宿主注入不落会话」＝免剥离差异，标记片段匹配保留为防御）；②反向
-//! 扫描以分块读实现（无上游 seekable/compressed reader 层，语义等价：
+//! ①输入类型＝本地 `HistoryItem`（text/tool_calls/tool_result 之外还有检查点/
+//! 编排/Agent 事件等变体）——上游的注入消息与事件类概念本地会话**同样落
+//! 会话**（015 上下文消息、035 AgentEvent、032/034 检查点与编排事件），剔除
+//! 在序列化侧进行且已计入 8 MiB 读取预算（上游在读取侧剔除、不占预算）；
+//! 013 §2.2-7「宿主注入不落会话＝免剥离」结论已过时，需规格负责人重新登记；
+//! ②反向扫描以分块读实现（无上游 seekable/compressed reader 层，语义等价：
 //! 从文件尾向前、超限跳过、预算尽即停）；③`tool_result.display` 展示数据
 //! 经投影天然不进入序列化（012 契约）。
 
@@ -28,7 +30,7 @@ const SCAN_CHUNK_BYTES: usize = 64 * 1024;
 
 /// 读取近期会话记录：保留能装进预算的最新记录，恢复来源顺序（旧→新）。
 ///
-/// - 首行必须在单条上限内是有效会话元数据（`{"v":1}`），否则整体拒绝；
+/// - 首行必须在单条上限内是有效会话元数据，否则整体拒绝；
 /// - 从文件尾向前扫描：超限单条与非 UTF-8/坏行跳过，预算耗尽即停止
 ///   （更旧记录不再读取）；
 /// - 预算按序列化后的记录字节数计（上游 `serde_json::to_vec(&item).len()`）。
@@ -144,12 +146,6 @@ fn process_line(line: &[u8], items: &mut Vec<HistoryItem>, remaining: &mut usize
     true
 }
 
-/// 序列化过滤后的提炼输入（上游 V1 路径 `serialize_filtered_rollout_response_items`）：
-/// 过滤→逐条投影为模型面 JSON→数组序列化→整体秘密替换。
-/// `tool_result.display` 展示数据经投影排除（012：绝不进入模型请求）。
-/// 过滤时机与上游差异：上游在读取侧剔除注入消息（不占 8 MiB 预算），本地
-/// 在序列化侧过滤（已计入预算）——本地会话结构性不含注入块（§2.2-7），该
-/// 差异当前影响为零，登记备查。
 /// 032：上下文管理控制工具名（其调用/结果不作为用户/工具经历）。
 /// 034：exec/wait 编排外壳同列——脚本源码不当成已执行的工具；真实叶子
 /// 事实改由编排事件（call_started/call_finished）合成提取（§1.6）。
@@ -184,6 +180,12 @@ fn call_arguments_of(
     })
 }
 
+/// 序列化过滤后的提炼输入（上游 V1 路径 `serialize_filtered_rollout_response_items`）：
+/// 过滤→逐条投影为模型面 JSON→数组序列化→整体秘密替换。
+/// `tool_result.display` 展示数据经投影排除（012：绝不进入模型请求）。
+/// 过滤时机与上游差异：上游在读取侧剔除注入消息（不占 8 MiB 预算），本地
+/// 在序列化侧过滤（已计入预算）——015 起注入块确实落本地会话（读取时占
+/// 预算、序列化侧剔除），预算口径差异登记备查。
 pub fn serialize_filtered_history_items(items: &[HistoryItem]) -> Result<String, String> {
     // 032 §1.6（审查修复 #3：按调用粒度过滤）：ContextCheckpoint（连同 seed
     //——seed 只存在于检查点内，不会以顶层记录出现）与上下文管理控制调用及

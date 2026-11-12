@@ -99,18 +99,25 @@ pub fn tool_launch_argv(
 /// 沙箱子进程白名单环境：PATH/TERM 继承（非凭据；工具可用性优先），HOME 定为
 /// 工作区。主进程经 .env dotenv 加载的凭据变量**不在白名单**——027 R1 的环境面
 /// 防线（「凭据 env 不进工具」）在沙箱模式下由本函数＋调用侧 `env_clear` 保留。
-fn tool_child_env(workspace: &Path) -> Vec<(String, String)> {
+/// 沙箱子进程白名单环境单点（S23）：PATH 继承（缺省 /usr/bin:/bin）、
+/// HOME 由调用方指定（033＝工具工作区；031＝沙箱私有 /tmp）、TERM 继承。
+/// 凭据 env 不进白名单——027 R1 环境面防线（调用侧 env_clear 保留）。
+fn whitelist_env(home: &str) -> Vec<(String, String)> {
     let mut env = vec![
         (
             "PATH".to_string(),
             std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string()),
         ),
-        ("HOME".to_string(), workspace.to_string_lossy().into_owned()),
+        ("HOME".to_string(), home.to_string()),
     ];
     if let Ok(term) = std::env::var("TERM") {
         env.push(("TERM".to_string(), term));
     }
     env
+}
+
+fn tool_child_env(workspace: &Path) -> Vec<(String, String)> {
+    whitelist_env(&workspace.to_string_lossy())
 }
 
 /// 033-B2（2026-10-27 加固）：沙箱工具子进程 fd 收口——pre_exec 内以
@@ -124,8 +131,9 @@ fn tool_child_env(workspace: &Path) -> Vec<(String, String)> {
 ///   静默 exit 1）——故必须 CLOEXEC 标记而非关闭；
 /// - stdio 0/1/2 不在标记范围；载荷运行时自开的 fd 在 execve 之后，不受影响。
 ///
-/// 三处工具 spawn 点（proc_session build_tool_command、mcp transport、
-/// apply_patch internal-apply）仅在**沙箱分支**注入；普通模式行为零变化。
+/// 四处工具 spawn 点（proc_session build_tool_command、mcp transport、
+/// apply_patch internal-apply、view_image 沙箱图片准备）仅在**沙箱分支**
+/// 注入；普通模式行为零变化。
 /// close_range 失败（如旧内核 ENOSYS）＝Err → pre_exec 失败 → std 回传错误、
 /// spawn 返回 Err（沙箱工具显式失败，不静默放行）；部署前提＝内核 ≥5.11
 ///（CLOSE_RANGE_CLOEXEC 引入）＋glibc ≥2.34（close_range 封装；libc 0.2.189
@@ -146,8 +154,7 @@ pub fn close_inherited_fds_mark_cloexec() -> std::io::Result<()> {
 
 /// 非 Linux unix：close_range(2) 为 Linux 特有 syscall，此处＝能力不足，按
 /// 既有 fail-closed 语义显式失败（Os repr ENOSYS，不堆分配——pre_exec 内
-/// 合法），沙箱工具不静默放行。非 unix（Windows）下 tool_launch_argv 恒
-/// None，不会调用本函数。
+/// 合法），沙箱工具不静默放行。
 #[cfg(all(unix, not(target_os = "linux")))]
 pub fn close_inherited_fds_mark_cloexec() -> std::io::Result<()> {
     Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
@@ -190,6 +197,30 @@ pub fn close_inherited_fds_except_cloexec(skip: std::os::fd::RawFd) -> std::io::
 #[cfg(all(unix, not(target_os = "linux")))]
 pub fn close_inherited_fds_except_cloexec(_skip: std::os::fd::RawFd) -> std::io::Result<()> {
     Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
+}
+
+/// 033-B2 fd 收口接线单点（S23）：有 seccomp fd＝仅保留该 fd（其余标记
+/// CLOEXEC，execve 时关闭）；无＝全量标记 CLOEXEC。std Command 站点共用；
+/// tokio 站点语义相同、类型不同，接线各自展开。
+#[cfg(unix)]
+pub(crate) fn apply_spawn_fd_hygiene(
+    cmd: &mut std::process::Command,
+    seccomp: Option<&SeccompFd>,
+) {
+    use std::os::unix::process::CommandExt;
+    match seccomp {
+        Some(g) => {
+            let fd = g.raw();
+            // SAFETY：pre_exec 回调在 fork 后 exec 前的子进程副本中运行，
+            // 仅做 fd 标记操作（异步信号安全路径）。
+            unsafe {
+                cmd.pre_exec(move || close_inherited_fds_except_cloexec(fd));
+            }
+        }
+        None => unsafe {
+            cmd.pre_exec(close_inherited_fds_mark_cloexec);
+        },
+    }
 }
 
 // ---------- bwrap 探测（failIfUnavailable） ----------
@@ -472,10 +503,11 @@ fn create_bwrap_command_args(
     create_bwrap_flags(command, policy, command_cwd, mask_wsl_interop)
 }
 
-/// 上游 `create_bwrap_flags`（bwrap.rs:309）的适配版。会话与命名空间标志保留；
-/// WSLg/WSL-interop 遮蔽、`--proc`（本项目保留 PID 命名空间以维持 016 的
-/// killpg 进程组管理，新 procfs 不挂——工具内进程视图受限为已知取舍）、
-/// unshare-pid/net 默认关闭。
+/// 上游 `create_bwrap_flags`（bwrap.rs:309）的适配版。会话标志保留；
+/// user/pid/ipc 命名空间隔离＋成对新 procfs（`--proc /proc`，上游 mount_proc
+/// 语义——保留 `/proc/self/fd` 消费者）恒开启；WSL-interop 遮蔽仅在该目录
+/// 存在（WSL 发行版）时注入；本路径不断网（`--unshare-net` 仅 031 策略路径
+/// 按开关注入）。
 fn create_bwrap_flags(
     command: Vec<String>,
     policy: &SandboxPolicy,
@@ -552,7 +584,7 @@ fn create_filesystem_args(policy: &SandboxPolicy) -> Result<Vec<String>, String>
         .map(|root| {
             // 038 Windows CI 实证：components() 的分量语义（verbatim 路径
             // 「..」不作 ParentDir 解释等平台差异）可让 `sub\..` 穿透词法
-            // 清洁比较。四道判据按序判定：
+            // 清洁比较。三条判据按序判定：
             // ② 字符串级点分段——无条件拒绝（点分段依赖内核回溯，即便存在
             //    符号链接组件，遮蔽排布同样不可信）；
             // ① components 词法走查失配；
@@ -964,17 +996,7 @@ pub(crate) fn permission_launch_argv_with_payload_program(
 /// 031 沙箱子进程白名单环境：PATH/TERM 继承（非凭据）；HOME＝沙箱私有
 /// `/tmp`（可写暂存；宿主用户目录不进沙箱——凭据防线与 033 R1 同源）。
 fn permission_child_env() -> Vec<(String, String)> {
-    let mut env = vec![
-        (
-            "PATH".to_string(),
-            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string()),
-        ),
-        ("HOME".to_string(), "/tmp".to_string()),
-    ];
-    if let Ok(term) = std::env::var("TERM") {
-        env.push(("TERM".to_string(), term));
-    }
-    env
+    whitelist_env("/tmp")
 }
 
 /// 受限读树挂载布局（§1.6；M0 restricted-read 实证布局）：
@@ -1417,12 +1439,11 @@ pub fn build_seccomp_filter() -> Vec<u8> {
     prog
 }
 
-/// 非 x86_64：031 的过滤器清单按 x86_64 编号固定，其他架构 fail-closed
-/// （返回 Err，031 拒绝启用——不产出无 arch 门或错误编号的过滤器）。
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-pub fn build_seccomp_filter() -> Option<Vec<u8>> {
-    None
-}
+// 非 x86_64：031 的过滤器清单按 x86_64 编号固定，其他架构由下方
+// `build_seccomp_fd` 恒 Err 承担 fail-closed（拒绝启用 031 模式，不产出
+// 无 arch 门或错误编号的过滤器）。曾在此放一个返回 `None` 的
+// build_seccomp_filter 桩：该 cfg 组合下无任何调用方，且文档声称
+// 「返回 Err」与实际不符——已删（简化清单 S6）。
 
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 fn build_seccomp_fd() -> std::io::Result<Option<SeccompFd>> {
@@ -1459,14 +1480,6 @@ fn build_seccomp_fd() -> std::io::Result<Option<SeccompFd>> {
     Ok(Some(guard))
 }
 
-/// 031 逐启动 PID 命名空间验证（§1.6）：**验证对象是 bwrap 的直接 namespace
-/// init 回收器**——直连 bwrap 进程在新 pid ns 之外的监督位，其自身 ns 与主
-/// 进程相同属正常形态（实测实证；不能只凭启动时一次探测判定）。经
-/// `/proc/<bwrap>/task/*/children` 找到回收器的宿主 pid，其 `ns/pid` 必须与主进程不同。bwrap 自身
-/// 多次 re-exec：spawn 返回时载荷可能尚未出现——有界轮询（≤200ms）；
-/// bwrap 已退出＝自身 fail-hard 已生效（载荷未运行），返回 Ok；超时仍无任
-/// 何异 ns 子进程且进程存活＝隔离未建立：killpg 整组终止＋waitpid 回收并返
-/// 回 Err（模型命令拒绝）。
 /// 038 exec 的可信 gate 命令。setsid 与 shell 在用户命令之前建立独立 session
 /// 和进程组；shell 原位停止，确认后才 exec 原始命令字符串。
 #[cfg(target_os = "linux")]
@@ -1573,6 +1586,14 @@ pub fn confirm_sandbox_isolation_and_release(
     )
 }
 
+/// 031 逐启动 PID 命名空间验证（§1.6）：**验证对象是 bwrap 的直接 namespace
+/// init 回收器**——直连 bwrap 进程在新 pid ns 之外的监督位，其自身 ns 与主
+/// 进程相同属正常形态（实测实证；不能只凭启动时一次探测判定）。经
+/// `/proc/<bwrap>/task/*/children` 找到回收器的宿主 pid，其 `ns/pid` 必须与主进程不同。bwrap 自身
+/// 多次 re-exec：spawn 返回时载荷可能尚未出现——有界轮询（≤200ms）；
+/// bwrap 已退出＝自身 fail-hard 已生效（载荷未运行），返回 Ok；超时仍无任
+/// 何异 ns 子进程且进程存活＝隔离未建立：killpg 整组终止＋waitpid 回收并返
+/// 回 Err（模型命令拒绝）。
 #[cfg(target_os = "linux")]
 pub(crate) fn confirm_sandbox_with_release(
     leader_pid: u32,
@@ -2297,7 +2318,9 @@ fn path_depth(path: &Path) -> usize {
 
 /// 纯词法规范化（本项目补充：上游策略层在 codex-protocol 内完成等价处理）——
 /// 消除 `.`/`..`，保证 starts_with 关系与 bwrap 目标一致。
-/// 031：permissions 模块的路径规范化共用（同一包含语义，禁止两处定义分叉）。
+/// 031：permissions 模块；029：apply_move 同路径比较（2026-11-11 起，原
+/// apply_patch `lexical_normalize` 分叉副本已删——Windows 盘符丢弃曾致跨盘
+/// Move 误判同路径）。同一包含语义，禁止再定义分叉。
 pub(crate) fn absolute_lexical(path: &Path) -> PathBuf {
     let mut current = PathBuf::new();
     for component in path.components() {

@@ -313,8 +313,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // ---- ExecArgs::from_value ----
-
     #[test]
     fn exec_args_defaults_and_full_fields() {
         let a = ExecArgs::from_value(&json!({ "cmd": "ls" })).unwrap();
@@ -392,8 +390,6 @@ mod tests {
             .unwrap_err()
             .contains("max_output_chars"));
     }
-
-    // ---- WriteStdinArgs::from_value ----
 
     #[test]
     fn stdin_args_query_defaults() {
@@ -475,8 +471,6 @@ mod tests {
             .unwrap_err()
             .contains("未知参数"));
     }
-
-    // ---- 结果形状 ----
 
     #[test]
     fn result_serializes_spec_shape() {

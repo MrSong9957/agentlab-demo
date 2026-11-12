@@ -80,8 +80,6 @@ fn ensure_within_dir(dir: &Path, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-// ---------- 装载与修复 ----------
-
 /// 文件尾形态（续写尾置处理的依据，§3）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TailState {
@@ -107,7 +105,6 @@ pub struct Loaded {
 }
 
 impl Loaded {
-    /// 装载成功输出的单行摘要。
     pub fn summary(&self) -> String {
         format!(
             "恢复 {} 条（跳过 {} 行，修复 {} 处）",
@@ -366,10 +363,15 @@ pub(crate) fn validate_orchestration_chain(history: &[HistoryItem]) -> Result<()
                     return Err(format!("cell {cell_id} 叶子 {leaf} 重复 call_finished"));
                 }
                 if let Some(result) = result {
-                    if result.content.len() > 64 * 1024 && !result.truncated {
-                        return Err(format!(
-                            "cell {cell_id} 叶子 {leaf} 结果超过 64 KiB 但未标记 truncated"
-                        ));
+                    // A10：截断片段本身也须 ≤64 KiB（写入侧 SNIPPET/LIMIT 保证
+                    // 片段即截断后形态；缺失检查使超长片段可携 truncated=true
+                    // 通过校验——文档 :282「result 片段 ≤64 KiB」的落实）。
+                    if result.content.len() > 64 * 1024 {
+                        return Err(if result.truncated {
+                            format!("cell {cell_id} 叶子 {leaf} 截断片段超过 64 KiB")
+                        } else {
+                            format!("cell {cell_id} 叶子 {leaf} 结果超过 64 KiB 但未标记 truncated")
+                        });
                     }
                     if result.truncated
                         && (result.original_bytes.is_none() || result.sha256.is_none())
@@ -601,8 +603,6 @@ fn repair_pairs(entries: Vec<Entry>) -> (usize, Vec<HistoryItem>) {
         match entry {
             Entry::Bad => finalize_open_batch(&mut out, &mut open, &mut repairs),
             // 032：检查点只在批次闭合后追加——作为边界处理（先闭合开放批再入列）。
-            // 语义校验（代数/关联/seed 形状）由活动视图读取时裁决（§1.6/§2：
-            // 可展示恢复事实，但不得悄悄丢标记并用错误视图续接）。
             Entry::Item(item @ HistoryItem::ContextCheckpoint { .. }) => {
                 finalize_open_batch(&mut out, &mut open, &mut repairs);
                 out.push(item);
@@ -671,8 +671,6 @@ pub fn load_session_file(path: &Path) -> Result<Loaded, String> {
     load_from_reader(file)
 }
 
-// ---------- 名称与路径 ----------
-
 /// 通用名称校验：`^[A-Za-z0-9._-]{1,64}$`（/resume 有名与 /save 共用）。
 pub fn validate_session_name(name: &str) -> Result<(), String> {
     let count = name.chars().count();
@@ -702,8 +700,6 @@ fn session_file_path(dir: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-// ---------- 列表与最近 auto ----------
-
 /// 列出会话（readdir＋stat，不打开任何会话正文）：名称（stem）＋文件字节数，按名称排序。
 pub fn list_sessions(dir: &Path) -> Vec<(String, u64)> {
     let mut out = Vec::new();
@@ -732,29 +728,22 @@ pub fn latest_auto(dir: &Path) -> Option<String> {
         .max()
 }
 
-// ---------- auto 命名提供者（可注入） ----------
-
-/// UTC 基本格式时间戳 `YYYYMMDDTHHMMSS`（字典序＝时间序；无 chrono 依赖，
-/// Howard Hinnant civil_from_days 算法）。
+/// UTC 基本格式时间戳 `YYYYMMDDTHHMMSS`（字典序＝时间序；chrono 格式化。
+/// 口径出处＝007 的 auto 文件命名约定）。
 fn utc_basic_now() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let days = (secs / 86400) as i64;
-    let rem = secs % 86400;
-    let (hh, mm, ss) = (rem / 3600, rem % 3600 / 60, rem % 60);
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = y + if m <= 2 { 1 } else { 0 };
-    format!("{y:04}{m:02}{d:02}T{hh:02}{mm:02}{ss:02}")
+    utc_basic_from_secs(secs)
+}
+
+/// u64 秒 → 基本格式时间戳（u64 域内 `from_timestamp` 恒 Some，负秒不可能）。
+fn utc_basic_from_secs(secs: u64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0)
+        .expect("u64 秒域内非 None")
+        .format("%Y%m%dT%H%M%S")
+        .to_string()
 }
 
 fn valid_ts_shape(s: &str) -> bool {
@@ -868,7 +857,7 @@ fn try_flock(path: &Path, _file: &File) -> (LockOutcome, Option<SessionLock>) {
     let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
     let name: String = format!(
         "Local\tchat-session-{}\0",
-        digest.iter().take(16).map(|b| format!("{b:02x}")).collect::<String>()
+        crate::hex::hex_encode(&digest[..16])
     );
     let wide: Vec<u16> = name.encode_utf16().collect();
     let handle = unsafe { CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };
@@ -889,8 +878,6 @@ fn try_flock(path: &Path, _file: &File) -> (LockOutcome, Option<SessionLock>) {
         (LockOutcome::Failed("WaitForSingleObject 失败".into()), None)
     }
 }
-
-// ---------- 手动快照（/save） ----------
 
 /// tmp＋rename 原子替换（`catalog.rs write_atomic` 模式最小适配：独立 tmp 0600、
 /// 流式逐记录写入、失败仅清 tmp——保存失败不得损坏旧快照）。返回记录条数。
@@ -944,8 +931,6 @@ pub fn save_snapshot(dir: &Path, name: &str, history: &[HistoryItem]) -> Result<
     result
 }
 
-// ---------- 会话写入器 ----------
-
 /// 记录序列化行（含结尾 `\n`）。
 fn record_line(item: &HistoryItem) -> String {
     let mut line =
@@ -967,7 +952,6 @@ enum State {
     Disabled,
 }
 
-/// `/resume` 结果。
 #[derive(Debug)]
 pub struct ResumeInfo {
     pub loaded: Loaded,
@@ -998,6 +982,14 @@ pub struct Session {
     /// 根线程随后在安全点推入内存历史；吸收逻辑与 034 共用——事件行按
     /// 写盘顺序进入内存，计数逐条吸收）。
     agent_untracked: usize,
+}
+
+/// untracked 吸收计数种类（S11 验收修正：字符串参量改枚举——编译期消除
+/// 拼错静默丢计数的风险）。
+#[derive(Debug, Clone, Copy)]
+enum UntrackedKind {
+    Orch,
+    Agent,
 }
 
 impl Session {
@@ -1057,6 +1049,117 @@ impl Session {
         }
     }
 
+    /// V3 专用事件提交原语（S11 单点）：行超限/停用/滞留预检（文案主语
+    /// `subject`）→ 未迁移则 V3 目标重建（开篇含 transcript＋事件行）→ 已迁移
+    /// 则滞留段＋事件行按序写入。`advance_over_line`＝游标是否越过事件行
+    /// （检查点 true——调用方恰推入一条同名记录；orch/agent false——由
+    /// `mark_untracked` 计数吸收）。失败截回 durable_len；截回失败停用
+    /// （错误文案与三处原实现逐字一致）。
+    fn commit_event_line(
+        &mut self,
+        history: &[HistoryItem],
+        line: &str,
+        subject: &str,
+        advance_over_line: bool,
+        // 游标不越过时的吸收计数（advance_over_line=true 时忽略）。
+        untracked_kind: Option<UntrackedKind>,
+    ) -> Result<usize, String> {
+        if line_over_limit(line) {
+            return Err(format!(
+                "{}，已拒绝提交{subject}",
+                line_limit_error(&format!("{subject}序列化后"))
+            ));
+        }
+        if matches!(self.state, State::Disabled) {
+            return Err(format!("自动保存已停用，无法提交{subject}"));
+        }
+        for item in &history[self.persisted_upto..] {
+            if line_over_limit(&record_line(item)) {
+                return Err(format!(
+                    "{}，滞留记录无法随{subject}提交",
+                    line_limit_error("待写段记录")
+                ));
+            }
+        }
+        if self.version != 3 {
+            let (path, file, bytes, session_lock) =
+                self.create_v3_target_with_tail(history, &[line])?;
+            self.version = 3;
+            self.state = State::Writing { _path: path, file, _lock: session_lock };
+            self.durable_len = bytes;
+            if advance_over_line {
+                // 游标越过事件行：调用方随后恰推入一条同名记录（on_record 无新增可写）
+                self.persisted_upto = history.len() + 1;
+            } else {
+                // 迁移开篇已写完整 transcript＋事件行；游标停在普通记录末，
+                // 事件行由 untracked 计数吸收（内存 push 后 flush 跳过）。
+                self.persisted_upto = history.len();
+                match untracked_kind {
+                Some(UntrackedKind::Orch) => self.orch_untracked += 1,
+                Some(UntrackedKind::Agent) => self.agent_untracked += 1,
+                None => {}
+            }
+            }
+            self.error_reported = false;
+            return Ok(self.persisted_upto);
+        }
+        let State::Writing { file, .. } = &mut self.state else {
+            return Err(format!("自动保存目标不可用，无法提交{subject}"));
+        };
+        // 滞留段＋事件行按序写入（原三胞胎闭包展开为顺序代码：file 借用与
+        // self 字段写并存，S11 抽取时保持同一写序与推进节奏）。
+        let outcome = loop {
+            let mut pending_error: Option<std::io::Error> = None;
+            for item in &history[self.persisted_upto..] {
+                let item_line = record_line(item);
+                if let Err(e) = file.write_all(item_line.as_bytes()) {
+                    pending_error = Some(e);
+                    break;
+                }
+                self.durable_len += item_line.len() as u64;
+                self.persisted_upto += 1;
+            }
+            if pending_error.is_none() {
+                if let Err(e) = file.write_all(line.as_bytes()) {
+                    pending_error = Some(e);
+                }
+            }
+            if let Some(e) = pending_error {
+                break Err(e);
+            }
+            self.durable_len += line.len() as u64;
+            if advance_over_line {
+                // 游标越过事件行：调用方恰推入一条同名记录（on_record 无新增可写）
+                self.persisted_upto += 1;
+            } else {
+                match untracked_kind {
+                Some(UntrackedKind::Orch) => self.orch_untracked += 1,
+                Some(UntrackedKind::Agent) => self.agent_untracked += 1,
+                None => {}
+            }
+            }
+            break Ok(());
+        };
+        match outcome {
+            Ok(()) => {
+                self.error_reported = false;
+                Ok(self.persisted_upto)
+            }
+            Err(e) => {
+                let msg = format!("{subject}提交写入失败（{e}）：未提交");
+                match file.set_len(self.durable_len) {
+                    Ok(()) => Err(msg),
+                    Err(te) => {
+                        self.state = State::Disabled;
+                        Err(format!(
+                            "{msg}；截回失败（{te}），自动保存已停用，文件尾部半行将由下次装载按坏行跳过"
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
     /// 032 M3：提交检查点——专用可失败回执路径（与普通 on_history 的"失败只
     /// 提示一次"分离，§1.5：没有回执不得切换活动视图）。语义：
     /// - 首次提交先迁移 V3 目标（V1/V2 旧文件保持原样，新 auto 文件以完整
@@ -1074,73 +1177,23 @@ impl Session {
         checkpoint: &HistoryItem,
     ) -> Result<usize, String> {
         let cp_line = record_line(checkpoint);
-        if line_over_limit(&cp_line) {
-            return Err(format!(
-                "{}，已拒绝提交检查点",
-                line_limit_error("检查点序列化后")
-            ));
-        }
-        if matches!(self.state, State::Disabled) {
-            return Err("自动保存已停用，无法提交检查点".into());
-        }
-        // 待写段行限预检（纯检查，不写不改状态）
-        for item in &history[self.persisted_upto..] {
-            if line_over_limit(&record_line(item)) {
-                return Err(format!(
-                    "{}，滞留记录无法随检查点提交",
-                    line_limit_error("待写段记录")
-                ));
-            }
-        }
-        // 032 审查修复 #13：迁移原子化——version<3 时先在局部完成「建 V3 目标
-        // ＋完整 transcript 开篇＋检查点行」，全部成功后才一次性替换状态；
-        // 任一失败只清理临时文件，self 不动（旧目标与普通自动保存保持原样，
-        // 不再出现「无检查点的 V3 残档」或迁移失败即停用）。
-        if self.version != 3 {
-            let (path, file, bytes, session_lock) =
-                self.create_v3_target_with_checkpoint(history, cp_line.as_str())?;
-            self.version = 3;
-            self.state = State::Writing { _path: path, file, _lock: session_lock };
-            self.durable_len = bytes;
-            // 游标越过检查点：调用方回执成功后恰推入一条同名记录
-            self.persisted_upto = history.len() + 1;
-            self.error_reported = false;
-            return Ok(self.persisted_upto);
-        }
-        let State::Writing { file, .. } = &mut self.state else {
-            return Err("自动保存目标不可用，无法提交检查点".into());
-        };
-        let outcome = (|| -> Result<(), std::io::Error> {
-            for item in &history[self.persisted_upto..] {
-                let line = record_line(item);
-                file.write_all(line.as_bytes())?;
-                self.durable_len += line.len() as u64;
-                self.persisted_upto += 1;
-            }
-            file.write_all(cp_line.as_bytes())?;
-            self.durable_len += cp_line.len() as u64;
-            // 游标越过检查点：调用方恰推入一条同名记录（on_record 无新增可写）
-            self.persisted_upto += 1;
-            Ok(())
-        })();
-        match outcome {
-            Ok(()) => {
-                self.error_reported = false;
-                Ok(self.persisted_upto)
-            }
-            Err(e) => {
-                let msg = format!("检查点提交写入失败（{e}）：未提交，活动视图不变");
-                match file.set_len(self.durable_len) {
-                    Ok(()) => Err(msg),
-                    Err(te) => {
-                        self.state = State::Disabled;
-                        Err(format!(
-                            "{msg}；截回失败（{te}），自动保存已停用，文件尾部半行将由下次装载按坏行跳过"
-                        ))
-                    }
+        // 游标越过检查点行（调用方回执成功后恰推入一条同名记录）。
+        self.commit_event_line(history, &cp_line, "检查点", true, None)
+            .map_err(|msg| {
+                // 032 原文案逐字保真（验收审查修正——原 ends_with 判断对
+                // 预检分支误追加、对截回失败分支漏还原）：
+                // - 写入失败（截回成功）＝「…未提交，活动视图不变」；
+                // - 截回失败＝「…未提交，活动视图不变；截回失败…」（原 msg
+                //   在「：未提交」后直接接「；截回失败」，此处精准插回）；
+                // - 预检/停用等分支原样（原版无后缀）。
+                if msg.contains("；截回失败") {
+                    msg.replacen("：未提交", "：未提交，活动视图不变", 1)
+                } else if msg.starts_with("检查点提交写入失败") {
+                    format!("{msg}，活动视图不变")
+                } else {
+                    msg
                 }
-            }
-        }
+            })
     }
 
     /// 034：提交一条编排事件——专用可失败回执路径（与检查点同模式：保存
@@ -1154,69 +1207,8 @@ impl Session {
         event: &HistoryItem,
     ) -> Result<usize, String> {
         let line = record_line(event);
-        if line_over_limit(&line) {
-            return Err(format!(
-                "{}，已拒绝提交编排事件",
-                line_limit_error("编排事件序列化后")
-            ));
-        }
-        if matches!(self.state, State::Disabled) {
-            return Err("自动保存已停用，无法提交编排事件".into());
-        }
-        for item in &history[self.persisted_upto..] {
-            if line_over_limit(&record_line(item)) {
-                return Err(format!(
-                    "{}，滞留记录无法随编排事件提交",
-                    line_limit_error("待写段记录")
-                ));
-            }
-        }
-        if self.version != 3 {
-            let (path, file, bytes, session_lock) =
-                self.create_v3_target_with_tail(history, &[line.as_str()])?;
-            self.version = 3;
-            self.state = State::Writing { _path: path, file, _lock: session_lock };
-            self.durable_len = bytes;
-            // 迁移开篇已写完整 transcript＋事件行；游标停在普通记录末，
-            // 事件行由 untracked 吸收（内存 push 后 flush 跳过）。
-            self.persisted_upto = history.len();
-            self.orch_untracked += 1;
-            self.error_reported = false;
-            return Ok(self.persisted_upto);
-        }
-        let State::Writing { file, .. } = &mut self.state else {
-            return Err("自动保存目标不可用，无法提交编排事件".into());
-        };
-        let outcome = (|| -> Result<(), std::io::Error> {
-            for item in &history[self.persisted_upto..] {
-                let line = record_line(item);
-                file.write_all(line.as_bytes())?;
-                self.durable_len += line.len() as u64;
-                self.persisted_upto += 1;
-            }
-            file.write_all(line.as_bytes())?;
-            self.durable_len += line.len() as u64;
-            self.orch_untracked += 1; // 游标不越过事件行（flush 吸收）
-            Ok(())
-        })();
-        match outcome {
-            Ok(()) => {
-                self.error_reported = false;
-                Ok(self.persisted_upto)
-            }
-            Err(e) => {
-                let msg = format!("编排事件提交写入失败（{e}）：未提交");
-                match file.set_len(self.durable_len) {
-                    Ok(()) => Err(msg),
-                    Err(te) => {
-                        self.state = State::Disabled;
-                        Err(format!(
-                            "{msg}；截回失败（{te}），自动保存已停用，文件尾部半行将由下次装载按坏行跳过"
-                        ))
-                    }
-                }
-            }
-        }
+        // 游标不越过事件行（flush 吸收）。
+        self.commit_event_line(history, &line, "编排事件", false, Some(UntrackedKind::Orch))
     }
 
     /// 035：根线程提交一条 Agent 事件（spawn/send/followup/interrupt 等根侧
@@ -1229,67 +1221,8 @@ impl Session {
         event: &HistoryItem,
     ) -> Result<usize, String> {
         let line = record_line(event);
-        if line_over_limit(&line) {
-            return Err(format!(
-                "{}，已拒绝提交 Agent 事件",
-                line_limit_error("Agent 事件序列化后")
-            ));
-        }
-        if matches!(self.state, State::Disabled) {
-            return Err("自动保存已停用，无法提交 Agent 事件".into());
-        }
-        for item in &history[self.persisted_upto..] {
-            if line_over_limit(&record_line(item)) {
-                return Err(format!(
-                    "{}，滞留记录无法随 Agent 事件提交",
-                    line_limit_error("待写段记录")
-                ));
-            }
-        }
-        if self.version != 3 {
-            let (path, file, bytes, session_lock) =
-                self.create_v3_target_with_tail(history, &[line.as_str()])?;
-            self.version = 3;
-            self.state = State::Writing { _path: path, file, _lock: session_lock };
-            self.durable_len = bytes;
-            self.persisted_upto = history.len();
-            self.agent_untracked += 1;
-            self.error_reported = false;
-            return Ok(self.persisted_upto);
-        }
-        let State::Writing { file, .. } = &mut self.state else {
-            return Err("自动保存目标不可用，无法提交 Agent 事件".into());
-        };
-        let outcome = (|| -> Result<(), std::io::Error> {
-            for item in &history[self.persisted_upto..] {
-                let line = record_line(item);
-                file.write_all(line.as_bytes())?;
-                self.durable_len += line.len() as u64;
-                self.persisted_upto += 1;
-            }
-            file.write_all(line.as_bytes())?;
-            self.durable_len += line.len() as u64;
-            self.agent_untracked += 1;
-            Ok(())
-        })();
-        match outcome {
-            Ok(()) => {
-                self.error_reported = false;
-                Ok(self.persisted_upto)
-            }
-            Err(e) => {
-                let msg = format!("Agent 事件提交写入失败（{e}）：未提交");
-                match file.set_len(self.durable_len) {
-                    Ok(()) => Err(msg),
-                    Err(te) => {
-                        self.state = State::Disabled;
-                        Err(format!(
-                            "{msg}；截回失败（{te}），自动保存已停用，文件尾部半行将由下次装载按坏行跳过"
-                        ))
-                    }
-                }
-            }
-        }
+        // 游标不越过事件行（flush 吸收）。
+        self.commit_event_line(history, &line, "Agent 事件", false, Some(UntrackedKind::Agent))
     }
 
     /// 035：调度泵线程提交一条 Agent 事件（根阻塞于模型/工具/wait 期间）。
@@ -1516,6 +1449,21 @@ impl Session {
         &self,
         history: &[HistoryItem],
     ) -> Result<(PathBuf, File, u64, Option<SessionLock>), String> {
+        // S11：与 create_v3_target_with_tail 同构——仅 meta 版本（self.version
+        // vs 3）、错误前缀两处差异；开篇尾行差异由调用面承担。
+        self.create_target(history, self.version, &[], "", "自动会话文件名持续冲突，自动保存已停用")
+    }
+
+    /// 新 V3 目标创建单点（S11）：meta(meta_version)＋完整 transcript＋可选
+    /// 尾行；`failure_prefix` 逐字来自原「提交检查点失败：」／空串（auto 创建）。
+    fn create_target(
+        &self,
+        history: &[HistoryItem],
+        meta_version: u64,
+        tail_lines: &[&str],
+        failure_prefix: &str,
+        conflict_err: &str,
+    ) -> Result<(PathBuf, File, u64, Option<SessionLock>), String> {
         catalog::ensure_private_dir(&self.dir)
             .map_err(|e| format!("自动会话目录初始化失败：{e}"))?;
         let base = auto_file_name();
@@ -1529,20 +1477,23 @@ impl Session {
             };
             let path = self.dir.join(&name);
             let opened = {
+                // read(true)（A11 修复，unix 行为微变：句柄追加只写→可读写）：
+                // 同名恢复（resume 命中同一文件）经本已存句柄 rewind＋装载读取
+                // ——append-only 句柄读回 EBADF（红测试
+                // resume_same_file_after_fresh_auto_file_reads_back 实证）。
+                // 锁不经句柄（unix flock / Windows 命名互斥体），read 位不影响锁语义。
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::OpenOptionsExt;
                     std::fs::OpenOptions::new()
                         .append(true)
+                        .read(true)
                         .create_new(true)
                         .mode(0o600)
                         .open(&path)
                 }
                 #[cfg(not(unix))]
                 {
-                    // read(true)：Windows LockFileEx 要求句柄具备 GENERIC_READ/
-                    // GENERIC_WRITE；append-only 句柄（仅 FILE_APPEND_DATA）取锁
-                    // 得 ERROR_ACCESS_DENIED——CI 实测（038）自动保存因此停用。
                     std::fs::OpenOptions::new()
                         .append(true)
                         .read(true)
@@ -1572,7 +1523,7 @@ impl Session {
             }
             let mut bytes = 0u64;
             let outcome = (|| -> Result<(), String> {
-                let meta = format!("{}\n", meta_line(self.version));
+                let meta = format!("{}\n", meta_line(meta_version));
                 file.write_all(meta.as_bytes())
                     .map_err(|e| format!("自动会话写入失败：{e}"))?;
                 bytes += meta.len() as u64;
@@ -1580,102 +1531,6 @@ impl Session {
                     let line = record_line(item);
                     if line_over_limit(&line) {
                         return Err(format!("{}，自动保存已停用", line_limit_error("记录序列化后")));
-                    }
-                    file.write_all(line.as_bytes())
-                        .map_err(|e| format!("自动会话写入失败：{e}"))?;
-                    bytes += line.len() as u64;
-                }
-                Ok(())
-            })();
-            match outcome {
-                Ok(()) => return Ok((path, file, bytes, session_lock)),
-                Err(msg) => {
-                    // 创建即失败：无已提交记录可保，清掉残档后停用
-                    let _ = std::fs::remove_file(&path);
-                    return Err(msg);
-                }
-            }
-        }
-        Err("自动会话文件名持续冲突，自动保存已停用".into())
-    }
-
-    /// 032 审查修复 #13：迁移原子化的局部演练——创建新 V3 auto 目标（meta
-    /// v3＋完整 transcript 开篇＋检查点行），成功返回 (path, file, bytes)，
-    /// 失败清理临时文件且不触碰 self。撞名候选循环与锁语义复用
-    /// create_auto_file 的既有约定。
-    fn create_v3_target_with_checkpoint(
-        &self,
-        history: &[HistoryItem],
-        cp_line: &str,
-    ) -> Result<(PathBuf, File, u64, Option<SessionLock>), String> {
-        self.create_v3_target_with_tail(history, &[cp_line])
-    }
-
-    /// 032 迁移原语（034 起检查点与编排事件共用）：新 V3 目标＝meta v3＋完整
-    /// transcript 开篇＋尾行（提交中的记录行）；全部成功才替换 self。
-    fn create_v3_target_with_tail(
-        &self,
-        history: &[HistoryItem],
-        tail_lines: &[&str],
-    ) -> Result<(PathBuf, File, u64, Option<SessionLock>), String> {
-        catalog::ensure_private_dir(&self.dir)
-            .map_err(|e| format!("自动会话目录初始化失败：{e}"))?;
-        let base = auto_file_name();
-        for attempt in 0..50u32 {
-            let name = if attempt == 0 {
-                base.clone()
-            } else {
-                format!("{}-{attempt}.jsonl", base.strip_suffix(".jsonl").unwrap_or(&base))
-            };
-            let path = self.dir.join(&name);
-            let opened = {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    std::fs::OpenOptions::new()
-                        .append(true)
-                        .create_new(true)
-                        .mode(0o600)
-                        .open(&path)
-                }
-                #[cfg(not(unix))]
-                {
-                    // read(true)：同 create_auto_file——LockFileEx 句柄访问权要求。
-                    std::fs::OpenOptions::new()
-                        .append(true)
-                        .read(true)
-                        .create_new(true)
-                        .open(&path)
-                }
-            };
-            let mut file = match opened {
-                Ok(f) => f,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => return Err(format!("创建自动会话文件失败：{e}")),
-            };
-            let (lock_outcome, session_lock) = try_flock(&path, &file);
-            match lock_outcome {
-                LockOutcome::Acquired => {}
-                LockOutcome::Busy => continue,
-                LockOutcome::Failed(e) => return Err(format!("自动会话文件加锁失败：{e}")),
-            }
-            if ensure_within_dir(&self.dir, &path).is_err() {
-                let _ = std::fs::remove_file(&path);
-                return Err("自动会话路径逃出 sessions 目录，已停用自动保存".into());
-            }
-            let mut bytes = 0u64;
-            let outcome = (|| -> Result<(), String> {
-                let meta = format!("{}\n", meta_line(3));
-                file.write_all(meta.as_bytes())
-                    .map_err(|e| format!("自动会话写入失败：{e}"))?;
-                bytes += meta.len() as u64;
-                for item in history {
-                    let line = record_line(item);
-                    if line_over_limit(&line) {
-                        return Err(format!(
-                            "{}，自动保存已停用",
-                            line_limit_error("记录序列化后")
-                        ));
                     }
                     file.write_all(line.as_bytes())
                         .map_err(|e| format!("自动会话写入失败：{e}"))?;
@@ -1691,14 +1546,27 @@ impl Session {
             match outcome {
                 Ok(()) => return Ok((path, file, bytes, session_lock)),
                 Err(msg) => {
-                    // 局部演练失败：清掉残档，self 未被触碰（旧目标原样）
+                    // 创建即失败：无已提交记录可保，清掉残档后停用
                     let _ = std::fs::remove_file(&path);
-                    return Err(format!("提交检查点失败：{msg}"));
+                    return Err(format!("{failure_prefix}{msg}"));
                 }
             }
         }
-        Err("自动会话文件名持续冲突，检查点未提交（自动保存不受影响）".into())
+        Err(conflict_err.to_string())
     }
+
+    /// 032 迁移原语（034 起 S11 通用）：新 V3 目标＝meta 3＋完整 transcript
+    /// 开篇＋尾行（提交中的记录行）；全部成功才替换 self。错误前缀＝「提交
+    /// 检查点失败：」（032 文案，事件提交路径沿用）。
+    fn create_v3_target_with_tail(
+        &self,
+        history: &[HistoryItem],
+        tail_lines: &[&str],
+    ) -> Result<(PathBuf, File, u64, Option<SessionLock>), String> {
+        self.create_target(history, 3, tail_lines, "提交检查点失败：", "自动会话文件名持续冲突，检查点未提交（自动保存不受影响）")
+    }
+
+
 
     /// 按序提交待写段 `history[persisted_upto..]`：每行独立 write_all＋独立推进；
     /// 失败→截回 durable_len（截回成功＝游标不动待补写；截回失败＝停用）；
@@ -1796,6 +1664,12 @@ fn truncate_bad_tail(file: &mut File, file_len: u64) -> std::io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    /// S25：epoch 0 的固定秒数断言（chrono 替换手写历法的输出逐字节锚）。
+    #[test]
+    fn utc_basic_from_secs_epoch() {
+        assert_eq!(super::utc_basic_from_secs(0), "19700101T000000");
+    }
+
     use super::*;
 
     /// 032 M3（C10 写前/半写屏障）：真实设备注入——Writing 态指向 /dev/full
@@ -1841,10 +1715,138 @@ mod tests {
             err.contains("检查点提交写入失败") && err.contains("截回失败") && err.contains("停用"),
             "报错须指明写失败＋截回失败＋停用：{err}"
         );
+
         // 游标未越过检查点；停用后普通追加静默（不再尝试写）
         assert_eq!(session.persisted_upto, 1, "游标不因失败推进");
         assert_eq!(session.on_history(&history), None, "停用后无追加");
         assert_eq!(session.flush_final(&history), Ok(()), "停用态排空＝无操作");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A10：截断片段自身也须 ≤64 KiB（修复前超长片段携 truncated=true 可
+    /// 通过校验——文档「result 片段 ≤64 KiB」的落实；写入侧 SNIPPET 保证
+    /// 正常路径恒不超限，本锚锁定校验面）。
+    #[test]
+    fn validate_rejects_oversized_truncated_fragment() {
+        let event = |seq: u64, content_len: usize, truncated: bool| {
+            HistoryItem::OrchestrationEvent {
+                kind: crate::prompt::OrchestrationEventKind::CallFinished,
+                cell_id: "cell-a10".into(),
+                exec_call_id: "exec-a10".into(),
+                seq,
+                leaf_id: Some(1),
+                tool_name: Some("leaf".into()),
+                arguments: Some("{}".into()),
+                result: Some(crate::prompt::OrchestrationEventResult {
+                    content: "x".repeat(content_len),
+                    original_bytes: truncated.then_some(1_000_000),
+                    sha256: truncated.then_some("0".repeat(64)),
+                    truncated,
+                    display: None,
+                    execution: "unknown".into(),
+                }),
+                close_reason: None,
+            }
+        };
+        // 前置链：cell 开篇＋call_started（validate 的次序与配对要求）。
+        let cell_started = HistoryItem::OrchestrationEvent {
+            kind: crate::prompt::OrchestrationEventKind::CellStarted,
+            cell_id: "cell-a10".into(),
+            exec_call_id: "exec-a10".into(),
+            seq: 1,
+            leaf_id: None,
+            tool_name: None,
+            arguments: Some("{}".into()),
+            result: None,
+            close_reason: None,
+        };
+        let call_started = HistoryItem::OrchestrationEvent {
+            kind: crate::prompt::OrchestrationEventKind::CallStarted,
+            cell_id: "cell-a10".into(),
+            exec_call_id: "exec-a10".into(),
+            seq: 2,
+            leaf_id: Some(1),
+            tool_name: Some("leaf".into()),
+            arguments: Some("{}".into()),
+            result: None,
+            close_reason: None,
+        };
+        // 合法：≤64 KiB 片段（truncated 标记与否则均可）
+        assert!(super::validate_orchestration_chain(&[
+            cell_started.clone(),
+            call_started.clone(),
+            event(3, 64 * 1024, false)
+        ])
+        .is_ok());
+        assert!(super::validate_orchestration_chain(&[
+            cell_started.clone(),
+            call_started.clone(),
+            event(3, 64 * 1024, true)
+        ])
+        .is_ok());
+        // 超 64 KiB 且 truncated=true：修复前通过（无上限检查）——红转绿锚。
+        let err = super::validate_orchestration_chain(&[
+            cell_started,
+            call_started,
+            event(3, 64 * 1024 + 1, true),
+        ])
+        .expect_err("超长截断片段必须拒绝");
+        assert!(err.contains("截断片段超过 64 KiB"), "{err}");
+    }
+
+// S11 验收补锚：检查点失败文案恢复出的「活动视图不变」后缀
+// （正确性审查发现 map_err 三分支曾偏差,此锚钉住逐字保真）。
+#[test]
+fn checkpoint_write_failure_message_keeps_view_note() {
+    let dir = std::env::temp_dir().join(format!("tchat-cp-msg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // Writing 态持只读句柄：写路径失败→截回成功分支。
+    let ro = dir.join("ro.bin");
+    std::fs::write(&ro, b"").unwrap();
+    let dev = std::fs::File::open(&ro).expect("只读夹具");
+    let mut session = Session {
+        version: 3,
+        native_seen: 0,
+        dir: dir.clone(),
+        state: State::Writing { _path: ro, file: dev, _lock: None },
+        persisted_upto: 1,
+        durable_len: 64,
+        error_reported: false,
+        orch_untracked: 0,
+        agent_untracked: 0,
+    };
+    let history = vec![text_user("一"), text_user("二")];
+    let cp = HistoryItem::ContextCheckpoint {
+        context_id: 1,
+        request_call_id: "req-a10".into(),
+        summary: "检查点摘要".into(),
+        seed: vec![],
+    };
+    let err = session.commit_checkpoint(&history, &cp).expect_err("必败");
+    assert!(
+        err.contains("，活动视图不变；截回失败"),
+        "截回失败分支须含「活动视图不变」：{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+    /// A11：新建 auto 文件的句柄 unix 侧 append-only（无 read）——同进程
+    /// 立即 /resume 命中 same_file 复用分支，从只写句柄读＝EBADF（修复前红）。
+    #[test]
+    fn resume_same_file_after_fresh_auto_file_reads_back() {
+        let dir = std::env::temp_dir().join(format!("tchat-a11-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut session = Session::new(dir.clone());
+        let history = vec![text_user("新建即恢复")];
+        assert_eq!(session.on_history(&history), None, "首写建文件");
+        // 同进程立即恢复：写者持锁同名文件，命中 same_file 复用分支。
+        let res = session.resume(None);
+        assert!(res.is_ok(), "新建后立即 resume 不得 EBADF：{res:?}");
+        let info = res.unwrap();
+        assert!(!info.degraded, "same_file 复用＝非降级");
+        assert_eq!(info.loaded.history.len(), 1, "已写记录可读回");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -31,6 +31,21 @@ pub enum AgentState {
 }
 
 impl AgentState {
+    /// V3 装载侧状态名词表单源（S32）：与 [`AgentState::as_str`] 互逆，
+    /// events 校验与展示名共用，防漂移。
+    pub fn from_display(state: &str) -> Option<Self> {
+        Some(match state {
+            "starting" => Self::Starting,
+            "running" => Self::Running,
+            "stopping" => Self::Stopping,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "interrupted" => Self::Interrupted,
+            "closed" => Self::Closed,
+            _ => return None,
+        })
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Starting => "starting",
@@ -102,8 +117,6 @@ impl AgentRecord {
 /// 计费并释放未用预留（§1.6）。
 pub struct GroupCore {
     pub group_id: u64,
-    /// 组事件宿主递增序号（只在提交成功后占用——034 审查 P1-3 同教训）。
-    pub seq: u64,
     pub agents: BTreeMap<String, AgentRecord>,
     pub closed: bool,
     pub close_reason: Option<String>,
@@ -132,7 +145,6 @@ impl GroupCore {
     pub fn new(group_id: u64) -> Self {
         Self {
             group_id,
-            seq: 0,
             agents: BTreeMap::new(),
             closed: false,
             close_reason: None,

@@ -32,9 +32,32 @@ const PROMPT_IMAGE_PATCH_SIZE: u32 = 32;
 const HIGH_DETAIL_MAX_DIMENSION: u32 = 2048;
 const HIGH_DETAIL_MAX_PATCHES: usize = 2500;
 
+/// `bytes` 字段的传输编码（A9）：base64 字符串替代 JSON 十进制数组——
+/// 膨胀 4/3 倍而非 ≈4 倍，沙箱传输有效上限与进程内 4 MiB 对齐。
+/// 仅跨进程 stdout 一对消费方（子进程 to_vec／宿主 from_slice），进程内
+/// 不序列化本结构；往返无损由单元测试锚定。
+mod bytes_wire {
+    use base64::Engine as _;
+    pub fn serialize<S: serde::Serializer>(
+        bytes: &[u8],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<u8>, D::Error> {
+        let s = <String as serde::Deserialize>::deserialize(deserializer)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(s.as_bytes())
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// 准备后的图片（上游 `EncodedImage` 的本地形态；无缓存共享故用 Vec）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EncodedImage {
+    #[serde(with = "bytes_wire")]
     pub bytes: Vec<u8>,
     pub mime: String,
     pub source_width: u32,
@@ -42,6 +65,10 @@ pub struct EncodedImage {
     pub width: u32,
     pub height: u32,
 }
+
+/// 沙箱传输接收上限（A9）：4 MiB 原始经 base64（4/3）＋元数据余量——
+/// 生产接收检查与测试断言共用的单一口径（防双写漂移）。
+pub(crate) const SANDBOX_WIRE_BOUND: usize = MAX_PREPARED_IMAGE_BYTES / 3 * 4 + 4096;
 
 /// 上游 `data_url_from_bytes`：包装为 data URL（本层不解码校验）。
 pub fn data_url_from_bytes(mime: &str, bytes: &[u8]) -> String {
@@ -71,7 +98,6 @@ fn error_summary(error: &str) -> String {
     serde_json::json!({ "ok": false, "error": error }).to_string()
 }
 
-/// 能力关闭（text-only／未知）时的结果：不读取文件（§3.2——声明与执行两层关闭）。
 /// 以错误摘要构造结果（031 编码失败等调用方侧失败；不读取文件）。
 pub fn error_outcome(error: &str) -> ViewImageOutcome {
     ViewImageOutcome {
@@ -80,6 +106,7 @@ pub fn error_outcome(error: &str) -> ViewImageOutcome {
     }
 }
 
+/// 能力关闭（text-only／未知）时的结果：不读取文件（§3.2——声明与执行两层关闭）。
 pub fn unsupported_outcome() -> ViewImageOutcome {
     ViewImageOutcome {
         summary: error_summary(
@@ -112,6 +139,20 @@ fn parse_arguments(arguments: &str) -> Result<String, String> {
 /// 工作目录，绝对＝原义，不作 shell 展开）→ 有界读取 → 图片准备 → 摘要与载荷。
 /// 取消检查点：读取前、读取后、结果提交前（解码为有界同步处理，途中取消在
 /// 下一检查点生效）。
+/// run() 结果 → 工具结果装配（execute 与 execute_sandboxed 共用；错误＝摘要、无图）。
+fn to_outcome(run: Result<(PathBuf, EncodedImage), String>) -> ViewImageOutcome {
+    match run {
+        Ok((resolved, encoded)) => ViewImageOutcome {
+            summary: ok_summary(&resolved, &encoded),
+            image: Some(ToolResultImage {
+                image_url: data_url_from_bytes(&encoded.mime, &encoded.bytes),
+                detail: "high".into(),
+            }),
+        },
+        Err(error) => ViewImageOutcome { summary: error_summary(&error), image: None },
+    }
+}
+
 pub fn execute(arguments: &str, cwd: &Path, cancel: Option<&AtomicBool>) -> ViewImageOutcome {
     let run = || -> Result<(PathBuf, EncodedImage), String> {
         let path = parse_arguments(arguments)?;
@@ -125,16 +166,7 @@ pub fn execute(arguments: &str, cwd: &Path, cancel: Option<&AtomicBool>) -> View
         }
         Ok((resolved, encoded))
     };
-    match run() {
-        Ok((resolved, encoded)) => ViewImageOutcome {
-            summary: ok_summary(&resolved, &encoded),
-            image: Some(ToolResultImage {
-                image_url: data_url_from_bytes(&encoded.mime, &encoded.bytes),
-                detail: "high".into(),
-            }),
-        },
-        Err(error) => ViewImageOutcome { summary: error_summary(&error), image: None },
-    }
+    to_outcome(run())
 }
 
 /// 从已解析路径准备单张图片（020：与工具共用核心——普通文件检查、
@@ -206,22 +238,7 @@ pub fn execute_sandboxed_with_exe(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            unsafe {
-                match launch.seccomp.as_ref() {
-                    Some(g) => {
-                        let fd = g.raw();
-                        cmd.pre_exec(move || {
-                            crate::sandbox::close_inherited_fds_except_cloexec(fd)
-                        });
-                    }
-                    None => {
-                        cmd.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
-                    }
-                }
-            }
-        }
+        crate::sandbox::apply_spawn_fd_hygiene(&mut cmd, launch.seccomp.as_ref());
         // seccomp fd 守卫存活到 spawn 完成（memfd 非 CLOEXEC 穿越 execve）。
         let child = cmd
             .spawn()
@@ -245,27 +262,24 @@ pub fn execute_sandboxed_with_exe(
             };
             return Err(format!("沙箱图片准备失败（exit {:?}）：{tail}", out.status.code()));
         }
-        // 有界接收：编码图片上限即进程内同款 4 MiB＋元数据余量
-        if out.stdout.len() > MAX_PREPARED_IMAGE_BYTES + 1024 {
+        // 有界接收：4 MiB 原始经 base64 传输（4/3）＋元数据余量（A9 修复——
+        // 原十进制数组 ≈4 倍膨胀使有效上限仅 ≈1 MiB，1.1–4 MiB 图片假拒绝）。
+        if out.stdout.len() > SANDBOX_WIRE_BOUND {
             return Err("沙箱图片结果超过有界上限".to_string());
         }
         let encoded: EncodedImage = serde_json::from_slice(&out.stdout)
             .map_err(|e| format!("沙箱图片结果解析失败：{e}"))?;
+        // 防御深度（验收审查）：解码后复验进程内同款 4 MiB 上限（线格式余量
+        // 允许约 3 KiB 偏差；唯一写者＝第一方 worker，仅一致性收口）。
+        if encoded.bytes.len() > MAX_PREPARED_IMAGE_BYTES {
+            return Err("沙箱图片结果超过进程内上限".to_string());
+        }
         if cancelled(cancel) {
             return Err("用户已取消：本调用未完成".into());
         }
         Ok((resolved, encoded))
     };
-    match run() {
-        Ok((resolved, encoded)) => ViewImageOutcome {
-            summary: ok_summary(&resolved, &encoded),
-            image: Some(ToolResultImage {
-                image_url: data_url_from_bytes(&encoded.mime, &encoded.bytes),
-                detail: "high".into(),
-            }),
-        },
-        Err(error) => ViewImageOutcome { summary: error_summary(&error), image: None },
-    }
+    to_outcome(run())
 }
 
 /// `--internal-view-image <path>` 子进程入口：读取并准备单张图片，编码 JSON
@@ -350,7 +364,6 @@ pub fn compose_cli_user_message(
     (content, elements)
 }
 
-/// 相对路径以会话工作目录解析；绝对路径按原义使用。
 fn resolve_path(cwd: &Path, path: &str) -> PathBuf {
     let p = Path::new(path);
     if p.is_absolute() {
@@ -680,6 +693,34 @@ fn cancelled(cancel: Option<&AtomicBool>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A9 红：4 MiB 原始图片（进程内允许上限，:446 同款检查）按十进制数组
+    /// JSON 编码后 ≈3.6 倍膨胀，超沙箱接收上限（4 MiB＋1 KiB）——沙箱路径
+    /// 对 1.1–4 MiB 图片假拒绝（修复前红）。
+    #[test]
+    fn sandbox_transfer_encoding_of_max_prepared_image_fits_bound() {
+        let encoded = EncodedImage {
+            mime: "image/png".into(),
+            bytes: vec![0x89u8; MAX_PREPARED_IMAGE_BYTES],
+            source_width: 1,
+            source_height: 1,
+            width: 1,
+            height: 1,
+        };
+        let wire = serde_json::to_vec(&encoded).unwrap();
+        // 断言对象＝沙箱接收上限（A9 修复后口径：base64 4/3＋元数据余量；
+        // 修复前旧口径下本测试红：十进制数组 16,777,302 B > 4,195,328 B）。
+        let bound = SANDBOX_WIRE_BOUND;
+        assert!(
+            wire.len() <= bound,
+            "4 MiB 图编码后 {} B 超接收上限 {bound} B（沙箱有效上限≠进程内）",
+            wire.len()
+        );
+        // 往返一致（传输编码改写后仍无损）。
+        let back: EncodedImage = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(back, encoded);
+    }
+
+
     use super::*;
     use image::GenericImageView;
     use image::ImageDecoder;
@@ -932,8 +973,6 @@ mod tests {
             .unwrap();
         cursor.into_inner()
     }
-
-    // ---------- execute 契约 ----------
 
     fn write_png(dir: &Path, name: &str) -> PathBuf {
         let p = dir.join(name);

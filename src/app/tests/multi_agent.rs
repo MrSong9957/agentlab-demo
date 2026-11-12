@@ -2194,3 +2194,273 @@ fn c13_bwrap_owner_reap_matrix() {
     assert_eq!(v["leftover_sleep"], json!(false), "回收后无残留进程：{v}");
     let _ = std::fs::remove_dir_all(&io);
 }
+
+// ===== A1/S33、A2 回归锚（清单 docs/logs/2026-11-10-simplify-checklist.md）=====
+//
+// 直驱运行时（不经完整 turn）：AgentManager::begin_turn 取组句柄后用
+// execute_control_tool 逐步执行——与 turn 分派同一入口。
+
+use terminal_chat::agents::events::event_bytes;
+use terminal_chat::agents::runtime::{execute_control_tool, SpawnContext};
+use terminal_chat::prompt::AgentEventKind;
+
+/// 构造直驱上下文（sender 工厂返回克隆脚本子）。
+fn direct_ctx<'a>(
+    factory: &'a (dyn Fn() -> Box<dyn ChildModelSender> + 'static),
+) -> SpawnContext<'a> {
+    SpawnContext {
+        active_items: &[],
+        context_id: 0,
+        preamble: "测试环境上下文（冻结）".to_string(),
+        system: String::new(),
+        view_image: false,
+        mcp: None,
+        declared_dynamic: std::collections::HashSet::new(),
+        sender_factory: factory,
+    }
+}
+
+fn tool(
+    runtime: &Arc<terminal_chat::agents::runtime::GroupRuntime>,
+    name: &str,
+    args: Value,
+    history: &mut Vec<HistoryItem>,
+    ctx: &SpawnContext<'_>,
+) -> String {
+    execute_control_tool(runtime, name, &args.to_string(), history, ctx, &|| false)
+}
+
+/// S36/N3：followup 满槽（全局 3 子执行槽被挂起 Agent 占满）拒绝时——
+/// 目标 Agent 保持原终态与最近任务文案（rollback_followup 不得错置 failed、
+/// 不得毁最近任务展示）。挂起构造：ScriptChild 屏障 n=2 而仅 1 请求到达＝
+/// 模型线程卡在屏障等待＝槽持续占用（ScriptChild::send 30s 自限时后释放，SuiteGuard drain 覆盖）。
+#[test]
+fn n3_followup_full_slots_keeps_terminal_state_and_message() {
+    let _suite = SuiteGuard::acquire();
+    let dir = std::env::temp_dir().join(format!("tchat-035-n3-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let manager = AgentManager::new();
+    let session = Arc::new(Mutex::new(Session::new(dir.clone())));
+    let procs = terminal_chat::proc_session::ProcessManager::new();
+    let runtime = manager.begin_turn(session, procs);
+    // 终态目标：final 响应＝completed（N3 区分「错置 failed」——prev 必须非 failed）。
+    let done_factory = || -> Box<dyn ChildModelSender> {
+        Box::new(ScriptChild::new(vec![child_final("done1 完成")]))
+    };
+    let ctx = direct_ctx(&done_factory);
+    let mut history = Vec::new();
+    let out = tool(
+        &runtime,
+        "spawn_agent",
+        json!({ "task_name": "done1", "message": "任务 done1", "fork_turns": "none" }),
+        &mut history,
+        &ctx,
+    );
+    assert!(out.contains("\"error\":null"), "终态目标 spawn：{out}");
+    let out = tool(&runtime, "wait_agent", json!({ "timeout_ms": 8000 }), &mut history, &ctx);
+    assert!(!out.contains("\"timeout\""), "终态目标应完成：{out}");
+    // 挂起 ×3 占满全局槽（屏障等待＝模型线程卡住）。
+    for name in ["hang1", "hang2", "hang3"] {
+        let factory = {
+            let child = ScriptChild::new(vec![]).with_barrier(2);
+            move || -> Box<dyn ChildModelSender> { Box::new(child.clone()) }
+        };
+        let hang_ctx = direct_ctx(&factory);
+        let out = tool(
+            &runtime,
+            "spawn_agent",
+            json!({ "task_name": name, "message": format!("任务 {name}"), "fork_turns": "none" }),
+            &mut history,
+            &hang_ctx,
+        );
+        assert!(out.contains("\"error\":null"), "{name} 挂起 spawn：{out}");
+    }
+    // followup 终态目标：满槽拒绝（文案含槽数），状态/文案不被破坏。
+    let out = tool(
+        &runtime,
+        "followup_task",
+        json!({ "target": "/root/done1", "message": "续接任务" }),
+        &mut history,
+        &ctx,
+    );
+    assert!(
+        out.contains("CAPACITY_LIMIT") && out.contains("全应用子执行槽已满（3）"),
+        "满槽 followup 应拒绝：{out}"
+    );
+    let listing = tool(&runtime, "list_agents", json!({}), &mut history, &ctx);
+    let v: serde_json::Value = serde_json::from_str(&listing).unwrap();
+    let done1 = v["data"]["agents"]
+        .as_array()
+        .and_then(|a| {
+            a.iter()
+                .find(|a| a["agent_name"] == json!("/root/done1"))
+                .cloned()
+        })
+        .expect("list_agents 含 done1");
+    assert_eq!(
+        done1["state"], json!("completed"),
+        "N3：拒绝后保持原终态（不得错置 failed）：{done1}"
+    );
+    assert_eq!(
+        done1["last_task_message"], json!("任务 done1"),
+        "N3：最近任务文案不毁：{done1}"
+    );
+}
+
+/// S33（A1 回归锚）：组事件计费恰一次。035 §1.6「提交后按真实大小计费并
+/// 释放未用预留」——已提交事件（除 MessageDelivered 通知，其不属于计费面）
+/// 的 event_bytes 之和必须等于 event_bytes_committed。A1（child_record 在
+/// release 与 account_event 各计一次）修复前该断言失败。
+#[test]
+fn s33_group_event_billing_charged_exactly_once() {
+    let _suite = SuiteGuard::acquire();
+    let dir = std::env::temp_dir().join(format!("tchat-035-s33-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let manager = AgentManager::new();
+    let session = Arc::new(Mutex::new(Session::new(dir.clone())));
+    let procs = terminal_chat::proc_session::ProcessManager::new();
+    let runtime = manager.begin_turn(session, procs);
+    // 子脚本：先带工具调用（该响应经 child_record 提交——A1 双计费点），
+    // 再纯文本终文（终文不经 child_record，见 runtime 终文门 Complete 分支）。
+    let child = ScriptChild::new(vec![
+        child_call("k1", "exec_command", json!({ "cmd": "echo hi" })),
+        child_final("子完成"),
+    ]);
+    let c2 = child.clone();
+    let factory = move || -> Box<dyn ChildModelSender> { Box::new(c2.clone()) };
+    let ctx = direct_ctx(&factory);
+    let mut history = Vec::new();
+
+    let out = tool(
+        &runtime,
+        "spawn_agent",
+        json!({ "task_name": "worker", "message": "任务 worker", "fork_turns": "none" }),
+        &mut history,
+        &ctx,
+    );
+    assert!(out.contains("\"error\":null"), "spawn 应成功：{out}");
+    let out = tool(&runtime, "wait_agent", json!({ "timeout_ms": 8000 }), &mut history, &ctx);
+    assert!(!out.contains("\"failed\""), "子应正常终态：{out}");
+    runtime.close_for_turn_exit(&mut history, &mut |_| {}, "s33_end");
+
+    let charged_sum: u64 = history
+        .iter()
+        .filter_map(|it| match it {
+            HistoryItem::AgentEvent { kind, .. }
+                if !matches!(kind, AgentEventKind::MessageDelivered) =>
+            {
+                Some(event_bytes(it))
+            }
+            _ => None,
+        })
+        .sum();
+    let counter = runtime.event_bytes_committed();
+    assert_eq!(
+        charged_sum, counter,
+        "组事件计费应恰一次（Σ已提交非 delivered 事件 == 计数器；\
+         A1 双计费时 counter 偏大）：sum={charged_sum} counter={counter}"
+    );
+    SuiteGuard::drain_slots();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A2 回归：组消息预算满时 followup 必须返回 BUDGET_LIMIT 错误而不是挂死。
+/// 修复前 rollback_followup 在持有 core 互斥锁的块内再次锁 core（std Mutex
+/// 不可重入）——根线程死锁，本用例经 90s 看门狗超时失败。
+///
+/// 填预算：4 个 Agent（空脚本，spawn 后立即失败终态），每接收者邮箱
+/// 256 KiB（16×16 KiB）×4＝恰好填满 1 MiB 组累计字节；spawn 任务字节使其
+/// 超 1 MiB，故第 64 条 send 被 CAPACITY_LIMIT 拒绝（不计入），此后
+/// followup 的 16 KiB 任务必超预算（1_032_252+16_384 > 1_048_576）。
+#[test]
+fn a2_followup_budget_full_returns_error_not_deadlock() {
+    let _suite = SuiteGuard::acquire();
+    let dir = std::env::temp_dir().join(format!("tchat-035-a2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let manager = AgentManager::new();
+    let session = Arc::new(Mutex::new(Session::new(dir.clone())));
+    let procs = terminal_chat::proc_session::ProcessManager::new();
+    let runtime = manager.begin_turn(session, procs);
+    // 空脚本子：首个模型请求即失败 → 快速终态，槽位及时释放。
+    let factory = || -> Box<dyn ChildModelSender> { Box::new(ScriptChild::new(vec![])) };
+    let ctx = direct_ctx(&factory);
+    let mut history = Vec::new();
+
+    for (id, name) in [("s1", "a1"), ("s2", "a2"), ("s3", "a3")] {
+        let out = tool(
+            &runtime,
+            "spawn_agent",
+            json!({ "task_name": name, "message": format!("任务 {name}"), "fork_turns": "none" }),
+            &mut history,
+            &ctx,
+        );
+        assert!(out.contains("\"error\":null"), "{id} spawn 应成功：{out}");
+    }
+    for w in 1..=3 {
+        let out = tool(&runtime, "wait_agent", json!({ "timeout_ms": 8000 }), &mut history, &ctx);
+        assert!(!out.contains("\"timeout\""), "第 {w} 个 wait 应收到终态：{out}");
+    }
+    let out = tool(
+        &runtime,
+        "spawn_agent",
+        json!({ "task_name": "a4", "message": "任务 a4", "fork_turns": "none" }),
+        &mut history,
+        &ctx,
+    );
+    assert!(out.contains("\"error\":null"), "a4 spawn 应成功：{out}");
+    let out = tool(&runtime, "wait_agent", json!({ "timeout_ms": 8000 }), &mut history, &ctx);
+    assert!(!out.contains("\"timeout\""), "a4 wait 应收到终态：{out}");
+
+    // 填满组消息预算：4 接收者 × 16 条 16 KiB（第 64 条被拒，不计入）。
+    let mut rejected = 0usize;
+    for target in ["a1", "a2", "a3", "a4"] {
+        for _ in 0..16 {
+            let out = tool(
+                &runtime,
+                "send_message",
+                json!({ "target": target, "message": "x".repeat(16 * 1024) }),
+                &mut history,
+                &ctx,
+            );
+            if out.contains("CAPACITY_LIMIT") {
+                rejected += 1;
+            }
+        }
+    }
+    assert_eq!(rejected, 1, "恰好第 64 条 send 超组字节预算被拒：{rejected}");
+
+    // followup：预算满 → BUDGET_LIMIT。看门狗 90s——修复前此处死锁超时。
+    let rt2 = Arc::clone(&runtime);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let fargs = json!({
+        "target": "/root/a1",
+        "message": "x".repeat(16 * 1024),
+    });
+    std::thread::Builder::new()
+        .name("a2-followup".into())
+        .spawn(move || {
+            let child2 = ScriptChild::new(vec![]);
+            let factory2 = move || -> Box<dyn ChildModelSender> { Box::new(child2.clone()) };
+            let ctx2 = direct_ctx(&factory2);
+            let mut h2 = Vec::new();
+            let out = tool(&rt2, "followup_task", fargs, &mut h2, &ctx2);
+            let _ = tx.send(out);
+        })
+        .unwrap();
+    match rx.recv_timeout(std::time::Duration::from_secs(90)) {
+        Ok(out) => {
+            assert!(
+                out.contains("BUDGET_LIMIT") && out.contains("组累计消息预算已满"),
+                "followup 应被组消息预算拒绝：{out}"
+            );
+        }
+        Err(_) => panic!(
+            "followup 在组消息预算满时挂死（>90s 无返回）——A2 锁重入回归"
+        ),
+    }
+    SuiteGuard::drain_slots();
+    let _ = std::fs::remove_dir_all(&dir);
+}

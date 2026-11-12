@@ -24,8 +24,6 @@ pub struct QueuedMessage {
 pub struct Mailbox {
     queue: std::collections::VecDeque<QueuedMessage>,
     pending_bytes: usize,
-    /// 已按批交付（保留计数供核算；正文已进接收者上下文）。
-    delivered: usize,
 }
 
 impl Mailbox {
@@ -62,7 +60,6 @@ impl Mailbox {
     pub fn drain(&mut self) -> Vec<QueuedMessage> {
         let out: Vec<QueuedMessage> = self.queue.drain(..).collect();
         self.pending_bytes = 0;
-        self.delivered += out.len();
         out
     }
 

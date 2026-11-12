@@ -71,7 +71,6 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("--internal-js") {
         std::process::exit(terminal_chat::js_orchestration::worker::run_internal_js());
     }
-    // .env 是环境变量的可选来源：启动时载入，已存在的变量不覆盖
     catalog::load_dotenv_from(std::path::Path::new(".env"));
     // 031：可信策略装配（§1.2：CLI/TUI 分流前统一加载并冻结；两宿主取得同
     // 一快照，dotenv 不能重配信任根）。设置 TCHAT_PERMISSION_POLICY 而装配
@@ -312,10 +311,15 @@ fn banner() {
     println!("==============================");
 }
 
+/// y/yes 确认谓词（大小写不敏感，首尾空白忽略）——prompt_y_n 与权限/提交确认共用。
+fn is_affirmative(line: &str) -> bool {
+    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
 /// 交互确认：仅接受 y/yes，其他输入（含读取错误）一律视为拒绝。
 fn prompt_y_n(rl: &mut DefaultEditor, question: &str) -> bool {
     match rl.readline(question) {
-        Ok(line) => matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
+        Ok(line) => is_affirmative(&line),
         Err(_) => false,
     }
 }
@@ -358,7 +362,7 @@ impl terminal_chat::permissions::PermissionHost for CliPermissionHost<'_> {
         let mut rl = self.rl.borrow_mut();
         match rl.readline("允许本次申请？[y/N] ") {
             Ok(line) => {
-                if matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                if is_affirmative(&line) {
                     Ok(terminal_chat::permissions::PermissionDecision::Allow)
                 } else {
                     Ok(terminal_chat::permissions::PermissionDecision::Deny)
@@ -462,10 +466,7 @@ fn ask_cli(
             return Ok(response);
         }
         let confirmation = read(rl, "仍有未答题，确认提交？[y/N] ")?;
-        if matches!(
-            confirmation.trim().to_ascii_lowercase().as_str(),
-            "y" | "yes"
-        ) {
+        if is_affirmative(&confirmation) {
             return Ok(response);
         }
     }
@@ -590,7 +591,8 @@ fn handle_input(
                 &catalog::user_dir(),
             )),
             other => say(&format!(
-                "未知命令 /{other}，可用：/models、/refresh、/save <名称>、/resume [名称]、/sessions、/memory-status、/memory-reset confirm、/mcp [reload]"
+                "未知命令 /{other}，{}",
+                terminal_chat::tui_host::SLASH_COMMAND_HINT
             )),
         }
         return false;
@@ -679,8 +681,6 @@ fn cmd_resume(
             return;
         }
     }
-    // 035：037 会话切换＝组边界——同轮旧组不可续用（begin_turn 于下一轮
-    // 顶替；此处显式关闭旧组防残留）。
     let outcome = autosave
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -822,8 +822,6 @@ fn cmd_chat(
                     let key = &cred.value;
                     let mut sender =
                         |body: &serde_json::Value| api::chat_with_provider_body(&prov.provider_id, conn, key, &model, body, agent);
-                    // 012：工具活动结构化事件——行式路径保持历史输出逐字节不变
-                    //（ToolBegin 打印同一活动行；ToolEnd 仅落史不打印，与 006 一致）；
                     // 016：运行中／已取消但进程仍存活的工具，明确展示会话编号；
                     // 017：update_plan 的 ToolEnd 打印计划清单/原因（成功快照说明与步骤）。
                     let mut notify = |n: turn::TurnNotify| match n {
@@ -840,7 +838,7 @@ fn cmd_chat(
                         turn::TurnNotify::ToolBegin { id, name, .. } => {
                             // 021：消息工具无运行活动——成功即消息本身，失败原因
                             // 在 ToolEnd 呈现；不打印无信息量的活动行
-                            if name != "send_message_to_user_async" {
+                            if name != terminal_chat::message_to_user::TOOL_NAME {
                                 say(&turn::tool_activity_line(&name, &id));
                             }
                         }
@@ -853,7 +851,7 @@ fn cmd_chat(
                             // 021：send_message 成功消息即时输出（终文前；println
                             // 按行 flush）；失败/取消/未知显式呈现原因。不重复
                             // 打印活动行（Begin 已抑制）。
-                            if name == "send_message_to_user_async" {
+                            if name == terminal_chat::message_to_user::TOOL_NAME {
                                 match terminal_chat::message_to_user::sent_message_from_record(
                                     &arguments, &result,
                                 ) {
@@ -1054,11 +1052,6 @@ fn cmd_chat(
                             }
                         }
                     }
-                    let context_sources_for_agents =
-                        terminal_chat::context::ContextSources::from_env();
-                    let agents_context_message =
-                        terminal_chat::context::build_context_message(&context_sources_for_agents)
-                            .message;
                     let agents_sender = agent_sender.clone();
                     let agent_factory =
                         move || -> Box<dyn terminal_chat::agents::runtime::ChildModelSender> {
@@ -1067,6 +1060,13 @@ fn cmd_chat(
                             ))
                         };
                     let agents_extras = if agents_ready {
+                        // S21：agents 上下文仅在就绪时构建（产物仅 AgentExtras
+                        // 消费，纯函数无副作用）。
+                        let context_sources_for_agents =
+                            terminal_chat::context::ContextSources::from_env();
+                        let agents_context_message =
+                            terminal_chat::context::build_context_message(&context_sources_for_agents)
+                                .message;
                         Some(terminal_chat::agents::runtime::AgentExtras {
                             manager: agents_mgr,
                             session: autosave.clone(),

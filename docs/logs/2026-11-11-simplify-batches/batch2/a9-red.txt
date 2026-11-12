@@ -1,0 +1,2 @@
+thread 'view_image::tests::sandbox_transfer_encoding_of_max_prepared_image_fits_bound' (131408) panicked at src/app/src/view_image.rs:678:9:
+4 MiB 图编码后 16777302 B 超接收上限 4195328 B（沙箱有效上限≠进程内）

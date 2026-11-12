@@ -46,13 +46,7 @@ fn identity_hash(server: &str, tool: &str) -> String {
     hasher.update([0u8]);
     hasher.update(tool.as_bytes());
     let digest = hasher.finalize();
-    digest
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>()
-        .chars()
-        .take(HASH_LEN)
-        .collect()
+    crate::hex::hex_encode(&digest).chars().take(HASH_LEN).collect()
 }
 
 /// 原始名字去重后按净化基础名分组，冲突或超长条目附哈希并截断前缀；

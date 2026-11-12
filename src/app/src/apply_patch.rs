@@ -29,8 +29,6 @@ use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 
-// ---- JSON 工具边界 ----
-
 /// apply_patch 工具入参：只接受 patch 字段，多余字段视为非法。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApplyPatchArgs {
@@ -171,26 +169,11 @@ pub fn apply_patch_sandboxed_with_exe(
     spawn_cmd.args(sandbox_args);
     // 033-B2：同 exec 面——继承 fd ≥3 标记 CLOEXEC（execve 时关闭）；仅沙箱
     // 分支。031：seccomp fd 是唯一例外（非 CLOEXEC，bwrap 经 --seccomp 读取）。
-    // pre_exec 为 unix API；非 unix 下 tool_launch_argv 恒 None，不会
-    // 到达此分支（cfg 门控仅为可编译性）。
+    // pre_exec 为 unix API；非 unix 下沙箱后端不可用（上方 Err／Ok(None)
+    // 均已提前返回），不会到达此分支（cfg 门控仅为可编译性）。
     #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            match seccomp_guard.as_ref() {
-                Some(g) => {
-                    let fd = g.raw();
-                    spawn_cmd
-                        .pre_exec(move || crate::sandbox::close_inherited_fds_except_cloexec(fd));
-                }
-                None => {
-                    spawn_cmd.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
-                }
-            }
-        }
-    }
-    // 审查 #27（§1.6 逐启动确认）：031 分支 spawn 后核验载荷确在新 PID ns
-    //（033 分支不适用——033 验收契约不含该检查）。
+    crate::sandbox::apply_spawn_fd_hygiene(&mut spawn_cmd, seccomp_guard.as_ref());
+    // 审查 #27（§1.6 逐启动确认）：031 分支 spawn 后核验载荷确在新 PID ns。
     let spawn_cmd = spawn_cmd
         .env_clear() // 033：凭据环境不进补丁子进程（027 R1 环境面防线保留）
         .envs(child_env);
@@ -234,7 +217,7 @@ pub fn apply_patch_sandboxed_with_exe(
         Err(e) => return err(format!("沙箱执行等待失败：{e}"), false),
     };
     // 040：沙箱分支 program=bwrap，监督进程已收割——就地回收其被收养的
-    // ns-PID-1 reaper（非沙箱分支 program 为补丁程序本体，扫描无匹配）。
+    // ns-PID-1 reaper（非沙箱请求在上方 tool_launch_argv 返回 Ok(None) 时已提前报错）。
     #[cfg(target_os = "linux")]
     crate::sandbox::reap_adopted_bwrap_reapers();
     if !out.status.success() {
@@ -413,9 +396,10 @@ fn run(patch_text: &str) -> (ApplyPatchResult, Vec<crate::prompt::PatchChange>) 
 /// 模型面结果 changed_files 不受影响。
 pub const MAX_DISPLAY_BYTES: usize = 16 * 1024 * 1024;
 
-/// 变更累积器（审查 #6）：changed（结果清单）与 display（展示卡片）必须同序
-/// 同长——该配对不变量由本类型唯一 [`ChangeLog::record`] 入口保证，替代此前
-/// 5 处手写双 push；同时承载展示字节预算（审查 #9）。
+/// 变更累积器（审查 #6）：changed（结果清单）与 display（展示卡片）由本类型
+/// 唯一 [`ChangeLog::record`] 入口统一维护；结果清单始终入列，展示卡片受
+/// 预算约束（预算耗尽时卡片不入列或降级，两者长度可不同）；同时承载展示
+/// 字节预算（审查 #9）。
 #[derive(Default)]
 struct ChangeLog {
     changed: Vec<ChangedFile>,
@@ -1033,8 +1017,6 @@ fn compute_new_content(
     Ok(source.into_contents())
 }
 
-// ---- 顺序执行器 ----
-
 /// 单块失败：区分“未发生写入”（清单仍可信）与“变更操作失败”（须重读）。
 struct Failure {
     msg: String,
@@ -1104,12 +1086,6 @@ fn open_validated_regular(target: &Path) -> std::io::Result<std::fs::File> {
     )
 }
 
-/// 有界源读入核心（Update/Move 共用，审查 #7 收敛）：fd 级 fstat 预检＋take
-/// 有限读取＋字节门（N5）；并核对**读取字节数与 fstat 尺寸一致**——常规文件
-/// 的读取结果不可能偏离其元数据尺寸：超出＝procfs/sysfs 类伪文件（S_IFREG、
-/// st_size=0 而读取有内容，安全修复 F-2），不足＝fstat 与读取之间被并发截断
-/// （审查 #8，data-loss：短读残片曾被当完整内容移动并删源）。两向都保守拒绝。
-
 enum BoundedReadError {
     /// fstat 尺寸超过上限
     OversizeSize(u64),
@@ -1120,6 +1096,11 @@ enum BoundedReadError {
     Io(std::io::Error),
 }
 
+/// 有界源读入核心（Update/Move 共用，审查 #7 收敛）：fd 级 fstat 预检＋take
+/// 有限读取＋字节门（N5）；并核对**读取字节数与 fstat 尺寸一致**——常规文件
+/// 的读取结果不可能偏离其元数据尺寸：超出＝procfs/sysfs 类伪文件（S_IFREG、
+/// st_size=0 而读取有内容，安全修复 F-2），不足＝fstat 与读取之间被并发截断
+/// （审查 #8，data-loss：短读残片曾被当完整内容移动并删源）。两向都保守拒绝。
 fn read_bounded(file: &std::fs::File) -> Result<(Vec<u8>, u64), BoundedReadError> {
     // fstat 等价：句柄级元数据（Windows 为 GetFileInformationByHandle 路径，
     // 与 unix fstat 同为"绑定已打开对象"的尺寸来源，不受路径替换影响）。
@@ -1600,8 +1581,8 @@ fn apply_move(
         format!("{}：{detail}", ctx(stage))
     };
 
-    // 1. 同路径拒绝：词法归一后比较（`./`、`..`）；其余别名等价由排他创建兜底
-    if lexical_normalize(&src) == lexical_normalize(&dst) {
+    // 1. 同路径拒绝：词法归一后比较（`./`、`..`；Windows 盘符/UNC 前缀保留——跨盘 Move 不再被误判同路径，A4/S27）；实现单点＝`sandbox::absolute_lexical`；其余别名等价由排他创建兜底
+    if crate::sandbox::absolute_lexical(&src) == crate::sandbox::absolute_lexical(&dst) {
         return Err(Failure::validation(ctx("移动源与目标为同一路径，按目标冲突拒绝")));
     }
     // 目标存在预检：任何目录项（常规/目录/符号链接/悬空/硬链接）均拒绝
@@ -1714,9 +1695,11 @@ fn apply_move(
     let verify = match open_source_nofollow(&src) {
         Ok(Some(f)) => f,
         Ok(None) => {
-            return Err(Failure::mutating(
-                "删除前复核移动源失败：源是符号链接（含悬空），拒绝移动".into(),
-            ));
+            // 029 §1.4-5：变更阶段失败错误须含源、目标绝对路径与失败阶段
+            // （A3：此前本臂缺双路径——S34 回归锚
+            // move_symlink_swap_error_contains_both_paths）。
+            let reason = "源是符号链接（含悬空），拒绝移动";
+            return Err(Failure::mutating(both("删除前复核移动源失败", &reason)));
         }
         Err(e) => return Err(Failure::mutating(both("删除前复核移动源失败", &e))),
     };
@@ -1767,26 +1750,7 @@ fn open_source_nofollow(target: &Path) -> std::io::Result<Option<std::fs::File>>
     std::fs::File::open(target).map(Some)
 }
 
-/// 末端符号链接拒绝的错误判定（unix＝ELOOP；Windows＝本模块 FilesystemLoop
-/// 哨兵，见 [`open_source_nofollow`]）。
 
-/// 词法归一（消 `.`/`..`）比较两路径是否同一目标——用于移动的自路径拒绝；
-/// 不触文件系统（符号链接别名等价由 `create_new` 排他创建兜底）。
-fn lexical_normalize(p: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in p.components() {
-        match component {
-            std::path::Component::RootDir => out.push("/"),
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            std::path::Component::Normal(part) => out.push(part),
-            std::path::Component::Prefix(_) => {}
-        }
-    }
-    out
-}
 
 /// 029 Move 窗口测试同步接缝（**仅测试构建**，与 f2_seam 同构）：具名屏障，
 /// 控制端在确定性的时点完成抢占/替换——
@@ -2711,6 +2675,51 @@ mod tests {
             std::fs::read_to_string(&moved_away).unwrap(),
             "ORIGINAL\n",
             "被挪走的原文件保留（用户重读后决定下一步）"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// S34（A3 回归锚，029 §1.4-5）：变更阶段失败的错误必须含源、目标的
+    /// 可确定绝对路径和失败阶段。删除前复核发现源被替换为末端符号链接时，
+    /// 错误此前不含任何路径。before_unlink 屏障给出确定性替换时点。
+    #[test]
+    #[cfg(unix)]
+    fn move_symlink_swap_error_contains_both_paths() {
+        if move_seam_child_mode() {
+            unreachable!("子进程已在 move_seam_child_mode 内退出");
+        }
+        let dir = std::env::temp_dir().join(format!("tchat-movesym-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.txt");
+        let dst = dir.join("dst.txt");
+        std::fs::write(&src, "ORIGINAL\n").unwrap();
+        write_move_patch(&dir, &src, &dst);
+        let mut child = spawn_move_seam_child(
+            "apply_patch::tests::move_symlink_swap_error_contains_both_paths",
+            &dir,
+        );
+        release_move_barrier(&dir, "before_read");
+        release_move_barrier(&dir, "before_create");
+        wait_move_barrier(&dir, "before_unlink", &mut child);
+        // 确定性删源前时点：源替换为悬空末端符号链接——O_NOFOLLOW 复核必须拒绝
+        std::fs::rename(&src, &dir.join("moved-away.txt")).unwrap();
+        std::os::unix::fs::symlink(&dir.join("no-such-target"), &src).unwrap();
+        release_move_barrier(&dir, "before_unlink");
+        let r = collect_move_child(&dir, child);
+        assert_eq!(r["ok"], json!(false), "源被换成符号链接必须失败：{r}");
+        assert_eq!(r["state_known"], json!(false), "复核拒绝＝变更阶段失败：{r}");
+        let err = r["error"].as_str().unwrap();
+        assert!(
+            err.contains(&src.display().to_string()) && err.contains(&dst.display().to_string()),
+            "029 §1.4-5：错误须含源与目标两个绝对路径：{err}"
+        );
+        assert!(err.contains("删除前复核"), "错误须标明失败阶段：{err}");
+        // 磁盘事实：目标已完整写入并保留（不回滚）；替换对象不得被删
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "ORIGINAL\n", "目标保留");
+        assert!(
+            std::fs::symlink_metadata(&src).unwrap().file_type().is_symlink(),
+            "替换的符号链接不得被删除"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

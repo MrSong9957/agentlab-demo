@@ -10,9 +10,9 @@
 //! 适配（013 §6 M5，已登记）：①合并代理＝参数化工具集的
 //! [`crate::turn::run_tool_turn_with_mode`]（`ToolMode::MemoryMerge`——恰
 //! `mem_read/mem_write/mem_list` 三工具，执行分派层拒绝一切未注册工具，
-//! 含 exec_command/apply_patch）；②心跳挂点＝每次模型请求前经 sender 闭包
-//! 续租＋校验通过后再确认一次（上游为事件循环周期心跳；本项目模型调用为
-//! 同步阻塞，请求前续租为最细可行粒度）；③上游 `failed_spawn_agent`/
+//! 含 exec_command/apply_patch）；②心跳＝上游事件循环周期心跳的同步阻塞
+//! 承载（每请求前续租＋请求阻塞期间心跳线程周期续租＋校验通过后再确认
+//! 一次，详见 run 步骤 8/10 注释与 [`JOB_HEARTBEAT_SECONDS`]）；③上游 `failed_spawn_agent`/
 //! `failed_sandbox_policy` 无对应概念（无独立子进程与沙箱配置面）——合并轮
 //! 创建失败并入 `failed_agent`（D3 边界即隔离承载）；④线程元数据（threads
 //! 启用门在 SQL 内、`rollout_path`/`cwd`/`git_branch` 水合）经注入解析器

@@ -26,8 +26,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// text() 单次值的分块上限（单 IPC 帧 ≤1 MiB；JSON 转义膨胀下取半）。
-const TEXT_CHUNK: usize = 512 * 1024;
+/// 单片字节预算（A8）：≤1 MiB 帧限 / JSON 转义上界 6 字符每字节 → 160 KiB。
+const TEXT_CHUNK: usize = 160 * 1024;
 
 /// worker 注入的 prelude：目录装配、桥接面与 text（§1.2/§1.3 契约的 JS 侧）。
 /// 内部状态（pending 表/序号）封装在 IIFE 闭包内不进全局；`__settle` 为宿主
@@ -113,7 +113,6 @@ pub fn run_internal_js() -> i32 {
     }
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout().lock();
-    // init 帧（≤10 MiB）：源码＋工具目录。
     let first_frame = read_frame(&mut input, MAX_INIT_FRAME_BYTES);
     restore_worker_process_name();
     let init = match first_frame {
@@ -283,20 +282,29 @@ async fn run_module<R: Read, W: Write>(
             Function::new(
                 ctx.clone(),
                 move |line: String, json: bool| -> bool {
-                    // 按调用顺序分块（单帧 ≤1 MiB；UTF-8 边界安全切分）。
+                    // 按调用顺序分块（UTF-8 边界安全切分）。A8/034 §1.3：首片
+                    // output_frame、后续片 output_frame_cont——宿主合并回一条。
+                    // TEXT_CHUNK=160 KiB：JSON 转义上界 6 字符/字节（控制字符
+                    // \u00XX），160 KiB×6=960 KiB＜1 MiB 帧限（512 KiB 片在
+                    // 全控制字符下转义后 ≈3 MiB 撑爆帧限——转义膨胀问题同源
+                    // 修复，分片大小对合并后交付无观察差异）。
                     let mut rest = line.as_str();
+                    let mut first = true;
                     let queued_all = true;
                     loop {
                         let (chunk, tail) = if rest.len() > TEXT_CHUNK {
-                            let mut cut = TEXT_CHUNK;
-                            while !rest.is_char_boundary(cut) {
-                                cut -= 1;
-                            }
+                            let cut = rest.floor_char_boundary(TEXT_CHUNK);
                             (&rest[..cut], Some(&rest[cut..]))
                         } else {
                             (rest, None)
                         };
-                        outbox_push(&outbox_for_text, output_frame(chunk, json));
+                        let frame = if first {
+                            first = false;
+                            output_frame(chunk, json)
+                        } else {
+                            super::protocol::output_frame_cont(chunk, json)
+                        };
+                        outbox_push(&outbox_for_text, frame);
                         match tail {
                             Some(next) => rest = next,
                             None => break,

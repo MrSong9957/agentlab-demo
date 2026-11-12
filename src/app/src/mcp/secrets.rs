@@ -6,6 +6,7 @@
 //! 会话／记忆、展示或普通日志之前检查；检测先于截断。
 //! 这不是任意第三方秘密识别器，也不扫描原有用户历史。
 
+use serde_json::Value;
 use std::collections::HashSet;
 
 /// 一次连接的固定敏感值集合（Arc 共享给快照与连接）。
@@ -16,8 +17,7 @@ pub struct SensitiveValues {
 }
 
 impl SensitiveValues {
-    /// 从准备阶段已解析的凭证值构建；空值／缺失不进入集合（该情形下连接
-    /// 准备本身失败，不降为匿名）。
+    /// 从准备阶段已解析的凭证值构建；空值／缺失不进入集合。
     pub fn from_values(values: impl IntoIterator<Item = String>) -> Self {
         let mut values: Vec<String> = values
             .into_iter()
@@ -25,8 +25,6 @@ impl SensitiveValues {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
-        // 长值优先检查：短值可能是长值的平凡子串，先命中长值便于内部定位；
-        // contains 判定本身与顺序无关。
         values.sort_by_key(|v| std::cmp::Reverse(v.len()));
         SensitiveValues { values }
     }
@@ -47,6 +45,18 @@ impl SensitiveValues {
     /// 集合为空＝无敏感值（匿名、无显式环境引用的连接）。
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
+    }
+}
+
+/// 递归检查 JSON 值的全部字符串叶子（023 §5.1：逐字段检查原文，不能仅
+/// 扫序列化字符串——敏感值含引号／反斜杠时转义会掩盖原文包含关系；
+/// A5 起工具结果路径与资源路径共用本实现）。
+pub fn value_polluted(value: &Value, sensitive: &SensitiveValues) -> bool {
+    match value {
+        Value::String(s) => sensitive.contains_secret(s),
+        Value::Array(items) => items.iter().any(|v| value_polluted(v, sensitive)),
+        Value::Object(map) => map.values().any(|v| value_polluted(v, sensitive)),
+        _ => false,
     }
 }
 
@@ -79,8 +89,8 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
         && haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-/// HTTP 认证解析结果（只含环境变量名到实际值的映射，供传输层使用；
-/// 敏感值集合在连接准备时固定）。
+/// HTTP 认证解析结果（Bearer 值、请求头名到实际值的映射与缺失引用名，供
+/// 传输层使用；敏感值集合在连接准备时固定）。
 pub struct ResolvedHttpAuth {
     /// Bearer 认证头值（`auth_header` 语义：不带 `Bearer ` 前缀）。
     pub auth_header: Option<String>,

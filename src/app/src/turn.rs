@@ -22,7 +22,28 @@ pub const MAX_MODEL_REQUESTS_PER_TURN: usize = 8;
 /// 单批 tool_calls 上限（2026-10-10 安全修复 N3：入史/执行前检查，超限整批拒绝）。
 pub const MAX_TOOL_CALLS_PER_BATCH: usize = crate::prompt::MAX_TOOL_CALLS_PER_BATCH;
 
-fn with_native(message: HistoryItem, state: &Option<crate::prompt::NativeState>) -> HistoryItem {
+/// assistant 终文入史单点（S17）：Text 记录（经 with_native 包装）＋on_record。
+/// 五处出口共用（内容均＝reply.clone()，原样保留语义不变）。
+fn push_assistant_text(
+    history: &mut Vec<HistoryItem>,
+    on_record: &mut dyn FnMut(&[HistoryItem]),
+    reply: &str,
+    native_state: &Option<crate::prompt::NativeState>,
+) {
+    history.push(with_native(
+        HistoryItem::Text(HistoryMessage {
+            images: None,
+            text_elements: Vec::new(),
+            role: HistoryRole::Assistant,
+            content: reply.to_string(),
+            user_input_event: None,
+        }),
+        native_state,
+    ));
+    on_record(history);
+}
+
+pub(crate) fn with_native(message: HistoryItem, state: &Option<crate::prompt::NativeState>) -> HistoryItem {
     match state {
         Some(state) => HistoryItem::NativeAssistant {
             message: Box::new(message), state: Some(state.clone()),
@@ -31,8 +52,9 @@ fn with_native(message: HistoryItem, state: &Option<crate::prompt::NativeState>)
     }
 }
 
-/// 一轮的工具面（013-M5 D3 参数化；017 四工具）：`User`＝既有用户轮契约
-/// （恰 `exec_command`/`apply_patch`/`write_stdin`/`update_plan`，此外无新工具）；
+/// 一轮的工具面（013-M5 D3 参数化）：`User`＝用户轮契约——基础四工具
+/// `exec_command`/`apply_patch`/`write_stdin`/`update_plan`，另按宿主与模型
+/// 能力条件追加扩展工具（经 prompt.rs `TurnRequestOptions` 由 `build_turn_request_options` 组装）；
 /// `MemoryMerge`＝内部合并轮（恰 `mem_read`/`mem_write`/`mem_list`，
 /// 限 `root` 记忆根；请求组装注入三项工具与合并系统提示，**不声明也不执行
 /// update_plan**）。**权限在执行分派层生效**：不在当前模式注册表内的工具名
@@ -208,10 +230,6 @@ pub fn tool_activity_line(name: &str, id: &str) -> String {
 /// `build_request` 另有一处属 005 既有契约文本）。
 const BLANK_INPUT_ERROR: &str = "当前用户输入不能为空或全为空白";
 
-/// 取消后未执行调用的结果：按对应工具的既定结果结构记录未执行原因——
-/// exec_command/apply_patch 构造各自结果结构体序列化（字段与错误语义同工具本体同源）；
-/// 其他名称（未知工具）与未知工具回传通道一致：单 `error` 字段通用结构，
-/// 不伪装成 exec 结果。
 /// 取消跳过的固定消息（012：恢复投影以此常量精确识别"未执行取消"——
 /// 单一生产者 [`skipped_without_execution`]，非模糊文本匹配）。
 pub const SKIPPED_BY_CANCEL_MESSAGE: &str = "用户取消，本调用未执行";
@@ -220,6 +238,10 @@ pub const SKIPPED_BY_CANCEL_MESSAGE: &str = "用户取消，本调用未执行";
 /// 宿主以此常量判定"取消当前轮"，不反解析消息文本（012 教训）。
 pub const CANCELLED_TURN_ERROR_PREFIX: &str = "用户已取消";
 
+/// 取消后未执行调用的结果：按对应工具的既定结果结构记录未执行原因——
+/// exec_command/apply_patch 构造各自结果结构体序列化（字段与错误语义同工具本体同源）；
+/// 其他名称（未知工具）与未知工具回传通道一致：单 `error` 字段通用结构，
+/// 不伪装成 exec 结果。
 fn skipped_without_execution(
     name: &str,
     mode: &ToolMode<'_>,
@@ -264,13 +286,10 @@ fn skipped_without_execution(
     }
 }
 
-/// 从 assistant 消息解析出的一条工具调用。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedToolCall {
-    pub id: String,
-    pub name: String,
-    pub arguments: String,
-}
+/// 从 assistant 消息解析出的一条工具调用（006：原样保存 id、工具名与
+/// arguments JSON；S32 起＝[`crate::prompt::ToolCallRecord`] 别名——恒等
+/// 映射搬移消除，字段与派生超集兼容）。
+pub use crate::prompt::ToolCallRecord as ParsedToolCall;
 
 /// 整批校验 `tool_calls` 协议结构：每个调用须有非空 `id`/`name`、`type=="function"`、
 /// 字符串 `arguments`，批内 `id` 不重复。任一项无效即整批无效（不执行、不入历史）。
@@ -278,13 +297,7 @@ pub struct ParsedToolCall {
 /// 与分派均使用原始值；`arguments` 字符串内的 JSON 无效不在此检查——那属参数错误，
 /// 按工具失败结构回传。
 fn parse_tool_calls(message: &Value) -> Result<Vec<ParsedToolCall>, String> {
-    ToolCallRecord::parse_batch(message).map(|records| {
-        records.into_iter().map(|call| ParsedToolCall {
-            id: call.id,
-            name: call.name,
-            arguments: call.arguments,
-        }).collect()
-    })
+    ToolCallRecord::parse_batch(message)
 }
 
 
@@ -890,38 +903,6 @@ pub fn run_user_turn_with_context(
     sources: &crate::context::ContextSources,
     procs: &ProcessManager,
 ) -> Result<String, String> {
-    run_user_turn_with_context_and_host(
-        history,
-        current_input,
-        sender,
-        notify,
-        cancel,
-        on_record,
-        mode,
-        sources,
-        procs,
-        None,
-        false,
-        None,
-    )
-}
-
-/// 018：原上下文入口保留无宿主行为；只在交互宿主传入问答接口。
-/// 019：`image_input`＝本轮模型图片能力快照（声明与执行分派共用，轮内固定）。
-pub fn run_user_turn_with_context_and_host(
-    history: &mut Vec<HistoryItem>,
-    current_input: &str,
-    sender: &mut dyn FnMut(&Value) -> Result<Value, String>,
-    notify: &mut dyn FnMut(TurnNotify),
-    cancel: Option<&std::sync::atomic::AtomicBool>,
-    on_record: &mut dyn FnMut(&[HistoryItem]),
-    mode: ToolMode<'_>,
-    sources: &crate::context::ContextSources,
-    procs: &ProcessManager,
-    input_host: Option<&mut crate::user_input::InputHost<'_>>,
-    image_input: bool,
-    user_images: Option<&crate::prompt::UserImagePayload>,
-) -> Result<String, String> {
     run_user_turn_with_context_and_hosts(
         history,
         current_input,
@@ -932,15 +913,14 @@ pub fn run_user_turn_with_context_and_host(
         mode,
         sources,
         procs,
-        input_host,
         None,
-        image_input,
-        user_images,
+        None,
+        false,
+        None,
     )
 }
 
-/// 018 阶段 B：TUI 用户轮同时传入同步与异步问答宿主（七工具）；
-/// CLI 仍走 [`run_user_turn_with_context_and_host`]（五工具，仅同步）。
+/// 018 阶段 B：TUI 用户轮同时传入同步与异步问答宿主（七工具）。
 /// 019：`image_input`＝本轮模型图片能力快照；MemoryMerge 内部轮不经本入口。
 /// 021 兼容入口：无消息能力、无运行中接续通道。
 pub fn run_user_turn_with_context_and_hosts(
@@ -1006,10 +986,10 @@ pub fn run_user_turn_with_context_and_caps(
             notify(TurnNotify::Info(notice.clone()));
         }
         // 032：视图损坏时明确失败（不忽略标记回退全历史）；去重基线直接扫完整
-        // 历史——seed 中的上下文消息是最后一条顶层上下文消息的原样副本
-        //（build_seed 复制 last_context_body(history)），两处扫描结果恒等
-        //（等价性由 m5_context_dedup… 回归锁定），免去每用户轮的整视图深克隆
-        //（审查修复 #16）。
+        // 历史——seed 中的上下文消息＝last_context_body(history) 的规范化正文
+        //（build_seed 复制同一函数结果；替换声明两侧比较前均剥除），两处扫描
+        // 结果恒等（等价性由 m5_context_dedup… 回归锁定），免去每用户轮的
+        // 整视图深克隆（审查修复 #16）。
         crate::context_window::active_view(history).map_err(|reason| reason)?;
         let inject_text = match crate::context::last_context_body(history) {
             Some(previous) if previous == built.message => None,
@@ -1544,8 +1524,44 @@ fn turn_body_inner(
             if let (Some(cell), Some(orch)) = (orch_cell.as_mut(), orch_extras.as_mut()) {
                 cell.close_for_turn_exit(orch.sink, history);
                 push_orchestration_events(cell, history, on_record);
-                orch_cell = None;
+                // 轮出口置空：此后不再读取（直接调用与 close_exit! 间接展开
+                // 均如此）——展开位置的 never-read 警告为既有假阳性，统一抑制。
+                #[allow(unused_assignments)]
+                {
+                    orch_cell = None;
+                }
             }
+        }};
+    }
+    // S17：出口三连统一宏（steer→pending→orch 为主序）。**4 处例外站点
+    // （:1802/:1818/:1828/:1865 一带，先 close_orch）为入史顺序可观察行为，
+    // 逐站点按原序保留**——mode 参量选择尾随 pending 形态，direction 选择
+    // steer 与 orch 的先后。
+    macro_rules! close_exit {
+        (pending $reason:expr) => {{
+            close_steer_restore(&mut steer, notify, $reason);
+            close_pending_async(history, on_record, notify, &mut pending_async, $reason);
+            close_orch!();
+        }};
+        (model_error) => {{
+            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
+            close_pending_on_model_error(history, on_record, notify, &mut pending_async);
+            close_orch!();
+        }};
+        (orch_first model_error) => {{
+            close_orch!();
+            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
+            close_pending_on_model_error(history, on_record, notify, &mut pending_async);
+        }};
+        (orch_first task_completed) => {{
+            close_orch!();
+            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_TASK_COMPLETED);
+            close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_TASK_COMPLETED);
+        }};
+        (pending_dyn $steer_reason:expr, $pending_reason:expr) => {{
+            close_steer_restore(&mut steer, notify, $steer_reason);
+            close_pending_async(history, on_record, notify, &mut pending_async, $pending_reason);
+            close_orch!();
         }};
     }
     // 同轮已入史答案的 request_id（§8.4）：后续批次再等待这些 ID 只确认
@@ -1567,19 +1583,7 @@ fn turn_body_inner(
             // 审查 #7：先借用快照条目做容量计量（瞬态序列化，超限即停），
             // 过门后才物化 owned 目录——不在门前整表克隆 Schema。
             if let Err(reason) = crate::tool_search::check_snapshot_capacity(snapshot) {
-                close_steer_restore(
-                    &mut steer,
-                    notify,
-                    crate::user_input_async::CLOSE_REQUEST_LIMIT,
-                );
-                close_pending_async(
-                    history,
-                    on_record,
-                    notify,
-                    &mut pending_async,
-                    crate::user_input_async::CLOSE_REQUEST_LIMIT,
-                );
-                close_orch!();
+                close_exit!(pending crate::user_input_async::CLOSE_REQUEST_LIMIT);
                 return Err(reason);
             }
             let entries: Vec<crate::tool_search::CatalogEntry> = snapshot
@@ -1597,9 +1601,7 @@ fn turn_body_inner(
     }
     loop {
         if requests >= MAX_MODEL_REQUESTS_PER_TURN {
-            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_REQUEST_LIMIT);
-            close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_REQUEST_LIMIT);
-            close_orch!();
+            close_exit!(pending crate::user_input_async::CLOSE_REQUEST_LIMIT);
             return Err(cap_error());
         }
         // 续请求使用完整历史（含本轮 user 与已有结果），不再次追加当前输入。
@@ -1608,9 +1610,7 @@ fn turn_body_inner(
         let active_items = match crate::context_window::active_view(&*history) {
             Ok(view) => view.items(),
             Err(reason) => {
-                close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
-                close_pending_on_model_error(history, on_record, notify, &mut pending_async);
-                close_orch!();
+                close_exit!(model_error);
                 return Err(reason);
             }
         };
@@ -1653,42 +1653,31 @@ fn turn_body_inner(
         let orch_declared = orch_extras.is_some();
         // 035：六工具声明与执行同门（extras 装配＝目录六名全配＋共享会话）。
         let agents_declared = agent_runtime.is_some();
+        // S31：两用户轮形态仅 memory_context 不同——开关结构体合一。
+        let options = crate::prompt::TurnRequestOptions {
+            memory_context: match &mode {
+                ToolMode::UserWithMemory { .. } => memory_context.as_deref(),
+                _ => None,
+            },
+            has_input_host: input_host.is_some(),
+            has_async_input_host: async_host.is_some(),
+            image_input,
+            send_message,
+            context_query,
+            context_switch,
+            permissions: permissions_declared,
+            orchestration: orch_declared,
+            agents: agents_declared,
+            tool_search: tool_search_definition.as_ref(),
+            mcp_tools: mcp_definitions,
+        };
         let mut body = match &mode {
-            ToolMode::User => crate::prompt::build_turn_request_with_agents(
-                &active_items,
-                None,
-                input_host.is_some(),
-                async_host.is_some(),
-                image_input,
-                send_message,
-                context_query,
-                context_switch,
-                permissions_declared,
-                tool_search_definition.as_ref(),
-                mcp_definitions,
-                orch_declared,
-                agents_declared,
-            ),
-            ToolMode::UserWithMemory { .. } => crate::prompt::build_turn_request_with_agents(
-                &active_items,
-                memory_context.as_deref(),
-                input_host.is_some(),
-                async_host.is_some(),
-                image_input,
-                send_message,
-                context_query,
-                context_switch,
-                permissions_declared,
-                tool_search_definition.as_ref(),
-                mcp_definitions,
-                orch_declared,
-                agents_declared,
-            ),
             ToolMode::MemoryMerge { system, .. } => build_turn_request_with(
                 &active_items,
                 &crate::memory::mem_tools::tool_definitions(),
                 system,
             ),
+            _ => crate::prompt::build_turn_request_options(&active_items, &options),
         };
         // 024：共同历史作为宿主数据交给适配器；兼容的 messages 投影仍供旧发送者
         // 使用。此字段和原生状态绝不直接出现在厂商请求中。032：与 messages 同用
@@ -1699,19 +1688,7 @@ fn turn_body_inner(
         let declared_tools = body["tools"].as_array().map(|t| t.len()).unwrap_or(0);
         if let Some(snapshot) = mcp_snapshot {
             if declared_tools > crate::mcp::config::MAX_TOTAL_TOOLS {
-                close_steer_restore(
-                    &mut steer,
-                    notify,
-                    crate::user_input_async::CLOSE_REQUEST_LIMIT,
-                );
-                close_pending_async(
-                    history,
-                    on_record,
-                    notify,
-                    &mut pending_async,
-                    crate::user_input_async::CLOSE_REQUEST_LIMIT,
-                );
-                close_orch!();
+                close_exit!(pending crate::user_input_async::CLOSE_REQUEST_LIMIT);
                 return Err(format!(
                     "本轮工具总数 {declared_tools} 超过上限 {}（其中 MCP {} 项）：请缩小 mcp.json 的工具名单",
                     crate::mcp::config::MAX_TOTAL_TOOLS,
@@ -1726,31 +1703,21 @@ fn turn_body_inner(
                 // （通道终态与模型失败同轮发生时以模型失败文案收尾，通道侧无新事实）
                 // 021：未入史的已受理接续输入交还宿主恢复
                 let _ = drain_pending_async(&mut pending_async);
-                close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
-                close_pending_on_model_error(history, on_record, notify, &mut pending_async);
-                close_orch!();
+                close_exit!(model_error);
                 return Err(error);
             }
         };
         requests += 1;
         // 018-B 模型返回检查点：通道终态为失败＝明确结束本轮，不处理该响应
         if let Some(error) = drain_pending_async(&mut pending_async) {
-            close_steer_restore(
-                &mut steer,
-                notify,
-                crate::user_input_async::close_reason_for(&error),
-            );
             let reason = crate::user_input_async::close_reason_for(&error);
-            close_pending_async(history, on_record, notify, &mut pending_async, reason);
-            close_orch!();
+            close_exit!(pending_dyn reason, reason);
             return Err(error.message().into());
         }
         // 先整条校验消息与整批调用结构，再写入历史、执行；协议级失败
         // 收尾统一先保存已受理回答（§8.5），未答项才按 model_error 关闭
         let Some(message) = resp.get("assistant").or_else(|| resp.pointer("/choices/0/message")).cloned() else {
-            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
-            close_pending_on_model_error(history, on_record, notify, &mut pending_async);
-            close_orch!();
+            close_exit!(model_error);
             return Err("协议错误：响应缺少 choices[0].message".to_string());
         };
         let native_state = match resp.get("native_state") {
@@ -1758,9 +1725,7 @@ fn turn_body_inner(
             Some(value) => match serde_json::from_value::<crate::prompt::NativeState>(value.clone()) {
                 Ok(state) => Some(state),
                 Err(_) => {
-                    close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
-                    close_pending_on_model_error(history, on_record, notify, &mut pending_async);
-                    close_orch!();
+                    close_exit!(model_error);
                     return Err("协议错误：原生续接状态无效".into());
                 }
             },
@@ -1768,9 +1733,7 @@ fn turn_body_inner(
         let calls = match parse_tool_calls(&message) {
             Ok(calls) => calls,
             Err(error) => {
-                close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
-                close_pending_on_model_error(history, on_record, notify, &mut pending_async);
-                close_orch!();
+                close_exit!(model_error);
                 return Err(error);
             }
         };
@@ -1778,17 +1741,13 @@ fn turn_body_inner(
             None | Some(Value::Null) => None,
             Some(Value::String(s)) => Some(s.clone()),
             Some(_) => {
-                close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
-                close_pending_on_model_error(history, on_record, notify, &mut pending_async);
-                close_orch!();
+                close_exit!(model_error);
                 return Err("协议错误：assistant.content 必须是字符串或 null".into());
             }
         };
         // N3：批大小在入史/执行之前检查，超限整批拒绝（协议级失败，历史不污染）
         if calls.len() > MAX_TOOL_CALLS_PER_BATCH {
-            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
-            close_pending_on_model_error(history, on_record, notify, &mut pending_async);
-            close_orch!();
+            close_exit!(model_error);
             return Err(format!(
                 "单批工具调用 {} 条超过上限 {MAX_TOOL_CALLS_PER_BATCH}，整批拒绝",
                 calls.len()
@@ -1801,9 +1760,7 @@ fn turn_body_inner(
             .iter()
             .any(|c| c.name == "wait_for_user_input")
         {
-            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
-            close_pending_on_model_error(history, on_record, notify, &mut pending_async);
-            close_orch!();
+            close_exit!(model_error);
             return Err(
                 "协议错误：wait_for_user_input 必须是批内最后一条调用，整批拒绝".to_string(),
             );
@@ -1818,13 +1775,7 @@ fn turn_body_inner(
             if switch_count > 1
                 || (switch_count == 1 && last.name != crate::context_window::SWITCH_TOOL_NAME)
             {
-                close_steer_restore(
-                    &mut steer,
-                    notify,
-                    crate::user_input_async::CLOSE_MODEL_ERROR,
-                );
-                close_pending_on_model_error(history, on_record, notify, &mut pending_async);
-                close_orch!();
+                close_exit!(model_error);
                 return Err(
                     "协议错误：new_context 必须是批内最后一条调用且每批至多一次，整批拒绝"
                         .to_string(),
@@ -1840,9 +1791,7 @@ fn turn_body_inner(
                 .iter()
                 .any(|c| c.name == crate::agents::WAIT_TOOL_NAME)
         {
-            close_orch!();
-            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
-            close_pending_on_model_error(history, on_record, notify, &mut pending_async);
+            close_exit!(orch_first model_error);
             return Err(
                 "协议错误：wait_agent 必须是批内最后一条调用，整批拒绝".to_string(),
             );
@@ -1856,9 +1805,7 @@ fn turn_body_inner(
             let control_count = calls.iter().filter(|c| is_control(&c.name)).count();
             if control_count > 0 && calls.len() > 1 {
                 // 违规整批零执行（§2「先整批拒绝」）。
-                close_orch!();
-                close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
-                close_pending_on_model_error(history, on_record, notify, &mut pending_async);
+                close_exit!(orch_first model_error);
                 return Err(format!(
                     "协议错误：exec/wait 必须单独成批（本批 {} 条调用），整批拒绝",
                     calls.len()
@@ -1866,9 +1813,7 @@ fn turn_body_inner(
             }
             if orch_cell.is_some() && control_count == 0 && !calls.is_empty() {
                 // 活动 cell 时普通工具批整批拒绝并收尾（仅 wait 可推进，§1.5）。
-                close_orch!();
-                close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
-                close_pending_on_model_error(history, on_record, notify, &mut pending_async);
+                close_exit!(orch_first model_error);
                 return Err(
                     "协议错误：当前存在未消费的编排 cell，仅 wait 可以推进执行，其他批次整批拒绝"
                         .into(),
@@ -1878,22 +1823,13 @@ fn turn_body_inner(
         if calls.is_empty() {
             let reply = content.unwrap_or_default();
             if reply.trim().is_empty() {
-                close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_MODEL_ERROR);
-                close_pending_on_model_error(history, on_record, notify, &mut pending_async);
-                close_orch!();
+                close_exit!(model_error);
                 return Err("模型回复为空".into());
             }
             // 018-B 结束检查：已受理回答先于终文——继续原轮让模型处理，
             // 不把该终文提前交付为任务完成（§8.4）。
             if let Some(p) = pending_async.as_ref().filter(|p| p.answer.is_some()) {
-                history.push(with_native(HistoryItem::Text(HistoryMessage {
-                    images: None,
-                    text_elements: Vec::new(),
-                    role: HistoryRole::Assistant,
-                    content: reply.clone(),
-                    user_input_event: None,
-                }), &native_state));
-                on_record(history);
+                push_assistant_text(history, on_record, &reply, &native_state);
                 record_async_answer(history, on_record, notify, p);
                 recorded_answer_ids.push(pending_async.take().unwrap().request_id);
                 // 021：受理中的接续输入保持开放，随下一批末接入
@@ -1903,9 +1839,7 @@ fn turn_body_inner(
             // 并记录收尾后返回轮错误（真实副作用不回滚）。
             if orch_cell.is_some() {
                 let cell_id = orch_cell.as_ref().expect("已确认存在").id.clone();
-                close_orch!();
-                close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_TASK_COMPLETED);
-                close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_TASK_COMPLETED);
+                close_exit!(orch_first task_completed);
                 return Err(format!(
                     "模型已给出最终回复，但编排 cell {cell_id} 的结果尚未取回：cell 已按收尾关闭（已发生的真实副作用不回滚）；请在本轮内用 wait 取回结果后再结束"
                 ));
@@ -1917,14 +1851,7 @@ fn turn_body_inner(
             // 不把未完成子工作报告为完成；两者皆无才接受根终文。
             if let Some(runtime) = agent_runtime {
                 if runtime.pending_updates() > 0 {
-                    history.push(with_native(HistoryItem::Text(HistoryMessage {
-                        images: None,
-                        text_elements: Vec::new(),
-                        role: HistoryRole::Assistant,
-                        content: reply.clone(),
-                        user_input_event: None,
-                    }), &native_state));
-                    on_record(history);
+                    push_assistant_text(history, on_record, &reply, &native_state);
                     runtime.deliver_root_updates(history, on_record);
                     for event in runtime.take_committed_events() {
                         history.push(event);
@@ -1943,6 +1870,10 @@ fn turn_body_inner(
                         on_record,
                         "root_final_with_active_children",
                     );
+                    // S17 验收修正：本站为 agents 侧收尾（close_for_turn_exit 非
+                    // close_orch!），原序 steer→pending 且**不动 orch_cell**——
+                    // 误用 close_exit!(orch_first) 会在 orch_cell 有值时额外关闭
+                    // 编排 cell（行为变化）。还原显式两行。
                     close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_TASK_COMPLETED);
                     close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_TASK_COMPLETED);
                     return Err(
@@ -1954,14 +1885,7 @@ fn turn_body_inner(
                 // 落入（两次独立加锁）——接受终文前复查一次，微窗口内已受理的
                 // 终态报告不丢失。
                 if runtime.pending_updates() > 0 {
-                    history.push(with_native(HistoryItem::Text(HistoryMessage {
-                        images: None,
-                        text_elements: Vec::new(),
-                        role: HistoryRole::Assistant,
-                        content: reply.clone(),
-                        user_input_event: None,
-                    }), &native_state));
-                    on_record(history);
+                    push_assistant_text(history, on_record, &reply, &native_state);
                     runtime.deliver_root_updates(history, on_record);
                     for event in runtime.take_committed_events() {
                         history.push(event);
@@ -1981,41 +1905,20 @@ fn turn_body_inner(
                 None => Vec::new(),
             };
             if !late.is_empty() {
-                history.push(with_native(HistoryItem::Text(HistoryMessage {
-                    images: None,
-                    text_elements: Vec::new(),
-                    role: HistoryRole::Assistant,
-                    content: reply.clone(),
-                    user_input_event: None,
-                }), &native_state));
-                on_record(history);
+                push_assistant_text(history, on_record, &reply, &native_state);
                 for input in late {
                     ingest_steer_input(history, on_record, input, image_input, cancel, notify);
                 }
                 continue;
             }
-            history.push(with_native(HistoryItem::Text(HistoryMessage {
-                images: None,
-                text_elements: Vec::new(),
-                role: HistoryRole::Assistant,
-                content: reply.clone(),
-                user_input_event: None,
-            }), &native_state));
-            on_record(history);
+            push_assistant_text(history, on_record, &reply, &native_state);
             close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_TASK_COMPLETED);
             close_orch!();
             return Ok(reply);
         }
         // 合法批：记录 assistant（content 原样保留），按返回顺序串行执行并逐条追加结果
         history.push(with_native(HistoryItem::AssistantToolCalls {
-            tool_calls: calls
-                .iter()
-                .map(|c| ToolCallRecord {
-                    id: c.id.clone(),
-                    name: c.name.clone(),
-                    arguments: c.arguments.clone(),
-                })
-                .collect(),
+            tool_calls: calls.clone(),
             content,
         }, &native_state));
         on_record(history);
@@ -2214,8 +2117,8 @@ fn turn_body_inner(
                 let outcome = if image_input {
                     let cwd =
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                    // 031 出生快照（审查 #1：与 execute_tool 同源——以冻结策略
-                    // 为键，无宿主同样执行基线快照）
+                    // 031 出生快照（独立构造，错误呈现与 exec 臂不同：构建失败
+                    // 显式 Err 分支；以冻结策略为键，无宿主同样执行基线快照）
                     let snap = crate::permissions::frozen().map(|f| {
                         let grants = permission_state
                             .as_ref()
@@ -2515,30 +2418,20 @@ fn turn_body_inner(
             recorded_answer_ids.push(pending_async.take().unwrap().request_id);
         }
         if let Some(reason) = input_end {
-            close_steer_restore(
-                &mut steer,
-                notify,
-                crate::user_input_async::close_reason_for(&reason),
-            );
             let close_reason = crate::user_input_async::close_reason_for(&reason);
-            close_pending_async(history, on_record, notify, &mut pending_async, close_reason);
-            close_orch!();
+            close_exit!(pending_dyn close_reason, close_reason);
             return Err(reason.message().into());
         }
         if cancelled_batch {
             // 取消：结束本轮，保留已发生结果与历史，不自动请求模型、不重复已执行工具
             // 032：取消已赢——排定的切换候选随轮丢弃（未提交不生效）
-            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_CANCELLED);
-            close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_CANCELLED);
-            close_orch!();
+            close_exit!(pending crate::user_input_async::CLOSE_CANCELLED);
             return Err("用户已取消本轮工具执行：已执行结果保留，剩余调用未执行".into());
         }
         if (answered_in_batch || async_answer_recorded)
             && cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst))
         {
-            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_CANCELLED);
-            close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_CANCELLED);
-            close_orch!();
+            close_exit!(pending crate::user_input_async::CLOSE_CANCELLED);
             return Err("用户已取消本轮：已保存问询结果，不再请求模型".into());
         }
         // 021 §2.3-4（既有语义；032 屏障前移判定）：完整工具批及结果配对（含
@@ -2573,9 +2466,7 @@ fn turn_body_inner(
             && cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst))
         {
             pending_switch = None;
-            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_CANCELLED);
-            close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_CANCELLED);
-            close_orch!();
+            close_exit!(pending crate::user_input_async::CLOSE_CANCELLED);
             return Err("用户已取消本轮：已排定的上下文切换未提交，不生效".into());
         }
         if let Some(candidate) = pending_switch.take() {
@@ -2638,9 +2529,7 @@ fn turn_body_inner(
         }
         if quota_hit {
             // 第 8 批：保存全部结果后报上限，不发第 9 次请求，不生成假回复
-            close_steer_restore(&mut steer, notify, crate::user_input_async::CLOSE_REQUEST_LIMIT);
-            close_pending_async(history, on_record, notify, &mut pending_async, crate::user_input_async::CLOSE_REQUEST_LIMIT);
-            close_orch!();
+            close_exit!(pending crate::user_input_async::CLOSE_REQUEST_LIMIT);
             return Err(cap_error());
         }
     }
@@ -2663,7 +2552,6 @@ struct PendingSwitch {
 /// 检查点保存成功并收到宿主回执后才把检查点推入内存历史（此后活动视图＝
 /// seed＋其后真实历史；会话已在提交内落盘，on_record 无新增可写）。
 /// Err＝未应用原因（旧视图保留，候选不复活）。
-#[allow(clippy::too_many_arguments)]
 fn commit_context_switch(
     history: &mut Vec<HistoryItem>,
     on_record: &mut dyn FnMut(&[HistoryItem]),

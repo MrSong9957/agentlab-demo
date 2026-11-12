@@ -156,8 +156,6 @@ mod tests {
         assert_eq!(sanitize_for_terminal("正常\n\t文字"), "正常\n\t文字");
     }
 
-    // ---------- 高风险清单补充（2026-10-10）----------
-
     #[test]
     fn charset_selection_escapes_removed() {
         // 字符集选择 ESC ( B / ESC ) 0（三字节序列）整段剥离，正常文字保留

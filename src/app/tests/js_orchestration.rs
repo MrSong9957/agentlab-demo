@@ -64,6 +64,8 @@ impl LeafDispatcher for MapDispatcher {
 /// 记录型 sink：事件入 Vec；可注入保存失败（指定事件 kinds 失败）。
 struct RecordingSink {
     events: Mutex<Vec<EventKind>>,
+    /// S36/P1-3 锚用：(kind, seq) 序列——保存失败不占号可观察。
+    seqs: Mutex<Vec<(EventKind, u64)>>,
     fail_on: Vec<EventKind>,
 }
 
@@ -71,6 +73,7 @@ impl RecordingSink {
     fn new() -> Self {
         Self {
             events: Mutex::new(Vec::new()),
+            seqs: Mutex::new(Vec::new()),
             fail_on: Vec::new(),
         }
     }
@@ -78,8 +81,14 @@ impl RecordingSink {
     fn failing(fail_on: Vec<EventKind>) -> Self {
         Self {
             events: Mutex::new(Vec::new()),
+            seqs: Mutex::new(Vec::new()),
             fail_on,
         }
+    }
+
+    /// S36/P1-3：(kind, seq) 序列（含被拒绝事件到达时的 seq）。
+    fn seqs(&self) -> Vec<(EventKind, u64)> {
+        self.seqs.lock().unwrap().clone()
     }
 
     fn kinds(&self) -> Vec<EventKind> {
@@ -93,6 +102,7 @@ impl OrchestrationSink for RecordingSink {
         event: &Event<'_>,
         _history: &[terminal_chat::prompt::HistoryItem],
     ) -> Result<(), String> {
+        self.seqs.lock().unwrap().push((event.kind, event.seq));
         if self.fail_on.contains(&event.kind) {
             return Err("注入的保存失败".into());
         }
@@ -241,6 +251,160 @@ fn pure_js_text_output_completes() {
     assert!(kinds.contains(&EventKind::CellStarted));
     assert!(kinds.contains(&EventKind::CellClosed));
     assert_eq!(kinds.iter().filter(|k| **k == EventKind::CellStarted).count(), 1);
+}
+
+/// A7 写线程端到端行为锚（testing_gaps 登记项，批 5 审查 R2 登记）：大结果
+/// （250KiB，≈3.9× 管道容量 64KiB；桥接上限 262144 字节内的最大量级）经
+/// reply_leaf → stdin 写线程 → worker 真实管道不丢帧不损坏。worker 侧对
+/// 收到的字符串做长度＋FNV-1a 摘要回传，宿主以同源摘要对照——帧长前缀
+/// 错位、截断、损坏任一发生即失配或 ReaderDead（cell Failed）。
+#[test]
+fn large_leaf_result_through_writer_thread_arrives_intact() {
+    let payload: String = (0..250_000)
+        .map(|i| (b'a' + (i % 26) as u8) as char)
+        .collect();
+    let result_json = serde_json::json!({ "s": payload }).to_string();
+    let dispatcher = MapDispatcher::new(&[("big", &result_json)]);
+    let mut sink = RecordingSink::new();
+    let cfg = config(
+        r#"
+        const r = await tools.big({});
+        let h = 2166136261;
+        for (let i = 0; i < r.s.length; i++) {
+            h ^= r.s.charCodeAt(i);
+            h = Math.imul(h, 16777619) >>> 0;
+        }
+        text("LEN=" + r.s.length + " DIGEST=" + h.toString(16));
+        "done";
+    "#,
+        vec![catalog_entry("big", false)],
+        dispatcher,
+        turn_budget(),
+    );
+    let empty_history: Vec<terminal_chat::prompt::HistoryItem> = Vec::new();
+    let mut cell = spawn_cell(&cfg, &mut sink, &empty_history).expect("spawn");
+    let observation = drive_to_terminal(&mut cell, &mut sink);
+    assert_eq!(observation.status, CellStatus::Completed, "{observation:?}");
+    assert!(observation.ok);
+    let mut h: u32 = 2166136261;
+    for b in payload.bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(16777619);
+    }
+    let expected = format!("LEN=250000 DIGEST={h:x}");
+    assert_eq!(
+        observation.output,
+        vec![expected],
+        "250KiB 结果经写线程到达 worker 后须逐字节一致"
+    );
+    assert!(cell.is_closed(), "终态交付后句柄释放");
+}
+
+/// S36/P1-3：保存失败不占序号——call_finished 拒绝后，关闭事件的 seq
+/// 复用同一号（无空洞；修复前若失败也递增则 closed.seq=3）。
+#[test]
+fn persist_failure_does_not_leave_seq_hole() {
+    let dispatcher = MapDispatcher::new(&[("n", r#"{"ok":true}"#)]);
+    let mut sink = RecordingSink::failing(vec![EventKind::CallFinished]);
+    let cfg = config(
+        r#"await tools["n"]({}); "done""#,
+        vec![catalog_entry("n", false)],
+        dispatcher,
+        turn_budget(),
+    );
+    let empty_history: Vec<terminal_chat::prompt::HistoryItem> = Vec::new();
+    let mut cell = spawn_cell(&cfg, &mut sink, &empty_history).expect("spawn");
+    let observation = drive_to_terminal(&mut cell, &mut sink);
+    assert_eq!(observation.status, CellStatus::Failed, "{observation:?}");
+    let seqs = sink.seqs();
+    let closed = seqs
+        .iter()
+        .find(|(k, _)| *k == EventKind::CellClosed)
+        .map(|(_, s)| *s)
+        .expect("关闭事件必到达 sink");
+    // 语义：CallFinished 构造时 seq=3，被拒不占用；CellClosed 复用 3（若
+    // 失败也递增则 closed=4＝空洞）。序列 [(CellStarted,1),(CallStarted,2),
+    // (CallFinished,3 被拒),(CellClosed,3)]＝无空洞。
+    assert_eq!(closed, 3, "CellClosed 复用被拒 CallFinished 的 seq（无空洞）：{seqs:?}");
+}
+
+/// S36/P2-8：预算截断标记不粘——首次 observe 交付截断（truncated=true），
+/// 二次 observe 无新溢出则不再截断（「交付即复位」非粘性语义锚）。
+#[test]
+fn second_observe_does_not_repeat_truncation() {
+    let dispatcher = MapDispatcher::new(&[]);
+    let mut sink = RecordingSink::new();
+    let code = r#"text("x".repeat(100 * 1024)); await new Promise(r => setTimeout(r, 500)); "done""#;
+    let cfg = config(code, vec![], dispatcher, turn_budget());
+    let empty_history: Vec<terminal_chat::prompt::HistoryItem> = Vec::new();
+    let mut cell = spawn_cell(&cfg, &mut sink, &empty_history).expect("spawn");
+    let first = cell.observe(1_000, 64 * 1024, &mut sink, None, &empty_history);
+    assert!(
+        first.output_truncated,
+        "100 KiB 条超 64 KiB 待交付上限：首次观察必带截断标记：{:?}",
+        first.output_truncated
+    );
+    // 第二次观察（让出期内或终态交付）：无新溢出＝不再截断。
+    let second = cell.observe(30_000, 64 * 1024, &mut sink, None, &empty_history);
+    assert!(
+        !second.output_truncated,
+        "P2-8：二次 observe 不再截断（非粘性）：{:?}",
+        second.output_truncated
+    );
+}
+
+/// A8/034 §1.3：一次超分片阈值（TEXT_CHUNK=160 KiB）的 text——worker 后续
+/// 分片必须走 output_frame_cont（cont=true），宿主合并回一条。修复前全部
+/// output_frame（cont=false 恒定），分片成多条独立交付＝行为与规格相反，
+/// 本测试修复前红。帧级直驱 `--internal-js`（单条 700 KiB 超宿主 64 KiB
+/// 待交付上限，观察面无法区分分片，帧序号才可断言）。
+#[test]
+fn multi_chunk_text_frames_carry_cont_flag() {
+    use terminal_chat::js_orchestration::protocol::{
+        init_frame, read_frame, write_frame, MAX_FRAME_BYTES, MAX_INIT_FRAME_BYTES,
+    };
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_terminal-chat"))
+        .arg("--internal-js")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("启动 worker");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = child.stdout.take().expect("stdout");
+    let init = init_frame(r#"text("x".repeat(700 * 1024)); "done""#, &[]);
+    write_frame(&mut stdin, &init, MAX_INIT_FRAME_BYTES).expect("写 init");
+    // 依次读帧：init 确认后的 output 帧序列（≤3 片：512K+188K→2 片＋done）。
+    let mut output_frames: Vec<bool> = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        match read_frame(&mut stdout, MAX_FRAME_BYTES) {
+            Ok(Some(frame)) => {
+                match frame.get("t").and_then(serde_json::Value::as_str) {
+                    Some("output") => {
+                        output_frames.push(
+                            frame.get("cont").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                        );
+                    }
+                    Some("done") => break,
+                    _ => {}
+                }
+            }
+            Ok(None) => break,
+            Err(e) => panic!("读帧失败：{e}"),
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        output_frames.len() >= 2,
+        "700 KiB text 须分片（TEXT_CHUNK=160 KiB）：实际 {output_frames:?}"
+    );
+    assert!(
+        output_frames.iter().skip(1).all(|cont| *cont),
+        "首片后全部 cont=true（034 §1.3 合并链）：{output_frames:?}"
+    );
+    assert!(!output_frames[0], "首片 cont=false");
 }
 
 #[cfg(target_os = "linux")]

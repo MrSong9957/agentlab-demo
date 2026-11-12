@@ -15,8 +15,7 @@
 //!   等待与读写期间不持有管理器全局锁，取消／查询／退出／终止的竞态经
 //!   会话内互斥锁串行化。
 //!
-//! 平台：仅 Linux 本地执行；Shell 固定 `/bin/sh -c`；句柄绑定本管理器
-//! （宿主实例＋当前对话），跨实例或重启后即失效。
+//! 平台：句柄绑定本管理器（宿主实例＋当前对话），跨实例或重启后即失效。
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -33,7 +32,9 @@ use std::time::{Duration, Instant};
 
 // 038 ConPTY：ChildHandle::Raw 的句柄级 wait/退出码读取与伪终端拆除。
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 #[cfg(windows)]
 use windows_sys::Win32::System::Console::{ClosePseudoConsole, HPCON};
 #[cfg(windows)]
@@ -117,8 +118,7 @@ struct MgrInner {
     /// 启动至会话登记期间串行化；确认闸等待时释放 state 锁，close 先标记关闭再等此锁。
     start_gate: Mutex<()>,
     /// 工具进程创建线程的请求通道（033 生命周期修复，见 [`ProcessManager::new`]
-    /// 内线程注释）。Mutex 仅弥补 std mpsc Sender 非 Sync（发送为 O(1) 入队）；
-    /// 接收端为专属长寿线程，退出条件＝全部管理器克隆 Drop（通道关闭）。
+    /// 内线程注释）。接收端为专属长寿线程，退出条件＝全部管理器克隆 Drop（通道关闭）。
     spawner_tx: Mutex<std::sync::mpsc::Sender<SpawnJob>>,
 }
 
@@ -302,49 +302,16 @@ impl ProcessManager {
             self.lock_mgr().reap_failed = None;
             return Ok(());
         }
-        // 统一温和终止（一次发齐）。
-        for s in &extras {
-            if let Phase::Running { pgid } = s.phase() {
-                request_group_term(pgid);
-            }
+        let pending = Self::terminate_sessions_bounded(&extras);
+        if pending.is_empty() {
+            return Ok(());
         }
-        // 共享有界窗口。
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            if extras.iter().all(|s| !matches!(s.phase(), Phase::Running { .. })) {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        // 升级强杀（monitor 回收），再短窗核实。
-        for s in &extras {
-            if matches!(s.phase(), Phase::Running { .. }) {
-                s.request_kill(KillReq::Terminate);
-            }
-        }
-        let hard_deadline = Instant::now() + Duration::from_millis(500);
-        loop {
-            let pending: Vec<String> = extras
-                .iter()
-                .filter(|s| matches!(s.phase(), Phase::Running { .. }))
-                .map(|s| s.id.clone())
-                .collect();
-            if pending.is_empty() {
-                return Ok(());
-            }
-            if Instant::now() >= hard_deadline {
-                let msg = format!(
-                    "额外权限进程未能全部终止（{}）：不宣称已安全撤销，拒绝开始下一轮",
-                    pending.join("、")
-                );
-                self.lock_mgr().reap_failed = Some(msg.clone());
-                return Err(msg);
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        let msg = format!(
+            "额外权限进程未能全部终止（{}）：不宣称已安全撤销，拒绝开始下一轮",
+            pending.join("、")
+        );
+        self.lock_mgr().reap_failed = Some(msg.clone());
+        Err(msg)
     }
 
     /// 035 §1.5：回收一个 assignment 的命令进程（子轮终态/中断调用）——
@@ -398,36 +365,12 @@ impl ProcessManager {
         if owned.is_empty() {
             return Ok(());
         }
-        for s in &owned {
-            if let Phase::Running { pgid } = s.phase() {
-                request_group_term(pgid);
-            }
-        }
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            if owned.iter().all(|s| !matches!(s.phase(), Phase::Running { .. })) {
-                break;
-            }
-            if Instant::now() >= deadline {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        for s in &owned {
-            if matches!(s.phase(), Phase::Running { .. }) {
-                s.request_kill(KillReq::Terminate);
-            }
-        }
-        let hard_deadline = Instant::now() + Duration::from_millis(500);
-        loop {
-            if owned.iter().all(|s| !matches!(s.phase(), Phase::Running { .. })) {
-                break;
-            }
-            if Instant::now() >= hard_deadline {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        // 温和终止由 terminate_sessions_bounded 开头统一发送（S13 验收修正：
+        // 原抽取版调用侧直发＋helper 再发＝同一批两次 SIGTERM，冗余）。
+        Self::terminate_sessions_bounded(&owned);
+        // S13 验收修正：pending 与移除在同一锁临界区内判定（原抽取版在
+        // helper 无锁快照判定，两时刻间被 monitor 终止的会话会「既移除又
+        // 报 pending」——伪失败 Err）。helper 只负责终止；最终判定在此。
         let mut pending = Vec::new();
         {
             let mut st = self.lock_mgr();
@@ -446,7 +389,48 @@ impl ProcessManager {
         }
     }
 
-    /// [`ProcessManager::start`] 的 031 变体：`policy`＝出生策略快照（调用
+    /// 终止收尾骨架单点（S13）：温和终止一批会话（一次发齐）→ 3 秒共享有界
+/// 窗口轮询（20ms）→ 到期升级强杀（monitor 回收）→ 500ms 短窗核实（20ms）。
+/// 返回仍未终止的会话 id；记录移除、错误文案与失败标记由调用方处理。
+fn terminate_sessions_bounded(sessions: &[Arc<Session>]) -> Vec<String> {
+    for s in sessions {
+        if let Phase::Running { pgid } = s.phase() {
+            request_group_term(pgid);
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if sessions.iter().all(|s| !matches!(s.phase(), Phase::Running { .. })) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for s in sessions {
+        if matches!(s.phase(), Phase::Running { .. }) {
+            s.request_kill(KillReq::Terminate);
+        }
+    }
+    let hard_deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        if sessions.iter().all(|s| !matches!(s.phase(), Phase::Running { .. })) {
+            break;
+        }
+        if Instant::now() >= hard_deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    sessions
+        .iter()
+        .filter(|s| matches!(s.phase(), Phase::Running { .. }))
+        .map(|s| s.id.clone())
+        .collect()
+}
+
+/// [`ProcessManager::start`] 的 031 变体：`policy`＝出生策略快照（调用
     /// 开始时构建，经创建线程携带——不临时重读授权）；`extra`＝是否使用基线
     /// 之外的额外授权（到期收尾只针对此类进程，§1.7-5——016 对该条的修订：
     /// 额外权限进程不跨用户轮存活）。毒丸快照＝显式错误，零命令执行。
@@ -1022,8 +1006,6 @@ fn test_gate_wait(session: &Session) {
     }
 }
 
-/// 终止进程组的受检入口：返回 Ok（已发信号）／Gone（组已不存在）／Failed
-///（失败，含 errno）。测试注入仅对 [`TEST_KILLPG_FAIL_PGD`] 匹配的组生效。
 /// 组硬终止（unix＝killpg(SIGKILL)＋errno 分类；Windows＝作业对象整树终止——
 /// 后代默认继承作业，TerminateJobObject 覆盖整树；组不存在＝句柄已关闭）。
 #[cfg(unix)]
@@ -1083,6 +1065,8 @@ fn request_group_interrupt(pgid: GroupId) -> std::io::Result<()> {
     }
 }
 
+/// 终止进程组的受检入口：返回 Ok（已发信号）／Gone（组已不存在）／Failed
+///（失败，含 errno）。测试注入仅对 [`TEST_KILLPG_FAIL_PGD`] 匹配的组生效。
 fn kill_group_checked(pgid: GroupId) -> KillOutcome {
     #[cfg(test)]
     {
@@ -1116,8 +1100,6 @@ fn cancelled_before_start(cancel: Option<&AtomicBool>) -> Option<ExecResult> {
             session_id: None,
         })
 }
-
-// ---- 会话记录 ----
 
 /// 一次受管理的进程执行：生命周期状态＋待取输出缓存＋输入通道。
 struct Session {
@@ -1537,7 +1519,10 @@ fn drain(st: &mut SessionState, max_output_chars: usize, final_drain: bool) -> (
 struct PendingBuffer {
     decoder_pending: Vec<u8>,
     head: String,
+    /// 尾部缓存＋已省略前端偏移（S28：超限后省略改为偏移推进＋达阈值才
+    /// 物理收缩——避免每次追加对 ~1 MiB 尾串全量 memmove；take() 输出逐字节不变）。
     tail: String,
+    tail_offset: usize,
     omitted: u64,
 }
 
@@ -1547,6 +1532,7 @@ impl PendingBuffer {
             decoder_pending: Vec::new(),
             head: String::new(),
             tail: String::new(),
+            tail_offset: 0,
             omitted: 0,
         }
     }
@@ -1595,7 +1581,7 @@ impl PendingBuffer {
         let head_cap = PENDING_CAP / 2;
         if self.head.len() < head_cap {
             let remaining = head_cap - self.head.len();
-            let cut = floor_char_boundary(s, remaining);
+            let cut = s.floor_char_boundary(remaining);
             self.head.push_str(&s[..cut]);
             let rest = &s[cut..];
             if !rest.is_empty() {
@@ -1604,11 +1590,17 @@ impl PendingBuffer {
         } else {
             self.tail.push_str(s);
         }
-        let over = (self.head.len() + self.tail.len()) as i64 - PENDING_CAP as i64;
+        let live = self.tail.len() - self.tail_offset;
+        let over = (self.head.len() + live) as i64 - PENDING_CAP as i64;
         if over > 0 {
-            let evict = ceil_char_boundary(&self.tail, over as usize);
-            self.tail.drain(..evict);
+            let evict = self.tail[self.tail_offset..].ceil_char_boundary(over as usize);
+            self.tail_offset += evict;
             self.omitted += evict as u64;
+            if self.tail_offset >= PENDING_CAP {
+                // 批量物理收缩（摊还 O(n)）：偏移过半即整理一次。
+                self.tail.drain(..self.tail_offset);
+                self.tail_offset = 0;
+            }
         }
     }
 
@@ -1624,38 +1616,13 @@ impl PendingBuffer {
         if truncated {
             out.push_str(&format!("\n…[已省略 {} 字节输出]…\n", self.omitted));
         }
-        out.push_str(&self.tail);
+        out.push_str(&self.tail[self.tail_offset..]);
         self.tail.clear();
+        self.tail_offset = 0;
         self.omitted = 0;
         (out, truncated)
     }
 }
-
-/// 不超过 `limit` 的最大字符边界（s 为合法 UTF-8）。
-fn floor_char_boundary(s: &str, limit: usize) -> usize {
-    if limit >= s.len() {
-        return s.len();
-    }
-    let mut i = limit;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
-/// 不小于 `limit` 的最小字符边界（用于从头省略整字符）。
-fn ceil_char_boundary(s: &str, limit: usize) -> usize {
-    if limit >= s.len() {
-        return s.len();
-    }
-    let mut i = limit;
-    while i < s.len() && !s.is_char_boundary(i) {
-        i += 1;
-    }
-    i
-}
-
-// ---- 启动与后台线程 ----
 
 /// 一次成功启动的产物。
 struct Spawned {
@@ -1672,18 +1639,6 @@ struct Spawned {
     stderr: Option<std::process::ChildStderr>,
 }
 
-/// 033：构造 exec_command 的启动命令——普通模式 `/bin/sh -c <cmd>`（既有行为，
-/// 环境按现状继承）；沙箱模式（`TCHAT_SANDBOX` 非空）`<bwrap> <沙箱参数> --
-/// /bin/sh -c <cmd>`：Command env_clear＋白名单环境（PATH/HOME/TERM，主进程
-/// 凭据 env 不进工具——027 R1 环境面防线在此保留）；沙箱不可用时返回 Err，
-/// 由调用侧显式报错（禁止静默回退到无沙箱执行）。策略锚定主进程 cwd（G1 修
-/// 复），workdir 仅作沙箱内 --chdir，不参与策略。
-/// 031：`policy` 携带时改走 [`crate::sandbox::permission_launch_argv`]（受限
-/// 读树＋deny 优先＋网络开关＋seccomp 的动态策略入口）；seccomp fd 守卫须
-/// 存活到 spawn 返回——本函数内联完成 spawn 前‥后的全部时序。
-/// 启动参数中间形态（038 ConPTY）：std Command 无读取接口，Windows PTY 路径
-/// 需要原始 program/argv/env 交给 CreateProcessW——两个消费方（std Command
-/// 构造与 ConPTY 启动）共用同一决策，行为零分歧。
 struct ToolArgv {
     program: String,
     args: Vec<String>,
@@ -1696,6 +1651,18 @@ struct ToolArgv {
     seccomp: Option<crate::sandbox::SeccompFd>,
 }
 
+/// 033：构造 exec_command 的启动命令——普通模式 `/bin/sh -c <cmd>`（既有行为，
+/// 环境按现状继承）；沙箱模式（`TCHAT_SANDBOX` 非空）`<bwrap> <沙箱参数> --
+/// /bin/sh -c <cmd>`：Command env_clear＋白名单环境（PATH/HOME/TERM，主进程
+/// 凭据 env 不进工具——027 R1 环境面防线在此保留）；沙箱不可用时返回 Err，
+/// 由调用侧显式报错（禁止静默回退到无沙箱执行）。策略锚定主进程 cwd（G1 修
+/// 复），workdir 仅作沙箱内 --chdir，不参与策略。
+/// 031：`policy` 携带时改走 [`crate::sandbox::permission_launch_argv`]（受限
+/// 读树＋deny 优先＋网络开关＋seccomp 的动态策略入口）；seccomp fd 守卫须
+/// 存活到 spawn 返回——本函数内联完成 spawn 前‥后的全部时序。
+/// 启动参数中间形态（038 ConPTY）：std Command 无读取接口，Windows PTY 路径
+/// 需要原始 program/argv/env 交给 CreateProcessW——两个消费方（std Command
+/// 构造与 ConPTY 启动）共用同一决策，行为零分歧。
 fn tool_argv(
     cmd: &str,
     workdir: &std::path::Path,
@@ -1752,22 +1719,9 @@ fn build_tool_command(
     c.args(&t.args);
     if t.sandbox_wrapped {
         // 031：seccomp fd 守卫须存活到 spawn——经返回值交给调用方。
-        // Some＝close_range 版收口（除 seccomp fd 外全部关闭）；None＝033-B2
-        // 的 CLOEXEC 标记版（launcher 遗留 fd execve 时关闭；仅沙箱分支）。
+        //（两个变体的 fd 处理语义见 sandbox.rs 中对应函数文档。）
         #[cfg(unix)]
-        match t.seccomp.as_ref() {
-            Some(guard) => {
-                let fd = guard.raw();
-                unsafe {
-                    c.pre_exec(move || {
-                        crate::sandbox::close_inherited_fds_except_cloexec(fd)
-                    });
-                }
-            }
-            None => unsafe {
-                c.pre_exec(crate::sandbox::close_inherited_fds_mark_cloexec);
-            },
-        }
+        crate::sandbox::apply_spawn_fd_hygiene(&mut c, t.seccomp.as_ref());
         #[cfg(windows)]
         let _ = &c;
     }
@@ -1791,9 +1745,6 @@ fn build_tool_command(
 }
 
 /// 管道模式：stdin 关闭，stdout/stderr 管道；独立进程组。
-/// 031：spawn 后 best-effort 验证 bwrap 子进程的 PID 命名空间确已隔离
-///（仍存活且与主进程同 ns ⇒ 立即整组终止并报错——隔离创建失败的执行前
-/// 拒绝链闭合；子进程已退出时以 bwrap 自身 fail-hard 语义为准）。
 fn spawn_piped(
     cmd: &str,
     workdir: &std::path::Path,
@@ -1826,9 +1777,6 @@ fn spawn_piped(
     })
 }
 
-/// PTY 模式：分配真实伪终端作为控制终端；会话组长自身成组
-///（pre_exec setsid，不用 process_group——setpgid 后 setsid 会失败）。
-/// 031：同管道模式的 spawn 后 PID 命名空间验证（TTY 组终止路径）。
 /// Windows 版（038 ConPTY，008 A6 的 Windows 等价实现）：CreatePseudoConsole
 /// ＋PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE 属性清单＋CreateProcessW。会话语义
 /// 对齐 unix 版：ConPTY 输出端＝读取线程通道；输入端＝master（Arc<File> 输入
@@ -2036,6 +1984,8 @@ fn quote_windows_arg(arg: &str) -> String {
     out
 }
 
+/// PTY 模式：分配真实伪终端作为控制终端；会话组长自身成组
+///（pre_exec setsid，不用 process_group——setpgid 后 setsid 会失败）。
 #[cfg(unix)]
 fn spawn_pty(
     cmd: &str,
@@ -2387,7 +2337,6 @@ fn terminate_sandbox_payload(
 }
 
 /// 读取线程：poll＋读取一路输出通道直到 EOF；持续推入待取缓存并唤醒等待方。
-/// `readers_may_stop` 置位后退出（宽限已过，通道由后代持有时不无限等待）。
 /// Windows 读取线程：阻塞 Read 直到 EOF（树终止后管道关闭必然 EOF；
 /// 宽限语义由 collect_done 的自然退出覆盖，无需 poll 中断）。
 #[cfg(windows)]
@@ -2412,9 +2361,16 @@ fn spawn_reader<R: Read + Send + 'static>(session: Arc<Session>, mut pipe: R) {
                 }
             }
         }
+        // A10 修复：EOF／错误退出同样累加 reader_eof（与 unix 版同构）——
+        // 缺失时 collect_done 每会话多等满 COLLECT_GRACE（2 秒）。
+        let mut st = session.lock();
+        st.reader_eof += 1;
+        drop(st);
+        session.cv.notify_all();
     });
 }
 
+/// `readers_may_stop` 置位后退出（宽限已过，通道由后代持有时不无限等待）。
 #[cfg(unix)]
 fn spawn_reader<R: Read + AsRawFd + Send + 'static>(session: Arc<Session>, mut pipe: R) {
     std::thread::spawn(move || {
@@ -2447,6 +2403,74 @@ fn spawn_reader<R: Read + AsRawFd + Send + 'static>(session: Arc<Session>, mut p
 
 #[cfg(test)]
 mod tests {
+    /// S36：reap_failed 闩锁清除时机——再次 reap（即使无额外权限会话）
+    /// 成功即清除（:302 早退路径），宿主可开始下一用户轮。
+    #[test]
+    fn reap_extra_clears_failed_latch_even_without_extras() {
+        let mgr = ProcessManager::new();
+        {
+            let mut st = mgr.lock_mgr();
+            st.reap_failed = Some("注入的收尾失败".into());
+        }
+        assert!(mgr.extra_reap_gate().is_some(), "置位后可读");
+        mgr.reap_extra_permission_sessions().unwrap();
+        assert!(
+            mgr.lock_mgr().reap_failed.is_none(),
+            "再次 reap 成功（无 extras）即清除闩锁"
+        );
+    }
+
+    /// S37 锚 1（Windows）：`ChildHandle::try_wait` 的 WAIT_TIMEOUT 分支可达——
+    /// 打开本进程自身的 SYNCHRONIZE 句柄（自身未终止），0ms 等待必落
+    /// WAIT_TIMEOUT 臂返回 Ok(None)；WAIT_FAILED 导入缺失为 Windows 编译错
+    /// （A10 修复），由本测试所在目标编译兜底。待 038 Windows CI 验证。
+    #[cfg(windows)]
+    #[test]
+    fn try_wait_wait_timeout_branch_reachable() {
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        // windows-sys 0.59：SYNCHRONIZE 属 Storage::FileSystem（非 Threading）；
+        // HPCON＝isize（非指针），空位取 0（try_wait 不触 hpc，无 Drop）。
+        use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
+        use windows_sys::Win32::System::Threading::OpenProcess;
+        let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, std::process::id()) };
+        assert!(!(handle as isize).is_negative(), "OpenProcess 自身失败");
+        let mut child = ChildHandle::Raw { process: handle as HANDLE, pid: std::process::id(), hpc: 0 };
+        let first = child.try_wait().expect("首次 try_wait");
+        assert!(first.is_none(), "自身句柄未终止：0ms 等待应落 WAIT_TIMEOUT 臂");
+        unsafe { CloseHandle(handle as HANDLE) };
+    }
+
+    /// S37 锚 2（Windows）：读取线程 EOF 后累加 `reader_eof`（A10 修复——
+    /// 缺失时 collect_done 每会话多等满 COLLECT_GRACE）。待 038 Windows CI 验证。
+    #[cfg(windows)]
+    #[test]
+    fn windows_reader_eof_accumulates_on_eof() {
+        let session = std::sync::Arc::new(Session::new(
+            "s37-reader".into(),
+            "cmd".into(),
+            1,
+            1,
+            None,
+            1,
+            false,
+            OwnerTag::Root,
+        ));
+        spawn_reader(session.clone(), std::io::Cursor::new(Vec::new()));
+        // 轮询等待（读取线程异步；空游标立即 EOF，但线程调度有延迟）。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let eof = session.st.lock().unwrap().reader_eof;
+            if eof == 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "reader_eof 未在 5 秒内累加（实际 {eof}）"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     use super::*;
 
     #[cfg(target_os = "linux")]
@@ -3347,11 +3371,11 @@ mod tests {
 
     #[test]
     fn char_boundary_helpers() {
-        assert_eq!(floor_char_boundary("a🎉b", 2), 1); // 🎉 前
-        assert_eq!(floor_char_boundary("a🎉b", 10), 6);
-        assert_eq!(ceil_char_boundary("a🎉b", 1), 1);
-        assert_eq!(ceil_char_boundary("a🎉b", 2), 5); // 跳过 🎉（字节 1..5）
-        assert_eq!(ceil_char_boundary("a🎉b", 10), 6);
+        assert_eq!("a🎉b".floor_char_boundary(2), 1); // 🎉 前
+        assert_eq!("a🎉b".floor_char_boundary(10), 6);
+        assert_eq!("a🎉b".ceil_char_boundary(1), 1);
+        assert_eq!("a🎉b".ceil_char_boundary(2), 5); // 跳过 🎉（字节 1..5）
+        assert_eq!("a🎉b".ceil_char_boundary(10), 6);
     }
 
 // ---------- 016 剩余验收：可控时间接缝 / 终止失败注入（单测）----------

@@ -270,8 +270,6 @@ impl TurnGrants {
     }
 }
 
-// ---------- 严格 JSON（递归重复键拒绝） ----------
-
 /// 递归严格 Value：每个对象层拒绝重复键（serde_json Map 会静默合并——022
 /// 配置侧先例在策略/请求侧同样成立）。非对象根由各层校验拒绝。
 fn parse_strict_json(text: &str) -> Result<Value, String> {
@@ -332,8 +330,6 @@ impl<'de> serde::de::Visitor<'de> for StrictVisitor {
     }
 }
 
-// ---------- Value 校验辅助 ----------
-
 fn expect_object<'a>(v: &'a Value, ctx: &str) -> Result<&'a serde_json::Map<String, Value>, String> {
     v.as_object()
         .ok_or_else(|| format!("{ctx} 必须是对象（收到 {v}）"))
@@ -378,8 +374,6 @@ fn validate_text_bytes(s: &str, ctx: &str) -> Result<(), String> {
     }
     Ok(())
 }
-
-// ---------- 策略解析 ----------
 
 impl Policy {
     /// 严格解析策略文本（§1.3：version=1；重复键/未知字段/矛盾规则拒绝；
@@ -485,7 +479,8 @@ impl Policy {
         deny.extend(ctx.install_dirs.iter().cloned());
         let mut out: Vec<PathBuf> = Vec::new();
         for p in deny {
-            // 存在性三分类（fail-closed 语义在挂载层；此处 missing＝无对象）
+            // 存在性两分：metadata 成功才进 deny 集；任何错误（含非 NotFound）
+            // 一律跳过＝该路径不进快照、挂载层无从保护
             let Ok(md) = std::fs::metadata(&p) else { continue };
             let _ = md;
             let canon = canonical_long(&p);
@@ -524,6 +519,24 @@ fn parse_scope(v: &Value, ctx: &str) -> Result<FsScope, String> {
     Ok(FsScope { entries, network })
 }
 
+/// 已存在的绝对实际路径（§1.3）：加载即验证存在并固定 canonical 形态。
+/// 两处策略路径入口共用（S22）；错误文案逐字保留，field_ctx 为完整字段上下文。
+fn parse_existing_abs_path(field_ctx: &str, raw: &str) -> Result<PathBuf, String> {
+    let p = Path::new(raw);
+    if !p.is_absolute() {
+        return Err(format!("{field_ctx} 必须是绝对路径（收到 {raw}）"));
+    }
+    match std::fs::metadata(p) {
+        Ok(_) => canonical_long_checked(p)
+            .map_err(|e| format!("{field_ctx} {} 无法规范化（{e}）：拒绝", p.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(format!(
+            "{field_ctx} {} 不存在：策略路径必须是已存在的绝对实际路径",
+            p.display()
+        )),
+        Err(e) => Err(format!("{field_ctx} {} 状态读取失败（{e}）：拒绝", p.display())),
+    }
+}
+
 fn parse_path_spec(v: &Value, ctx: &str) -> Result<PathBuf, String> {
     let obj = expect_object(v, ctx)?;
     expect_exact_fields(obj, ctx, &["type", "path"], &[])?;
@@ -533,20 +546,8 @@ fn parse_path_spec(v: &Value, ctx: &str) -> Result<PathBuf, String> {
     }
     let raw = expect_string(&obj["path"], &format!("{ctx}.path"))?;
     validate_text_bytes(raw, &format!("{ctx}.path"))?;
-    let p = Path::new(raw);
-    if !p.is_absolute() {
-        return Err(format!("{ctx}.path 必须是绝对路径（收到 {raw}）"));
-    }
     // 已存在的绝对实际路径（§1.3）：加载即验证存在并固定 canonical 形态。
-    match std::fs::metadata(p) {
-        Ok(_) => canonical_long_checked(p)
-            .map_err(|e| format!("{ctx}.path {} 无法规范化（{e}）：拒绝", p.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(format!(
-            "{ctx}.path {} 不存在：策略路径必须是已存在的绝对实际路径",
-            p.display()
-        )),
-        Err(e) => Err(format!("{ctx}.path {} 状态读取失败（{e}）：拒绝", p.display())),
-    }
+    parse_existing_abs_path(&format!("{ctx}.path"), raw)
 }
 
 fn parse_access(v: &Value, ctx: &str) -> Result<Access, String> {
@@ -566,31 +567,9 @@ fn parse_deny_paths(v: &Value) -> Result<Vec<PathBuf>, String> {
     for (i, e) in arr.iter().enumerate() {
         let raw = expect_string(e, &format!("deny_paths[{i}]"))?;
         validate_text_bytes(raw, &format!("deny_paths[{i}]"))?;
-        let p = Path::new(raw);
-        if !p.is_absolute() {
-            return Err(format!(
-                "deny_paths[{i}] 必须是绝对路径（收到 {raw}）"
-            ));
-        }
-        match std::fs::metadata(p) {
-            Ok(_) => out.push(canonical_long_checked(&p).map_err(|e| {
-                format!("deny_paths[{i}] {} 无法规范化（{e}）：拒绝", p.display())
-            })?),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Err(format!(
-                    "deny_paths[{i}] {} 不存在：策略路径必须是已存在的绝对实际路径",
-                    p.display()
-                ));
-            }
-            Err(err) => {
-                return Err(format!(
-                    "deny_paths[{i}] {} 状态读取失败（{err}）：拒绝",
-                    p.display()
-                ));
-            }
-        }
+        out.push(parse_existing_abs_path(&format!("deny_paths[{i}]"), raw)?);
     }
-    // deny 集去重（同一路径重复列出不是矛盾）
+    // 相邻重复去重（Vec::dedup 只合并相邻项；同一路径重复列出不是矛盾）
     out.dedup();
     Ok(out)
 }
@@ -710,19 +689,23 @@ fn canonical_long(p: &Path) -> PathBuf {
 
 /// fail-closed 变体（038 安全测试 B4）：canonicalize 失败时返回错误而非静默
 /// 保留原形态——策略装载路径用它恢复「拒绝启动」语义。
+/// verbatim 前缀剥离（A10 抽取为纯函数，S37 锚定）：`\\?\UNC\srv\share`
+/// 还原为原生 **两反斜杠** `\\srv\share`（修复前 `\\\\\{rest}` 产生三个
+/// 反斜杠——path_covers 的 starts_with 对齐失效）；`\\?\C:\…` 剥离为
+/// `C:\…`；其余原样。
+#[cfg(windows)]
+fn strip_verbatim_prefix(s: &str) -> std::path::PathBuf {
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return std::path::PathBuf::from(format!(r"\\{rest}"));
+    }
+    std::path::PathBuf::from(s.strip_prefix(r"\\?\").map(String::from).unwrap_or_else(|| s.to_string()))
+}
+
 fn canonical_long_checked(p: &Path) -> std::io::Result<PathBuf> {
     let canon = std::fs::canonicalize(p)?;
     #[cfg(windows)]
     {
-        let s = canon.to_string_lossy().into_owned();
-        // UNC 特判（038 安全测试 B2）：\\?\UNC\srv\share 剥离后是「服务器名
-        // 为 UNC」的畸形形态——还原为原生 \\srv\share 形态
-        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-            return Ok(std::path::PathBuf::from(format!("\\\\\\{rest}")));
-        }
-        Ok(std::path::PathBuf::from(
-            s.strip_prefix(r"\\?\").map(String::from).unwrap_or(s),
-        ))
+        Ok(strip_verbatim_prefix(&canon.to_string_lossy()))
     }
     #[cfg(not(windows))]
     Ok(canon)
@@ -1233,14 +1216,14 @@ pub fn execute_request_permissions(
     }
     // §1.7-1（审查 #11）：超限在**确认前**失败——预演试算命中 64 上限即
     // 整次 error，不弹确认窗（用户不应为必然失败的申请按下允许）。
-    {
-        let mut trial = TurnGrants {
-            entries: grants.entries.clone(),
-            network: grants.network,
-        };
-        if let Err(e) = trial.grant_all(&norm) {
-            return error_result(&e);
-        }
+    // 预演 trial 确认前一次构造（S22）：确认仅只读，两次构造结果恒等；
+    // Allow 臂复用同一 trial 提交。
+    let mut trial = TurnGrants {
+        entries: grants.entries.clone(),
+        network: grants.network,
+    };
+    if let Err(e) = trial.grant_all(&norm) {
+        return error_result(&e);
     }
     // 宿主确认（默认拒绝；Err＝error，不扩大授权）。
     let view = PermissionRequestView {
@@ -1256,19 +1239,35 @@ pub fn execute_request_permissions(
     match decision {
         PermissionDecision::Deny => denied_result(),
         PermissionDecision::Allow => {
-            // 预演：授予＋编码＋可表达性全部通过后才提交（原子）。
-            let mut trial = TurnGrants {
-                entries: grants.entries.clone(),
-                network: grants.network,
-            };
-            if let Err(e) = trial.grant_all(&norm) {
-                return error_result(&e);
-            }
+            // 预演：编码＋可表达性通过后才提交（授予预演已在确认前完成）。
             if let Err(e) = build_snapshot(policy, &trial, deny_ctx) {
                 return error_result(&format!("生效策略编码失败，本次新增许可未发布：{e}"));
             }
             *grants = trial;
             granted_result(&norm)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// S37 锚 3（Windows）：UNC verbatim 还原为**两反斜杠**原生形态
+    /// （A10 修复——原 `\\\\\{rest}` 产生三个反斜杠）。纯函数锚；函数在
+    /// 本模块（proc_session 测试面误挂，CI E0425 后归位）。
+    #[cfg(windows)]
+    #[test]
+    fn unc_verbatim_restores_two_backslashes() {
+        assert_eq!(
+            super::strip_verbatim_prefix(r"\\?\UNC\srv\share"),
+            std::path::PathBuf::from(r"\\srv\share")
+        );
+        assert_eq!(
+            super::strip_verbatim_prefix(r"\\?\C:\dir\f"),
+            std::path::PathBuf::from(r"C:\dir\f")
+        );
+        assert_eq!(
+            super::strip_verbatim_prefix(r"C:\plain\path"),
+            std::path::PathBuf::from(r"C:\plain\path")
+        );
     }
 }

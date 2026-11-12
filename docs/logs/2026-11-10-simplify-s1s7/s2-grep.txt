@@ -1,0 +1,17 @@
+# S2 只写状态零读者核实（2026-11-10）
+## ChildSpec.wall_limit
+src/app/src/agents/runtime.rs:1482:    wall_limit: Duration,
+## GroupCore.seq（core.seq 读取面）
+## Mailbox.delivered
+src/app/src/agents/mailbox.rs:28:    delivered: usize,
+src/app/src/agents/mailbox.rs:65:        self.delivered += out.len();
+src/app/src/agents/runtime.rs:396:    /// 根线程批末/终文前交付已收事实：message_delivered 事件＋带来源标注的
+src/app/tests/multi_agent.rs:510:    let delivered: Vec<&HistoryItem> = history
+src/app/tests/multi_agent.rs:517:    assert_eq!(delivered.len(), 3, "三份终态报告批末交付恰一次");
+src/app/tests/multi_agent.rs:746:    let delivered: Vec<String> = history
+src/app/tests/multi_agent.rs:755:    assert_eq!(delivered.len(), 2, "两条消息各恰一次：{delivered:?}");
+src/app/tests/multi_agent.rs:756:    let p1 = delivered
+src/app/tests/multi_agent.rs:760:    let p2 = delivered
+src/app/tests/multi_agent.rs:2284:        "组事件计费应恰一次（Σ已提交非 delivered 事件 == 计数器；\
+## event_value
+src/app/src/agents/events.rs:261:pub(crate) fn event_value(item: &HistoryItem) -> Value {

@@ -3,11 +3,12 @@
 //! 契约（008 规格）：
 //! - 交互判定：stdin＋stdout 均为终端且 TERM 非 dumb（未设置按能力探测）才进入 TUI；
 //!   其余走既有行式路径（001/003–007 契约原样）。
-//! - API 非流式、turn 同步：一轮在独立线程运行 `turn::run_tool_turn`（006 契约不变），
-//!   整段回复按换行边界合成 delta 回推（J6；不宣称 SSE）。
-//! - Ctrl+C：TUI 内空闲＝退出（恢复终端后由 main 打印 `再见!`、退出码 0）；
-//!   turn 运行中＝006 N2b 取消（置标志→SIGKILL 进程组→CLI 存活）；在途模型
-//!   请求同受取消（sender 等待侧轮询标志，010 定点轮）。
+//! - API：024 起支持五协议原生 SSE（`stream` 请求参数可直达发送层）；turn
+//!   仍在独立线程同步运行（006 契约不变），回复按换行边界合成 delta 回推
+//!   （J6）——不宣称逐 token 流式渲染。
+//! - Ctrl+C：一律退出（含 turn 运行中，走宿主完整收尾）；轮内取消归 Esc
+//!   ——权威表述见 `tchat_tui::chat_driver` 模块头；空闲退出恢复终端后由
+//!   main 打印 `再见!`（退出码 0）。
 //! - 授权门（003）：进入 TUI 前对所选 provider 完成一次性 origin 授权（普通终端交互）；
 //!   会话中 /refresh 产生的**新增** origin 授权需求按非交互契约拒绝并提示（不静默放行）。
 //! - /resume：装载历史经 `tchat_tui::chat_driver::project_history` 投影（不重放工具，007）。
@@ -30,7 +31,6 @@ use crate::proc_session::ProcessManager;
 use crate::turn::SteerChannel as _;
 use crate::{api, catalog, session, turn};
 
-/// 是否应进入 TUI 模式。
 pub fn tui_should_run() -> bool {
     use std::io::IsTerminal;
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
@@ -59,6 +59,9 @@ struct TurnSteerChannel {
     /// 035：pending_hint 预取缓存（探测不消费——先回填缓存，drain 先取缓存）。
     peeked: std::cell::RefCell<Vec<turn::SteerInput>>,
 }
+
+/// 未知斜杠命令提示的可用清单（TUI 与行式两宿主共用同一文案）。
+pub const SLASH_COMMAND_HINT: &str = "可用：/models、/refresh、/save <名称>、/resume [名称]、/sessions、/memory-status、/memory-reset confirm、/mcp [reload]";
 
 impl TurnSteerChannel {
     fn drain_rx(&self) -> Vec<turn::SteerInput> {
@@ -452,7 +455,7 @@ impl TuiHost {
             let provider_id = prov.provider_id.clone();
             let conn = prov.conn;
             let key = cred.value;
-            // 010 定点轮＋收尾轮（J10 契约②）：Ctrl+C 取消＝**停止本地等待**——
+            // 010 定点轮＋收尾轮；2026-10-15 按键单一职责轮起轮内取消由 Esc 承担（Ctrl+C 一律退出）：取消＝**停止本地等待**——
             // 当前实现未中止底层 HTTP 请求（等待侧不关 socket、不中断/不 join
             // 辅助线程），请求移入辅助线程执行、等待侧轮询取消标志；取消＝Err
             // 结束本轮（Failed 反馈行如实表述「已停止等待」，不宣称网络请求已
@@ -538,7 +541,7 @@ impl TuiHost {
                         // 021：消息工具无运行活动可展示——成功路径直接投影为
                         // 消息 cell，失败原因在 ToolEnd 显式呈现；不打印无信息
                         // 量的活动行（成功通知不重复打印正文）。
-                        if name == "send_message_to_user_async" {
+                        if name == crate::message_to_user::TOOL_NAME {
                             None
                         } else {
                             let ev = if name == "write_stdin" {
@@ -574,7 +577,7 @@ impl TuiHost {
                                 Some(item) => Some(DriverEvent::ToolEnd { id, item }),
                                 // 021：消息工具失败/取消/结果未知——活动行已被抑制，
                                 // 这里显式呈现原因，不静默（展示副本过终端过滤）
-                                None if name == "send_message_to_user_async" => Some(DriverEvent::Info(
+                                None if name == crate::message_to_user::TOOL_NAME => Some(DriverEvent::Info(
                                     crate::display::sanitize_for_terminal(
                                         &crate::message_to_user::failure_line(&result),
                                     ),
@@ -718,16 +721,15 @@ impl TuiHost {
                         agent_sender_snapshot.clone(),
                     ))
                 };
-            let agents_context_message = crate::context::build_context_message(
-                &crate::context::ContextSources::from_env(),
-            )
-            .message;
             let agents_extras = if agents_ready {
+                // S21：agents 上下文仅在就绪时构建（复用本轮 context_sources；
+                // 产物仅 AgentExtras 消费，纯函数无副作用）。
                 Some(crate::agents::runtime::AgentExtras {
                     manager: agents_manager_arc.as_ref(),
                     session: autosave.clone(),
                     sender_factory: &agent_factory,
-                    context_message: agents_context_message,
+                    context_message: crate::context::build_context_message(&context_sources)
+                        .message,
                     mcp: mcp_snapshot.clone(),
                 })
             } else {
@@ -854,10 +856,6 @@ impl TuiHost {
         });
     }
 
-    /// 斜杠命令（TUI 内）：与行式路径同一语义/实现，输出改为多行文本。
-    /// 斜杠命令（/exit 已由驱动内建；其余与行式路径同一语义）。
-    /// /resume 成功时返回 [`CommandOutcome::ReplaceCells`]——驱动据此把投影 cells
-    /// 立即渲染进 transcript（装载历史不重放工具，007）。
     /// 022：`/mcp` 状态与 `/mcp reload`。reload 只在空闲时执行（接续槽位
     /// Open＝当前轮运行中→明确返回忙）；管理器 runtime 的 block_on 不得在
     /// TUI runtime 上下文内执行，经独立线程桥接后取回结果。
@@ -885,6 +883,8 @@ impl TuiHost {
         }
     }
 
+    /// 斜杠命令（TUI 内）：与行式路径同一语义/实现，输出改为多行文本。
+    /// 斜杠命令（/exit 已由驱动内建；其余与行式路径同一语义）。
     pub fn run_command(&self, full: &str) -> tchat_tui::chat_driver::CommandOutcome {
         let raw = full.split_whitespace().next().unwrap_or("");
         // 008-ADAPT：驱动经母本通道回传的命令名不带前导斜杠——规范化
@@ -909,7 +909,7 @@ impl TuiHost {
             }
             "/mcp" => Outcome::Output(self.cmd_mcp(args)),
             other => Outcome::Output(format!(
-                "未知命令 {other}，可用：/models、/refresh、/save <名称>、/resume [名称]、/sessions、/memory-status、/memory-reset confirm、/mcp [reload]"
+                "未知命令 {other}，{SLASH_COMMAND_HINT}"
             )),
         }
     }
@@ -1010,6 +1010,8 @@ impl TuiHost {
         }
     }
 
+    /// /resume 成功时返回 [`CommandOutcome::ReplaceCells`]——驱动据此把投影 cells
+    /// 立即渲染进 transcript（装载历史不重放工具，007）。
     fn cmd_resume(&self, name: &str) -> tchat_tui::chat_driver::CommandOutcome {
         use tchat_tui::chat_driver::CommandOutcome;
         let target = if name.is_empty() { None } else { Some(name) };
@@ -1062,7 +1064,7 @@ impl TuiHost {
     /// 毒锁感知（定点复核 P2-新1）：run_command 在驱动主线程同步执行——此处裸
     /// unwrap 会以码 101 中止进程并跳过终端恢复；恢复数据继续。
     /// 登记备注（定点复核 P2-新2）：/resume 已由 composer available_during_task
-    /// 门拦截；假想的未来直发通道最坏情形为 :369 阻塞至当前轮结束＋记录一致性
+    /// 门拦截；假想的未来直发通道最坏情形为 阻塞至当前轮结束＋记录一致性
     /// 瑕疵，属纵深防御既定姿态。
     pub fn resumed_projection(&self) -> Vec<tchat_tui::chat_driver::HostCell> {
         let history = self
@@ -1074,12 +1076,6 @@ impl TuiHost {
     }
 }
 
-/// 历史投影（012）：文本直映；工具结果按 id→（name, arguments）配对后，经与
-/// 实时 ToolEnd **同一转换**（[`tool_end_item`]）产出 HostHistoryItem——恢复视图与
-/// 实时终态同源同投影（需求⑤）。调用参数不重放（007：恢复只投影不执行）。
-/// 018-B：带来源标记的回答/关闭文本（正文与标记 request_id 一致）合并进对应
-/// 异步发布调用的同一展示，不作为普通用户文本重复出现；孤儿/重复/矛盾记录
-/// 不伪造已答，按普通文本保留。
 /// 032：TUI 检查点提交宿主——与 on_record 共享同一 `Arc<Mutex<Session>>`
 ///（轮线程内顺序加锁，无竞争；提交失败候选不进内存历史）。
 struct TuiCheckpointSink(std::sync::Arc<std::sync::Mutex<session::Session>>);
@@ -1114,6 +1110,12 @@ impl crate::js_orchestration::runtime::OrchestrationSink for TuiOrchestrationSin
     }
 }
 
+/// 历史投影（012）：文本直映；工具结果按 id→（name, arguments）配对后，经与
+/// 实时 ToolEnd **同一转换**（[`tool_end_item`]）产出 HostHistoryItem——恢复视图与
+/// 实时终态同源同投影（需求⑤）。调用参数不重放（007：恢复只投影不执行）。
+/// 018-B：带来源标记的回答/关闭文本（正文与标记 request_id 一致）合并进对应
+/// 异步发布调用的同一展示，不作为普通用户文本重复出现；孤儿/重复/矛盾记录
+/// 不伪造已答，按普通文本保留。
 fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
     use std::collections::HashMap;
     // 018-B 预扫：request_id → 首条有效 answer/closed 事件
@@ -1191,7 +1193,7 @@ fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
             }
             // 032：检查点边界——归档前缀与活动视图的分界（完整 transcript 含
             // 归档内容可回看；seed 的用户输入已作为真实记录在前缀中展示，
-            // 不经 seed 复制重画；摘要随边界呈现，M5 细化展示形态）。
+            // 不经 seed 复制重画；摘要随边界呈现）。
             HistoryItem::ContextCheckpoint { context_id, summary, .. } => {
                 out.push(HostHistoryItem::Text {
                     assistant: false,
@@ -1300,7 +1302,7 @@ fn project_history_items(history: &[HistoryItem]) -> Vec<HostHistoryItem> {
                 });
                 let is_send_message = paired
                     .as_ref()
-                    .is_some_and(|(name, _)| name == "send_message_to_user_async");
+                    .is_some_and(|(name, _)| name == crate::message_to_user::TOOL_NAME);
                 let restored = paired.and_then(|(name, arguments)| {
                     if name == "request_user_input_async" {
                         restored_async_item(tool_call_id, &arguments, content, async_event)
@@ -1701,7 +1703,7 @@ fn tool_end_item(
         // 021：消息成功结果→AssistantMessage（实时终态与 /resume 恢复同一转换；
         // 只展示不重发）。失败/取消/结果未知返回 None——实时路径显式呈现原因，
         // 恢复路径按普通文本降级，不推定发送成功。
-        "send_message_to_user_async" => crate::message_to_user::sent_message_from_record(
+        crate::message_to_user::TOOL_NAME => crate::message_to_user::sent_message_from_record(
             arguments,
             result,
         )
@@ -1943,9 +1945,6 @@ mod tests {
         }
     }
 
-    /// 032：恢复历史中的上下文检查点——渲染为已应用边界＋摘要（完整
-    /// transcript 含归档前缀，seed 用户输入已作为真实记录展示，不经 seed 重画）。
-    #[test]
     /// 034 C16：编排事件投影行携带源码、叶子参数与真实结果摘要（哨兵区分
     /// 应显示内容；运行中/关闭状态行如实呈现）。
     #[test]
@@ -2008,6 +2007,9 @@ mod tests {
         assert!(text[3].contains("cell-abc-1 关闭"), "{}", text[3]);
     }
 
+    /// 032：恢复历史中的上下文检查点——渲染为已应用边界＋摘要（完整
+    /// transcript 含归档前缀，seed 用户输入已作为真实记录展示，不经 seed 重画）。
+    #[test]
     fn project_history_items_renders_checkpoint_boundary() {
         use tchat_tui::chat_driver::HostHistoryItem as H;
         let history = vec![

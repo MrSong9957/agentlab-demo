@@ -42,7 +42,7 @@ pub const MAX_CURSOR_BYTES: usize = 64 * 1024;
 /// 取消／超时通知发送任务的最长存活时间（022 §2.4）。
 pub const CANCEL_NOTIFY_BOUND: Duration = Duration::from_secs(1);
 
-/// 连接建立失败（不含凭证值；文本由调用方做污染检查后才可展示）。
+/// 连接建立失败（文本由调用方做污染检查后才可展示）。
 #[derive(Debug, Clone)]
 pub struct McpConnectError(pub String);
 
@@ -67,6 +67,20 @@ pub enum CallFailure {
     SentRejected(String),
     /// 已发出且收到本项目不支持的协议响应（input_required／Task）。
     Unsupported(String),
+}
+
+impl CallFailure {
+    /// 失败分类 → 标准客户端错误 JSON（脱敏；022 §2.4 同源语义）——manager
+    /// 调用与 023 资源聚合共用单点（S15；connection 已依赖 secrets，无环）。
+    pub fn to_client_error(&self, sensitive: &super::secrets::SensitiveValues) -> String {
+        let (kind, detail) = match self {
+            CallFailure::NotSent(d) => ("未发送", super::secrets::sanitize_detail(d, sensitive)),
+            CallFailure::SentUnknown(d) => ("状态未知", super::secrets::sanitize_detail(d, sensitive)),
+            CallFailure::SentRejected(d) => ("协议", super::secrets::sanitize_detail(d, sensitive)),
+            CallFailure::Unsupported(d) => ("协议", super::secrets::sanitize_detail(d, sensitive)),
+        };
+        super::call::client_error_json(kind, &detail)
+    }
 }
 
 impl std::fmt::Display for CallFailure {
@@ -278,8 +292,8 @@ impl McpConnection {
                     })
                 });
                 // spawn 移交为分离任务：若本 future 在 await 期间被取消/超时丢弃，
-                // 任务内已启动的进程不得孤儿化——StdioProcess 携带
-                // kill_on_drop(true)（见 transport::spawn），句柄 drop 即回收，
+                // 任务照常完成、其结果（StdioProcess）随即丢弃——Drop impl 按进程
+                // 组回收（kill_on_drop 兜底直接子进程，见 transport::spawn），
                 // 「spawn 成功但登记失败」仍有明确所有者并能回收。
                 let (process, t) = spawn_task
                     .await

@@ -29,7 +29,6 @@ pub const RESERVED_HTTP_HEADERS: &[&str] = &[
     "mcp-session-id",
 ];
 
-/// stdio 传输配置。
 #[derive(Debug, Clone, PartialEq)]
 pub struct StdioConfig {
     /// 程序：绝对路径，或从受控 PATH 查找的裸程序名（带路径的相对形式已拒绝）。
@@ -38,7 +37,8 @@ pub struct StdioConfig {
     pub args: Vec<String>,
     /// 已有绝对目录；缺省＝本次宿主启动目录（加载时解析）。
     pub cwd: PathBuf,
-    /// 仅转交列出的宿主环境变量（缺失时该服务器准备失败）。
+    /// 显式转交的宿主环境变量（平台缺省白名单另行转交；列出的变量缺失时
+    /// 该服务器准备失败）。
     pub env_vars: Vec<String>,
 }
 
@@ -202,6 +202,73 @@ impl<'de> Visitor<'de> for ServersVisitor {
 /// 单服务器原始条目（键值按出现顺序，重复键已在 visitor 拒绝）。
 struct RawServerFields {
     entries: Vec<(String, serde_json::Value)>,
+    /// `env_http_headers` 字段原始值（022 §2.1：内层对象不能经 serde_json
+    /// Value 解析——重复键会在 Value 层静默合并、事后不可检出；本字段在
+    /// 原始条目流上逐键拒绝重复）。其余字段的值仍为 Value（无对象内层键）。
+    env_http_headers: Option<RawHeaderField>,
+}
+
+/// `env_http_headers` 字段原始值：对象则逐键收集（重复键拒绝）；非对象
+/// 降级标记，由下游按既有文案报「env_http_headers 必须是对象」。
+enum RawHeaderField {
+    Object(Vec<(String, serde_json::Value)>),
+    NotObject,
+}
+
+impl<'de> serde::Deserialize<'de> for RawHeaderField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct HeaderVisitor;
+        impl<'de> Visitor<'de> for HeaderVisitor {
+            type Value = RawHeaderField;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("env_http_headers 对象")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut out = Vec::new();
+                let mut seen = HashSet::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if !seen.insert(key.clone()) {
+                        return Err(serde::de::Error::custom(format!("重复配置字段：{key}")));
+                    }
+                    let value: serde_json::Value = map.next_value()?;
+                    out.push((key, value));
+                }
+                Ok(RawHeaderField::Object(out))
+            }
+            // 非对象：不在此处报错——错误文案由下游统一给出「必须是对象」
+            //（与修复前 serde_json Value + as_object 失败的同文案路径一致）。
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(RawHeaderField::NotObject)
+            }
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(RawHeaderField::NotObject)
+            }
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(RawHeaderField::NotObject)
+            }
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(RawHeaderField::NotObject)
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(RawHeaderField::NotObject)
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(RawHeaderField::NotObject)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                // 排空全部元素再降级（审查 P2）：serde_json 的
+                // deserialize_any 在 visit_seq 返回后校验 end_seq，残留
+                // 元素会在解析层以 trailing characters 失败而非到下游
+                // 「env_http_headers 必须是对象」。
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(RawHeaderField::NotObject)
+            }
+        }
+        deserializer.deserialize_any(HeaderVisitor)
+    }
 }
 
 impl<'de> serde::Deserialize<'de> for RawServerFields {
@@ -215,14 +282,24 @@ impl<'de> serde::Deserialize<'de> for RawServerFields {
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let mut out = Vec::new();
                 let mut seen = HashSet::new();
+                let mut env_http_headers = None;
                 while let Some(key) = map.next_key::<String>()? {
                     if !seen.insert(key.clone()) {
                         return Err(serde::de::Error::custom(format!("重复配置字段：{key}")));
                     }
+                    if key == "env_http_headers" {
+                        // 022 §2.1：内层对象在原始条目流上逐键拒绝重复键
+                        //（A6：经 Value 解析会在 serde_json 层静默合并）。
+                        env_http_headers = Some(map.next_value::<RawHeaderField>()?);
+                        continue;
+                    }
                     let value: serde_json::Value = map.next_value()?;
                     out.push((key, value));
                 }
-                Ok(RawServerFields { entries: out })
+                Ok(RawServerFields {
+                    entries: out,
+                    env_http_headers,
+                })
             }
         }
         deserializer.deserialize_map(ServerVisitor)
@@ -324,7 +401,12 @@ fn parse_server(id: &str, raw: RawServerFields) -> Result<McpServerConfig, McpCo
     };
     let transport = match (command, url) {
         (Some(command), None) => McpTransport::Stdio(parse_stdio(id, command, &raw.entries)?),
-        (None, Some(url)) => McpTransport::Http(parse_http(id, url, &raw.entries)?),
+        (None, Some(url)) => McpTransport::Http(parse_http(
+            id,
+            url,
+            &raw.entries,
+            raw.env_http_headers.as_ref(),
+        )?),
         (Some(_), Some(_)) => {
             return Err(err(format!("服务器 {id}：command 与 url 只能选择一个")));
         }
@@ -341,7 +423,15 @@ fn parse_server(id: &str, raw: RawServerFields) -> Result<McpServerConfig, McpCo
         McpTransport::Http(_) => &["args", "cwd", "env_vars"],
     };
     for field in foreign_fields {
-        if get(field).is_some() {
+        // A6 起 env_http_headers 由 visitor 特判层携带（不在 entries）——
+        // 跨传输混用检查改查特判字段，stdio 携带仍必须拒绝（审查 P1：
+        // 此前该字段被静默忽略＝认证头配置丢失不可见）。
+        let present = if *field == "env_http_headers" {
+            raw.env_http_headers.is_some()
+        } else {
+            get(field).is_some()
+        };
+        if present {
             return Err(err(format!(
                 "服务器 {id}：{field} 与所选传输不匹配（跨传输字段混用）"
             )));
@@ -418,6 +508,7 @@ fn parse_http(
     id: &str,
     url: String,
     entries: &[(String, serde_json::Value)],
+    env_http_headers_raw: Option<&RawHeaderField>,
 ) -> Result<HttpConfig, McpConfigError> {
     if url.trim().is_empty() {
         return Err(err(format!("服务器 {id}：url 不能为空白")));
@@ -461,10 +552,16 @@ fn parse_http(
         }
     };
     let mut env_http_headers: Vec<(String, String)> = Vec::new();
-    if let Some(v) = lookup(entries, "env_http_headers") {
-        let map = v
-            .as_object()
-            .ok_or_else(|| err(format!("服务器 {id}：env_http_headers 必须是对象")))?;
+    // A6：条目已在 visitor 层按原始流逐键收集（重复键拒绝）；非对象在此
+    // 按既有文案报错。校验逻辑与修复前逐字一致。
+    let header_entries = match env_http_headers_raw {
+        Some(RawHeaderField::Object(entries)) => Some(entries),
+        Some(RawHeaderField::NotObject) => {
+            return Err(err(format!("服务器 {id}：env_http_headers 必须是对象")))
+        }
+        None => None,
+    };
+    if let Some(map) = header_entries {
         let mut seen_casing: Vec<String> = Vec::new();
         for (name, value) in map {
             if name.is_empty() || name.contains(['\r', '\n']) {

@@ -4,10 +4,10 @@
 //! 名称；不搬 send_input/resume_agent/close_agent）。
 //!
 //! 架构（规格 §1.4/§1.7「本地调度」）：每个根逻辑用户轮一个 group；子轮在
-//! 独立线程持有独立上下文运行（复用普通函数编码与真实业务分派）；事件经
-//! 有界通道交根调度泵线程顺序落盘（V3 `HistoryItem::AgentEvent`）；全组只有
-//! 根 AutoSession 一个追加写者（共享 `Arc<Mutex<Session>>`，事件行先行落盘、
-//! 由 Session 的 untracked 计数在 flush 时吸收——034 同机制）。
+//! 独立线程持有独立上下文运行（复用普通函数编码与真实业务分派）；事件的
+//! 「调度泵」以 writer 互斥串行提交实现（详见 [`runtime`] 模块头——V3
+//! `HistoryItem::AgentEvent`，全组只有根 AutoSession 一个追加写者，事件行
+//! 先行落盘、由 Session 的 untracked 计数在 flush 时吸收——034 同机制）。
 //!
 //! 分层：[`args`]（六工具参数严格校验）、[`registry`]（注册表/状态机/预算/
 //! 路径解析）、[`mailbox`]（每 Agent FIFO 邮箱与容量）、[`events`]（V3 事件
@@ -71,9 +71,6 @@ pub const MAX_GROUP_MESSAGE_BYTES: usize = 1024 * 1024;
 pub const MAX_TERMINAL_REPORTS: usize = 8;
 /// 单份终态报告正文上限。
 pub const MAX_REPORT_BYTES: usize = 64 * 1024;
-/// 组持久化收尾额度（含终态报告；另留组关闭 64 KiB；均计入 64 MiB 总额）。
-pub const GROUP_CLOSEDOWN_BUDGET: usize = 256 * 1024;
-pub const GROUP_CLOSE_BUDGET: usize = 64 * 1024;
 /// 每 assignment 墙钟上限（受理起，单调时钟，§1.6）。
 pub const ASSIGNMENT_WALL_LIMIT_SECS: u64 = 300;
 /// 单个子事件完整序列化上限。
@@ -84,8 +81,6 @@ pub const MAX_GROUP_EVENT_BYTES: u64 = 64 * 1024 * 1024;
 pub const RESPONSE_RESERVE_BYTES: u64 = 10 * 1024 * 1024;
 /// 子工具结果记录预留。
 pub const RESULT_RESERVE_BYTES: u64 = 2 * 1024 * 1024;
-/// 子事件通道容量（有界；背压由发送方阻塞形成）。
-pub const EVENT_CHANNEL_CAPACITY: usize = 256;
 /// 每 assignment 终态摘要里保留的收尾说明上限。
 pub const MAX_CLEANUP_NOTE_BYTES: usize = 2048;
 

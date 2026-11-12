@@ -1,0 +1,17 @@
+failures:
+    turn::tests::tool_call_id_and_name_preserved_verbatim
+    turn::tests::tool_call_id_uniqueness_uses_original_values
+    turn::tests::tool_events_pair_begin_end_and_carry_display
+
+test result: FAILED. 304 passed; 3 failed; 1 ignored; 0 measured; 0 filtered out; finished in 43.14s
+
+error: test failed, to rerun pass `--lib`
+
+# 存量并行偶发登记（2026-11-10，简化清单 S1–S7 验证时发现）
+- 现象：`cargo test --lib` 默认并行下 turn::tests 三例（tool_call_id_and_name_preserved_verbatim、
+  tool_call_id_uniqueness_uses_original_values、tool_events_pair_begin_end_and_carry_display）
+  失败于 turn.rs:2817（exec End 的 status/output 断言）；子集并行绿、单线程全量绿（307/0/1）。
+- 归属：git stash 后基线（70aefd1，无本批改动）同样失败（记录见上）——存量并行负载偶发，
+  非本批引入。与 040/041 轮登记的「全量并行负载型偶发」同族。
+- 建议：登记为独立观察项；如复现频率上升，按 038 U4 配方（重型套件单套件＋--test-threads=2）
+  调整 lib 全量验证口径或给三例补负载隔离。

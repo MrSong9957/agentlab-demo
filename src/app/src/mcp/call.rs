@@ -21,17 +21,23 @@ pub fn client_error_json(kind: &str, detail: &str) -> String {
     .to_string()
 }
 
+/// 把成功收到的 `CallToolResult` 投影为 JSON 值（污染逐叶检查与文本投影
+/// 共用同一 `to_value`——023 §5.1 的逐叶检查必须在序列化之前：转义会掩盖
+/// 含引号／反斜杠的敏感值）。序列化失败（理论上不可达）按协议错误文本返回。
+pub fn project_result_value(result: &CallToolResult) -> Result<Value, String> {
+    serde_json::to_value(result).map_err(|e| format!("结果序列化失败：{e}"))
+}
+
 /// 把成功收到的 `CallToolResult` 投影为工具结果 JSON 字符串。
 /// 投影经 serde 保留字段语义；序列化失败（理论上不可达）按协议错误处理。
 pub fn project_result(result: &CallToolResult) -> String {
-    match serde_json::to_value(result) {
+    match project_result_value(result) {
         Ok(value) => value_to_tool_text(&value),
-        Err(e) => client_error_json("协议", &format!("结果序列化失败：{e}")),
+        Err(e) => client_error_json("协议", &e),
     }
 }
 
-/// 给定已序列化的结果 JSON，产出工具文本。
-fn value_to_tool_text(value: &Value) -> String {
+pub fn value_to_tool_text(value: &Value) -> String {
     value.to_string()
 }
 

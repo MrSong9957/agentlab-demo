@@ -24,10 +24,10 @@ use serde_json::Value;
 use super::call;
 use super::catalog::{build_function_definition, build_server_catalog};
 use super::config::{load_mcp_file, McpServerConfig, McpTransport};
-use super::connection::{wait_cancel_flag, CallFailure, McpConnection};
+use super::connection::{wait_cancel_flag, McpConnection};
 use super::naming::assign_model_names;
 use super::resources::{self, ResourceServerEntry};
-use super::secrets::{collect_sensitive_values, SensitiveValues};
+use super::secrets::{collect_sensitive_values, value_polluted, SensitiveValues};
 
 /// 每个用户轮冻结的 MCP 工具快照：定义＋原始身份映射＋连接句柄，
 /// 所有本轮模型请求和实际分派共用它（不可变）。023 起资源能力服务器
@@ -108,24 +108,28 @@ impl McpSnapshot {
                 super::call::client_error_json("参数", "arguments 必须是 JSON 对象"),
                 true,
             ),
-            Ok(v) => match &self.manager {
-                Some(manager) => match manager.upgrade() {
-                    Some(manager) => manager.call_resource(
-                        &self.resources,
-                        name,
-                        &v,
-                        cancel,
-                    ),
-                    None => (
-                        super::call::client_error_json("内部", "MCP 管理器已释放"),
-                        true,
-                    ),
-                },
-                None => (
-                    super::call::client_error_json("内部", "MCP 管理器不可用"),
-                    true,
-                ),
+            Ok(v) => match self.upgraded_manager() {
+                Ok(manager) => manager.call_resource(&self.resources, name, &v, cancel),
+                Err(broken) => broken,
             },
+        }
+    }
+
+    /// 弱引用解析单点（S15）：已升级管理器，或（客户端错误 JSON, isError=true）
+    /// ——call 与资源桥两站点共用。
+    fn upgraded_manager(&self) -> Result<std::sync::Arc<McpManager>, (String, bool)> {
+        match &self.manager {
+            Some(manager) => match manager.upgrade() {
+                Some(manager) => Ok(manager),
+                None => Err((
+                    super::call::client_error_json("内部", "MCP 管理器已释放"),
+                    true,
+                )),
+            },
+            None => Err((
+                super::call::client_error_json("内部", "MCP 管理器不可用"),
+                true,
+            )),
         }
     }
 
@@ -137,18 +141,9 @@ impl McpSnapshot {
         arguments: Value,
         cancel: &AtomicBool,
     ) -> (String, bool) {
-        match &self.manager {
-            Some(manager) => match manager.upgrade() {
-                Some(manager) => manager.call(entry, arguments, cancel),
-                None => (
-                    super::call::client_error_json("内部", "MCP 管理器已释放"),
-                    true,
-                ),
-            },
-            None => (
-                super::call::client_error_json("内部", "MCP 管理器不可用"),
-                true,
-            ),
+        match self.upgraded_manager() {
+            Ok(manager) => manager.call(entry, arguments, cancel),
+            Err(broken) => broken,
         }
     }
 }
@@ -195,9 +190,11 @@ struct Inner {
     loaded: bool,
     load_error: Option<String>,
     servers: Vec<ServerState>,
+    /// S28：未变更时复用的发布快照（快照不可变；可变取锁一律置 None——
+    /// 涵盖全部 servers/listing/connection 变更点，下轮 publish 重建）。
+    snapshot_cache: Option<Arc<McpSnapshot>>,
 }
 
-/// MCP 管理器。
 pub struct McpManager {
     runtime: tokio::runtime::Runtime,
     inner: Mutex<Inner>,
@@ -227,6 +224,7 @@ impl McpManager {
                 loaded: false,
                 load_error: None,
                 servers: Vec::new(),
+                snapshot_cache: None,
             }),
             operate: Mutex::new(()),
             self_weak: OnceLock::new(),
@@ -302,11 +300,7 @@ impl McpManager {
                     .block_on(async { conn.state.transport_closed().await });
                 if sdk_closed || conn.is_transport_closed() {
                     conn.state.closed.store(true, Ordering::SeqCst);
-                    let mut inner = self.lock();
-                    if let Some(server) = inner.servers.iter_mut().find(|s| s.id == id) {
-                        server.listing = None;
-                        server.error = Some("连接已断开（reload 可恢复）".to_string());
-                    }
+                    self.note_connection_down(&id, &conn);
                 }
             }
         }
@@ -377,6 +371,7 @@ impl McpManager {
                         new_connections.push(connection.clone());
                     }
                     let mut inner = self.lock();
+                    inner.snapshot_cache = None;
                     if let Some(server) = inner.servers.iter_mut().find(|s| s.id == id) {
                         server.connection = Some(connection);
                         server.listing = Some(Arc::new(listing));
@@ -394,6 +389,7 @@ impl McpManager {
                 }
                 Err(PrepError::Failed(reason)) => {
                     let mut inner = self.lock();
+                    inner.snapshot_cache = None;
                     if let Some(server) = inner.servers.iter_mut().find(|s| s.id == id) {
                         server.connection = None;
                         server.listing = None;
@@ -508,6 +504,7 @@ impl McpManager {
         // 新连接失败不回用旧配置。
         let old: Vec<Arc<McpConnection>> = {
             let mut inner = self.lock();
+            inner.snapshot_cache = None;
             inner
                 .servers
                 .drain(..)
@@ -519,20 +516,13 @@ impl McpManager {
         }
         {
             let mut inner = self.lock();
+            inner.snapshot_cache = None;
             inner.load_error = None;
             inner.loaded = true;
             inner.servers = file
                 .servers
                 .into_iter()
-                .map(|(id, config)| ServerState {
-                    id,
-                    config,
-                    connection: None,
-                    error: None,
-                    listing: None,
-                    unknown_allowlisted: Vec::new(),
-                    excluded: Vec::new(),
-                })
+                .map(|(id, config)| fresh_server_state(id, config))
                 .collect();
         }
         let never = AtomicBool::new(false);
@@ -557,6 +547,7 @@ impl McpManager {
                 Ok((connection, listing, unknown, excluded)) => {
                     let connection = Arc::new(connection);
                     let mut inner = self.lock();
+                    inner.snapshot_cache = None;
                     if let Some(server) = inner.servers.iter_mut().find(|s| s.id == id) {
                         server.connection = Some(connection);
                         server.listing = Some(Arc::new(listing));
@@ -567,6 +558,7 @@ impl McpManager {
                 Err(PrepError::Cancelled) => unreachable!("reload 不响应取消"),
                 Err(PrepError::Failed(reason)) => {
                     let mut inner = self.lock();
+                    inner.snapshot_cache = None;
                     if let Some(server) = inner.servers.iter_mut().find(|s| s.id == id) {
                         server.connection = None;
                         server.listing = None;
@@ -588,6 +580,7 @@ impl McpManager {
         let _operate = self.operate.lock().unwrap_or_else(|e| e.into_inner());
         let old: Vec<Arc<McpConnection>> = {
             let mut inner = self.lock();
+            inner.snapshot_cache = None;
             inner
                 .servers
                 .iter_mut()
@@ -624,21 +617,31 @@ impl McpManager {
         let sensitive = &entry.sensitive;
         match result {
             Ok(rmcp::model::ServerResult::CallToolResult(result)) => {
-                let projected = call::project_result(&result);
-                if sensitive.contains_secret(&projected) {
-                    (
-                        call::client_error_json(
-                            "敏感数据",
-                            "调用结果包含凭证数据，已拒绝（已发调用的远端执行状态未知）",
-                        ),
-                        true,
-                    )
-                } else {
-                    let is_error = serde_json::from_str::<Value>(&projected)
-                        .ok()
-                        .and_then(|v| v.get("isError").and_then(Value::as_bool))
-                        .unwrap_or(false);
-                    (projected, is_error)
+                // 023 §5.1（与资源路径同一实现）：污染检查按投影前 Value 的
+                // 字符串叶子逐个进行——仅扫序列化串时，含引号／反斜杠的敏感
+                // 值被转义掩盖而漏报（A5：S35 回归锚
+                // a16_polluted_escaped_result_rejected_by_leaf_check）。
+                match call::project_result_value(&result) {
+                    Ok(value) => {
+                        if value_polluted(&value, sensitive) {
+                            (
+                                call::client_error_json(
+                                    "敏感数据",
+                                    "调用结果包含凭证数据，已拒绝（已发调用的远端执行状态未知）",
+                                ),
+                                true,
+                            )
+                        } else {
+                            let projected = call::value_to_tool_text(&value);
+                            let is_error =
+                                value.get("isError").and_then(Value::as_bool).unwrap_or(false);
+                            (projected, is_error)
+                        }
+                    }
+                    // 序列化失败（理论不可达）差异登记（验收审查）：A5 前该分支过污染检查且
+            // is_error=false；现直接 client_error（错误文本来自序列化器，不含
+            // 用户数据）且 is_error=true——错误态更准确。
+            Err(e) => (call::client_error_json("协议", &e), true),
                 }
             }
             Ok(rmcp::model::ServerResult::InputRequiredResult(_)
@@ -669,19 +672,7 @@ impl McpManager {
                         .store(true, Ordering::SeqCst);
                     self.note_disconnected(entry);
                 }
-                let (kind, detail) = match &failure {
-                    CallFailure::NotSent(d) => ("未发送", sanitize_owned(d.clone(), sensitive)),
-                    CallFailure::SentUnknown(d) => {
-                        ("状态未知", sanitize_owned(d.clone(), sensitive))
-                    }
-                    CallFailure::SentRejected(d) => {
-                        ("协议", sanitize_owned(d.clone(), sensitive))
-                    }
-                    CallFailure::Unsupported(d) => {
-                        ("协议", sanitize_owned(d.clone(), sensitive))
-                    }
-                };
-                (call::client_error_json(kind, &detail), true)
+                (failure.to_client_error(sensitive), true)
             }
         }
     }
@@ -697,21 +688,17 @@ impl McpManager {
         if inner.loaded {
             return;
         }
+        // S28 验收修正：失效语句只在**实际装载**时执行（原置于 loaded 检查前
+        // 使每轮 prepare 前缓存恒空——复用路径死代码）。装载后的变更点失效
+        // 由下方 Ok/Err 分支承担。
+        inner.snapshot_cache = None;
         let user_dir = crate::catalog::user_dir();
         match load_mcp_file(&user_dir) {
             Ok(file) => {
                 inner.servers = file
                     .servers
                     .into_iter()
-                    .map(|(id, config)| ServerState {
-                        id,
-                        config,
-                        connection: None,
-                        error: None,
-                        listing: None,
-                        unknown_allowlisted: Vec::new(),
-                        excluded: Vec::new(),
-                    })
+                    .map(|(id, config)| fresh_server_state(id, config))
                     .collect();
                 inner.load_error = None;
             }
@@ -793,11 +780,15 @@ impl McpManager {
     }
 
     fn publish_snapshot(&self) -> Arc<McpSnapshot> {
+        // S28：快照不可变——状态未变更的轮次直接复用（Arc 身份不可观察；
+        // 断连原子量每轮经 prepare_for_turn §5.1 同步块重查并失效缓存）。
+        if let Some(cache) = self.lock().snapshot_cache.clone() {
+            return cache;
+        }
         let manager: Option<Weak<McpManager>> = self.self_weak.get().cloned();
-        let inner = self.lock();
+        let mut inner = self.lock();
         // 聚合全部可用服务器目录，按原始身份稳定排序后**全局**分配模型名：
-        // 跨服务器同名冲突与单服务器内一样经稳定短哈希消解（022 §2.3），
-        // 残余冲突显式拒绝（本轮该工具缺失，不覆盖注册表）。
+        // 跨服务器同名冲突与单服务器内一样经稳定短哈希消解（022 §2.3）。
         let mut flattened: Vec<(
             String,
             String,
@@ -896,12 +887,14 @@ impl McpManager {
             definitions.push(resources::templates_tool_definition());
             definitions.push(resources::read_tool_definition());
         }
-        Arc::new(McpSnapshot {
+        let snapshot = Arc::new(McpSnapshot {
             entries,
             definitions,
             resources: resource_servers,
             manager,
-        })
+        });
+        inner.snapshot_cache = Some(snapshot.clone());
+        snapshot
     }
 
     /// 执行一次固定资源工具调用（023；同步桥接）。执行共用调用方快照的
@@ -938,6 +931,7 @@ impl McpManager {
     /// 按服务器 ID＋连接指针定位并移出发布状态（断连共用入口）。
     fn note_connection_down(&self, server_id: &str, connection: &Arc<McpConnection>) {
         let mut inner = self.lock();
+        inner.snapshot_cache = None;
         if let Some(server) = inner.servers.iter_mut().find(|s| {
             s.id == server_id
                 && s.connection
@@ -949,8 +943,6 @@ impl McpManager {
         }
     }
 }
-
-// ---- 目录发布（连接与重列共用） ----
 
 fn publish_tools(
     config: &McpServerConfig,
@@ -1003,6 +995,20 @@ fn build_sensitive(config: &McpServerConfig) -> SensitiveValues {
     }
 }
 
+/// 新装载的服务器条目（S15 单点：未连接、无缓存、无错误——初次装载与
+/// 兜底装载两站点共用）。
+fn fresh_server_state(id: String, config: McpServerConfig) -> ServerState {
+    ServerState {
+        id,
+        config,
+        connection: None,
+        error: None,
+        listing: None,
+        unknown_allowlisted: Vec::new(),
+        excluded: Vec::new(),
+    }
+}
+
 /// 诊断／错误文本脱敏（022／023 共用语义；委托 [`secrets::sanitize_detail`]）。
 fn sanitize_owned(text: String, sensitive: &SensitiveValues) -> String {
     super::secrets::sanitize_detail(&text, sensitive)
@@ -1023,14 +1029,6 @@ fn sanitize_diagnostic(text: &str, sensitive: &SensitiveValues) -> Option<String
         None
     } else {
         Some(trimmed.to_string())
-    }
-}
-
-use super::naming::NameAssignError;
-
-impl From<NameAssignError> for String {
-    fn from(e: NameAssignError) -> String {
-        e.to_string()
     }
 }
 
