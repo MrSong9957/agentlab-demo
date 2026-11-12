@@ -674,14 +674,14 @@ impl BoundedHttpClient {
 /// 022 §5.4：仅测试用的额外信任根（进程级、默认空）。生产代码不调用 setter。
 static EXTRA_ROOT: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
 
-/// 038（同上）：测试侧 builder 装饰器（一次性取用；构造在 dev-dependency
-/// 侧闭包内，产品不具名具体 TLS 栈类型）。
+/// 038（同上）：测试侧 builder 装饰器（Arc 可克隆——每次连接重建客户端
+/// 都须命中；构造在 dev-dependency 侧闭包内，产品不具名具体 TLS 栈类型）。
 type ClientBuilderHook =
-    Box<dyn Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder + Send + Sync>;
+    std::sync::Arc<dyn Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder + Send + Sync>;
 static BUILDER_HOOK: std::sync::Mutex<Option<ClientBuilderHook>> = std::sync::Mutex::new(None);
 
 fn client_builder_hook() -> Option<ClientBuilderHook> {
-    BUILDER_HOOK.lock().unwrap_or_else(|e| e.into_inner()).take()
+    BUILDER_HOOK.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 fn extra_root() -> Option<Vec<u8>> {
@@ -696,11 +696,11 @@ pub fn set_extra_root_certificate_for_tests(pem: Option<&[u8]>) {
 
 /// 038 测试接缝（同 `set_extra_root_certificate_for_tests` 约定）：装饰
 /// HTTP 客户端 builder（如 rustls `tls_backend_preconfigured`＋自签根——
-/// 具名 TLS 栈构造在 dev-dependency 侧闭包内完成）。一次性取用；生产代码
-/// 不调用。
+/// 具名 TLS 栈构造在 dev-dependency 侧闭包内完成）。持续生效（每次连接
+/// 重建客户端都命中）；生产代码不调用。
 #[doc(hidden)]
 pub fn set_client_builder_hook_for_tests(
-    hook: Box<dyn Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder + Send + Sync>,
+    hook: std::sync::Arc<dyn Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder + Send + Sync>,
 ) {
     *BUILDER_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
 }

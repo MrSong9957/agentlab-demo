@@ -222,11 +222,13 @@ fn tls_https_round_trip_with_injected_root() {
         .expect("协议版本")
         .with_root_certificates(roots)
         .with_no_client_auth();
-    terminal_chat::mcp::transport::set_client_builder_hook_for_tests(Box::new(move |b| {
-        let mut cfg = config.clone();
-        cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
-        b.tls_backend_preconfigured(cfg)
-    }));
+    terminal_chat::mcp::transport::set_client_builder_hook_for_tests(std::sync::Arc::new(
+        move |b| {
+            let mut cfg = config.clone();
+            cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+            b.tls_backend_preconfigured(cfg)
+        },
+    ));
     let (url, shutdown) = start_tls_server();
     let ctx = {
         let mut c = setup(&url);

@@ -36,7 +36,42 @@ Completed 状态而非 Timeout。迭代 35 归因（在案）：并行 spawn 下
 - Linux 全量：3923 过/3 失败（multi_agent×1＋turn::tests×2——复跑/单跑
   全绿＝已登记并行瞬态；turn.rs 本轮未动）。
 - mingw 交叉 check 不可用（容器网络限制，038 在案）；win 专属改动编译面
-  风险＝ReOpenFile 仅删一个常量组合（签名对照 registry windows-sys-0.59.0
+  风险＝ReOpenFile 仅删一个 share 常量组合（签名对照 registry windows-sys-0.59.0
   核实）＋G2 测试字符串拼接（非产品代码）。
 - Windows 腿最终判定待 CI（workflow_dispatch→PR）：预期 ≤3（决策② 2 项
   ＋#12 待取证），0xC0000142 瞬态若现按批 C 口径识别。
+
+## 第一轮 CI 实证与归因修正（run 43159561712，5a97fc9，阻断回报依据）
+
+**结果：win 24 失败**。销号 4 项（批 A-2 全部生效：a17/retention/m4/c15/G2
+中 4 项；G2、a17、retention、c15 从失败清单消失）——证明 CI 跑的是新代码、
+测试侧平台化修法在 win 生效。**批 A-1 的 15 项与批 B 的 2 项全部未销号**。
+
+- **批 A-1 归因修正（触发阻断条款「归因与报告不符」）**：调研报告把 15 项
+  归为 d 类「慢 runner 超窗」。修后轮询实证推翻该归因：explicit_timeout 以
+  20s 日志冻结轮询仍报「日志迟迟未冻结（写入者未被终止）」（1500ms 时限的
+  进程 20s 未被杀）；cancel_wait 的 terminate 重试 15s 内每次都返回「3 秒
+  回收超窗」（回收永不完成）；deadline_survives/read_does_not_reset 20s
+  轮询仍 Running。**＝Windows 杀树/回收链路真缺陷（产品级 a 类，永不完成
+  而非慢）**：deadline 终止、terminate 终止、collect 回收三职责在 win 上
+  均未履行；monitor 无 panic 痕迹（日志无 unnamed thread panic）。基线对照：
+  main 基线（7c65624）同项同败＝040/041 之间或更早已存在，非本分支引入；
+  迭代 35 时代同类断言曾在 CI 通过——退化窗口在迭代 35 后至本轮之间，需
+  Windows 环境取证（作业对象挂接实效性、cmd /C 树终止、monitor 轮询插桩）。
+- **批 B internal_apply（os87）**：share 去除 DELETE 修正无效（仍 os error
+  87）——87 另有根因（ReOpenFile 对该句柄形态不被支持，或错误实际来自
+  fd_inode/seek/write 步），需 win 取证。备选等价实现＝路径重开写＋句柄
+  身份核验（GetFileInformationByHandle 前后比对，TOCTOU 由核验兜底）——
+  未经 win 取证不再盲改。
+- **批 B TLS**：第一轮修法含确定性缺陷——builder hook 为一次性 take，多次
+  连接重建（重试/第二次 prepare）后回落 win 无效路径。已修（Arc 可克隆，
+  mcp_tls 3/0 复验）；platform-verifier 假设是否成立的最终判定待下一轮 CI。
+- mac 腿本轮为参考（非目标）：同 run mac 失败清单与既有登记族一致。
+
+## 第二轮处置（待定）
+
+- tls hook 修正已提交（随本报告推送）——CI 复验 tls 单项。
+- 批 A-1 15 项＋internal_apply：**按阻断条款停下回报**——产品级缺陷需
+  Windows 环境取证迭代（超出本批「测试侧修复」授权范围），待用户裁决：
+  ①批准 win 取证专项（CI 插桩轮次）；②或接受该 16 项为「产品级待修」
+  登记（038 §5 口径）继续其余目标。
