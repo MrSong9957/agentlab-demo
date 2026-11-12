@@ -99,3 +99,48 @@ ubuntu 腿三轮全绿（本批零回归）。
    实效性），或按 038 §5 口径登记「产品级待修」接受 PR 带该清单合并。
 2. **internal_apply/tls/pty_child 三项**：同上，两次盲改无效已停手。
 3. m4 第三形态归一（已提交）待下一轮 CI 销号确认。
+
+
+## 取证专项轮次记录（2026-11-12 下午，分支 fix/win-ci-failures）
+
+| 轮 | run | SHA | Windows 失败 | 关键进展 |
+|---|---|---|---|---|
+| 取证前 | 43195937333 之前基线 | — | 24→10→9→9（逐轮） | 见上方「第一轮 CI 实证」 |
+| 专 1 | 43175442613 | ddac3f5 | 编译失败 | 插桩 Debug 缺陷（Phase/KillReq 无 derive）→修正 71274e2 |
+| 专 2 | 43175442613 | 71274e2 | **10** | **monitor cfg 结构根因修复生效**：批 A-1 终止族 14 项销号（24→10） |
+| 专 3 | 43182730985 | 48aebc7 | 12 | big_dual 行数/诊断轮；新证：输出停 959 行（for /l 太慢） |
+| 专 4 | 43187158353 | efa4459 | 9 | tls no_proxy（假设未证实）；big_dual 未过（2000 行仍停 959） |
+| 专 5 | 43191351496 | 7da0d91 | 9 | **tls source chain 实证**：os 10053「established connection aborted by software in your host machine」＝runner 安全栈中止回环自签 TLS 握手（TCP 建立后、TLS 握手期） |
+| 专 6 | 43195937333 | f873c6d | **7** | os87 换法生效（ReOpenFile→路径重开＋身份核验）；tls (1) win 门控（038 §5 登记）＋插桩全拆 |
+| 专 7 | 43202186254 | 0c5436f | **7（同集合）** | 瞬态最小重试**无效实证**：-1073741502 崩溃发生在 powershell 运行中（start 成功 Running 后中途崩），非 spawn 点——测试级重试不可覆盖 |
+
+## 根因结论（取证专项）
+
+1. **杀树/回收 15 项（已修复销号）**：monitor 终止分支的 `#[cfg(linux)]`
+   挂在内层 if-let-else 整句——win/mac 编译后「唯一杀执行点」被剔除＝
+   terminate/deadline 请求被记录但永不执行。修复＝平台中立顺序判定；
+   linux 全量 3926/0 等价。
+2. **tls（已门控销号）**：runner 安全栈中止回环自签 TLS 握手（os 10053
+   插桩实证；代理假设被 no_proxy 复测否定）。平台环境限制，代码不可修
+   ——(1) 用例 cfg(not(windows)) 门控＋§5 偏离登记；拒绝语义由 (2)(3)
+   覆盖（win 上通过）。
+3. **os87（已换法销号）**：ReOpenFile 在 runner 环境恒 87（step=reopen
+   两轮实证）——换「路径重开写＋GetFileInformationByHandle 身份核验」
+   （TOCTOU 防护等价）。
+4. **-1073741502 运行中崩溃族（5 项，阻断项）**：powershell 在测试运行
+   中途崩溃（start 成功 Running 后），每轮 3-5 项集合轮换、连续多轮同族
+   红。spawn 点重试实证无效（崩溃不在 spawn）——测试级重试不可行；
+   runner 环境噪声（迭代 35 同族归因），属平台环境限制。
+5. **pty_child（阻断项）**：ConPTY 下 powershell 输出恒空（语义重试无效
+   ＝非瞬态）——输出链缺陷需 ConPTY 级取证（超出本轮）。
+
+## 当前台账（专项后）
+
+| 组 | 项数 | 明细 |
+|---|---|---|
+| 已销号 | 22 | monitor 族 15＋A-2 四项＋close_kills＋os87＋tls（门控）＋big_dual＋m4 |
+| -1073741502 运行中崩溃族 | 5 | blocked_input、input_limit_exact、pty_cancel、pty_interactive、pty_write_window（原决策②——本轮取证后改判瞬态族；spawn 重试无效，测试级重试不可行） |
+| ConPTY 输出链 | 1 | pty_child_sees_terminal（语义重试无效＝非瞬态） |
+| 决策② 待立项 | 1 | t18（取消呈现＝整树终止残差） |
+
+Ubuntu 三轮全绿（monitor 修复＋os87 换法零回归）。
