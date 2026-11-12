@@ -737,6 +737,18 @@ fn terminate_sessions_bounded(sessions: &[Arc<Session>]) -> Vec<String> {
                 }
                 let now = Instant::now();
                 if now >= deadline {
+                    // [kill-diag]（038 取证，暂驻）
+                    #[cfg(windows)]
+                    {
+                        let st2 = session.lock();
+                        let collected = st2.collect_done;
+                        eprintln!(
+                            "[kill-diag] terminate grace expired: kill_failed={:?} collect_done={} reader_eof={}/{} phase={:?}",
+                            st2.kill_failed.map(|(_, e)| e),
+                            collected,
+                            st2.reader_eof, st2.readers, st2.phase
+                        );
+                    }
                     return attach(
                         ExecResult::error_with_session(
                             format!(
@@ -2207,8 +2219,14 @@ fn monitor_thread(session: Arc<Session>, mut child: ChildHandle, deadline: Optio
             }
         }
         if let Some(reason) = reason {
+            // 038 Windows CI 实证修复（run 43159561712/43163771845：deadline
+            // 20s 不杀、terminate 重试 15s 全超窗）：原 `#[cfg(linux)]` 挂在
+            // 内层 if-let-else 整句上——win/mac 编译时 else（唯一杀执行点
+            // kill_group_checked）被一并剔除＝终止请求被记录但永不执行。
+            // 改为平台中立的顺序判定：沙箱载荷（linux）处理后跳过普通组
+            // 终止；其余会话（linux 无沙箱＋全部 win/mac）走普通组终止。
             #[cfg(target_os = "linux")]
-            if let Some(payload) = session.sandbox_payload.as_ref() {
+            let sandbox_handled = if let Some(payload) = session.sandbox_payload.as_ref() {
                 drop(st);
                 match terminate_sandbox_payload(payload, &mut child) {
                     KillOutcome::Ok => {
@@ -2228,8 +2246,20 @@ fn monitor_thread(session: Arc<Session>, mut child: ChildHandle, deadline: Optio
                         st = session.lock();
                     }
                 }
+                // Failed：已记录 kill_failed，继续轮询（沙箱组结构不同，
+                // 不落入普通组终止）。
+                true
             } else {
+                false
+            };
+            // 非 linux：无沙箱载荷面——终止一律走普通组终止。
+            #[cfg(not(target_os = "linux"))]
+            let sandbox_handled: bool = false;
+            if !sandbox_handled {
                 // 普通模式仍终止并等待原 bwrap/命令进程组。
+                // [kill-diag]（038 取证，暂驻）
+                #[cfg(windows)]
+                std::eprintln!("[kill-diag] monitor acting on kill req={:?} pgid={pgid}", reason);
                 match kill_group_checked(pgid) {
                     KillOutcome::Ok => {
                         drop(st);

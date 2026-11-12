@@ -1298,7 +1298,10 @@ fn write_via_validated_fd(
         )
     };
     if wh == INVALID_HANDLE_VALUE {
-        return Err(std::io::Error::last_os_error());
+        let e = std::io::Error::last_os_error();
+        // [os87-diag]（038 取证，暂驻）
+        eprintln!("[os87-diag] ReOpenFile failed: {e} raw={:?}", e.raw_os_error());
+        return Err(e);
     }
     let mut w = unsafe { std::fs::File::from_raw_handle(wh) };
     // 同一文件对象共享 CurrentByteOffset（读后位于 EOF）；写前归零。
