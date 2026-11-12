@@ -1282,13 +1282,18 @@ fn write_via_validated_fd(
     use std::os::windows::io::{FromRawHandle, RawHandle};
     use windows_sys::Win32::Foundation::{GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, ReOpenFile,
+        FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, ReOpenFile,
     };
+    // 038 Windows CI 实证（43139153907，os error 87）：读句柄经
+    // std::fs::File::open（CreateFileW share=READ|WRITE，访问权不含 DELETE）
+    // ——ReOpenFile 请求 share 含 FILE_SHARE_DELETE 需要句柄自身持有 DELETE
+    // 访问权，否则 ERROR_INVALID_PARAMETER。share 与原打开对齐（去除
+    // DELETE＝写窗口内他人不可删除，保守方向）；语义=同一对象重开写权限。
     let wh = unsafe {
         ReOpenFile(
             read_fd.as_raw_handle() as _,
             GENERIC_WRITE,
-            (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE) as u32,
+            (FILE_SHARE_READ | FILE_SHARE_WRITE) as u32,
             FILE_ATTRIBUTE_NORMAL,
         )
     };

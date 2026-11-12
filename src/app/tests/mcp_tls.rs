@@ -204,6 +204,29 @@ fn tls_https_round_trip_with_injected_root() {
     let _seq = ROOT_SWITCH.lock().unwrap_or_else(|e| e.into_inner());
     let pem = std::fs::read(format!("{FIX}/ca.crt")).expect("ca.crt");
     terminal_chat::mcp::transport::set_extra_root_certificate_for_tests(Some(&pem));
+    // 038 win/mac 实证（43139153907）：rustls feature 默认验证器＝
+    // platform-verifier（系统证书存储），注入根不在系统存储＝win/mac 握手
+    // 失败（ubuntu 降级读 rustls 根存储故绿）。经 builder hook 装饰：rustls
+    // 内建验证器＋注入根（与 server 同 ring provider）——校验严格性不变。
+    use rustls::pki_types::pem::PemObject;
+    let ca = rustls::pki_types::CertificateDer::pem_slice_iter(&pem)
+        .next()
+        .expect("ca.crt 证书")
+        .expect("ca.crt 解析");
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(ca).expect("自签根加入信任存储");
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let _ = provider.as_ref().clone().install_default();
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("协议版本")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    terminal_chat::mcp::transport::set_client_builder_hook_for_tests(Box::new(move |b| {
+        let mut cfg = config.clone();
+        cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+        b.tls_backend_preconfigured(cfg)
+    }));
     let (url, shutdown) = start_tls_server();
     let ctx = {
         let mut c = setup(&url);
@@ -224,6 +247,8 @@ fn tls_https_round_trip_with_injected_root() {
     assert!(!failed, "tools/call 经 TLS 成功：{result}");
     assert!(result.contains("tls-hit"), "结果回传：{result}");
     ctx.manager.close();
+    // 复位 builder hook（一次性取用形态本已消费；防御性复位保持进程态干净）
+    terminal_chat::mcp::transport::clear_client_builder_hook_for_tests();
     shutdown.store(true, Ordering::SeqCst);
     terminal_chat::mcp::transport::set_extra_root_certificate_for_tests(None);
 }
