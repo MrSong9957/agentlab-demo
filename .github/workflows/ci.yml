@@ -27,7 +27,10 @@ jobs:
       # 一端失败不取消其余平台，保证三端结果完整可见。
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # 038 Windows 取证（2026-11-12）：明确标签消除 latest 漂移——
+        # windows-latest 现指向 Windows Server 2025（与 runner-images README 一致），
+        # 0xC0000142 崩溃族 8 轮 100% 复现即在该镜像上。
+        os: [ubuntu-latest, windows-2025, macos-latest]
     runs-on: ${{ matrix.os }}
     # 上限防挂起运行：macOS 冷缓存构建＋全量实测约 95 分钟（第 7 轮 90 分钟被截断），放宽到 150。
     timeout-minutes: 150
