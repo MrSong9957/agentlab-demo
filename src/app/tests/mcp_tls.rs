@@ -235,7 +235,14 @@ fn tls_https_round_trip_with_injected_root() {
         c._shutdown = shutdown.clone();
         c
     };
-    assert_eq!(ctx.snapshot.len(), 1, "HTTPS 连接并完成工具发现");
+    // [tls-diag]（038 取证，暂驻）：snapshot 空时透出装载/连接错误面
+    assert_eq!(
+        ctx.snapshot.len(),
+        1,
+        "HTTPS 连接并完成工具发现 load_error={:?} status={:?}",
+        ctx.manager.status_lines(),
+        ctx.snapshot.definitions().len()
+    );
     assert_eq!(
         ctx.snapshot.definitions()[0]["function"]["name"],
         "mcp__web__search"

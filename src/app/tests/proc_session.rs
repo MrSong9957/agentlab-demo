@@ -853,13 +853,14 @@ fn reset_closes_old_and_allows_fresh_start() {
 fn big_dual_stream_completes_and_truncates() {
     let mgr = ProcessManager::new();
     let args = ExecArgs::from_value(&json!({
-        // 平台等价：Windows for /l 逐行 echo 慢于 seq，行数缩放为 15000×2
-        // （两流仍超管道缓冲、前缀断言与截断上限不变）
+        // 平台等价：Windows for /l 逐行 echo 慢于 seq，行数缩放为 4000×2
+        // （038 win 实测 12000 行在 runner 上超 85s——43175442613 输出停在
+        // 3798 行；两流仍超管道缓冲、前缀断言与截断上限不变）
         "cmd": cmd_builder::seq(&[
-            cmd_builder::seq_lines(if cfg!(windows) { 6_000 } else { 60_000 }, false),
-            cmd_builder::seq_lines(if cfg!(windows) { 6_000 } else { 60_000 }, true),
+            cmd_builder::seq_lines(if cfg!(windows) { 2_000 } else { 60_000 }, false),
+            cmd_builder::seq_lines(if cfg!(windows) { 2_000 } else { 60_000 }, true),
         ]),
-        // 038 Windows：12000 行 for /l 逐行 echo 在 runner 上超出 5s——
+        // 038 Windows：4000 行 for /l 逐行 echo 在 runner 上超出 5s——
         // 生成窗口放宽（完成＋截断契约不变）
         "yield_time_ms": if cfg!(windows) { 25_000 } else { 5_000 },
         "max_output_chars": 5000,

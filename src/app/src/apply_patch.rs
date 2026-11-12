@@ -1305,7 +1305,11 @@ fn write_via_validated_fd(
     }
     let mut w = unsafe { std::fs::File::from_raw_handle(wh) };
     // 同一文件对象共享 CurrentByteOffset（读后位于 EOF）；写前归零。
-    w.seek(std::io::SeekFrom::Start(0))?;
+    if let Err(e) = w.seek(std::io::SeekFrom::Start(0)) {
+        // [os87-diag]（038 取证，暂驻）
+        eprintln!("[os87-diag] seek failed: {e} raw={:?}", e.raw_os_error());
+        return Err(e);
+    }
     // 纵深防御：写句柄须与读入句柄为同一文件对象（身份一致）且仍为常规文件。
     if fd_inode(&w) != fd_inode(read_fd) || !fd_is_regular(&w) {
         return Err(std::io::Error::new(
@@ -1313,7 +1317,12 @@ fn write_via_validated_fd(
             "写入句柄与已判型对象不一致",
         ));
     }
-    w.write_all(data)
+    if let Err(e) = w.write_all(data) {
+        // [os87-diag]（038 取证，暂驻）
+        eprintln!("[os87-diag] write failed: {e} raw={:?}", e.raw_os_error());
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// F2 窗口测试同步接缝（**仅测试构建**，不构成公开接口/参数）：
