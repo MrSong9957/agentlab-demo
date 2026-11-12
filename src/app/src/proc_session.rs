@@ -741,12 +741,11 @@ fn terminate_sessions_bounded(sessions: &[Arc<Session>]) -> Vec<String> {
                     #[cfg(windows)]
                     {
                         let st2 = session.lock();
-                        let collected = st2.collect_done;
                         eprintln!(
-                            "[kill-diag] terminate grace expired: kill_failed={:?} collect_done={} reader_eof={}/{} phase={:?}",
+                            "[kill-diag] terminate grace expired: kill_failed_errno={:?} collect_done={} reader_eof={}/{}",
                             st2.kill_failed.map(|(_, e)| e),
-                            collected,
-                            st2.reader_eof, st2.readers, st2.phase
+                            st2.collect_done,
+                            st2.reader_eof, st2.readers
                         );
                     }
                     return attach(
@@ -2257,9 +2256,15 @@ fn monitor_thread(session: Arc<Session>, mut child: ChildHandle, deadline: Optio
             let sandbox_handled: bool = false;
             if !sandbox_handled {
                 // 普通模式仍终止并等待原 bwrap/命令进程组。
-                // [kill-diag]（038 取证，暂驻）
+                // [kill-diag]（038 取证，暂驻；Phase/KillReq 无 Debug，用判别串）
                 #[cfg(windows)]
-                std::eprintln!("[kill-diag] monitor acting on kill req={:?} pgid={pgid}", reason);
+                {
+                    let req_name = match reason {
+                        KillReq::Deadline => "deadline",
+                        KillReq::Terminate => "terminate",
+                    };
+                    std::eprintln!("[kill-diag] monitor acting on kill req={req_name} pgid={pgid}");
+                }
                 match kill_group_checked(pgid) {
                     KillOutcome::Ok => {
                         drop(st);
