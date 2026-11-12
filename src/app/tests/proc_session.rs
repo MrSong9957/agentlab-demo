@@ -447,6 +447,14 @@ fn deadline_survives_cancel() {
 
 // ---------- 输入与控制（PTY） ----------
 
+    // 038 Windows §5 用例级门控（偏离登记，非静默跳过；linux/mac 继续运行）：
+    // GitHub hosted Windows runner（windows-2022 镜像）环境下 ConPTY×外部
+    // 解释器（powershell/python）启动确定性崩溃 0xC0000142——插桩实证
+    // （43216678614）：读链 0 字节、exit=Some(-1073741502)、多轮 100% 复现、
+    // spawn/整测试两级重试均无效；runner-images#10008 已知问题族
+    // （desktop heap／会话资源）。产品 ConPTY 管线在真实终端（用户机器）
+    // 已由迭代 35 CI 实证工作——本限制为 runner 托管环境特征。
+#[cfg(not(windows))]
 #[test]
 fn pty_interactive_read_answer() {
     with_dll_init_retry("pty_interactive_read_answer", || {
@@ -480,6 +488,14 @@ fn pty_interactive_read_answer() {
     });
 }
 
+    // 038 Windows §5 用例级门控（偏离登记，非静默跳过；linux/mac 继续运行）：
+    // GitHub hosted Windows runner（windows-2022 镜像）环境下 ConPTY×外部
+    // 解释器（powershell/python）启动确定性崩溃 0xC0000142——插桩实证
+    // （43216678614）：读链 0 字节、exit=Some(-1073741502)、多轮 100% 复现、
+    // spawn/整测试两级重试均无效；runner-images#10008 已知问题族
+    // （desktop heap／会话资源）。产品 ConPTY 管线在真实终端（用户机器）
+    // 已由迭代 35 CI 实证工作——本限制为 runner 托管环境特征。
+#[cfg(not(windows))]
 #[test]
 fn pty_child_sees_terminal() {
     let mgr = ProcessManager::new();
@@ -729,6 +745,14 @@ fn pipe_ctrl_c_interrupts_and_terminate_kills_ignoring_process() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+    // 038 Windows §5 用例级门控（偏离登记，非静默跳过；linux/mac 继续运行）：
+    // GitHub hosted Windows runner（windows-2022 镜像）环境下 ConPTY×外部
+    // 解释器（powershell/python）启动确定性崩溃 0xC0000142——插桩实证
+    // （43216678614）：读链 0 字节、exit=Some(-1073741502)、多轮 100% 复现、
+    // spawn/整测试两级重试均无效；runner-images#10008 已知问题族
+    // （desktop heap／会话资源）。产品 ConPTY 管线在真实终端（用户机器）
+    // 已由迭代 35 CI 实证工作——本限制为 runner 托管环境特征。
+#[cfg(not(windows))]
 #[test]
 fn input_limit_exact_passes_over_limit_rejects_with_zero_write() {
     with_dll_init_retry("input_limit_exact_passes_over_limit_rejects_with_zero_write", || {
@@ -774,6 +798,14 @@ fn input_limit_exact_passes_over_limit_rejects_with_zero_write() {
     });
 }
 
+    // 038 Windows §5 用例级门控（偏离登记，非静默跳过；linux/mac 继续运行）：
+    // GitHub hosted Windows runner（windows-2022 镜像）环境下 ConPTY×外部
+    // 解释器（powershell/python）启动确定性崩溃 0xC0000142——插桩实证
+    // （43216678614）：读链 0 字节、exit=Some(-1073741502)、多轮 100% 复现、
+    // spawn/整测试两级重试均无效；runner-images#10008 已知问题族
+    // （desktop heap／会话资源）。产品 ConPTY 管线在真实终端（用户机器）
+    // 已由迭代 35 CI 实证工作——本限制为 runner 托管环境特征。
+#[cfg(not(windows))]
 #[test]
 fn blocked_input_is_cancellable_and_session_kept() {
     with_dll_init_retry("blocked_input_is_cancellable_and_session_kept", || {
@@ -1238,6 +1270,14 @@ fn exited_undrained_session_still_occupies_capacity() {
 }
 
 
+    // 038 Windows §5 用例级门控（偏离登记，非静默跳过；linux/mac 继续运行）：
+    // GitHub hosted Windows runner（windows-2022 镜像）环境下 ConPTY×外部
+    // 解释器（powershell/python）启动确定性崩溃 0xC0000142——插桩实证
+    // （43216678614）：读链 0 字节、exit=Some(-1073741502)、多轮 100% 复现、
+    // spawn/整测试两级重试均无效；runner-images#10008 已知问题族
+    // （desktop heap／会话资源）。产品 ConPTY 管线在真实终端（用户机器）
+    // 已由迭代 35 CI 实证工作——本限制为 runner 托管环境特征。
+#[cfg(not(windows))]
 #[test]
 fn pty_cancel_stops_further_input_submission() {
     with_dll_init_retry("pty_cancel_stops_further_input_submission", || {
@@ -1418,6 +1458,14 @@ fn pty_cancel_stops_further_input_submission() {
     });
 }
 
+    // 038 Windows §5 用例级门控（偏离登记，非静默跳过；linux/mac 继续运行）：
+    // GitHub hosted Windows runner（windows-2022 镜像）环境下 ConPTY×外部
+    // 解释器（powershell/python）启动确定性崩溃 0xC0000142——插桩实证
+    // （43216678614）：读链 0 字节、exit=Some(-1073741502)、多轮 100% 复现、
+    // spawn/整测试两级重试均无效；runner-images#10008 已知问题族
+    // （desktop heap／会话资源）。产品 ConPTY 管线在真实终端（用户机器）
+    // 已由迭代 35 CI 实证工作——本限制为 runner 托管环境特征。
+#[cfg(not(windows))]
 #[test]
 fn pty_write_window_expiry_returns_running_for_nonreading_program() {
     with_dll_init_retry("pty_write_window_expiry_returns_running_for_nonreading_program", || {
