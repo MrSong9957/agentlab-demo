@@ -1276,47 +1276,17 @@ fn write_via_validated_fd(
 #[cfg(windows)]
 fn write_via_validated_fd(
     read_fd: &std::fs::File,
-    _target: &Path,
+    target: &Path,
     data: &[u8],
 ) -> std::io::Result<()> {
-    use std::os::windows::io::{FromRawHandle, RawHandle};
-    use windows_sys::Win32::Foundation::{GENERIC_WRITE, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, ReOpenFile,
-    };
-    // 038 Windows CI 实证（43139153907，os error 87）：读句柄经
-    // std::fs::File::open（CreateFileW share=READ|WRITE，访问权不含 DELETE）
-    // ——ReOpenFile 请求 share 含 FILE_SHARE_DELETE 需要句柄自身持有 DELETE
-    // 访问权，否则 ERROR_INVALID_PARAMETER。share 与原打开对齐（去除
-    // DELETE＝写窗口内他人不可删除，保守方向）；语义=同一对象重开写权限。
-    let wh = unsafe {
-        ReOpenFile(
-            read_fd.as_raw_handle() as _,
-            GENERIC_WRITE,
-            (FILE_SHARE_READ | FILE_SHARE_WRITE) as u32,
-            FILE_ATTRIBUTE_NORMAL,
-        )
-    };
-    if wh == INVALID_HANDLE_VALUE {
-        let e = std::io::Error::last_os_error();
-        // [os87-diag]（038 取证，暂驻）：internal-apply 跑在子进程，stderr
-        // 不进测试捕获——步骤标记随错误文案进入 result.error（取证后还原）。
-        eprintln!("[os87-diag] ReOpenFile failed: {e} raw={:?}", e.raw_os_error());
-        return Err(std::io::Error::other(format!(
-            "step=reopen {e} raw={:?}",
-            e.raw_os_error()
-        )));
-    }
-    let mut w = unsafe { std::fs::File::from_raw_handle(wh) };
-    // 同一文件对象共享 CurrentByteOffset（读后位于 EOF）；写前归零。
-    if let Err(e) = w.seek(std::io::SeekFrom::Start(0)) {
-        // [os87-diag]（038 取证，暂驻）：step 标记随错误文案进入 result.error
-        eprintln!("[os87-diag] seek failed: {e} raw={:?}", e.raw_os_error());
-        return Err(std::io::Error::other(format!(
-            "step=seek {e} raw={:?}",
-            e.raw_os_error()
-        )));
-    }
+    // 038 Windows CI 取证（43175442613/43191351496，step=reopen 实证两轮）：
+    // ReOpenFile 在 runner 环境对该句柄形态恒报 ERROR_INVALID_PARAMETER
+    // （87）——不可用。换「按路径重开写句柄＋写前身份核验」等价实现：
+    // TOCTOU（读入后写入前目标被路径替换）由 GetFileInformationByHandle 的
+    // 对象身份比对兜底——重开拿到的是替换后文件＝身份失配＝拒绝写入；
+    // 核验后的残窗与原 ReOpenFile 方案同级。开档即写（不 truncate——
+    // 内容按偏移覆写，长度收缩由写入方语义保证）。
+    let mut w = std::fs::OpenOptions::new().write(true).open(target)?;
     // 纵深防御：写句柄须与读入句柄为同一文件对象（身份一致）且仍为常规文件。
     if fd_inode(&w) != fd_inode(read_fd) || !fd_is_regular(&w) {
         return Err(std::io::Error::new(
@@ -1324,15 +1294,9 @@ fn write_via_validated_fd(
             "写入句柄与已判型对象不一致",
         ));
     }
-    if let Err(e) = w.write_all(data) {
-        // [os87-diag]（038 取证，暂驻）：step 标记随错误文案进入 result.error
-        eprintln!("[os87-diag] write failed: {e} raw={:?}", e.raw_os_error());
-        return Err(std::io::Error::other(format!(
-            "step=write {e} raw={:?}",
-            e.raw_os_error()
-        )));
-    }
-    Ok(())
+    // 常规文件写句柄从文件头开始（新建打开无读偏移继承）。
+    w.seek(std::io::SeekFrom::Start(0))?;
+    w.write_all(data)
 }
 
 /// F2 窗口测试同步接缝（**仅测试构建**，不构成公开接口/参数）：

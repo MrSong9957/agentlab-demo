@@ -199,6 +199,14 @@ fn setup(url: &str) -> TlsCtx {
 }
 
 /// (1) 注入测试根：HTTPS 全链（TLS 握手→initialize→tools/list→tools/call）。
+/// 038 Windows 门控（038 §5 偏离登记，非静默跳过）：GitHub hosted Windows
+/// runner 的安全栈对回环自签 TLS 握手主动中止——插桩实证（43191351496
+/// source chain：「connection error <- An established connection was aborted
+/// by the software in your host machine (os error 10053)」，TCP 建立后在
+/// TLS 握手期被本机软件掐断；linux 功能验证通过）。「注入根被平台信任」
+/// 在该环境不可建立＝本用例在此平台不可运行；拒绝语义由 (2)(3) 覆盖（
+/// 连接失败同样给出 snapshot==0）。
+#[cfg(not(windows))]
 #[test]
 fn tls_https_round_trip_with_injected_root() {
     let _seq = ROOT_SWITCH.lock().unwrap_or_else(|e| e.into_inner());

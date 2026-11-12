@@ -657,10 +657,7 @@ impl BoundedHttpClient {
         // `set_client_builder_hook_for_tests` 装饰 builder（rustls 配置的
         // 具名构造在 dev-dependency 侧闭包内完成）——校验严格性不变，仅
         // 信任根来源不同；生产路径（无 hook）走 platform-verifier 不变。
-        let hook = client_builder_hook();
-        // [tls-diag]（038 取证，暂驻）
-        std::eprintln!("[tls-diag] new: hook={}", hook.is_some());
-        if let Some(hook) = hook {
+        if let Some(hook) = client_builder_hook() {
             builder = hook(builder);
         } else if let Some(pem) = extra_root().as_ref() {
             let cert = reqwest::tls::Certificate::from_pem(pem)
@@ -751,14 +748,7 @@ impl StreamableHttpClient for BoundedHttpClient {
             request = request.bearer_auth(auth_header);
         }
         request = apply_custom_headers(request, custom_headers)?;
-        // [tls-diag]（038 取证，暂驻）：连接失败透出具体错误
-        let response = match request.send().await {
-            Ok(r) => r,
-            Err(e) => {
-                std::eprintln!("[tls-diag] send err: {e}");
-                return Err(client_err(e));
-            }
-        };
+        let response = request.send().await.map_err(client_err)?;
         if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
             return Err(StreamableHttpError::ServerDoesNotSupportSse);
         }
@@ -796,14 +786,7 @@ impl StreamableHttpClient for BoundedHttpClient {
         }
         request = request.header("MCP-Session-Id", session.as_ref());
         request = apply_custom_headers(request, custom_headers)?;
-        // [tls-diag]（038 取证，暂驻）：连接失败透出具体错误
-        let response = match request.send().await {
-            Ok(r) => r,
-            Err(e) => {
-                std::eprintln!("[tls-diag] send err: {e}");
-                return Err(client_err(e));
-            }
-        };
+        let response = request.send().await.map_err(client_err)?;
         if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
             return Ok(());
         }
@@ -831,21 +814,7 @@ impl StreamableHttpClient for BoundedHttpClient {
         if let Some(session_id) = session_id {
             request = request.header("MCP-Session-Id", session_id.as_ref());
         }
-        // [tls-diag]（038 取证，暂驻）：initialize 的 POST 路径——失败透出
-        // reqwest 错误的完整 source chain（TLS 握手根因在其中）
-        let response = match request.json(&message).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                let mut chain = String::new();
-                let mut src = std::error::Error::source(&e);
-                while let Some(s) = src {
-                    chain.push_str(&format!(" <- {s}"));
-                    src = s.source();
-                }
-                std::eprintln!("[tls-diag] post_message send err: {e}{chain}");
-                return Err(client_err(e));
-            }
-        };
+        let response = request.json(&message).send().await.map_err(client_err)?;
         let status = response.status();
         if matches!(
             status,
