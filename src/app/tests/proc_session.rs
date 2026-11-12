@@ -508,8 +508,16 @@ fn pty_child_sees_terminal() {
         }
         out = mgr.start(&args, None);
     }
-    assert_eq!(out.result.status, ExecStatus::Completed);
-    assert!(out.result.output.contains("ISATTY"), "{:?}", out.result.output);
+    assert_eq!(
+        out.result.status, ExecStatus::Completed,
+        "[pty-diag] status={:?} exit={:?} output={:?}",
+        out.result.status, out.result.exit_code, out.result.output
+    );
+    assert!(
+        out.result.output.contains("ISATTY"),
+        "[pty-diag] output={:?} exit={:?}",
+        out.result.output, out.result.exit_code
+    );
     // 管道模式（tty=false）不是终端
     let out2 = start_with_transient_retry(&mgr, &tty_probe(false), None);
     assert_eq!(out2.status, ExecStatus::Completed);
