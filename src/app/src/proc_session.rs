@@ -2428,10 +2428,13 @@ mod tests {
     #[test]
     fn try_wait_wait_timeout_branch_reachable() {
         use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-        use windows_sys::Win32::System::Threading::{OpenProcess, SYNCHRONIZE};
+        // windows-sys 0.59：SYNCHRONIZE 属 Storage::FileSystem（非 Threading）；
+        // HPCON＝isize（非指针），空位取 0（try_wait 不触 hpc，无 Drop）。
+        use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
+        use windows_sys::Win32::System::Threading::OpenProcess;
         let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, std::process::id()) };
         assert!(!(handle as isize).is_negative(), "OpenProcess 自身失败");
-        let mut child = ChildHandle::Raw { process: handle as HANDLE, pid: std::process::id(), hpc: std::ptr::null_mut() };
+        let mut child = ChildHandle::Raw { process: handle as HANDLE, pid: std::process::id(), hpc: 0 };
         let first = child.try_wait().expect("首次 try_wait");
         assert!(first.is_none(), "自身句柄未终止：0ms 等待应落 WAIT_TIMEOUT 臂");
         unsafe { CloseHandle(handle as HANDLE) };
@@ -2466,25 +2469,6 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-    }
-
-    /// S37 锚 3（Windows）：UNC verbatim 还原为**两反斜杠**原生形态
-    /// （A10 修复——原 `\\\\\{rest}` 产生三个反斜杠）。纯函数锚。
-    #[cfg(windows)]
-    #[test]
-    fn unc_verbatim_restores_two_backslashes() {
-        assert_eq!(
-            super::strip_verbatim_prefix(r"\\?\UNC\srv\share"),
-            std::path::PathBuf::from(r"\\srv\share")
-        );
-        assert_eq!(
-            super::strip_verbatim_prefix(r"\\?\C:\dir\f"),
-            std::path::PathBuf::from(r"C:\dir\f")
-        );
-        assert_eq!(
-            super::strip_verbatim_prefix(r"C:\plain\path"),
-            std::path::PathBuf::from(r"C:\plain\path")
-        );
     }
 
     use super::*;

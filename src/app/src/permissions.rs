@@ -1248,3 +1248,26 @@ pub fn execute_request_permissions(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// S37 锚 3（Windows）：UNC verbatim 还原为**两反斜杠**原生形态
+    /// （A10 修复——原 `\\\\\{rest}` 产生三个反斜杠）。纯函数锚；函数在
+    /// 本模块（proc_session 测试面误挂，CI E0425 后归位）。
+    #[cfg(windows)]
+    #[test]
+    fn unc_verbatim_restores_two_backslashes() {
+        assert_eq!(
+            super::strip_verbatim_prefix(r"\\?\UNC\srv\share"),
+            std::path::PathBuf::from(r"\\srv\share")
+        );
+        assert_eq!(
+            super::strip_verbatim_prefix(r"\\?\C:\dir\f"),
+            std::path::PathBuf::from(r"C:\dir\f")
+        );
+        assert_eq!(
+            super::strip_verbatim_prefix(r"C:\plain\path"),
+            std::path::PathBuf::from(r"C:\plain\path")
+        );
+    }
+}
