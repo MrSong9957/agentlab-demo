@@ -848,8 +848,9 @@ fn s103_async_publish_f6_answer_enters_next_request_and_keeps_draft() {
     pty.send_raw(b"\x1b[17~"); // F6（xterm 转义序列）
     pty.wait_screen("S103-报告面向谁").unwrap();
     pty.send_raw(b"\r");
-    if let Err(e) = pty.wait_screen("Questions 1/1 answered") {
-        pty.diag_exit_probe(&e); // [tui-diag]（取证，暂驻）
+    // [tui-diag]（取证，暂驻）：无杀等待——存活态 sample 线程栈
+    if let Err(e) = pty.wait_screen_nokill_diag("Questions 1/1 answered", WATCHDOG) {
+        pty.diag_exit_probe(&e);
     }
     // 回答已受理；解除独立命令的阻塞，批收尾后回答进入下一请求
     std::fs::write(&gate, b"1").unwrap();
@@ -1319,6 +1320,43 @@ impl PtySession {
             }
             self.read_once(50);
         }
+    }
+
+    /// [tui-diag]（038 取证，暂驻）：无 kill 副作用的屏幕等待——超时不杀
+    /// 子进程，改由调用方在存活态采样（R12 实证：wait_screen_timeout 超时
+    /// 路径「只 kill 不 wait」＝僵尸态使 sample 探针失效）。
+    fn wait_screen_nokill_diag(&mut self, needle: &str, timeout: Duration) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.feed_screen();
+            if self.vt.to_string().contains(needle) {
+                return Ok(());
+            }
+            if Instant::now() > deadline {
+                return Err(format!("等待屏幕 {:?} 超时（无杀清理版）", needle));
+            }
+            self.read_once(50);
+        }
+    }
+
+    /// [tui-diag]（038 取证，暂驻）：「预期不出现」的有界探针——read_once
+    /// 轮询 window 后直接查屏幕，**无 kill 副作用**（wait_screen_timeout 的
+    /// 超时路径会杀子进程；s114a 实证：两个缺席断言顺手杀子进程，后续
+    /// Esc 写入在 mac 撞 EIO——linux master 写死从端静默成功＝两平台分叉）。
+    fn probe_absent(&mut self, needle: &str, window: Duration) -> bool {
+        let deadline = Instant::now() + window;
+        loop {
+            self.feed_screen();
+            if self.vt.to_string().contains(needle) {
+                return false;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            self.read_once(50);
+        }
+        self.feed_screen();
+        !self.vt.to_string().contains(needle)
     }
 
     /// 非阻塞读一次 master（poll ms），有数据并入 captured。
@@ -3309,8 +3347,9 @@ fn s18_save_during_turn_refused_fast_and_retries_ok() {
     }
     std::thread::sleep(Duration::from_millis(200));
     pty.send_line("/save busy1");
-    if let Err(e) = pty.wait_screen("已保存快照 busy1") {
-        pty.diag_exit_probe(&e); // [tui-diag]（取证，暂驻）
+    // [tui-diag]（取证，暂驻）：无杀等待——存活态 sample 线程栈（定位输入停滞）
+    if let Err(e) = pty.wait_screen_nokill_diag("已保存快照 busy1", WATCHDOG) {
+        pty.diag_exit_probe(&e);
     }
     pty.send_line("/exit");
     pty.wait_output("再见!", WATCHDOG).unwrap();
@@ -9672,8 +9711,9 @@ fn s113_tui_cancel_after_history_keeps_image_once() {
     pty.send_raw(b"next");
     std::thread::sleep(Duration::from_millis(250));
     pty.send_raw(b"\r");
-    if let Err(e) = pty.wait_screen_timeout("S113-第二轮完成", Duration::from_secs(10)) {
-        pty.diag_exit_probe(&e); // [tui-diag]（取证，暂驻）
+    // [tui-diag]（取证，暂驻）：无杀等待——存活态 sample 线程栈
+    if let Err(e) = pty.wait_screen_nokill_diag("S113-第二轮完成", Duration::from_secs(10)) {
+        pty.diag_exit_probe(&e);
     }
     // next 轮请求（首个索引）：gated 响应在取消后已被消费丢弃
     let body: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
@@ -9730,20 +9770,23 @@ fn s114a_tui_question_window_rejects_image_paste() {
     std::thread::sleep(Duration::from_millis(250));
     pty.send_raw(b"\r");
     pty.wait_screen_timeout("S114A-请选择方向", Duration::from_secs(5)).unwrap();
-    // Ctrl+V：问询窗口活动——不应建附件、不应出现剪贴板提示
+    // Ctrl+V：问询窗口活动——不应建附件、不应出现剪贴板提示。
+    // 缺席断言用 probe_absent（无 kill 副作用）——wait_screen_timeout 的
+    // 超时路径「只 kill 不 wait」：两个 300ms 缺席断言顺手杀子进程，后续
+    // Esc 写入在 mac 撞 EIO（linux master 写死从端静默成功＝平台分叉）。
     pty.send_raw(b"\x16");
     std::thread::sleep(Duration::from_millis(600));
-    let no_attachment = pty.wait_screen_timeout("[Image #", Duration::from_millis(300)).is_err();
+    let no_attachment = pty.probe_absent("[Image #", Duration::from_millis(300));
     assert!(no_attachment, "问询窗口不建附件");
-    let no_clip_hint = pty
-        .wait_screen_timeout("剪贴板图片", Duration::from_millis(300))
-        .is_err();
+    let no_clip_hint = pty.probe_absent("剪贴板图片", Duration::from_millis(300));
     assert!(no_clip_hint, "不触发剪贴板提示（按键归问询视图）");
-    // 收尾：Esc 中断问询后退出（问询期间按键不建附件、不触发剪贴板读取已断言
-    // 为本用例核心；退出码不属本用例验证目标，按框架清理收尾）
+    // 收尾：显式杀清（问询期间按键不建附件、不触发剪贴板读取已断言为本用
+    // 例核心；probe_absent 无杀副作用＝子进程仍活，finish 会等活进程退出——
+    // 退出码不属本用例验证目标，杀清收尾，Drop 分离承接）
     pty.send_raw(b"\x1b");
     std::thread::sleep(Duration::from_millis(800));
-    let _ = pty.finish();
+    let _ = pty.child.as_mut().map(|c| c.kill());
+    let _ = pty.child.as_mut().map(|c| c.wait());
 }
 
 // ---------- S21：021 send_message_to_user_async（A15/A04 L3 行式管道）----------
