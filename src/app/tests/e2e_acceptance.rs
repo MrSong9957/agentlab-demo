@@ -1357,8 +1357,13 @@ impl PtySession {
                 } else if n < 0 {
                     let err = std::io::Error::last_os_error();
                     if err.kind() != std::io::ErrorKind::WouldBlock {
+                        let state = self
+                            .child
+                            .as_mut()
+                            .and_then(|c| c.try_wait().ok())
+                            .flatten();
                         panic!(
-                            "PTY write 失败：{err}\n{}",
+                            "PTY write 失败：{err}（子进程状态 {state:?}）\n{}",
                             String::from_utf8_lossy(&self.captured)
                         );
                     }
@@ -1370,6 +1375,35 @@ impl PtySession {
     /// 发送原始字节（如 Ctrl+C 的 0x03，不附加换行）。
     fn send_raw(&mut self, bytes: &[u8]) {
         self.write_bounded(bytes);
+    }
+
+    /// [tui-diag]（038 取证，暂驻）：屏幕等待超时后的活性探针——发送 Ctrl+C
+    /// 后观察应用能否正常退出（子进程状态）＋探针期新增输出。区分「事件循环
+    /// 整体冻结」与「仅提交路径失效」（后者 Ctrl+C 仍可退出）。
+    fn diag_exit_probe(&mut self, err: &str) -> ! {
+        let before = self.captured.len();
+        let mut data: &[u8] = b"\x03";
+        while !data.is_empty() {
+            let n = unsafe { libc::write(self.master.as_raw_fd(), data.as_ptr().cast(), data.len()) };
+            if n <= 0 {
+                break;
+            }
+            data = &data[n as usize..];
+        }
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let mut exited: Option<std::process::ExitStatus> = None;
+        while Instant::now() < deadline {
+            self.read_once(100);
+            if let Some(c) = self.child.as_mut() {
+                if let Ok(Some(st)) = c.try_wait() {
+                    exited = Some(st);
+                    break;
+                }
+            }
+        }
+        let start = before.min(self.captured.len());
+        let new_output = String::from_utf8_lossy(&self.captured[start..]).to_string();
+        panic!("{err}\n[tui-diag] Ctrl+C 探针：exit={exited:?} 探针期新增输出={new_output:?}");
     }
 
     /// 017：真实缩放＋测试侧屏幕同步——在既有 [`PtySession::resize`]（TIOCSWINSZ
@@ -3204,7 +3238,9 @@ fn s18_save_during_turn_refused_fast_and_retries_ok() {
     }
     std::thread::sleep(Duration::from_millis(200));
     pty.send_line("/save busy1");
-    pty.wait_screen("已保存快照 busy1").unwrap();
+    if let Err(e) = pty.wait_screen("已保存快照 busy1") {
+        pty.diag_exit_probe(&e); // [tui-diag]（取证，暂驻）
+    }
     pty.send_line("/exit");
     pty.wait_output("再见!", WATCHDOG).unwrap();
     let (out, status) = pty.finish();
@@ -3683,7 +3719,12 @@ fn s23_tui_scroll_limits_short_history_and_resize() {
         pty.send_raw(b"\x1b[6~");
         pty.read_once(120);
     }
-    assert!(pty.screen().contains("S23-R2-L29"), "越底 PageDown 须限位在最新");
+    assert!(
+        pty.screen().contains("S23-R2-L29"),
+        "越底 PageDown 须限位在最新（子进程状态 {:?}），屏幕：\n{}",
+        pty.child.as_mut().and_then(|c| c.try_wait().ok()).flatten(),
+        pty.screen()
+    );
 
     // 验收 4（字面）：缩放期间草稿不丢失——resize 前输入草稿，resize 后仍在光标行。
     // 注：resize 后「立即慢打」的草稿渲染存在时序抖动（快打＋提交不受影响），
@@ -7425,7 +7466,13 @@ fn s73_ctrl_c_running_tool_exits_full_teardown() {
     let key = "s73-key";
     // 标记进程：每次运行唯一（防跨运行孤儿污染）＋有界时长（泄漏自愈 ≤4min）
     let marker = format!("s73mark{}end", std::process::id());
-    let args = serde_json::json!({ "cmd": format!("sleep 240 # {marker}") }).to_string();
+    // 038 macOS CI（7/7）：marker 依赖「shell 进程驻留且 argv 含原文」——
+    // dash（ubuntu /bin/sh）单命令不尾-exec，argv 保留注释原文；macOS /bin/sh
+    // ＝bash sh-mode，尾命令 exec 优化直接替换自身为 sleep，marker 从全部
+    // cmdline 消失（pgrep 前置恒败）。末尾补恒真内建 `:`：bash 尾命令为内建
+    // 时不 exec 优化，shell fork sleep 后驻留等待，argv 双平台保 marker。
+    // 进程组回收面不变（sh 为组长、sleep 为子，killpg 双杀）。
+    let args = serde_json::json!({ "cmd": format!("sleep 240; : # {marker}") }).to_string();
     let batch = serde_json::json!({ "choices": [{ "message": {
         "role": "assistant", "content": null,
         "tool_calls": [
@@ -9543,7 +9590,9 @@ fn s113_tui_cancel_after_history_keeps_image_once() {
     pty.send_raw(b"next");
     std::thread::sleep(Duration::from_millis(250));
     pty.send_raw(b"\r");
-    pty.wait_screen_timeout("S113-第二轮完成", Duration::from_secs(10)).unwrap();
+    if let Err(e) = pty.wait_screen_timeout("S113-第二轮完成", Duration::from_secs(10)) {
+        pty.diag_exit_probe(&e); // [tui-diag]（取证，暂驻）
+    }
     // next 轮请求（首个索引）：gated 响应在取消后已被消费丢弃
     let body: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
     let urls: Vec<&str> = body["messages"]
@@ -10061,7 +10110,20 @@ fn mcp_record(path: &Path) -> Vec<Value> {
 
 /// 进程是否仍存活（/proc 探测；进程组回收的 L3 证据）。
 fn process_alive(pid: u64) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    // 038 macOS CI（7/7 同点位）：/proc 为 Linux 专属——macOS 恒 false＝
+    // 存活断言必败、gone 断言恒真（空真）。macOS 改 POSIX kill(pid,0) 存活
+    // 查询（ESRCH＝不存在；EPERM＝存在非己属仍计存活；僵尸 kill 成功＝计
+    // 存活，与 /proc 目录存在语义一致）。Linux 口径零漂移。
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY：kill(2) 空信号仅查询存活，无内存影响。
+        let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Path::new(&format!("/proc/{pid}")).exists()
+    }
 }
 
 fn wait_pid_gone(pid: u64, timeout: Duration) -> bool {

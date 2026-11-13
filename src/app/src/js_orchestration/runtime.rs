@@ -752,6 +752,27 @@ fn spawn_worker(exe: &std::path::Path) -> Result<std::process::Child, String> {
                     // best-effort：失败（ENOSYS/EINVAL）不阻断 worker 启动
                     let _ = libc::syscall(436 as libc::c_long, 3u64, u64::MAX, 0u64);
                 }
+                // 038 macOS CI 实证（fd5 哨兵 7/7）：close_range(436) 为 Linux
+                // 专属，macOS 上该块被剔除＝继承 fd 直落 worker。Darwin 无
+                // close_range；pre_exec 异步信号安全上下文不能走 opendir(/dev/fd)
+                // （malloc），以 getrlimit(RLIMIT_NOFILE) 上界逐 fd close ≥3——
+                // close 语义与 Linux 分支一致（worker 只留 0/1/2），best-effort
+                // 失败不阻断启动。上界夹 64 位安全常量防 RLIM_INFINITY 形态。
+                #[cfg(target_os = "macos")]
+                {
+                    let mut nofile = libc::rlimit {
+                        rlim_cur: 0,
+                        rlim_max: 0,
+                    };
+                    if libc::getrlimit(libc::RLIMIT_NOFILE, &mut nofile) == 0 {
+                        let hi = nofile.rlim_cur.min(1 << 16);
+                        let mut fd: libc::c_int = 3;
+                        while fd < hi as libc::c_int {
+                            unsafe { libc::close(fd) };
+                            fd += 1;
+                        }
+                    }
+                }
                 // 038 macOS CI 实证：Darwin 不实现 RLIMIT_AS——setrlimit 恒
                 // EINVAL＝worker 全部启动失败（os error 22）。macOS 跳过 AS
                 // 上限（登记的平台能力边界），CPU 上限与宿主侧墙钟观察兜底
