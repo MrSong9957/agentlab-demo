@@ -516,7 +516,7 @@ fn perf_tiers_baseline_driven() {
     }
     #[cfg(target_os = "macos")]
     assert!(
-        peaks.iter().all(|p| *p <= &replace_bound),
+        peaks.iter().all(|p| *p <= replace_bound),
         "mac 分配器保留语义下仅按 per-peak 上界收口：{peaks:?}"
     );
     let _ = rss_obs; // VmRSS 仅观测记录
