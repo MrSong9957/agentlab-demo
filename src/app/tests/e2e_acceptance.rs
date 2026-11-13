@@ -1429,21 +1429,84 @@ impl PtySession {
         self.write_bounded(bytes);
     }
 
-    /// [tui-diag]（038 取证，暂驻）：屏幕等待超时后的活性探针——发送 Ctrl+C
-    /// 后观察应用能否正常退出（子进程状态）＋探针期新增输出＋死亡时点全进程
-    /// 表快照（R8 实证三例死亡形态＝SIGKILL：status 9——普查猎杀者）。
+    /// [tui-diag]（038 取证，暂驻）：屏幕等待超时后的活性探针——顺序＝分类
+    /// （Z 打字面→\r 提交面，屏幕差指纹）→ sample 线程栈（存活态）→ Ctrl+C
+    /// 退出面（R15 教训：\x03 先行会正常退出应用、后续探针全部落空）。
     fn diag_exit_probe(&mut self, err: &str) -> ! {
         let before = self.captured.len();
+        // ① 分类探针：Z＝打字面（composer 应追加 Z），\r＝提交面（应触发
+        //    submit→执行/拒绝渲染）。屏幕前后差进报文，指纹区分三态。
+        self.feed_screen();
+        let before_screen = self.vt.to_string();
+        let mut data: &[u8] = b"Z";
+        while !data.is_empty() {
+            let n =
+                unsafe { libc::write(self.master.as_raw_fd(), data.as_ptr().cast(), data.len()) };
+            if n <= 0 {
+                break;
+            }
+            data = &data[n as usize..];
+        }
+        let dl = Instant::now() + Duration::from_millis(800);
+        while Instant::now() < dl {
+            self.read_once(100);
+        }
+        let after_z = self.vt.to_string();
+        let mut data: &[u8] = b"\r";
+        while !data.is_empty() {
+            let n =
+                unsafe { libc::write(self.master.as_raw_fd(), data.as_ptr().cast(), data.len()) };
+            if n <= 0 {
+                break;
+            }
+            data = &data[n as usize..];
+        }
+        let dl = Instant::now() + Duration::from_millis(1200);
+        while Instant::now() < dl {
+            self.read_once(100);
+        }
+        let after_enter = self.vt.to_string();
+        let classify = format!(
+            "Z 前含 Z？{} → Z 后含 Z？{} → \\r 后屏幕变？{}",
+            before_screen.contains('Z'),
+            after_z.contains('Z'),
+            after_enter != after_z
+        );
+        // ② 存活采样线程栈（定位阻塞点；分类探针的 Z/\r 可能已改变状态，栈
+        //    采样反映探针后时点）。
+        let mut exited: Option<std::process::ExitStatus> = None;
+        if let Some(c) = self.child.as_mut() {
+            if let Ok(Some(st)) = c.try_wait() {
+                exited = Some(st);
+            }
+        }
+        let stacks = if exited.is_none() {
+            if let Some(pid) = self.child.as_ref().map(|c| c.id()) {
+                let file = format!("/tmp/tchat-sample-{pid}.txt");
+                let _ = Command::new("sample")
+                    .args([&pid.to_string(), "3", "-file", &file])
+                    .output();
+                let mut out = std::fs::read_to_string(&file).unwrap_or_default();
+                out.truncate(7000);
+                out
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+        // ③ Ctrl+C 退出面（收尾探针——应用若健康即正常退出 status 0）。
+        let start = before.min(self.captured.len());
         let mut data: &[u8] = b"\x03";
         while !data.is_empty() {
-            let n = unsafe { libc::write(self.master.as_raw_fd(), data.as_ptr().cast(), data.len()) };
+            let n =
+                unsafe { libc::write(self.master.as_raw_fd(), data.as_ptr().cast(), data.len()) };
             if n <= 0 {
                 break;
             }
             data = &data[n as usize..];
         }
         let deadline = Instant::now() + Duration::from_secs(4);
-        let mut exited: Option<std::process::ExitStatus> = None;
         while Instant::now() < deadline {
             self.read_once(100);
             if let Some(c) = self.child.as_mut() {
@@ -1453,72 +1516,9 @@ impl PtySession {
                 }
             }
         }
-        let start = before.min(self.captured.len());
         let new_output = String::from_utf8_lossy(&self.captured[start..]).to_string();
-        // 分类探针（暂驻）：R14 实证 Ctrl+C 即时处理＝输入路径健康——把停滞
-        // 定位到键面：Z＝打字面（composer 应追加 Z），\r＝提交面（应触发
-        // submit→执行/拒绝渲染）。屏幕前后差进报文，指纹区分三态。
-        let mut classify = String::new();
-        if exited.is_none() {
-            self.feed_screen();
-            let before_screen = self.vt.to_string();
-            let mut data: &[u8] = b"Z";
-            while !data.is_empty() {
-                let n = unsafe {
-                    libc::write(self.master.as_raw_fd(), data.as_ptr().cast(), data.len())
-                };
-                if n <= 0 {
-                    break;
-                }
-                data = &data[n as usize..];
-            }
-            let dl = Instant::now() + Duration::from_millis(800);
-            while Instant::now() < dl {
-                self.read_once(100);
-            }
-            let after_z = self.vt.to_string();
-            let mut data: &[u8] = b"\r";
-            while !data.is_empty() {
-                let n = unsafe {
-                    libc::write(self.master.as_raw_fd(), data.as_ptr().cast(), data.len())
-                };
-                if n <= 0 {
-                    break;
-                }
-                data = &data[n as usize..];
-            }
-            let dl = Instant::now() + Duration::from_millis(1200);
-            while Instant::now() < dl {
-                self.read_once(100);
-            }
-            let after_enter = self.vt.to_string();
-            classify = format!(
-                "Z 前含 Z？{} → Z 后含 Z？{} → \\r 后屏幕变？{}",
-                before_screen.contains('Z'),
-                after_z.contains('Z'),
-                after_enter != after_z
-            );
-        }
-        // 存活＝「输入停滞」假说（R11 串行二分：应用活、渲染正常、不理输入
-        // ——s18 Ctrl+C 零输出）——采样线程栈定位阻塞点（暂驻，定位后拆）。
-        let stacks = if exited.is_none() {
-            if let Some(pid) = self.child.as_ref().map(|c| c.id()) {
-                let file = format!("/tmp/tchat-sample-{pid}.txt");
-                let _ = Command::new("sample")
-                    .args([&pid.to_string(), "3", "-file", &file])
-                    .output();
-                let text = std::fs::read_to_string(&file).unwrap_or_default();
-                let mut out = text;
-                out.truncate(7000);
-                out
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        };
         panic!(
-            "{err}\n[tui-diag] Ctrl+C 探针：exit={exited:?} 探针期新增输出={new_output:?}\n[tui-diag] 分类探针：{classify}\n[tui-diag] 死亡时点全进程表：\n{}\n[tui-diag] 存活线程栈（sample）：\n{stacks}",
+            "{err}\n[tui-diag] 分类探针：{classify}\n[tui-diag] Ctrl+C 退出面：exit={exited:?} 探针期新增输出={new_output:?}\n[tui-diag] 死亡时点全进程表：\n{}\n[tui-diag] 存活线程栈（sample，分类前时点）：\n{stacks}",
             ps_snapshot()
         );
     }
