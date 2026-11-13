@@ -1276,28 +1276,17 @@ fn write_via_validated_fd(
 #[cfg(windows)]
 fn write_via_validated_fd(
     read_fd: &std::fs::File,
-    _target: &Path,
+    target: &Path,
     data: &[u8],
 ) -> std::io::Result<()> {
-    use std::os::windows::io::{FromRawHandle, RawHandle};
-    use windows_sys::Win32::Foundation::{GENERIC_WRITE, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, ReOpenFile,
-    };
-    let wh = unsafe {
-        ReOpenFile(
-            read_fd.as_raw_handle() as _,
-            GENERIC_WRITE,
-            (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE) as u32,
-            FILE_ATTRIBUTE_NORMAL,
-        )
-    };
-    if wh == INVALID_HANDLE_VALUE {
-        return Err(std::io::Error::last_os_error());
-    }
-    let mut w = unsafe { std::fs::File::from_raw_handle(wh) };
-    // 同一文件对象共享 CurrentByteOffset（读后位于 EOF）；写前归零。
-    w.seek(std::io::SeekFrom::Start(0))?;
+    // 038 Windows CI 取证（43175442613/43191351496，step=reopen 实证两轮）：
+    // ReOpenFile 在 runner 环境对该句柄形态恒报 ERROR_INVALID_PARAMETER
+    // （87）——不可用。换「按路径重开写句柄＋写前身份核验」等价实现：
+    // TOCTOU（读入后写入前目标被路径替换）由 GetFileInformationByHandle 的
+    // 对象身份比对兜底——重开拿到的是替换后文件＝身份失配＝拒绝写入；
+    // 核验后的残窗与原 ReOpenFile 方案同级。开档即写（不 truncate——
+    // 内容按偏移覆写，长度收缩由写入方语义保证）。
+    let mut w = std::fs::OpenOptions::new().write(true).open(target)?;
     // 纵深防御：写句柄须与读入句柄为同一文件对象（身份一致）且仍为常规文件。
     if fd_inode(&w) != fd_inode(read_fd) || !fd_is_regular(&w) {
         return Err(std::io::Error::new(
@@ -1305,6 +1294,8 @@ fn write_via_validated_fd(
             "写入句柄与已判型对象不一致",
         ));
     }
+    // 常规文件写句柄从文件头开始（新建打开无读偏移继承）。
+    w.seek(std::io::SeekFrom::Start(0))?;
     w.write_all(data)
 }
 

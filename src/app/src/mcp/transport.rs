@@ -650,7 +650,16 @@ impl BoundedHttpClient {
             .redirect(reqwest::redirect::Policy::none());
         // 022 §5.4：测试注入的自签根（doc(hidden) 接缝）；生产默认 None，
         // 只用系统/WebPKI 根，不放宽任何证书校验。
-        if let Some(pem) = extra_root().as_ref() {
+        // 038 Windows/macOS CI 实证（43139153907）：rustls feature 的默认
+        // 验证器＝platform-verifier（系统证书存储）——自签测试根不在系统
+        // 存储中，add_root_certificate 的注入根在 win/mac 平台验证路径不可
+        // 达（ubuntu 平台验证器降级读 rustls 根存储故绿）。测试经
+        // `set_client_builder_hook_for_tests` 装饰 builder（rustls 配置的
+        // 具名构造在 dev-dependency 侧闭包内完成）——校验严格性不变，仅
+        // 信任根来源不同；生产路径（无 hook）走 platform-verifier 不变。
+        if let Some(hook) = client_builder_hook() {
+            builder = hook(builder);
+        } else if let Some(pem) = extra_root().as_ref() {
             let cert = reqwest::tls::Certificate::from_pem(pem)
                 .map_err(|e| format!("测试根证书无效：{e}"))?;
             builder = builder.add_root_certificate(cert);
@@ -665,6 +674,16 @@ impl BoundedHttpClient {
 /// 022 §5.4：仅测试用的额外信任根（进程级、默认空）。生产代码不调用 setter。
 static EXTRA_ROOT: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
 
+/// 038（同上）：测试侧 builder 装饰器（Arc 可克隆——每次连接重建客户端
+/// 都须命中；构造在 dev-dependency 侧闭包内，产品不具名具体 TLS 栈类型）。
+type ClientBuilderHook =
+    std::sync::Arc<dyn Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder + Send + Sync>;
+static BUILDER_HOOK: std::sync::Mutex<Option<ClientBuilderHook>> = std::sync::Mutex::new(None);
+
+fn client_builder_hook() -> Option<ClientBuilderHook> {
+    BUILDER_HOOK.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 fn extra_root() -> Option<Vec<u8>> {
     EXTRA_ROOT.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
@@ -673,6 +692,24 @@ fn extra_root() -> Option<Vec<u8>> {
 #[doc(hidden)]
 pub fn set_extra_root_certificate_for_tests(pem: Option<&[u8]>) {
     *EXTRA_ROOT.lock().unwrap_or_else(|e| e.into_inner()) = pem.map(<[u8]>::to_vec);
+}
+
+/// 038 测试接缝（同 `set_extra_root_certificate_for_tests` 约定）：装饰
+/// HTTP 客户端 builder（如 rustls `tls_backend_preconfigured`＋自签根——
+/// 具名 TLS 栈构造在 dev-dependency 侧闭包内完成）。持续生效（每次连接
+/// 重建客户端都命中）；生产代码不调用。
+#[doc(hidden)]
+pub fn set_client_builder_hook_for_tests(
+    hook: std::sync::Arc<dyn Fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder + Send + Sync>,
+) {
+    *BUILDER_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+}
+
+/// 038 测试接缝：显式复位 builder 装饰器（hook 为一次性取用，此为防御性
+/// 复位接口）。
+#[doc(hidden)]
+pub fn clear_client_builder_hook_for_tests() {
+    *BUILDER_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 fn apply_custom_headers(

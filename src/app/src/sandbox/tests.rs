@@ -533,12 +533,20 @@ fn non_canonical_writable_root_fails_closed() {
     fs::write(ws.join(".env"), "FAKE-TEST-TOKEN=5\n").unwrap();
     fs::create_dir_all(ws.join("sub")).unwrap();
     // 038 Windows 实证：PathBuf::join("..") 在 push 时折叠（raw 即干净路径，
-    // 词法非清洁形态无法经 join 构造）——以字符串拼接保留 `sub\..` 原样；
-    // 该形态仅 unix 上可写经（verbatim 路径内核不解析 ..，.env 改写跳过，
-    // 边界对象由上方的 ws\.env 承载）。
+    // 词法非清洁形态无法经 join 构造）——以字符串拼接保留 `sub\..` 原样。
+    // 038 Windows 再实证（43139153907）：tmp_ws 经 canonicalize＝verbatim
+    // （\\?\）形态，而 verbatim 路径内核不解析 `..` 字面组件→exists()=false
+    // →被 create_filesystem_args 的 `root.exists()` 过滤跳过＝词法检查根本
+    // 不执行（Ok 形态）。故 win 以剥离 verbatim 前缀的词法形态拼接（内核
+    // 解析 ..→存在→进入检查面）；unix 不受影响（无该前缀）。
+    let ws_display = ws.to_string_lossy();
+    let ws_lexical = ws_display
+        .strip_prefix(r"\\?\UNC\")
+        .map(|rest| format!(r"\\{rest}"))
+        .unwrap_or_else(|| ws_display.strip_prefix(r"\\?\").map(String::from).unwrap_or_else(|| ws_display.to_string()));
     let raw = PathBuf::from(format!(
         "{}{}sub{}..",
-        ws.display(),
+        ws_lexical,
         std::path::MAIN_SEPARATOR,
         std::path::MAIN_SEPARATOR
     ));

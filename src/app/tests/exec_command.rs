@@ -71,6 +71,47 @@ fn run_with(
     }
 }
 
+/// 038 Windows runner 实测（43139153907）：终止/时限回收慢于单次调用窗
+/// ——基于共享 mgr 的有界轮询（产品契约不变；016 §3.3：超窗 Error＝
+/// 句柄保留可重试）。
+fn query_until_session(
+    mgr: &ProcessManager,
+    session_id: &str,
+    want: ExecStatus,
+    secs: u64,
+) -> ExecResult {
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    let stdin = |sid: &str| {
+        WriteStdinArgs::from_value(&json!({ "session_id": sid })).unwrap()
+    };
+    let mut r = mgr.interact(&stdin(session_id), None).result;
+    while r.status != want && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(200));
+        r = mgr.interact(&stdin(session_id), None).result;
+    }
+    r
+}
+
+/// terminate 重试直至终态或句柄已被此前窗口收集。
+fn terminate_until_terminal(mgr: &ProcessManager, session_id: &str) -> ExecResult {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let term = WriteStdinArgs::from_value(&json!({ "session_id": session_id, "terminate": true })).unwrap();
+        let r = mgr.interact(&term, None).result;
+        if r.status != ExecStatus::Error || std::time::Instant::now() >= deadline {
+            return r;
+        }
+        let err = r.error.as_deref().unwrap_or_default();
+        assert!(
+            err.contains("未能完成回收") || err.contains("未知或已失效"),
+            "terminate 的 Error 应为回收超窗或句柄失效，而非其他失败：{r:?}"
+        );
+        if err.contains("未知或已失效") {
+            return r;
+        }
+    }
+}
+
 /// 场景：空命令、零/负超时、非整数、零上限、额外参数、缺失参数、不存在的目录
 /// → 一律 error，且无进程执行、无命令副作用（016：u64::MAX 合法，不再属非法）。
 #[test]
@@ -310,10 +351,21 @@ fn invalid_utf8_bytes_replaced_end_to_end() {
 fn timeout_kills_process_group_and_stops_writes() {
     let dir = temp_dir("timeout");
     let log = dir.join("w.log");
-    let r = run(
+    // 038 Windows runner：8s 等待窗可能不足以观察到时限终止（Running 形态，
+    // 43139153907）——共享 mgr＋有界轮询到 Timeout；单次调用内观察的语义
+    // 由本地（首查即终态）承载。
+    let mgr = ProcessManager::new();
+    let r = run_with(
+        &mgr,
         &json!({ "cmd": writer_cmd(&log), "timeout_ms": 400, "yield_time_ms": 8000 }),
         None,
     );
+    let r = if r.status == ExecStatus::Running {
+        let sid = r.session_id.clone().expect("running 形态必有句柄");
+        query_until_session(&mgr, &sid, ExecStatus::Timeout, 15)
+    } else {
+        r
+    };
     assert_eq!(r.status, ExecStatus::Timeout, "{r:?}");
     assert!(r.exit_code.is_none(), "被信号终止无整数退出码：{r:?}");
     assert!(r.error.is_some(), "超时应给出说明");
@@ -323,6 +375,7 @@ fn timeout_kills_process_group_and_stops_writes() {
     thread::sleep(Duration::from_millis(400));
     let s2 = log_size(&log);
     assert_eq!(s1, s2, "超时终止后不应继续写文件（{s1} -> {s2}）");
+    mgr.close();
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -362,9 +415,8 @@ fn cancel_keeps_process_then_terminate_stops_writes() {
     };
     assert!(s2 > s1, "取消后受管理进程应继续运行（{s1} -> {s2}）");
 
-    // 明确终止回收：整个进程组停止写入
-    let term = WriteStdinArgs::from_value(&json!({ "session_id": sid, "terminate": true })).unwrap();
-    let r = mgr.interact(&term, None).result;
+    // 明确终止回收：整个进程组停止写入（慢 runner 回收超窗按句柄保留语义重试）
+    let r = terminate_until_terminal(&mgr, &sid);
     assert_eq!(r.status, ExecStatus::Terminated, "{r:?}");
     let s3 = log_size(&log);
     thread::sleep(Duration::from_millis(400));
@@ -551,7 +603,18 @@ fn exec_b07_concurrent_groups_isolated() {
     let log_a = dir_a.join("w.log");
     let cmd_a = writer_cmd(&log_a);
     let a = thread::spawn(move || {
-        run(&json!({ "cmd": cmd_a, "timeout_ms": 400, "yield_time_ms": 8000 }), None)
+        // 038 Windows runner：8s 窗可能不足（Running 形态）——显式 mgr＋
+        // 有界轮询到 Timeout（进程组隔离契约不变）。
+        let mgr = ProcessManager::new();
+        let r = run_with(&mgr, &json!({ "cmd": cmd_a, "timeout_ms": 400, "yield_time_ms": 8000 }), None);
+        let r = if r.status == ExecStatus::Running {
+            let sid = r.session_id.clone().expect("running 形态必有句柄");
+            query_until_session(&mgr, &sid, ExecStatus::Timeout, 15)
+        } else {
+            r
+        };
+        mgr.close();
+        r
     });
     // A 仍在运行时，B（独立进程组）反复快速执行并全部成功
     for i in 0..5 {
@@ -643,9 +706,9 @@ fn exec_p01_huge_timeout_accepted_then_terminate_reaps_group() {
         };
         assert_eq!(errno_after_cancel, None, "取消当前轮不得终止进程组");
     }
-    // 明确终止：回收整个受管理进程组
-    let term = WriteStdinArgs::from_value(&json!({ "session_id": sid, "terminate": true })).unwrap();
-    assert_eq!(mgr2.interact(&term, None).result.status, ExecStatus::Terminated);
+    // 明确终止：回收整个受管理进程组（慢 runner 回收超窗按句柄保留语义重试）
+    let r = terminate_until_terminal(&mgr2, &sid);
+    assert_eq!(r.status, ExecStatus::Terminated, "{r:?}");
     #[cfg(unix)]
     {
         let kid_state = |pid: i32| -> Option<char> {
@@ -750,11 +813,25 @@ fn min_timeout_accepted_and_expires_as_one_millisecond() {
         .expect("timeout_ms=1 必须是最小合法值");
     assert_eq!(args.timeout_ms, Some(1), "参数层不得把 1 改成默认值");
 
-    let r = run(&json!({ "cmd": "sleep 5", "timeout_ms": 1, "yield_time_ms": 8000 }), None);
+    // 038 Windows runner：1ms 时限的终止＋回收可超单次调用窗（Running/Completed
+    // 形态，43139153907）——共享 mgr＋有界轮询到 Timeout；时限值本身仍为 1ms。
+    let mgr = ProcessManager::new();
+    let r = run_with(&mgr, &json!({ "cmd": "sleep 5", "timeout_ms": 1, "yield_time_ms": 8000 }), None);
+    let sid = r.session_id.clone();
+    let r = if r.status != ExecStatus::Timeout {
+        if let Some(sid) = sid {
+            query_until_session(&mgr, &sid, ExecStatus::Timeout, 15)
+        } else {
+            r
+        }
+    } else {
+        r
+    };
     assert_eq!(r.status, ExecStatus::Timeout, "1ms 后应终止长睡眠：{r:?}");
     assert_eq!(r.exit_code, None, "被终止的进程没有自然退出码：{r:?}");
     let err = r.error.clone().unwrap_or_default();
     assert!(err.contains("时限"), "超时错误应说明时限到期：{err}");
+    mgr.close();
 }
 
 /// N4b：最小合法 max_output_chars=1；字符上限按 Unicode 码点截断，

@@ -692,7 +692,9 @@ fn a17_mcp_with_view_image_batch_pairs_then_image_projection() {
     let record_path = record_dir.path().join("record.jsonl");
     let fixture = common::mcp_fixtures::FIXTURE.replace('\\', "/");
     let json = format!(
-        r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "{py}", "args": ["{fixture}", "--scenario", "echo", "--record", "{}"], "cwd": "{}"}}}}}}"#,
+        // 038 批次一同款：内联构造也带 -X utf8（win 管道 stdout 默认 cp1252，
+        // 夹具中文经编码层＝mojibake/崩溃——43139153907 a17 实证）
+        r#"{{"mcp_servers": {{"fx": {{"enabled": true, "command": "{py}", "args": ["-X", "utf8", "{fixture}", "--scenario", "echo", "--record", "{}"], "cwd": "{}"}}}}}}"#,
         record_path.display().to_string().replace('\\', "/"),
         std::env::temp_dir().display().to_string().replace('\\', "/"),
         py = PY,
