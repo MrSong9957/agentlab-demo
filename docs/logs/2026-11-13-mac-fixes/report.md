@@ -323,3 +323,29 @@ Drop 分离承接；Drop 本体已有界安全）。
 **R15 取证**：分类探针（Z＝打字面、\r＝提交面、屏幕前后差指纹）＋
 sample 线程栈（存活态）；统一日志捕获已移除（runningboard 噪声淹没
 无价值）。
+
+## R15/R16 取证与根因闭合（停滞族＝crossterm mac 唤醒丢失）
+
+**R15**：探针顺序失误（\x03 先行把应用正常退出、分类探针落空）——R16 重排
+（分类→sample→退出面）。
+
+**R16 分类指纹（三例一致）**：Z 前含 Z？false → Z 后含 Z？true →
+\r 后屏幕变？true——**打字✓、Enter✓＝探针时点应用完全健康**。结合 R14
+（Ctrl+C 即时处理）＝**输入延迟几十秒后泄洪，非丢失非死锁**：s23 顶部画面
+＝早期 PageUp 延迟重放；s18 的 save 提交晚到（探针 \r 时一并执行）。
+
+**根因（sample 线程栈，R16）**：主线程 99.7% park 于 tokio Condvar
+（CachedParkThread::park → pthread_cond_wait），事件循环 select! 的
+FRAME_TICK=100ms 兜底存在却未恢复＝crossterm EventStream 内部后台读线程
+（mio/kqueue 事件源）在 mac PTY 丢输入就绪通知——数据滞留内核 tty 缓冲，
+内部缓冲不更新，tick 再轮询也 Pending；下一个输入字节的写触发了恢复
+（探针 Z/\r 全部即时生效）。
+
+**产品修复（6421167→本提交）**：src/tui/Cargo.toml mac target 段为
+crossterm 启用 `use-dev-tty`（/dev/tty + poll(2) 备用事件源，crossterm
+为 tty 事件问题提供的经典回退；fork 的 tty 后端完整支持
+InternalEvent/bracketed-paste）。经 TIOCSCTTY 会话 /dev/tty 即测试 PTY
+从设备，语义等价；仅 mac 编译生效，linux/windows 构建零变化。
+
+**顺带修**：s18 的 save 提交晚到使探针 \r 实际执行了 /save busy1Z——
+分类探针的 \r 副作用在報文里可见（屏幕变=true），无碍取证。
