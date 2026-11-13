@@ -18,6 +18,30 @@
 //! PagerKeymap.close）。替代入口：清选区＝点击输入区、回底＝Ctrl+End、解焦＝F4、
 //! 收 ? 提示＝再按 ?。
 
+// [mac-diag]（038 macOS 取证，暂驻；取证后拆除）：e2e_diag 开关（env
+// TCHAT_MAC_DIAG）控制的诊断文件通道——mac runner 上 TUI 交互面（鼠标/
+// 渲染/退出链）取证，子进程 stderr 不进测试捕获故走文件。
+fn mac_diag(msg: &str) {
+    if std::env::var("TCHAT_MAC_DIAG").is_err() {
+        return;
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/tchat-mac-diag.log")
+    {
+        use std::io::Write as _;
+        let _ = std::io::Write::write_all(
+            &mut f,
+            format!("[pid={}] t={ts} {msg}\n", std::process::id()).as_bytes(),
+        );
+    }
+}
+
 use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
@@ -1309,6 +1333,11 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                         needs_draw = true;
                     }
                     CrosstermEvent::Mouse(mouse) => {
+                        // [mac-diag] 取证（暂驻）
+                        mac_diag(&format!(
+                            "mouse kind={:?} row={} col={} mods={:?}",
+                            mouse.kind, mouse.row, mouse.column, mouse.modifiers
+                        ));
                         // 010：母本分发序（app/owned_transcript.rs:447-487）——composer
                         // 准备无条件先行（冲刷 paste burst 首字符，坑 4）；沟位（011）
                         // 归滚动条状态机且判定先于选区；transcript 正文区 Left 拖选/
@@ -1374,6 +1403,11 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                 {
                                     // 010：复制动作经视图既有管线（Markdown 序列化＋
                                     // 策略＝EXPLICIT；反馈写入 copy_feedback，gap 行渲染）
+                                        // [mac-diag] 取证（暂驻）
+                                        mac_diag(&format!(
+                                            "copy_action fired kind={:?} row={} col={}",
+                                            mouse.kind, mouse.row, mouse.column
+                                        ));
                                     transcript.copy_action(
                                         &mut tui,
                                         &cells,
@@ -1431,6 +1465,8 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
         // 011 §7：循环尾条件绘制——仅有未显示变化时执行（原无条件 draw 移除）；
         // 最后一次状态变化即时落屏（无跨事件延迟），Draw 通知经 FrameScheduler
         // 合并限频后到达
+        // [mac-diag] 取证（暂驻）
+        mac_diag(&format!("needs_draw frame"));
         if needs_draw {
             if let Some(detail) = tool_detail.as_mut() {
                 // 012 §8：详情页自绘（含标题/沟位/提示；Draw 事件幂等）
@@ -1439,6 +1475,8 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                 draw(&mut tui, &pane, &mut transcript, &mut scrollbar_rows, &cells, stream.as_ref())?;
             }
             needs_draw = false;
+            // [mac-diag] 取证（暂驻）
+            mac_diag("frame drawn");
         }
     }
     Ok(DriverExit::Quit)

@@ -1518,6 +1518,8 @@ fn pty_cli(project: Option<&Path>, envs: &[(&str, &str)]) -> Command {
     }
     // 交互分支的前提：PTY 使 stdin/stdout 均为终端；TERM 显式给正常值
     cmd.env("TERM", "xterm");
+    // [mac-diag] 取证（暂驻）：子进程侧诊断开关（产品 chat_driver 读）
+    cmd.env("TCHAT_MAC_DIAG", "1");
     cmd
 }
 
