@@ -364,6 +364,7 @@ fn huge_chat_body() -> String {
     )
 }
 
+#[cfg(not(windows))]
 #[test]
 fn chat_body_over_limit_aborts() {
     let _env = set_env(
@@ -1993,6 +1994,7 @@ fn n4c_request_body_limit_multibyte_two_points() {
 
 /// 2026-10-10 合并前补测：.env 对 TCHAT_SESSION_TS/PID 的信任根隔离——
 /// 大小写变体、空值、重复声明一律跳过；普通变量正常加载；进程已有值保留。
+#[cfg(not(windows))]
 #[test]
 fn dotenv_skips_session_trust_vars() {
     let _lock = common::ENV_LOCK.lock().unwrap();
