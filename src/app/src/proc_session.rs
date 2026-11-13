@@ -75,7 +75,13 @@ const READ_BUF: usize = 8 * 1024;
 const PENDING_CAP: usize = 1024 * 1024;
 /// 输入分块提交的块大小：块间检查中止标志（取消当前轮时停止提交
 /// 尚未发送的输入）；单块内阻塞不可移植中断。
-const INPUT_CHUNK: usize = 4096;
+/// 038 macOS CI 实证（pty_cancel 哨兵，8 轮同报文）：块内记账仅在整块
+/// 写完时落账（write_chunked note），块必须小于各平台 tty 输入缓冲才能
+/// 保证「接收侧吃到 ≥LIMIT 字节」与「发送侧已记账 ≥LIMIT」同步到达——
+/// linux N_TTY 缓冲恰 4096（整块恰好落账故绿），macOS 缓冲更小（实测
+/// 首块 4096 卡半途、note 永不执行＝input_written 恒 0 假象）。512 低于
+/// 全部平台缓冲下限：记账粒度与取消粒度同细，写入语义不变。
+const INPUT_CHUNK: usize = 512;
 
 /// 工具交互结果：模型面 [`ExecResult`] 之外的展示补充——write_stdin 的
 /// 展示需关联原命令（016 §3.3），不伪造一条新命令。

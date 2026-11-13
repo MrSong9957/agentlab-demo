@@ -848,7 +848,9 @@ fn s103_async_publish_f6_answer_enters_next_request_and_keeps_draft() {
     pty.send_raw(b"\x1b[17~"); // F6（xterm 转义序列）
     pty.wait_screen("S103-报告面向谁").unwrap();
     pty.send_raw(b"\r");
-    pty.wait_screen("Questions 1/1 answered").unwrap();
+    if let Err(e) = pty.wait_screen("Questions 1/1 answered") {
+        pty.diag_exit_probe(&e); // [tui-diag]（取证，暂驻）
+    }
     // 回答已受理；解除独立命令的阻塞，批收尾后回答进入下一请求
     std::fs::write(&gate, b"1").unwrap();
     pty.wait_screen("S103-完成").unwrap();
@@ -1069,6 +1071,16 @@ fn s106_resume_answered_async_question_displays_without_new_requests() {
 /// 跳转），含空格文本在原始字节流中不连续——新增 wait_screen 在 VT100 解析后
 /// 的屏幕文本上等待；send_line 改以 CR 结尾（TUI raw mode 下 Enter＝CR，
 /// rustyline 阶段 CR 经 ICRNL 同样按行结束）。
+/// [tui-diag]（038 取证，暂驻）：全进程表快照（含 pgid/sess/etime/命令行）
+/// ——死亡时点抓「谁在场」：并发测试的子进程、遗留孤儿、猎杀者候选。
+fn ps_snapshot() -> String {
+    Command::new("ps")
+        .args(["-axo", "pid,ppid,pgid,sess,stat,etime,command"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_else(|_| "(ps 失败)".into())
+}
+
 struct PtySession {
     master: File,
     child: Option<Child>,
@@ -1102,7 +1114,8 @@ impl PtySession {
         START.get_or_init(|| {
             let started = Instant::now();
             std::thread::spawn(move || loop {
-                std::thread::sleep(Duration::from_secs(60));
+                // [tui-diag]（取证，暂驻）：60s→15s 提频——死亡时间线普查
+                std::thread::sleep(Duration::from_secs(15));
                 let t = started.elapsed().as_secs();
                 let me = std::process::id();
                 let ps_all = Command::new("ps")
@@ -1363,7 +1376,8 @@ impl PtySession {
                             .and_then(|c| c.try_wait().ok())
                             .flatten();
                         panic!(
-                            "PTY write 失败：{err}（子进程状态 {state:?}）\n{}",
+                            "PTY write 失败：{err}（子进程状态 {state:?}）\n[tui-diag] 死亡时点全进程表：\n{}\n{}",
+                            ps_snapshot(),
                             String::from_utf8_lossy(&self.captured)
                         );
                     }
@@ -1378,8 +1392,8 @@ impl PtySession {
     }
 
     /// [tui-diag]（038 取证，暂驻）：屏幕等待超时后的活性探针——发送 Ctrl+C
-    /// 后观察应用能否正常退出（子进程状态）＋探针期新增输出。区分「事件循环
-    /// 整体冻结」与「仅提交路径失效」（后者 Ctrl+C 仍可退出）。
+    /// 后观察应用能否正常退出（子进程状态）＋探针期新增输出＋死亡时点全进程
+    /// 表快照（R8 实证三例死亡形态＝SIGKILL：status 9——普查猎杀者）。
     fn diag_exit_probe(&mut self, err: &str) -> ! {
         let before = self.captured.len();
         let mut data: &[u8] = b"\x03";
@@ -1403,7 +1417,10 @@ impl PtySession {
         }
         let start = before.min(self.captured.len());
         let new_output = String::from_utf8_lossy(&self.captured[start..]).to_string();
-        panic!("{err}\n[tui-diag] Ctrl+C 探针：exit={exited:?} 探针期新增输出={new_output:?}");
+        panic!(
+            "{err}\n[tui-diag] Ctrl+C 探针：exit={exited:?} 探针期新增输出={new_output:?}\n[tui-diag] 死亡时点全进程表：\n{}",
+            ps_snapshot()
+        );
     }
 
     /// 017：真实缩放＋测试侧屏幕同步——在既有 [`PtySession::resize`]（TIOCSWINSZ
