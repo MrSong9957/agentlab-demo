@@ -1082,40 +1082,6 @@ fn ps_snapshot() -> String {
         .unwrap_or_else(|_| "(ps 失败)".into())
 }
 
-/// [tui-diag]（取证，暂驻）：系统统一日志近 2 分钟 kill 相关记录——捕获
-/// 系统侧猎杀（RunningBoard/jetsam/memorystatus 类日志）；用户态 kill(2)
-/// 通常无日志（此为否定证据通道）。谓词含 jetsam/memorystatus——R11 尾部
-/// 40 行被 mds→mdworker 常规回收噪声占满，需扩捕内存压杀记录。
-fn unified_log_kill_lines() -> String {
-    Command::new("log")
-        .args([
-            "show",
-            "--last",
-            "2m",
-            "--style",
-            "compact",
-            "--predicate",
-            "eventMessage CONTAINS[c] 'kill' OR eventMessage CONTAINS[c] 'jetsam' OR eventMessage CONTAINS[c] 'memorystatus'",
-        ])
-        .output()
-        .map(|o| {
-            let text = String::from_utf8_lossy(&o.stdout).into_owned();
-            let mine = std::process::id().to_string();
-            let lines: Vec<&str> = text
-                .lines()
-                .filter(|l| l.contains("kill") || l.contains("jetsam") || l.contains("memorystatus"))
-                .collect();
-            let (head, tail) = if lines.len() > 60 {
-                lines.split_at(lines.len() - 60)
-            } else {
-                (&lines[..0], &lines[..])
-            };
-            let _ = head;
-            format!("共 {} 行，尾部：\n{}", lines.len(), tail.join("\n"))
-        })
-        .unwrap_or_else(|_| "(log show 失败)".into())
-}
-
 struct PtySession {
     master: File,
     child: Option<Child>,
@@ -1448,9 +1414,8 @@ impl PtySession {
                             .and_then(|c| c.try_wait().ok())
                             .flatten();
                         panic!(
-                            "PTY write 失败：{err}（子进程状态 {state:?}）\n[tui-diag] 死亡时点全进程表：\n{}\n[tui-diag] 统一日志 kill 记录（近 2m 尾部）：\n{}\n{}",
+                            "PTY write 失败：{err}（子进程状态 {state:?}）\n[tui-diag] 死亡时点全进程表：\n{}\n{}",
                             ps_snapshot(),
-                            unified_log_kill_lines(),
                             String::from_utf8_lossy(&self.captured)
                         );
                     }
@@ -1490,6 +1455,50 @@ impl PtySession {
         }
         let start = before.min(self.captured.len());
         let new_output = String::from_utf8_lossy(&self.captured[start..]).to_string();
+        // 分类探针（暂驻）：R14 实证 Ctrl+C 即时处理＝输入路径健康——把停滞
+        // 定位到键面：Z＝打字面（composer 应追加 Z），\r＝提交面（应触发
+        // submit→执行/拒绝渲染）。屏幕前后差进报文，指纹区分三态。
+        let mut classify = String::new();
+        if exited.is_none() {
+            self.feed_screen();
+            let before_screen = self.vt.to_string();
+            let mut data: &[u8] = b"Z";
+            while !data.is_empty() {
+                let n = unsafe {
+                    libc::write(self.master.as_raw_fd(), data.as_ptr().cast(), data.len())
+                };
+                if n <= 0 {
+                    break;
+                }
+                data = &data[n as usize..];
+            }
+            let dl = Instant::now() + Duration::from_millis(800);
+            while Instant::now() < dl {
+                self.read_once(100);
+            }
+            let after_z = self.vt.to_string();
+            let mut data: &[u8] = b"\r";
+            while !data.is_empty() {
+                let n = unsafe {
+                    libc::write(self.master.as_raw_fd(), data.as_ptr().cast(), data.len())
+                };
+                if n <= 0 {
+                    break;
+                }
+                data = &data[n as usize..];
+            }
+            let dl = Instant::now() + Duration::from_millis(1200);
+            while Instant::now() < dl {
+                self.read_once(100);
+            }
+            let after_enter = self.vt.to_string();
+            classify = format!(
+                "Z 前含 Z？{} → Z 后含 Z？{} → \\r 后屏幕变？{}",
+                before_screen.contains('Z'),
+                after_z.contains('Z'),
+                after_enter != after_z
+            );
+        }
         // 存活＝「输入停滞」假说（R11 串行二分：应用活、渲染正常、不理输入
         // ——s18 Ctrl+C 零输出）——采样线程栈定位阻塞点（暂驻，定位后拆）。
         let stacks = if exited.is_none() {
@@ -1509,9 +1518,8 @@ impl PtySession {
             String::new()
         };
         panic!(
-            "{err}\n[tui-diag] Ctrl+C 探针：exit={exited:?} 探针期新增输出={new_output:?}\n[tui-diag] 死亡时点全进程表：\n{}\n[tui-diag] 统一日志 kill 记录：\n{}\n[tui-diag] 存活线程栈（sample）：\n{stacks}",
-            ps_snapshot(),
-            unified_log_kill_lines()
+            "{err}\n[tui-diag] Ctrl+C 探针：exit={exited:?} 探针期新增输出={new_output:?}\n[tui-diag] 分类探针：{classify}\n[tui-diag] 死亡时点全进程表：\n{}\n[tui-diag] 存活线程栈（sample）：\n{stacks}",
+            ps_snapshot()
         );
     }
 
