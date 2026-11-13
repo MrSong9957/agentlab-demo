@@ -179,3 +179,30 @@ s106 2/7（R1/R4）、s69 1/7（R3）、c04 1/7（R5）、e12 1/7（R7）——�
 - **已拆**：ci.yml mac-diag upload artifact 步骤（产品诊断文件通道已不存在）。
 - **待拆**：e2e_acceptance watchdog_start/log_direct（038 D-mac 轮遗留）＋
   本轮全部暂驻标记。
+
+## R8（43394602657，3b6b641）结果：16→9，批 1/批 2 六项销号
+
+**销号**：attack01/02/05、bin_pipe、env_and_fd(fd5)、matrix_a、
+s103_mcp_reload、s73——全部修复持续有效。
+
+**余 9 项**：pty_cancel（R9 已修）、tls、s113、s114a、s18、s23、
+s103_async（3/8）、perf_tiers、c09（新 1/8）。
+
+**R8 取证结论**：
+1. **tls**：raw rustls 探针同死（写成功→read@0 FIN 无 close_notify）＝
+   TLS/平台层问题，非 reqwest/产品装配——服务端线程在响应前关闭连接，
+   原因待 R9 服务端捕获报文。
+2. **pty_cancel**：sent=0 会话存活=true cnt=1024＝接收侧吃满 LIMIT 而
+   记账零——write_chunked 整块落账 ×mac tty 输入缓冲<4096＝首块永卡
+   半途。**产品修：INPUT_CHUNK 4096→512**（a755d94；512 低于全平台缓冲
+   下限，记账/取消粒度同细，写入语义不变）。
+3. **TUI 族 SIGKILL 实锤**：s18/s113 探针 exit=unix_wait_status(9)、
+   s114a PTY write EIO 时子进程状态=9——**三例都是被 SIGKILL 猎杀**，
+   非产品冻结。产品 kill 路径全组作用域（killpg 对独立会话 ESRCH 安全）
+   无法命中；猎杀者身份待 R9 死亡时点全进程表快照（ps auxww）＋看门狗
+   15s 提频时间线。
+4. **c09**（1/8）：i1 中断落点时 previous_state=completed＝子 agent 在
+   中断前已完成——调度竞态（sleep 30 工具未按预期保持活动态）；agents
+   与 js worker 无代码关联、排除批 2 回归——轮换观察。
+5. **轮换计数（R8 后）**：p2 4/8、s103_async 3/8（R2/R4/R8）、s106 2/8、
+   s69/c04/e12/c09 各 1/8。
