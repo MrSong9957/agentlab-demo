@@ -143,6 +143,8 @@ impl Default for CrosstermEventSource {
         let events = crossterm::event::EventStream::new();
         #[cfg(target_os = "macos")]
         let events = super::threaded_event_source::ThreadedEventSource::new();
+        #[cfg(windows)]
+        let events = crossterm::event::EventStream::new();
         Self {
             #[cfg(not(windows))]
             events,

@@ -32,7 +32,7 @@ use crossterm::event::Event as CrosstermEvent;
 // 延迟数十秒泄洪（R11–R20 取证）——mac 换专属读线程事件源（详见
 // threaded_event_source 模块文档）；linux/windows 保持 EventStream 原路径。
 #[cfg(target_os = "macos")]
-use crate::tui::tui::threaded_event_source::ThreadedEventSource;
+use crate::tui::threaded_event_source::ThreadedEventSource;
 #[cfg(not(target_os = "macos"))]
 use crossterm::event::EventStream;
 use crossterm::event::KeyCode;
