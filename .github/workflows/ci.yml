@@ -78,7 +78,7 @@ jobs:
         run: choco install ripgrep -y --no-progress
       # [mac-diag]（038 取证，暂驻）：TUI 交互面诊断文件上传（取证后拆除）
       - name: 上传 mac PTY 诊断（临时）
-        if: runner.os == 'Macos' && always()
+        if: runner.os == 'macOS' && always()
         uses: actions/upload-artifact@v4
         with:
           name: mac-pty-diag
