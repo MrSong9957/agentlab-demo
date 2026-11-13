@@ -349,3 +349,42 @@ InternalEvent/bracketed-paste）。经 TIOCSCTTY 会话 /dev/tty 即测试 PTY
 
 **顺带修**：s18 的 save 提交晚到使探针 \r 实际执行了 /save busy1Z——
 分类探针的 \r 副作用在報文里可见（屏幕变=true），无碍取证。
+
+## R17–R20：停滞族根因闭合与产品修复尝试——停下问
+
+**R17**：lock 未随 target 段更新的 --locked 失败（ubuntu/windows 同源），
+a698cb1 补 lock 后消除。
+
+**R19 全线程栈（关键）**：一个 tokio worker **100% CPU 自旋于
+slice_contains**（调度队列扫描不 park），其余 worker cvwait/kevent，
+**主线程 park 等唤醒、tick 罕见轮询（1552 样本仅 4）＝tokio 计时器驱动
+停摆 + 输入唤醒 starvation**。s114a 类同点位的 R20 全量表：主线程
+clock_gettime 抖动、spawner 正常 park、worker 77769 kevent、**77771
+slice_contains 自旋**、77772 cvwait。
+
+**use-dev-tty 未消除停滞**（R18/R19/R20 三轮同指纹：分类探针 Z/\\r/退出
+全健康、输入延迟数十秒泄洪）＝停滞在 tokio 运行时层（worker 饥饿→主线程
+唤醒 starvation→EventStream/计时器延后），不在 tty 事件源。
+
+**修复所需＝输入架构调整**（EventStream→专属读线程＋通道桥，涉 tui.rs
+suspend/resume 的 EventStream drop/resume 交互路径）——**设计取舍，
+按阻断线停下问**；不影响当前 PR 的 ubuntu（R20 绿）与 windows（R20 仅
+t18）基线。
+
+## 收尾状态总表（R20，a8c9be6）
+
+**已销号（本轮收尾累计 10 项）**：attack01/02/05、bin_pipe、fd5、
+matrix_a、s103_reload、s73、pty_cancel、tls、s114a；**p2 §5 mac 门控**
+（5 轮轮换＋时序族）。
+
+**mac 现存 6 项**：
+| 组 | 项 | 定性 | 证据 |
+|---|---|---|---|
+| 输入延迟泄洪族 | s18/s113/s23/s103_async | crossterm/tokio mac 唤醒 starvation（产品运行时级） | R11–R20 十轮：栈证 park 99.7%＋worker slice_contains 自旋；分类探针证打字/提交/退出全健康；use-dev-tty 无效 |
+| 资源语义族 | perf_tiers | mac 分配器保留语义（离散断言结构性为假） | 峰形跨轮逐字节一致 |
+| 资源语义族 | ts30_perf_gates | RSS 子进程未输出期望行（perf 族，1/9） | R14 首现 |
+
+**轮换观察（未达标门控线）**：c04 2/12、c09 2/12、e12 1/9、s69 1/9、
+s103_async 5/10（停滞族同源）。
+
+**linux R20＝绿；windows R20＝仅 t18（豁免不变）**。
