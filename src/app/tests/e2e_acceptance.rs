@@ -2289,7 +2289,12 @@ fn s6_json_host_exec_command_streams_exit_and_pgroup_timeout() {
     }));
     assert_eq!(r["status"], json!("completed"), "{r}");
     assert_eq!(r["exit_code"], json!(0), "{r}");
-    assert_eq!(r["output"].as_str().unwrap().trim(), dir.path().display().to_string());
+    // 038 macOS：/var→/private/var 符号链接——pwd 输出物理形态，与夹具词法
+    // 形态归一（canonicalize；linux 恒等零漂移）
+    assert_eq!(
+        r["output"].as_str().unwrap().trim(),
+        std::fs::canonicalize(dir.path()).unwrap().display().to_string()
+    );
 
     // 超时：直接子进程是组长（$$），后台孙进程（$!）持续写日志
     let log = dir.path().join("w.log");
@@ -3406,15 +3411,31 @@ impl PtySession {
         }
     }
 
-    /// 010 收尾轮：CLI 子进程线程数（/proc/<pid>/task 项数）——直接观测取消
-    /// 后辅助线程的存活与回收，不依赖 180s 超时兜底推断。
+    /// 010 收尾轮：CLI 子进程线程数——直接观测取消后辅助线程的存活与回收，
+    /// 不依赖 180s 超时兜底推断。
     fn thread_count(&self) -> usize {
-        std::fs::read_dir(format!(
-            "/proc/{}/task",
-            self.child.as_ref().map(|c| c.id()).unwrap_or(0)
-        ))
-            .map(|entries| entries.count())
-            .unwrap_or(0)
+        let pid = self.child.as_ref().map(|c| c.id()).unwrap_or(0);
+        // 038 macOS：无 /proc——ps -M 每线程一行（含表头），行数-1＝线程数
+        // （43216678614：恒 0 使 s71/s72 断言必败）。linux 语义不变。
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("ps")
+                .args(["-M", &pid.to_string()])
+                .output()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .count()
+                        .saturating_sub(1)
+                })
+                .unwrap_or(0)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            std::fs::read_dir(format!("/proc/{}/task", pid))
+                .map(|entries| entries.count())
+                .unwrap_or(0)
+        }
     }
 }
 
