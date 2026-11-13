@@ -1081,6 +1081,32 @@ fn ps_snapshot() -> String {
         .unwrap_or_else(|_| "(ps 失败)".into())
 }
 
+/// [tui-diag]（取证，暂驻）：系统统一日志近 2 分钟 kill 相关记录——捕获
+/// 系统侧猎杀（RunningBoard/jetsam 类有 Submitting kill 日志）；用户态
+/// kill(2) 通常无日志（此为否定证据通道，供猎杀源二分）。
+fn unified_log_kill_lines() -> String {
+    Command::new("log")
+        .args([
+            "show",
+            "--last",
+            "2m",
+            "--style",
+            "compact",
+            "--predicate",
+            "eventMessage CONTAINS[c] 'kill'",
+        ])
+        .output()
+        .map(|o| {
+            let text = String::from_utf8_lossy(&o.stdout).into_owned();
+            text.lines()
+                .rev()
+                .take(40)
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_else(|_| "(log show 失败)".into())
+}
+
 struct PtySession {
     master: File,
     child: Option<Child>,
@@ -1376,8 +1402,9 @@ impl PtySession {
                             .and_then(|c| c.try_wait().ok())
                             .flatten();
                         panic!(
-                            "PTY write 失败：{err}（子进程状态 {state:?}）\n[tui-diag] 死亡时点全进程表：\n{}\n{}",
+                            "PTY write 失败：{err}（子进程状态 {state:?}）\n[tui-diag] 死亡时点全进程表：\n{}\n[tui-diag] 统一日志 kill 记录（近 2m 尾部）：\n{}\n{}",
                             ps_snapshot(),
+                            unified_log_kill_lines(),
                             String::from_utf8_lossy(&self.captured)
                         );
                     }
@@ -1418,8 +1445,9 @@ impl PtySession {
         let start = before.min(self.captured.len());
         let new_output = String::from_utf8_lossy(&self.captured[start..]).to_string();
         panic!(
-            "{err}\n[tui-diag] Ctrl+C 探针：exit={exited:?} 探针期新增输出={new_output:?}\n[tui-diag] 死亡时点全进程表：\n{}",
-            ps_snapshot()
+            "{err}\n[tui-diag] Ctrl+C 探针：exit={exited:?} 探针期新增输出={new_output:?}\n[tui-diag] 死亡时点全进程表：\n{}\n[tui-diag] 统一日志 kill 记录（近 2m 尾部）：\n{}",
+            ps_snapshot(),
+            unified_log_kill_lines()
         );
     }
 
@@ -3736,12 +3764,19 @@ fn s23_tui_scroll_limits_short_history_and_resize() {
         pty.send_raw(b"\x1b[6~");
         pty.read_once(120);
     }
-    assert!(
-        pty.screen().contains("S23-R2-L29"),
-        "越底 PageDown 须限位在最新（子进程状态 {:?}），屏幕：\n{}",
-        pty.child.as_mut().and_then(|c| c.try_wait().ok()).flatten(),
-        pty.screen()
-    );
+    if !pty.screen().contains("S23-R2-L29") {
+        // [tui-diag]（取证，暂驻）：600ms 复检区分「瞬帧」与「真实上滚态」
+        pty.read_once(600);
+        let still = pty.screen().contains("S23-R2-L29");
+        let tail_start = pty.captured.len().saturating_sub(1600);
+        let tail = String::from_utf8_lossy(&pty.captured[tail_start..]).to_string();
+        let screen = pty.screen();
+        let state = pty.child.as_mut().and_then(|c| c.try_wait().ok()).flatten();
+        assert!(
+            still,
+            "越底 PageDown 须限位在最新（600ms 复检 still={still}，子进程状态 {state:?}）\n[tui-diag] 输出尾字节：\n{tail}\n屏幕：\n{screen}"
+        );
+    }
 
     // 验收 4（字面）：缩放期间草稿不丢失——resize 前输入草稿，resize 后仍在光标行。
     // 注：resize 后「立即慢打」的草稿渲染存在时序抖动（快打＋提交不受影响），

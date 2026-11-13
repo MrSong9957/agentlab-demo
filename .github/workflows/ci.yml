@@ -79,6 +79,17 @@ jobs:
       - name: cargo check
         run: cargo check --locked
       - name: cargo test（全量：单元＋集成＋回归＋E2E）
+        if: runner.os != 'macOS'
+        run: cargo test --workspace --no-fail-fast --locked
+      # [kill-diag]（038 取证，暂驻）：mac 全量串行——SIGKILL 猎杀源二分。
+      # R8/R10 死亡普查实证 TUI 子进程被 SIGKILL（status 9），产品 kill 路径
+      # 全部组作用域（killpg 对独立会话 ESRCH 安全）无法命中；串行后死亡
+      # 消失＝测试内并发互杀（对最终修复定标），仍在＝系统级（统一日志
+      # 捕获给否定/肯定证据）。取证后还原并行。
+      - name: cargo test（mac 取证轮：全量串行二分）
+        if: runner.os == 'macOS'
+        env:
+          RUST_TEST_THREADS: "1"
         run: cargo test --workspace --no-fail-fast --locked
 
   # D1–D3 runner 异常诊断（docs/logs/038-github-actions-ci/2026-10-31-runner-diagnosis-plan.md
