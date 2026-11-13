@@ -4671,7 +4671,7 @@ fn scrollbar_session(tag: &str) -> (PtySession, common::Mock, Vec<TempDir>) {
     // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
     // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
     // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
-#[cfg(not(target_os = "macOS"))]
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s35_tui_scrollbar_renders_and_tracks_position() {
     let (mut pty, mock, _keep) = scrollbar_session("35");
@@ -4788,7 +4788,7 @@ fn s36_tui_scrollbar_drag_browses_and_restores_follow() {
     // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
     // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
     // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
-#[cfg(not(target_os = "macOS"))]
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s37_tui_scrollbar_track_click_pages() {
     let (mut pty, _mock, _keep) = scrollbar_session("37");
@@ -5189,7 +5189,7 @@ impl PtySession {
     // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
     // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
     // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
-#[cfg(not(target_os = "macOS"))]
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s40_tui_drag_select_right_click_copies_via_osc52() {
     let (mut pty, mock, _keep) = selection_session("40");
@@ -5275,7 +5275,7 @@ fn s41b_tui_enter_with_selection_submits_normally() {
     // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
     // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
     // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
-#[cfg(not(target_os = "macOS"))]
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s42_tui_right_click_without_selection_and_composer_click_clears() {
     let (mut pty, _mock, _keep) = selection_session("42");
@@ -5347,7 +5347,7 @@ fn s42_tui_right_click_without_selection_and_composer_click_clears() {
     // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
     // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
     // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
-#[cfg(not(target_os = "macOS"))]
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s43_tui_drag_select_wide_chars_payload_exact() {
     let (mut pty, _mock, _keep) = selection_session("43");
@@ -5379,7 +5379,7 @@ fn s43_tui_drag_select_wide_chars_payload_exact() {
     // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
     // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
     // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
-#[cfg(not(target_os = "macOS"))]
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s44_tui_wheel_keeps_selection_gutter_unchallenged() {
     let (mut pty, _mock, _keep) = selection_session("44");
@@ -5492,7 +5492,7 @@ fn s45_tui_edge_drag_auto_scrolls() {
     // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
     // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
     // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
-#[cfg(not(target_os = "macOS"))]
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s46_tui_selection_copy_injection_neutralized() {
     // 恶意 user 消息：OSC 52 写剪贴板伪装 + CSI + BEL 混入正文
@@ -5566,7 +5566,7 @@ fn s46_tui_selection_copy_injection_neutralized() {
     // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
     // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
     // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
-#[cfg(not(target_os = "macOS"))]
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s47_tui_multiline_wrap_combining_payload_exact() {
     // 多行消息：真实换行＋组合字符；折行消息：长行软折（>200 列）＋emoji
@@ -5669,7 +5669,7 @@ fn s47_tui_multiline_wrap_combining_payload_exact() {
     // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
     // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
     // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
-#[cfg(not(target_os = "macOS"))]
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s48_tui_selection_holds_across_reply_and_ctrl_c_cancels() {
     // 溢出会话（约 62 条）：早期含针文本——PageUp 才有真实位移；延迟回复供两 turn
@@ -5775,7 +5775,7 @@ fn s48_tui_selection_holds_across_reply_and_ctrl_c_cancels() {
     // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
     // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
     // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
-#[cfg(not(target_os = "macOS"))]
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s49_tui_oversize_copy_fails_with_feedback_then_recovers() {
     let oversize = format!("BIG-{}", "x".repeat(100_100));
@@ -6029,7 +6029,7 @@ fn s53_paste_burst_flushes_without_extra_keys() {
     // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
     // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
     // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
-#[cfg(not(target_os = "macOS"))]
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s54_copy_feedback_expires_without_extra_keys() {
     let (mut pty, _mock, _keep) = selection_session("54");
@@ -6849,7 +6849,7 @@ fn s65_detail_browsing_accounts_new_messages_then_submit() {
     // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
     // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
     // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
-#[cfg(not(target_os = "macOS"))]
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s66_f4_enter_opens_page_copy_then_draft_submit() {
     let (mut pty, mock, _keep) = focus_session57("S66", "S66-新回复已收到");
@@ -7047,7 +7047,7 @@ fn s69_esc_cancels_inflight_reply_without_selection() {
     // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
     // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
     // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
-#[cfg(not(target_os = "macOS"))]
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s69b_esc_cancels_with_selection_preserved() {
     let (mut pty, mock, _keep) = cancel_session(
@@ -7630,7 +7630,7 @@ fn s75_esc_with_shortcut_overlay_cancel_and_keep_hints() {
     // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
     // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
     // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
-#[cfg(not(target_os = "macOS"))]
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s76_idle_esc_is_noop_across_states() {
     let cfg = TempDir::new("s76-cfg");
@@ -8824,7 +8824,7 @@ fn s90_m8_line_mode_citation_feedback_updates_usage() {
     // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
     // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
     // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
-#[cfg(not(target_os = "macOS"))]
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s91_tui_update_plan_snapshot_and_resume_consistency() {
     let cfg = TempDir::new("s91-cfg");
