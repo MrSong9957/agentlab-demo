@@ -76,6 +76,14 @@ jobs:
       - name: 安装 ripgrep（Windows）
         if: runner.os == 'Windows'
         run: choco install ripgrep -y --no-progress
+      # [mac-diag]（038 取证，暂驻）：TUI 交互面诊断文件上传（取证后拆除）
+      - name: 上传 mac PTY 诊断（临时）
+        if: runner.os == 'Macos' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-pty-diag
+          path: /tmp/tchat-mac-diag.log
+          if-no-files-found: ignore
       - name: cargo check
         run: cargo check --locked
       - name: cargo test（全量：单元＋集成＋回归＋E2E）
