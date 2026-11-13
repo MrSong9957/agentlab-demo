@@ -1487,9 +1487,9 @@ impl PtySession {
                     .args([&pid.to_string(), "3", "-file", &file])
                     .output();
                 let mut out = std::fs::read_to_string(&file).unwrap_or_default();
-                // 30000：R18 截断 7000 只见主线程——需含 crossterm 唤醒任务线程
-                // 与 tokio worker（判定 use-dev-tty 是否生效、哪条 poll 卡住）
-                out.truncate(30000);
+                // 120000：R18/19 截断只见主线程与首个 worker——需全部 tokio
+                // worker 状态与 crossterm 唤醒任务线程（命名饥饿机制）
+                out.truncate(120000);
                 out
             } else {
                 String::new()
