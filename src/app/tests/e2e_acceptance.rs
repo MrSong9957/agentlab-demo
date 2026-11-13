@@ -3141,36 +3141,7 @@ fn s18_save_during_turn_refused_fast_and_retries_ok() {
     }
     std::thread::sleep(Duration::from_millis(200));
     pty.send_line("/save busy1");
-    // [r24-diag]（038 取证，暂驻）：桥上线后停滞依旧（R23）——无杀等待
-    // （超时清理会先杀进程，sample 扑空）＋存活子进程全量线程栈（120KB）。
-    {
-        let deadline = Instant::now() + WATCHDOG;
-        let mut e = None;
-        loop {
-            pty.feed_screen();
-            if pty.vt.to_string().contains("已保存快照 busy1") {
-                break;
-            }
-            if Instant::now() > deadline {
-                e = Some(format!(
-                    "等待屏幕 已保存快照 busy1 超时（无杀版），屏幕：\n{}",
-                    pty.vt.to_string()
-                ));
-                break;
-            }
-            pty.read_once(50);
-        }
-        if let Some(e) = e {
-            let pid = pty.child.as_ref().map(|c| c.id()).unwrap_or(0);
-            let _ = Command::new("sample")
-                .args([&pid.to_string(), "3", "-file", &format!("/tmp/r24-sample-{pid}.txt")])
-                .output();
-            let mut stacks = std::fs::read_to_string(format!("/tmp/r24-sample-{pid}.txt"))
-                .unwrap_or_default();
-            stacks.truncate(120000);
-            panic!("{e}\n[r24-diag] 存活线程栈：\n{stacks}");
-        }
-    }
+    pty.wait_screen("已保存快照 busy1").unwrap();
     pty.send_line("/exit");
     pty.wait_output("再见!", WATCHDOG).unwrap();
     let (out, status) = pty.finish();

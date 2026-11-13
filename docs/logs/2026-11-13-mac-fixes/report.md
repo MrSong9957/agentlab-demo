@@ -440,3 +440,37 @@ cancel_wait_keeps_process_alive_and_queryable / deadline_survives_cancel
 R20 ubuntu CI proc_session 28/28 全绿佐证 CI runner 无此差异。CI 结果为准。
 
 ## 提交索引（输入架构专项批）
+
+## 输入架构专项结果与根因修正（R21–R25，停下回报）
+
+**R21**：桥首次推送——ubuntu/windows 编译翻车（mac-only cfg 本机不可编译
+验证的两处低级错误：路径多写一层 tui、EventBroker Default windows 分支
+缺 events 绑定）；fc82919 修复。
+**R22**：perf_tiers mac 分支引用比较类型错（同类）；34a1f76 修复。
+**R23（桥首个有效验证轮）**：ubuntu 绿；windows 仅 t18＋a15 新面孔
+（snapshot 空＝a12 同族回环噪声，1 轮观察）；**mac 停滞族依旧**（s18/
+s113/s23/s103_async＋c12 新面孔 1 轮）＝**EventStream 双 waker 假说否定**。
+**R24/R25**：临时 sample 探针（无杀等待版，R24 踩超时先杀坑扑空）取证——
+**R25 全量线程栈（决定性）**：
+- 桥读线程 tchat-tty-events 正常：1282/1288 样本阻塞在 mio kevent 等 tty
+  事件（桥本体无恙）；
+- 主线程 1288/1288 park 于 Condvar（block_on 等根 future）；
+- 4 个 tokio worker 全部闲等（kevent/cvwait），**R19 的 slice_contains
+  自旋者消失**；
+- **3 秒采样窗内 FRAME_TICK=100ms 的 tick 一次都未唤醒主线程**＝tokio
+  timer/任务唤醒事件全部丢失（worker kevent 空）。
+
+**根因修正**：停滞不在 crossterm 也不在 EventStream 结构——**tokio
+multi_thread 运行时在 macOS 的 kqueue driver 跨线程唤醒丢失**（任务
+notify/timer 事件不入 worker；Linux epoll 无此问题）。全部历史现象吻合：
+输入延迟泄洪（等下一次偶然唤醒）＋Ctrl+C 即时生效（SIGINT 中断 kevent
+强制唤醒 worker 顺带泄洪）＋s23 PageUp 延迟重放＋桥/EventStream 无差异。
+
+**R25 windows＝仅 t18**（a15 未再现）；ubuntu 持续绿。
+
+**修复所需**：tokio 运行时级改动（current_thread flavor 或等效——影响
+turn/MCP/UI 全部并发面，行为变化面大）——**超出「输入架构」授权边界，
+按阻断线停下回报**。停滞族证据线已充分（11 轮稳定＋族属明确＝运行时
+唤醒丢失）。
+
+**探针已拆**（r24-diag 标记归零；插桩净保持）。
