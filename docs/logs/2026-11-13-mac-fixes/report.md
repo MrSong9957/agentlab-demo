@@ -88,3 +88,94 @@ s103_mcp_reload、s113、s114a、s18、s23、s73、tls——其中：
 6a7d75a（批 A）→ b3f076f/007fbbf/31325c0/c3db79d（取证设施）→ bafeb3a
 （mac-diag2）→ 45aa5fb（15 门控）→ 3e5b095（cfg 小写修正）→ fd50208/…
 （台账）——PR #7 未合并，等验收。
+
+## 用户裁决（2026-11-13）：mac 收尾口径
+
+13 个 7/7 全红项＝确定性平台分叉，**不适用门控，逐项修**；仅轮换型走
+「≥3 轮轮换实证→§5 门控」。attack×3 夹具 canonicalize 可行，但须保住
+「越锚被拒」测试意图。修完销号、修不动单独举证停下问。
+
+## PR #7 八轮失败集合轮次表（R1–R7 已完，R8=43394402954 进行中）
+
+| 轮 | run | commit | 失败数 | 备注 |
+|---|---|---|---|---|
+| R1 | 43363077628 | 007fbbf | 32 | mac-diag 设施轮 |
+| R2 | 43366154148 | 31325c0 | 32 | upload 条件修正 |
+| R3 | 43369350915 | c3db79d | 32 | ubuntu 也红（插桩轮，已还原） |
+| R4 | 43373035232 | bafeb3a | 31 | mac-diag2 四点插桩 |
+| R5 | 43377431234 | 45aa5fb | 33 | 15 项门控（cfg 大写失效＝未生效）＋c04 新观测 |
+| R6 | 43381070533 | 3e5b095 | 15 | cfg 小写修正，门控生效（剪贴板 12＋渲染 3 消失） |
+| R7 | 43384471070 | b94695a | 16 | e12 新观测 |
+| R8 | 43394402954 | 6b69a36 | ？ | 批 1（44e126c）＋批 2（7270172）＋取证插桩（6b69a36） |
+
+**13 项 7/7 持续红（确定性，非轮换）**：attack01/02/05、bin_pipe、fd5、
+matrix_a、perf_tiers、pty_cancel、s103_reload、s113、s114a、s18、s23、s73、
+tls——跨轮报文逐字节稳定（除 pid/tempdir）。
+
+**轮换型计数（R1–R7）**：p2 4/7（R1/R2/R3/R5）、s103_async 2/7（R2/R4）、
+s106 2/7（R1/R4）、s69 1/7（R3）、c04 1/7（R5）、e12 1/7（R7）——均未达
+「≥3 轮＋族属」门控证据线，继续观察（p2 已够轮次，族属待报文比对）。
+
+## 批 1 修复（44e126c，Linux 定向绿）
+
+1. **attack×3**＝产品「逐组件验证拒绝符号链接组件」×mac 临时目录词法形态
+   （/var→/private/var 系统符号链接）：attack01/05 期望 denied/granted 实得
+   error、attack02 期望 requestable 归因实得符号链接文案——根因均为越锚请求
+   （reqA/outside 是 workspace 锚的兄弟/外部路径）从根起走先撞 /var。
+   **夹具 canonicalize 归一**（root_dir 出口，macOS only；linux 恒等零漂移；
+   windows 不动防 verbatim 分叉）：全部断言逐字不变，越锚拒绝仍按 scope
+   归因（与 linux 同理由），步骤 5 显式 reqA/link 符号链接用例不受影响。
+   安全语义（拒绝＋零弹窗＋零授权）不测自 product 行为变化。
+2. **bin_pipe**＝环境块 cwd 断言词法 vs getcwd 物理形态：environment_block
+   渲染 sources.cwd＝子进程 getcwd() 结果（内核恒返物理路径）——断言侧
+   canonicalize 归一（s6 同法，macOS only）。
+
+## 批 2 修复（7270172，Linux 定向绿）
+
+1. **fd5（产品修复）**：js worker spawn 的 fd 收口块挂
+   `#[cfg(all(linux, x86_64/aarch64/riscv64))]`——macOS 编译期整块剔除，
+   planted 非 CLOEXEC fd 直落 worker（哨兵 7/7）。Darwin 无 close_range；
+   pre_exec 异步信号安全上下文不能 opendir(/dev/fd)（malloc）——
+   getrlimit(RLIMIT_NOFILE) 上界（夹 64K）逐 fd close≥3。close 语义与
+   Linux 分支一致（worker 只留 0/1/2），best-effort 失败不阻断。
+2. **matrix_a（能力前置）**：测试面＝Linux 沙箱设施验证（/proc 扫描、
+   ns/pid 证据链、bwrap/seccomp 探针），mac 无验证对象——前置
+   fs::metadata("/proc/<pid>") 恒败 7/7 同点位；基线轮「通过」实为 job
+   提前收尾未观测。按 attack03/04 bwrap skip 先例做 /proc/self 能力前置；
+   linux 全量不变（windows 文件级 cfg(unix) 不编译）。**注：此处理按
+   「修不动→单独举证」路线走，候选回报时供裁决（若需 mac 平行证据面另立专项）。**
+3. **s103_reload（测试平台化）**：process_alive 读 /proc＝mac 恒 false→
+   存活断言必败＋wait_pid_gone 恒 true 空真——mac 分支改 POSIX
+   kill(pid,0)（EPERM 计存活；僵尸计存活＝/proc 目录语义一致）。
+   mac 侧回收断言由空真转真验证（若产品回收在 mac 有真缺陷将在 R8 显形）。
+4. **s73（测试壳分叉）**：marker 依赖「shell 进程驻留且 argv 含原文」——
+   dash（ubuntu /bin/sh）单命令不尾-exec（本机实验：pgrep 命中）；macOS
+   /bin/sh＝bash sh-mode 尾命令 exec 优化直接替换自身为 sleep（实验：
+   bash 行消失）＝marker 从全部 cmdline 消失、pgrep 前置恒败。末尾补
+   恒真内建 `:`（`sleep 240; : # marker`）——bash 尾命令为内建不 exec 优化，
+   双平台 argv 均保 marker；进程组回收面不变。产品契约（平台 shell 语义）
+   无需变化。
+
+## 修不动候选（单独举证，候选回报时裁决）
+
+- **perf_tiers**：5 次替换窗口峰值 [140,170,170,215,260] 跨轮逐字节稳定
+  ＝macOS 分配器保留语义（不归还页）非泄漏；per-peak 上界断言（≤B0+u×96
+  +128）通过，仅「离散 ≤32 MiB」辅助断言结构性为假。外部无 heap 计量
+  通道（ps/RSS 含分配器保留）。候选：mac 平台资源语义豁免或另立
+  heap-in-use 计量专项。
+- **e12**：R7 首现（1/7）。报文形态＝受限子进程先撞 manual.json 重建写
+  （EFBIG）而非会话追加——静态推理未闭合（manual.json 为何在子进程视角
+  缺失），证据仅 1 轮不足定性，继续观察。
+
+## 取证插桩（6b69a36，暂驻，定位后拆除）
+
+- **tls**：connection.rs 初始化失败附 Debug 链＋mcp_tls 原始 rustls 全往返
+  探针（与 hook 同配置）——区分 reqwest/hyper 层 vs TLS/平台层。
+- **pty_cancel**：超时报文附会话存活/cnt/release——区分「载荷早亡族
+  （python3 解析）」vs「写路径阻塞」。
+- **TUI 族（s18/s113）**：diag_exit_probe——超时后发 Ctrl+C 观察能否退出
+  ＋新增输出，区分「事件循环冻结」vs「仅提交路径失效」；s23 失败附屏幕
+  ＋子进程状态；s114a 的 write_bounded EIO 附子进程状态。
+- **已拆**：ci.yml mac-diag upload artifact 步骤（产品诊断文件通道已不存在）。
+- **待拆**：e2e_acceptance watchdog_start/log_direct（038 D-mac 轮遗留）＋
+  本轮全部暂驻标记。
