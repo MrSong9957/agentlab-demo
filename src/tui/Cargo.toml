@@ -103,13 +103,10 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Globali
 
 # 038-CI：clock_format/screen_reader/system_motion 的 macOS 分支依赖此前未声明
 #（与 windows-sys 同类缺口），声明对照上游 97771b1 codex-rs/tui 原样补齐。
-# 038 macOS CI（R11–R16 取证）：mio/kqueue 事件源在 mac PTY 丢唤醒——主线程
-# 99.7% park 于 Condvar（sample 线程栈实证），输入滞留内核 tty 缓冲直到下一
-# 个输入字节才泄洪（延迟重放形态）。mac 切 use-dev-tty 备用事件源（/dev/tty
-# + poll(2)，crossterm 为 tty 事件问题提供的经典回退）；经 TIOCSCTTY 会话
-# /dev/tty 即测试 PTY 从设备，语义等价。仅 mac 编译生效，linux/windows 零变化。
+# 038 macOS CI：曾试 use-dev-tty 备用事件源（R18–R20 三轮实证对 EventStream
+# 唤醒结构无效）——已撤；事件源修复改为 threaded_event_source（读线程＋通道桥，
+# 与后端无关），crossterm 依赖回归 main 原样。
 [target.'cfg(target_os = "macos")'.dependencies]
-crossterm = { version = "0.29.0", features = ["bracketed-paste", "event-stream", "use-dev-tty"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAccessibility", "NSWorkspace"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSDateFormatter", "NSFormatter", "NSLocale", "NSString"] }
 

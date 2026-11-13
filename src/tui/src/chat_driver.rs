@@ -28,6 +28,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::Event as CrosstermEvent;
+// 038 macOS CI：EventStream 在 mac 的「后台唤醒任务＋双 waker」结构触发输入
+// 延迟数十秒泄洪（R11–R20 取证）——mac 换专属读线程事件源（详见
+// threaded_event_source 模块文档）；linux/windows 保持 EventStream 原路径。
+#[cfg(target_os = "macos")]
+use crate::tui::tui::threaded_event_source::ThreadedEventSource;
+#[cfg(not(target_os = "macos"))]
 use crossterm::event::EventStream;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -397,6 +403,9 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
         pane.set_task_running(true);
         (hooks.spawn_turn)(submission, turn_tx.clone());
     }
+    #[cfg(target_os = "macos")]
+    let mut events = ThreadedEventSource::new();
+    #[cfg(not(target_os = "macos"))]
     let mut events = EventStream::new();
     let mut ticker = tokio::time::interval(FRAME_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

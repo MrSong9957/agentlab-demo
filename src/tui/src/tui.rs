@@ -72,6 +72,8 @@ mod job_control;
 mod keyboard_modes;
 mod link_pointer;
 mod notification_preview;
+#[cfg(target_os = "macos")]
+pub(crate) mod threaded_event_source;
 #[cfg(test)]
 #[path = "tui/owned_screen_tests.rs"]
 mod owned_screen_tests;
