@@ -21,7 +21,7 @@
 // [mac-diag]（038 macOS 取证，暂驻；取证后拆除）：e2e_diag 开关（env
 // TCHAT_MAC_DIAG）控制的诊断文件通道——mac runner 上 TUI 交互面（鼠标/
 // 渲染/退出链）取证，子进程 stderr 不进测试捕获故走文件。
-fn mac_diag(msg: &str) {
+pub(crate) fn mac_diag(msg: &str) {
     if std::env::var("TCHAT_MAC_DIAG").is_err() {
         return;
     }
