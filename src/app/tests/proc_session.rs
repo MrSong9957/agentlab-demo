@@ -7,7 +7,7 @@ mod common;
 use common::cmd_builder;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1364,7 +1364,17 @@ fn pty_cancel_stops_further_input_submission() {
             break; // 发送侧进度冻结＝写操作在等待
         }
         prev_sent = now_sent;
-        assert!(Instant::now() < deadline, "背压就绪超时（sent={now_sent}）");
+        if Instant::now() >= deadline {
+            // [pty-diag3]（038 取证，暂驻）：sent=0 形态区分——会话已消失
+            // （None）＝载荷进程早亡（python3 解析/启动失败族）；会话在而写
+            // 零进展＝写路径阻塞。
+            let present = mgr.session_input_written(&sid).is_some();
+            panic!(
+                "背压就绪超时（sent={now_sent} 会话存活={present} cnt={:?} release存在={:?}）",
+                std::fs::read_to_string(&cnt).ok(),
+                Path::new(&release).exists()
+            );
+        }
         std::thread::sleep(Duration::from_millis(200));
     }
     let blocked_at = sent();

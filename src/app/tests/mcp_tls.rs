@@ -230,6 +230,8 @@ fn tls_https_round_trip_with_injected_root() {
         .expect("协议版本")
         .with_root_certificates(roots)
         .with_no_client_auth();
+    // [tls-diag-mac]（取证，暂驻）：hook 闭包 move config，探针先行克隆
+    let probe_config = config.clone();
     terminal_chat::mcp::transport::set_client_builder_hook_for_tests(std::sync::Arc::new(
         move |b| {
             let mut cfg = config.clone();
@@ -241,6 +243,54 @@ fn tls_https_round_trip_with_injected_root() {
         },
     ));
     let (url, shutdown) = start_tls_server();
+    // [tls-diag-mac]（038 取证，暂驻）：绕过 reqwest/hyper 的原始 rustls 客户端
+    // 全往返（与 hook 同一 ClientConfig）。此处成功＋产品客户端失败＝问题在
+    // reqwest/hyper/产品装配层；此处失败＝TLS/平台层问题（rustls 精确报错）。
+    {
+        use std::io::{Read as _, Write as _};
+        let hostport = url.trim_start_matches("https://").split('/').next().unwrap().to_string();
+        let (host, port_str) = hostport.rsplit_once(':').unwrap();
+        let host = host.to_string();
+        let port: u16 = port_str.parse().unwrap();
+        let round = (|| -> Result<usize, String> {
+            let server_name = host
+                .try_into()
+                .map_err(|e| format!("server name：{e:?}"))?;
+            let mut conn = rustls::ClientConnection::new(
+                Arc::new(probe_config.clone()),
+                server_name,
+            )
+            .map_err(|e| format!("ClientConnection：{e:?}"))?;
+            let mut sock =
+                std::net::TcpStream::connect(hostport.as_str())
+                    .map_err(|e| format!("TCP：{e}"))?;
+            let mut tls = rustls::Stream::new(&mut conn, &mut sock);
+            let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}"#;
+            let req = format!(
+                "POST /mcp HTTP/1.1\r\nHost: {hostport}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            tls.write_all(req.as_bytes())
+                .map_err(|e| format!("TLS write：{e}"))?;
+            let _ = tls.flush();
+            let mut total = 0usize;
+            let mut buf = [0u8; 4096];
+            loop {
+                match tls.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => total += n,
+                    Err(e) => return Err(format!("TLS read @{total}：{e}")),
+                }
+            }
+            Ok(total)
+        })();
+        eprintln!(
+            "[tls-diag-mac] raw rustls round trip: {}",
+            round
+                .map(|n| format!("OK（{n} bytes 响应）"))
+                .unwrap_or_else(|e| format!("FAIL：{e}"))
+        );
+    }
     let ctx = {
         let mut c = setup(&url);
         c._shutdown = shutdown.clone();

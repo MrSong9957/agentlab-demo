@@ -333,7 +333,12 @@ impl McpConnection {
         let service =
             serve_client_with_lifecycle(handler, transport, ClientLifecycleMode::Initialize)
                 .await
-                .map_err(|e| connect_err(format!("初始化失败：{e}")))?;
+                .map_err(|e| {
+                    // [tls-diag-mac]（038 取证，暂驻）：透传 Debug 形态——Display
+                    // 只露顶层「error sending request」，TLS 层真因（alert／io
+                    // error）在 Debug 的嵌套字段里（Windows 取证同法）。
+                    connect_err(format!("初始化失败：{e}（debug={e:?}）"))
+                })?;
         // 版本与能力校验：不兼容版本，或既未声明 tools 也未声明 resources
         // 能力的服务器记为不可用（023 §3.2：两种能力独立判断）。
         let info = service
