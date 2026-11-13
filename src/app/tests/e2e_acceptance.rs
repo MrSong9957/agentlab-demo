@@ -3141,7 +3141,18 @@ fn s18_save_during_turn_refused_fast_and_retries_ok() {
     }
     std::thread::sleep(Duration::from_millis(200));
     pty.send_line("/save busy1");
-    pty.wait_screen("已保存快照 busy1").unwrap();
+    // [r24-diag]（038 取证，暂驻）：桥上线后停滞依旧（R23）——对存活子进程
+    // 采全量线程栈定位自旋者完整符号（120KB 截断）。
+    if let Err(e) = pty.wait_screen_timeout("已保存快照 busy1", WATCHDOG) {
+        let pid = pty.child.as_ref().map(|c| c.id()).unwrap_or(0);
+        let _ = Command::new("sample")
+            .args([&pid.to_string(), "3", "-file", &format!("/tmp/r24-sample-{pid}.txt")])
+            .output();
+        let mut stacks = std::fs::read_to_string(format!("/tmp/r24-sample-{pid}.txt"))
+            .unwrap_or_default();
+        stacks.truncate(120000);
+        panic!("{e}\n[r24-diag] 存活线程栈：\n{stacks}");
+    }
     pty.send_line("/exit");
     pty.wait_output("再见!", WATCHDOG).unwrap();
     let (out, status) = pty.finish();
