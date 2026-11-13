@@ -9780,13 +9780,27 @@ fn s114a_tui_question_window_rejects_image_paste() {
     assert!(no_attachment, "问询窗口不建附件");
     let no_clip_hint = pty.probe_absent("剪贴板图片", Duration::from_millis(300));
     assert!(no_clip_hint, "不触发剪贴板提示（按键归问询视图）");
-    // 收尾：显式杀清（问询期间按键不建附件、不触发剪贴板读取已断言为本用
-    // 例核心；probe_absent 无杀副作用＝子进程仍活，finish 会等活进程退出——
-    // 退出码不属本用例验证目标，杀清收尾，Drop 分离承接）
+    // 收尾：显式杀清＋排干等待（问询期间按键不建附件、不触发剪贴板读取已
+    // 断言为本用例核心；probe_absent 无杀副作用＝子进程仍活，finish 会等活
+    // 进程退出——退出码不属本用例验证目标。杀清后按 finish 同款排干等待：
+    // 不排干则 E 态子进程阻塞在退出写上、wait 无限等（24c8ca3 教训＋R13
+    // CI 实证挂死）；有界 10s 超限交 Drop 分离承接）
     pty.send_raw(b"\x1b");
     std::thread::sleep(Duration::from_millis(800));
     let _ = pty.child.as_mut().map(|c| c.kill());
-    let _ = pty.child.as_mut().map(|c| c.wait());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        pty.read_once(20);
+        let gone = pty
+            .child
+            .as_mut()
+            .and_then(|c| c.try_wait().ok())
+            .flatten()
+            .is_some();
+        if gone || Instant::now() >= deadline {
+            break;
+        }
+    }
 }
 
 // ---------- S21：021 send_message_to_user_async（A15/A04 L3 行式管道）----------
