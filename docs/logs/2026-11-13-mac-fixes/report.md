@@ -388,3 +388,55 @@ matrix_a、s103_reload、s73、pty_cancel、tls、s114a；**p2 §5 mac 门控**
 s103_async 5/10（停滞族同源）。
 
 **linux R20＝绿；windows R20＝仅 t18（豁免不变）**。
+
+## 输入架构专项（裁决①执行，2026-11-13）
+
+**方案**：`ThreadedEventSource`（src/tui/src/tui/threaded_event_source.rs，
+cfg(target_os = "macos") 编译）——独立读线程以 crossterm 公共 API
+poll(100ms)+read() 串行采样，事件经 tokio mpsc 通道供 select! 消费；
+替代点＝chat_driver 事件多路与 EventBroker 的 CrosstermEventSource 两处
+EventStream 构造（产品输入路径唯一活跃点为前者，后者惰性）。
+
+**等价论证（逐条）**：
+1. 事件源/解析器/事件类型/顺序：同一 crossterm 全局 reader＋公共 API
+   poll/read（EventStream 内部同路径）——语义一致；
+2. EOF/错误：Err 入通道→消费方既有 Some(Err) 路径（EventStream 同形态）；
+3. Drop：stop 标志＋rx drop 双保险，线程 ≤100ms（poll 超时窗口）内退出
+   （EventStream shutdown+waker 同形态）；
+4. pause/resume（broker drop/recreate）：桥 drop＝线程退出＝不再读 stdin
+   （放手 stdin 语义一致）；resume 新建＝惰性重建（全局 reader 单例零成本）；
+5. 唤醒：mpsc send→recv 直接唤醒（单跳，不经 EventStream 双 waker＋tokio
+   调度往返）＝修复本体；
+6. linux/windows：cfg 隔离（linux 编译路径零变化＝产物与 main 一致；
+   windows 的 WindowsKeySequence<EventStream> 包装原样——generic Stream
+   bound 兼容性已核）；
+7. use-dev-tty 撤销（R18–R20 三轮实证对 EventStream 无效），crossterm
+   依赖与 Cargo.lock 回归 main 原样（单一变量＝EventStream→桥）。
+
+**资源族**：
+- perf_tiers：离散辅助断言（≤32 MiB）cfg(not(macos)) 收口——mac 分配器
+  保留语义下 RSS 无法区分「保留 vs 泄漏」（峰形 R1–R20 逐字节一致）；
+  per-peak 上界主断言（≤B0＋u×96＋128）三平台不变＝真实契约未松。
+- ts30：本轮再观察（1/9，未达门控线不动代码）。
+
+**拆桩还原（git grep 标记＝0）**：ci.yml 并行还原；e2e watchdog_start/
+log_direct/ps_snapshot/diag_exit_probe/wait_screen_nokill_diag/sample 全拆；
+s18/s113/s103_async/s23 失败等待还原原版断言；mcp_tls 原始 rustls 探针
+＋服务端事件捕获还原（set_nonblocking 修复本体保留）；connection.rs
+debug 链透传还原；clipboard_copy [clip-diag] 拆（漏网残留）；proc_session
+[pty-diag] 报文标记拆。保留＝修复本体：probe_absent（s114a 无杀缺席探针）
+＋排干收尾＋INPUT_CHUNK 512＋INPUT 注释依据。
+
+**本轮改动面**：threaded_event_source.rs（新）＋chat_driver/event_stream/
+tui.rs 接线＋Cargo.toml 注释＋Cargo.lock 还原＋session_perf 断言修正＋
+拆桩 6 文件＋ci.yml。
+
+## 本机环境观察（非回归记录）
+
+cancel_wait_keeps_process_alive_and_queryable / deadline_survives_cancel
+在本机（TCHAT_SANDBOX=1 部署注入态）间歇红——stash 对照基线同样间歇红
+（基线 4 跑 3 红）＝「300ms/250ms cancel 置位窗 vs bwrap 确认闸」的本机
+竞态临界，与输入架构改动无关（INPUT_CHUNK 在写入路径、启动确认面零改动）；
+R20 ubuntu CI proc_session 28/28 全绿佐证 CI runner 无此差异。CI 结果为准。
+
+## 提交索引（输入架构专项批）
