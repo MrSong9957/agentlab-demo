@@ -848,10 +848,7 @@ fn s103_async_publish_f6_answer_enters_next_request_and_keeps_draft() {
     pty.send_raw(b"\x1b[17~"); // F6（xterm 转义序列）
     pty.wait_screen("S103-报告面向谁").unwrap();
     pty.send_raw(b"\r");
-    // [tui-diag]（取证，暂驻）：无杀等待——存活态 sample 线程栈
-    if let Err(e) = pty.wait_screen_nokill_diag("Questions 1/1 answered", WATCHDOG) {
-        pty.diag_exit_probe(&e);
-    }
+    pty.wait_screen("Questions 1/1 answered").unwrap();
     // 回答已受理；解除独立命令的阻塞，批收尾后回答进入下一请求
     std::fs::write(&gate, b"1").unwrap();
     pty.wait_screen("S103-完成").unwrap();
@@ -1072,16 +1069,6 @@ fn s106_resume_answered_async_question_displays_without_new_requests() {
 /// 跳转），含空格文本在原始字节流中不连续——新增 wait_screen 在 VT100 解析后
 /// 的屏幕文本上等待；send_line 改以 CR 结尾（TUI raw mode 下 Enter＝CR，
 /// rustyline 阶段 CR 经 ICRNL 同样按行结束）。
-/// [tui-diag]（038 取证，暂驻）：全进程表快照（含 pgid/sess/etime/命令行）
-/// ——死亡时点抓「谁在场」：并发测试的子进程、遗留孤儿、猎杀者候选。
-fn ps_snapshot() -> String {
-    Command::new("ps")
-        .args(["-axo", "pid,ppid,pgid,sess,stat,etime,command"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_else(|_| "(ps 失败)".into())
-}
-
 struct PtySession {
     master: File,
     child: Option<Child>,
@@ -1096,91 +1083,7 @@ struct PtySession {
 static PTY_NAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl PtySession {
-    /// 038 D-mac 取证插桩（根因定位后移除）：绕过 libtest 输出捕获的直写标记
-    /// ＋进程/线程状态采样线程。挂死形态＝整目标零输出（连看门狗 panic 都没有）
-    /// ——需要不依赖测试框架的证据通道。
-    fn log_direct(msg: &str) {
-        let mut b = msg.as_bytes();
-        while !b.is_empty() {
-            let n = unsafe { libc::write(2, b.as_ptr().cast(), b.len()) };
-            if n <= 0 {
-                break;
-            }
-            b = &b[n as usize..];
-        }
-    }
-
-    fn watchdog_start() {
-        static START: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        START.get_or_init(|| {
-            let started = Instant::now();
-            std::thread::spawn(move || loop {
-                // [tui-diag]（取证，暂驻）：60s→15s 提频——死亡时间线普查
-                std::thread::sleep(Duration::from_secs(15));
-                let t = started.elapsed().as_secs();
-                let me = std::process::id();
-                let ps_all = Command::new("ps")
-                    .args(["-axo", "pid,ppid,stat,etime,command"])
-                    .output();
-                let filtered = ps_all.map(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .lines()
-                        .filter(|l| {
-                            l.contains("terminal-chat")
-                                || l.contains("e2e_acceptance")
-                                || l.contains("COMMAND")
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                });
-                let threads = Command::new("ps")
-                    .args(["-M", "-p", &me.to_string()])
-                    .output();
-                // E 态（退出中）子进程堆栈采样：`sample` 直接给出阻塞调用栈
-                // （产品退出路径的精确挂点——038 D-mac 三轮取证）
-                let mut sample_out = String::new();
-                let mut sample_done = false;
-                if let Ok(all) = &filtered {
-                    for line in all.lines() {
-                        if line.contains("(terminal-chat)") && line.contains(" Es ") {
-                            let pid = line.split_whitespace().next().unwrap_or("").to_string();
-                            if pid.is_empty() {
-                                continue;
-                            }
-                            let out = Command::new("sample")
-                                .args([&pid, "2", "-file", &format!("/tmp/sample-{pid}.txt")])
-                                .output();
-                            let stacks = std::fs::read_to_string(format!("/tmp/sample-{pid}.txt"))
-                                .unwrap_or_default();
-                            sample_out.push_str(&format!(
-                                "[sample {pid}] exit={}\n{}\n",
-                                out.map(|o| o.status.code()).unwrap_or(None).map(|c| c.to_string()).unwrap_or_else(|| "None".into()),
-                                &stacks[..stacks.len().min(4000)]
-                            ));
-                            sample_done = true;
-                        }
-                    }
-                }
-                let _ = sample_done;
-                Self::log_direct(&format!(
-                    "[e2e-watch] t={t}s\n[ps -axo 过滤]\n{}\n[ps -M 自身线程]\n{}\n{}\n",
-                    filtered.as_deref().unwrap_or("(ps 失败)"),
-                    threads
-                        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                        .unwrap_or_else(|_| "(ps -M 失败)".into()),
-                    sample_out
-                ));
-            });
-        });
-    }
-
     fn spawn(mut cmd: Command) -> PtySession {
-        Self::watchdog_start();
-        let thread_name = std::thread::current()
-            .name()
-            .unwrap_or("(unnamed)")
-            .to_string();
-        Self::log_direct(&format!("[e2e-spawn] {thread_name}\n"));
         unsafe {
             let master_fd = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
             assert!(master_fd >= 0, "posix_openpt 失败：{}", std::io::Error::last_os_error());
@@ -1288,24 +1191,7 @@ impl PtySession {
         }
     }
 
-    /// [tui-diag]（038 取证，暂驻）：无 kill 副作用的屏幕等待——超时不杀
-    /// 子进程，改由调用方在存活态采样（R12 实证：wait_screen_timeout 超时
-    /// 路径「只 kill 不 wait」＝僵尸态使 sample 探针失效）。
-    fn wait_screen_nokill_diag(&mut self, needle: &str, timeout: Duration) -> Result<(), String> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            self.feed_screen();
-            if self.vt.to_string().contains(needle) {
-                return Ok(());
-            }
-            if Instant::now() > deadline {
-                return Err(format!("等待屏幕 {:?} 超时（无杀清理版）", needle));
-            }
-            self.read_once(50);
-        }
-    }
-
-    /// [tui-diag]（038 取证，暂驻）：「预期不出现」的有界探针——read_once
+    /// 「预期不出现」的有界探针——read_once
     /// 轮询 window 后直接查屏幕，**无 kill 副作用**（wait_screen_timeout 的
     /// 超时路径会杀子进程；s114a 实证：两个缺席断言顺手杀子进程，后续
     /// Esc 写入在 mac 撞 EIO——linux master 写死从端静默成功＝两平台分叉）。
@@ -1408,14 +1294,8 @@ impl PtySession {
                 } else if n < 0 {
                     let err = std::io::Error::last_os_error();
                     if err.kind() != std::io::ErrorKind::WouldBlock {
-                        let state = self
-                            .child
-                            .as_mut()
-                            .and_then(|c| c.try_wait().ok())
-                            .flatten();
                         panic!(
-                            "PTY write 失败：{err}（子进程状态 {state:?}）\n[tui-diag] 死亡时点全进程表：\n{}\n{}",
-                            ps_snapshot(),
+                            "PTY write 失败：{err}\n{}",
                             String::from_utf8_lossy(&self.captured)
                         );
                     }
@@ -1427,102 +1307,6 @@ impl PtySession {
     /// 发送原始字节（如 Ctrl+C 的 0x03，不附加换行）。
     fn send_raw(&mut self, bytes: &[u8]) {
         self.write_bounded(bytes);
-    }
-
-    /// [tui-diag]（038 取证，暂驻）：屏幕等待超时后的活性探针——顺序＝分类
-    /// （Z 打字面→\r 提交面，屏幕差指纹）→ sample 线程栈（存活态）→ Ctrl+C
-    /// 退出面（R15 教训：\x03 先行会正常退出应用、后续探针全部落空）。
-    fn diag_exit_probe(&mut self, err: &str) -> ! {
-        let before = self.captured.len();
-        // ① 分类探针：Z＝打字面（composer 应追加 Z），\r＝提交面（应触发
-        //    submit→执行/拒绝渲染）。屏幕前后差进报文，指纹区分三态。
-        self.feed_screen();
-        let before_screen = self.vt.to_string();
-        let mut data: &[u8] = b"Z";
-        while !data.is_empty() {
-            let n =
-                unsafe { libc::write(self.master.as_raw_fd(), data.as_ptr().cast(), data.len()) };
-            if n <= 0 {
-                break;
-            }
-            data = &data[n as usize..];
-        }
-        let dl = Instant::now() + Duration::from_millis(800);
-        while Instant::now() < dl {
-            self.read_once(100);
-        }
-        let after_z = self.vt.to_string();
-        let mut data: &[u8] = b"\r";
-        while !data.is_empty() {
-            let n =
-                unsafe { libc::write(self.master.as_raw_fd(), data.as_ptr().cast(), data.len()) };
-            if n <= 0 {
-                break;
-            }
-            data = &data[n as usize..];
-        }
-        let dl = Instant::now() + Duration::from_millis(1200);
-        while Instant::now() < dl {
-            self.read_once(100);
-        }
-        let after_enter = self.vt.to_string();
-        let classify = format!(
-            "Z 前含 Z？{} → Z 后含 Z？{} → \\r 后屏幕变？{}",
-            before_screen.contains('Z'),
-            after_z.contains('Z'),
-            after_enter != after_z
-        );
-        // ② 存活采样线程栈（定位阻塞点；分类探针的 Z/\r 可能已改变状态，栈
-        //    采样反映探针后时点）。
-        let mut exited: Option<std::process::ExitStatus> = None;
-        if let Some(c) = self.child.as_mut() {
-            if let Ok(Some(st)) = c.try_wait() {
-                exited = Some(st);
-            }
-        }
-        let stacks = if exited.is_none() {
-            if let Some(pid) = self.child.as_ref().map(|c| c.id()) {
-                let file = format!("/tmp/tchat-sample-{pid}.txt");
-                let _ = Command::new("sample")
-                    .args([&pid.to_string(), "3", "-file", &file])
-                    .output();
-                let mut out = std::fs::read_to_string(&file).unwrap_or_default();
-                // 120000：R18/19 截断只见主线程与首个 worker——需全部 tokio
-                // worker 状态与 crossterm 唤醒任务线程（命名饥饿机制）
-                out.truncate(120000);
-                out
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        };
-        // ③ Ctrl+C 退出面（收尾探针——应用若健康即正常退出 status 0）。
-        let start = before.min(self.captured.len());
-        let mut data: &[u8] = b"\x03";
-        while !data.is_empty() {
-            let n =
-                unsafe { libc::write(self.master.as_raw_fd(), data.as_ptr().cast(), data.len()) };
-            if n <= 0 {
-                break;
-            }
-            data = &data[n as usize..];
-        }
-        let deadline = Instant::now() + Duration::from_secs(4);
-        while Instant::now() < deadline {
-            self.read_once(100);
-            if let Some(c) = self.child.as_mut() {
-                if let Ok(Some(st)) = c.try_wait() {
-                    exited = Some(st);
-                    break;
-                }
-            }
-        }
-        let new_output = String::from_utf8_lossy(&self.captured[start..]).to_string();
-        panic!(
-            "{err}\n[tui-diag] 分类探针：{classify}\n[tui-diag] Ctrl+C 退出面：exit={exited:?} 探针期新增输出={new_output:?}\n[tui-diag] 死亡时点全进程表：\n{}\n[tui-diag] 存活线程栈（sample，分类前时点）：\n{stacks}",
-            ps_snapshot()
-        );
     }
 
     /// 017：真实缩放＋测试侧屏幕同步——在既有 [`PtySession::resize`]（TIOCSWINSZ
@@ -3357,10 +3141,7 @@ fn s18_save_during_turn_refused_fast_and_retries_ok() {
     }
     std::thread::sleep(Duration::from_millis(200));
     pty.send_line("/save busy1");
-    // [tui-diag]（取证，暂驻）：无杀等待——存活态 sample 线程栈（定位输入停滞）
-    if let Err(e) = pty.wait_screen_nokill_diag("已保存快照 busy1", WATCHDOG) {
-        pty.diag_exit_probe(&e);
-    }
+    pty.wait_screen("已保存快照 busy1").unwrap();
     pty.send_line("/exit");
     pty.wait_output("再见!", WATCHDOG).unwrap();
     let (out, status) = pty.finish();
@@ -3839,23 +3620,10 @@ fn s23_tui_scroll_limits_short_history_and_resize() {
         pty.send_raw(b"\x1b[6~");
         pty.read_once(120);
     }
-    if !pty.screen().contains("S23-R2-L29") {
-        // [tui-diag]（取证，暂驻）：600ms 复检区分「瞬帧」与「真实上滚态」
-        pty.read_once(600);
-        let still = pty.screen().contains("S23-R2-L29");
-        let tail_start = pty.captured.len().saturating_sub(1600);
-        let tail = String::from_utf8_lossy(&pty.captured[tail_start..]).to_string();
-        let screen = pty.screen();
-        // R11 复检 still=false＝真实上滚态＋输入已被处理——与 s18「输入永久
-        // 停滞」统一为输入停顿两副面孔（停顿期按键排队、恢复后按序重放）。
-        // 走 diag_exit_probe：存活子进程 sample 线程栈定位阻塞点。
-        if !still {
-            let err = format!(
-                "越底 PageDown 须限位在最新（600ms 复检仍不在底部＝真实上滚态）\n[tui-diag] 输出尾字节：\n{tail}\n屏幕：\n{screen}"
-            );
-            pty.diag_exit_probe(&err);
-        }
-    }
+    assert!(
+        pty.screen().contains("S23-R2-L29"),
+        "越底 PageDown 须限位在最新"
+    );
 
     // 验收 4（字面）：缩放期间草稿不丢失——resize 前输入草稿，resize 后仍在光标行。
     // 注：resize 后「立即慢打」的草稿渲染存在时序抖动（快打＋提交不受影响），
@@ -9721,10 +9489,7 @@ fn s113_tui_cancel_after_history_keeps_image_once() {
     pty.send_raw(b"next");
     std::thread::sleep(Duration::from_millis(250));
     pty.send_raw(b"\r");
-    // [tui-diag]（取证，暂驻）：无杀等待——存活态 sample 线程栈
-    if let Err(e) = pty.wait_screen_nokill_diag("S113-第二轮完成", Duration::from_secs(10)) {
-        pty.diag_exit_probe(&e);
-    }
+    pty.wait_screen_timeout("S113-第二轮完成", Duration::from_secs(10)).unwrap();
     // next 轮请求（首个索引）：gated 响应在取消后已被消费丢弃
     let body: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
     let urls: Vec<&str> = body["messages"]

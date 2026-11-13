@@ -111,21 +111,10 @@ fn copy_to_clipboard(
         // Never contact WSLg before trying Windows: even native setup can block forever.
         let clipboard = (!environment.wsl_session).then(arboard::Clipboard::new);
         move |text: &str, html: Option<&str>| {
-            // [clip-diag]（038 macOS 取证，暂驻）：Clipboard::new 的耗时与错误
-            // ——验证「无 GUI 会话挂起」假设（2026-11-13 调研报告批 C）。
-            let started = std::time::Instant::now();
-            std::eprintln!("[clip-diag] Clipboard::new begin");
             let clipboard = match clipboard {
-                Some(clipboard) => clipboard.map_err(|e| {
-                    std::eprintln!(
-                        "[clip-diag] Clipboard::new err after {:?}: {e}",
-                        started.elapsed()
-                    );
-                    format!("clipboard unavailable: {e}")
-                })?,
+                Some(clipboard) => clipboard.map_err(|e| format!("clipboard unavailable: {e}"))?,
                 None => wsl::native_clipboard()?,
             };
-            std::eprintln!("[clip-diag] Clipboard::new ok after {:?}", started.elapsed());
             arboard_copy(clipboard, text, html)
         }
     };

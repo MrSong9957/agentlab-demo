@@ -84,9 +84,7 @@ fn respond(req: &str) -> Vec<u8> {
 }
 
 /// 线程版 TLS/1.1 最小服务器：每连接一个请求（无池复用），Connection: close。
-/// 返回 (url, shutdown, conn_events)——conn_events＝服务端连接线程的关闭原因
-/// 捕获（[tls-diag-mac] 038 取证，暂驻）。
-fn start_tls_server() -> (String, Arc<AtomicBool>, Arc<Mutex<Vec<String>>>) {
+fn start_tls_server() -> (String, Arc<AtomicBool>) {
     use rustls::pki_types::pem::PemObject;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let _ = provider.as_ref().clone().install_default();
@@ -107,8 +105,6 @@ fn start_tls_server() -> (String, Arc<AtomicBool>, Arc<Mutex<Vec<String>>>) {
     let url = format!("https://127.0.0.1:{}/mcp", listener.local_addr().unwrap().port());
     let shutdown = Arc::new(AtomicBool::new(false));
     let flag = shutdown.clone();
-    let conn_events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let events = conn_events.clone();
     std::thread::spawn(move || {
         listener.set_nonblocking(true).ok();
         loop {
@@ -120,9 +116,8 @@ fn start_tls_server() -> (String, Arc<AtomicBool>, Arc<Mutex<Vec<String>>>) {
                 continue;
             };
             let config = config.clone();
-            let events = events.clone();
             std::thread::spawn(move || {
-                // 038 macOS CI 实证（R9/R10 服务端捕获）：BSD 语义下 accept 的
+                // 038 macOS CI（R9/R10 服务端捕获实证）：BSD 语义下 accept 的
                 // socket 继承监听器的 O_NONBLOCK（Linux 不继承）——服务端阻塞式
                 // read 在 mac 撞 EAGAIN（os error 35）被当致命错关闭连接＝客户端
                 // 「EOF 无 close_notify」。accept 后显式恢复阻塞语义，两端平台
@@ -131,10 +126,7 @@ fn start_tls_server() -> (String, Arc<AtomicBool>, Arc<Mutex<Vec<String>>>) {
                 stream.set_nonblocking(false).expect("恢复阻塞语义");
                 let mut conn = match rustls::ServerConnection::new(config) {
                     Ok(c) => c,
-                    Err(e) => {
-                        events.lock().unwrap().push(format!("ServerConnection 构造：{e:?}"));
-                        return;
-                    }
+                    Err(_) => return,
                 };
                 let mut tls = rustls::Stream::new(&mut conn, &mut stream);
                 // 读一个完整 HTTP 请求：header 终止符＋Content-Length 定长 body。
@@ -142,17 +134,7 @@ fn start_tls_server() -> (String, Arc<AtomicBool>, Arc<Mutex<Vec<String>>>) {
                 let header_end = loop {
                     let mut tmp = [0u8; 4096];
                     match tls.read(&mut tmp) {
-                        Ok(0) => {
-                            events.lock().unwrap().push(format!(
-                                "服务端读 EOF（已收 {}B）",
-                                buf.len()
-                            ));
-                            return;
-                        }
-                        Err(e) => {
-                            events.lock().unwrap().push(format!("服务端读错误：{e}"));
-                            return;
-                        }
+                        Ok(0) | Err(_) => return,
                         Ok(n) => buf.extend_from_slice(&tmp[..n]),
                     }
                     if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -174,45 +156,25 @@ fn start_tls_server() -> (String, Arc<AtomicBool>, Arc<Mutex<Vec<String>>>) {
                 while buf.len() < header_end + content_length {
                     let mut tmp = [0u8; 4096];
                     match tls.read(&mut tmp) {
-                        Ok(0) => {
-                            events.lock().unwrap().push(format!(
-                                "服务端读 EOF（body 期，已收 {}B）",
-                                buf.len()
-                            ));
-                            return;
-                        }
-                        Err(e) => {
-                            events.lock().unwrap().push(format!("服务端读错误：{e}"));
-                            return;
-                        }
+                        Ok(0) | Err(_) => return,
                         Ok(n) => buf.extend_from_slice(&tmp[..n]),
                     }
                 }
                 let body = buf[header_end..header_end + content_length].to_vec();
                 let response = respond(&String::from_utf8_lossy(&body));
-                if let Err(e) = tls.write_all(&response) {
-                    events
-                        .lock()
-                        .unwrap()
-                        .push(format!("服务端写响应失败：{e}"));
-                    return;
-                }
+                let _ = tls.write_all(&response);
                 let _ = tls.flush();
                 tls.conn.send_close_notify();
                 // close_notify 必须真正写出（complete_io），否则客户端视为 TLS 截断。
                 while tls.conn.wants_write() {
-                    if let Err(e) = tls.conn.complete_io(&mut tls.sock) {
-                        events
-                            .lock()
-                            .unwrap()
-                            .push(format!("服务端 complete_io 失败：{e}"));
+                    if tls.conn.complete_io(&mut tls.sock).is_err() {
                         break;
                     }
                 }
             });
         }
     });
-    (url, shutdown, conn_events)
+    (url, shutdown)
 }
 
 struct TlsCtx {
@@ -274,8 +236,6 @@ fn tls_https_round_trip_with_injected_root() {
         .expect("协议版本")
         .with_root_certificates(roots)
         .with_no_client_auth();
-    // [tls-diag-mac]（取证，暂驻）：hook 闭包 move config，探针先行克隆
-    let probe_config = config.clone();
     terminal_chat::mcp::transport::set_client_builder_hook_for_tests(std::sync::Arc::new(
         move |b| {
             let mut cfg = config.clone();
@@ -286,62 +246,12 @@ fn tls_https_round_trip_with_injected_root() {
             b.no_proxy().tls_backend_preconfigured(cfg)
         },
     ));
-    let (url, shutdown, conn_events) = start_tls_server();
-    // [tls-diag-mac]（038 取证，暂驻）：绕过 reqwest/hyper 的原始 rustls 客户端
-    // 全往返（与 hook 同一 ClientConfig）。此处成功＋产品客户端失败＝问题在
-    // reqwest/hyper/产品装配层；此处失败＝TLS/平台层问题（rustls 精确报错）。
-    {
-        use std::io::{Read as _, Write as _};
-        let hostport = url.trim_start_matches("https://").split('/').next().unwrap().to_string();
-        let (host, port_str) = hostport.rsplit_once(':').unwrap();
-        let host = host.to_string();
-        let port: u16 = port_str.parse().unwrap();
-        let round = (|| -> Result<usize, String> {
-            let server_name = host
-                .try_into()
-                .map_err(|e| format!("server name：{e:?}"))?;
-            let mut conn = rustls::ClientConnection::new(
-                Arc::new(probe_config.clone()),
-                server_name,
-            )
-            .map_err(|e| format!("ClientConnection：{e:?}"))?;
-            let mut sock =
-                std::net::TcpStream::connect(hostport.as_str())
-                    .map_err(|e| format!("TCP：{e}"))?;
-            let mut tls = rustls::Stream::new(&mut conn, &mut sock);
-            let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}"#;
-            let req = format!(
-                "POST /mcp HTTP/1.1\r\nHost: {hostport}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            tls.write_all(req.as_bytes())
-                .map_err(|e| format!("TLS write：{e}"))?;
-            let _ = tls.flush();
-            let mut total = 0usize;
-            let mut buf = [0u8; 4096];
-            loop {
-                match tls.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => total += n,
-                    Err(e) => return Err(format!("TLS read @{total}：{e}")),
-                }
-            }
-            Ok(total)
-        })();
-        eprintln!(
-            "[tls-diag-mac] raw rustls round trip: {} 服务端事件：{:?}",
-            round
-                .map(|n| format!("OK（{n} bytes 响应）"))
-                .unwrap_or_else(|e| format!("FAIL：{e}")),
-            conn_events.lock().unwrap()
-        );
-    }
+    let (url, shutdown) = start_tls_server();
     let ctx = {
         let mut c = setup(&url);
         c._shutdown = shutdown.clone();
         c
     };
-    // [tls-diag]（038 取证，暂驻）：snapshot 空时透出装载/连接错误面
     assert_eq!(
         ctx.snapshot.len(),
         1,
@@ -373,7 +283,7 @@ fn tls_https_round_trip_with_injected_root() {
 fn tls_untrusted_certificate_rejected() {
     let _seq = ROOT_SWITCH.lock().unwrap_or_else(|e| e.into_inner());
     terminal_chat::mcp::transport::set_extra_root_certificate_for_tests(None);
-    let (url, shutdown, _conn_events) = start_tls_server();
+    let (url, shutdown) = start_tls_server();
     let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = TempDir::new("mcp-tls-bad");
     std::env::set_var("TCHAT_USER_DIR", dir.path());
@@ -395,7 +305,7 @@ fn tls_untrusted_certificate_rejected() {
 fn tls_production_default_has_no_injected_root() {
     let _seq = ROOT_SWITCH.lock().unwrap_or_else(|e| e.into_inner());
     terminal_chat::mcp::transport::set_extra_root_certificate_for_tests(None);
-    let (url, shutdown, _conn_events) = start_tls_server();
+    let (url, shutdown) = start_tls_server();
     let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = TempDir::new("mcp-tls-default");
     std::env::set_var("TCHAT_USER_DIR", dir.path());
