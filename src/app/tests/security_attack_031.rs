@@ -36,6 +36,18 @@ fn root_dir(name: &str) -> PathBuf {
     ));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
+    // 038 macOS CI：temp_dir() 的词法形态为 /var/folders/…，其中 /var 是
+    // 系统级符号链接；normalize_request 对越出会话 cwd 的请求从根起走逐
+    // 组件验证（permissions.rs 锚定走查只覆盖锚内），会先撞 /var 以符号
+    // 链接归因拒绝——attack01/02/05 的越锚请求（reqA/outside 均为 workspace
+    // 锚的兄弟/外部路径）归因从「requestable/scope」漂移为符号链接文案。
+    // 夹具统一以真实形态（/private/var/…）呈达：断言语义（denied/granted/
+    // error＋零弹窗＋零授权）逐字不变，越锚被拒仍按 scope 归因（拒绝理由
+    // 与 linux 一致，且步骤 5 的显式 reqA/link 符号链接用例不受影响）；
+    // linux canonicalize 恒等零漂移；windows 不动（canonicalize 会引入
+    // verbatim 前缀形态分叉）。
+    #[cfg(target_os = "macos")]
+    let dir = fs::canonicalize(dir).unwrap();
     dir
 }
 
