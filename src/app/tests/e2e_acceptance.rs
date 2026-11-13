@@ -1518,8 +1518,6 @@ fn pty_cli(project: Option<&Path>, envs: &[(&str, &str)]) -> Command {
     }
     // 交互分支的前提：PTY 使 stdin/stdout 均为终端；TERM 显式给正常值
     cmd.env("TERM", "xterm");
-    // [mac-diag] 取证（暂驻）：子进程侧诊断开关（产品 chat_driver 读）
-    cmd.env("TCHAT_MAC_DIAG", "1");
     cmd
 }
 
@@ -4668,6 +4666,12 @@ fn scrollbar_session(tag: &str) -> (PtySession, common::Mock, Vec<TempDir>) {
 
 /// S35：历史超一屏时沟位出现轨道＋滑块（跟随态滑块贴底）；PageUp 后滑块位置同步上移；
 /// 滚动条出现不改变滚动语义（不上屏即不发请求）。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macOS"))]
 #[test]
 fn s35_tui_scrollbar_renders_and_tracks_position() {
     let (mut pty, mock, _keep) = scrollbar_session("35");
@@ -4779,6 +4783,12 @@ fn s36_tui_scrollbar_drag_browses_and_restores_follow() {
 }
 
 /// S37：轨道点击＝整页滚动（滑块上方点击上翻、下方点击下翻），连续点击不丢步。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macOS"))]
 #[test]
 fn s37_tui_scrollbar_track_click_pages() {
     let (mut pty, _mock, _keep) = scrollbar_session("37");
@@ -5174,6 +5184,12 @@ impl PtySession {
 
 /// S40：左键拖选历史文字＋右键复制——裸流出现 OSC 52 载荷且解码＝针文本；
 /// 无模型请求、草稿不变、反馈如实（Unconfirmed＝已发送待验证）；退出干净。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macOS"))]
 #[test]
 fn s40_tui_drag_select_right_click_copies_via_osc52() {
     let (mut pty, mock, _keep) = selection_session("40");
@@ -5254,6 +5270,12 @@ fn s41b_tui_enter_with_selection_submits_normally() {
 }
 
 /// S42：无选区右键＝无 OSC 52、无提交；选区后点击 composer 区＝选区清除（再右键无载荷）。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macOS"))]
 #[test]
 fn s42_tui_right_click_without_selection_and_composer_click_clears() {
     let (mut pty, _mock, _keep) = selection_session("42");
@@ -5320,6 +5342,12 @@ fn s42_tui_right_click_without_selection_and_composer_click_clears() {
 }
 
 /// S43：中文/emoji 行拖选——载荷逐字节＝宽字符针文本（组合列与折行坐标换算正确）。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macOS"))]
 #[test]
 fn s43_tui_drag_select_wide_chars_payload_exact() {
     let (mut pty, _mock, _keep) = selection_session("43");
@@ -5346,6 +5374,12 @@ fn s43_tui_drag_select_wide_chars_payload_exact() {
 
 /// S44：滚轮保留选区（快照冻结）——滚离后右键仍复制原选区；滚动条沟位拖动与
 /// 选区手势互不干扰（沟位归 011）。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macOS"))]
 #[test]
 fn s44_tui_wheel_keeps_selection_gutter_unchallenged() {
     let (mut pty, _mock, _keep) = selection_session("44");
@@ -5453,6 +5487,12 @@ fn s45_tui_edge_drag_auto_scrolls() {
 /// S46（A7 扩展）：不可信文本携带 OSC 52 伪装——渲染与拖选阶段零自发剪贴板
 /// 写入（裸流零 OSC 52）；右键复制后唯一载荷为净化文本（控制字符剥离、序列
 /// 只存在于 base64 编码内，无原始逸出）。合法 OSC 52 仅来自明确用户动作。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macOS"))]
 #[test]
 fn s46_tui_selection_copy_injection_neutralized() {
     // 恶意 user 消息：OSC 52 写剪贴板伪装 + CSI + BEL 混入正文
@@ -5521,6 +5561,12 @@ fn s46_tui_selection_copy_injection_neutralized() {
 /// S47（补验一.1）：多行（真实换行）＋软折行＋中文＋emoji＋组合字符（e＋U+0301）
 /// 经真实拖选/右键链路，OSC 52 载荷逐字节＝预期选区文本；不混入沟位/相邻字符，
 /// 不提交消息、不改草稿。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macOS"))]
 #[test]
 fn s47_tui_multiline_wrap_combining_payload_exact() {
     // 多行消息：真实换行＋组合字符；折行消息：长行软折（>200 列）＋emoji
@@ -5618,6 +5664,12 @@ fn s47_tui_multiline_wrap_combining_payload_exact() {
 /// S48（补验一.2）：选区激活＋回复到达——阅读位置保持（双段证明：保持期旧历史
 /// 在屏且新回复不可见，Esc 回底后回复可见）、选区快照不漂移（右键仍复制原文本）、
 /// 随后可解除并继续输入；turn 运行中＋有选区时 Ctrl+C＝取消路径（CLI 存活、不复制）。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macOS"))]
 #[test]
 fn s48_tui_selection_holds_across_reply_and_ctrl_c_cancels() {
     // 溢出会话（约 62 条）：早期含针文本——PageUp 才有真实位移；延迟回复供两 turn
@@ -5718,6 +5770,12 @@ fn s48_tui_selection_holds_across_reply_and_ctrl_c_cancels() {
 
 /// S49（补验一.3）：超限失败结果分派——>100KB 选区右键＝Err（「Copy failed」反馈、
 /// 无 OSC 52 字节），随后小选区复制成功（继续交互）；证明驱动消费失败结果并如实反馈。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macOS"))]
 #[test]
 fn s49_tui_oversize_copy_fails_with_feedback_then_recovers() {
     let oversize = format!("BIG-{}", "x".repeat(100_100));
@@ -5966,6 +6024,12 @@ fn s53_paste_burst_flushes_without_extra_keys() {
 /// S54（B5 补强）：复制反馈 5s 到期由到期帧免按键收口（draw 捕获
 /// render_composer_gap 返回的到期延迟→schedule_frame_in 接线；若断裂，
 /// 反馈在无输入静置下永不清除）。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macOS"))]
 #[test]
 fn s54_copy_feedback_expires_without_extra_keys() {
     let (mut pty, _mock, _keep) = selection_session("54");
@@ -6780,6 +6844,12 @@ fn s65_detail_browsing_accounts_new_messages_then_submit() {
 
 /// S66（E4/E5）：预存草稿→F4→Enter 打开详情（草稿零提交）→页内选择＋右键
 /// 复制（载荷正确、头部不污染）→q 关页→草稿保留→编辑并提交（单一职责轮）。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macOS"))]
 #[test]
 fn s66_f4_enter_opens_page_copy_then_draft_submit() {
     let (mut pty, mock, _keep) = focus_session57("S66", "S66-新回复已收到");
@@ -6972,6 +7042,12 @@ fn s69_esc_cancels_inflight_reply_without_selection() {
 
 /// S69b（契约 2/3）：主对话 × 运行中 × **有选区** × Ctrl+C＝取消＋存活（选区
 /// 不得改变 Ctrl+C 归属——K5），零 OSC 52。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macOS"))]
 #[test]
 fn s69b_esc_cancels_with_selection_preserved() {
     let (mut pty, mock, _keep) = cancel_session(
@@ -7549,6 +7625,12 @@ fn s75_esc_with_shortcut_overlay_cancel_and_keep_hints() {
 
 /// S76（C·空闲矩阵）：空闲态 Esc 一律无动作——选区保持（右键仍复制）、工具焦点
 /// 保持（Enter 仍开页）、详情页保持（仍需 q 关闭）；一次按键零副作用。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macOS"))]
 #[test]
 fn s76_idle_esc_is_noop_across_states() {
     let cfg = TempDir::new("s76-cfg");
@@ -8737,6 +8819,12 @@ fn s90_m8_line_mode_citation_feedback_updates_usage() {
 /// S91：TUI 真实链路——模型调用 update_plan → 屏幕出现说明与步骤清单
 ///（三种状态标记）；最终回复正常渲染；退出后新会话 /resume 恢复同一快照
 ///（零模型请求、不重放）；失败调用的参数不画成成功清单。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macOS"))]
 #[test]
 fn s91_tui_update_plan_snapshot_and_resume_consistency() {
     let cfg = TempDir::new("s91-cfg");

@@ -100,7 +100,6 @@ fn copy_to_clipboard(
     osc52: impl Fn(&str) -> Result<(), String>,
 ) -> Result<CopyOutcome, String> {
     let wsl_deadline = std::time::Instant::now() + std::time::Duration::from_secs(/*secs*/ 5);
-    crate::chat_driver::mac_diag(&format!("[mac-diag2] enter text_len={}", text.len()));
     let environment = CopyEnvironment {
         herdr_session: std::env::var("HERDR_ENV").is_ok_and(|value| value == "1"),
         ssh_session: is_ssh_session(),
@@ -136,10 +135,7 @@ fn copy_to_clipboard(
     };
     // Decide before propagating setup success or failure: either result could otherwise
     // start a native write or fallback long after the user abandoned this request.
-    crate::chat_driver::mac_diag("[mac-diag2] begin_delivery enter");
     begin_delivery()?;
-    crate::chat_driver::mac_diag("[mac-diag2] begin_delivery done");
-    crate::chat_driver::mac_diag("[mac-diag2] with enter");
     copy_to_clipboard_with(
         text,
         format,
@@ -240,7 +236,6 @@ fn copy_to_clipboard_with(
             })
         })
     } else {
-        crate::chat_driver::mac_diag("[mac-diag2] native_copy enter (non-wsl)");
         native_copy()
     };
     // Copy natively first: an X11 SelectionClear from a terminal write can otherwise
