@@ -1082,8 +1082,9 @@ fn ps_snapshot() -> String {
 }
 
 /// [tui-diag]（取证，暂驻）：系统统一日志近 2 分钟 kill 相关记录——捕获
-/// 系统侧猎杀（RunningBoard/jetsam 类有 Submitting kill 日志）；用户态
-/// kill(2) 通常无日志（此为否定证据通道，供猎杀源二分）。
+/// 系统侧猎杀（RunningBoard/jetsam/memorystatus 类日志）；用户态 kill(2)
+/// 通常无日志（此为否定证据通道）。谓词含 jetsam/memorystatus——R11 尾部
+/// 40 行被 mds→mdworker 常规回收噪声占满，需扩捕内存压杀记录。
 fn unified_log_kill_lines() -> String {
     Command::new("log")
         .args([
@@ -1093,16 +1094,23 @@ fn unified_log_kill_lines() -> String {
             "--style",
             "compact",
             "--predicate",
-            "eventMessage CONTAINS[c] 'kill'",
+            "eventMessage CONTAINS[c] 'kill' OR eventMessage CONTAINS[c] 'jetsam' OR eventMessage CONTAINS[c] 'memorystatus'",
         ])
         .output()
         .map(|o| {
             let text = String::from_utf8_lossy(&o.stdout).into_owned();
-            text.lines()
-                .rev()
-                .take(40)
-                .collect::<Vec<_>>()
-                .join("\n")
+            let mine = std::process::id().to_string();
+            let lines: Vec<&str> = text
+                .lines()
+                .filter(|l| l.contains("kill") || l.contains("jetsam") || l.contains("memorystatus"))
+                .collect();
+            let (head, tail) = if lines.len() > 60 {
+                lines.split_at(lines.len() - 60)
+            } else {
+                (&lines[..0], &lines[..])
+            };
+            let _ = head;
+            format!("共 {} 行，尾部：\n{}", lines.len(), tail.join("\n"))
         })
         .unwrap_or_else(|_| "(log show 失败)".into())
 }
@@ -1444,8 +1452,26 @@ impl PtySession {
         }
         let start = before.min(self.captured.len());
         let new_output = String::from_utf8_lossy(&self.captured[start..]).to_string();
+        // 存活＝「输入停滞」假说（R11 串行二分：应用活、渲染正常、不理输入
+        // ——s18 Ctrl+C 零输出）——采样线程栈定位阻塞点（暂驻，定位后拆）。
+        let stacks = if exited.is_none() {
+            if let Some(pid) = self.child.as_ref().map(|c| c.id()) {
+                let file = format!("/tmp/tchat-sample-{pid}.txt");
+                let _ = Command::new("sample")
+                    .args([&pid.to_string(), "3", "-file", &file])
+                    .output();
+                let text = std::fs::read_to_string(&file).unwrap_or_default();
+                let mut out = text;
+                out.truncate(7000);
+                out
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
         panic!(
-            "{err}\n[tui-diag] Ctrl+C 探针：exit={exited:?} 探针期新增输出={new_output:?}\n[tui-diag] 死亡时点全进程表：\n{}\n[tui-diag] 统一日志 kill 记录（近 2m 尾部）：\n{}",
+            "{err}\n[tui-diag] Ctrl+C 探针：exit={exited:?} 探针期新增输出={new_output:?}\n[tui-diag] 死亡时点全进程表：\n{}\n[tui-diag] 统一日志 kill 记录：\n{}\n[tui-diag] 存活线程栈（sample）：\n{stacks}",
             ps_snapshot(),
             unified_log_kill_lines()
         );
@@ -3771,11 +3797,15 @@ fn s23_tui_scroll_limits_short_history_and_resize() {
         let tail_start = pty.captured.len().saturating_sub(1600);
         let tail = String::from_utf8_lossy(&pty.captured[tail_start..]).to_string();
         let screen = pty.screen();
-        let state = pty.child.as_mut().and_then(|c| c.try_wait().ok()).flatten();
-        assert!(
-            still,
-            "越底 PageDown 须限位在最新（600ms 复检 still={still}，子进程状态 {state:?}）\n[tui-diag] 输出尾字节：\n{tail}\n屏幕：\n{screen}"
-        );
+        // R11 复检 still=false＝真实上滚态＋输入已被处理——与 s18「输入永久
+        // 停滞」统一为输入停顿两副面孔（停顿期按键排队、恢复后按序重放）。
+        // 走 diag_exit_probe：存活子进程 sample 线程栈定位阻塞点。
+        if !still {
+            let err = format!(
+                "越底 PageDown 须限位在最新（600ms 复检仍不在底部＝真实上滚态）\n[tui-diag] 输出尾字节：\n{tail}\n屏幕：\n{screen}"
+            );
+            pty.diag_exit_probe(&err);
+        }
     }
 
     // 验收 4（字面）：缩放期间草稿不丢失——resize 前输入草稿，resize 后仍在光标行。

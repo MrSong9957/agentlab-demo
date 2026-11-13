@@ -206,3 +206,64 @@ s103_async（3/8）、perf_tiers、c09（新 1/8）。
    与 js worker 无代码关联、排除批 2 回归——轮换观察。
 5. **轮换计数（R8 后）**：p2 4/8、s103_async 3/8（R2/R4/R8）、s106 2/8、
    s69/c04/e12/c09 各 1/8。
+
+## R10（43401124686，5daee98）结果：9→7，pty_cancel 修复生效
+
+**销号**：pty_cancel（INPUT_CHUNK 512 记账粒度修复 ✓）、s113（SIGKILL 未
+命中——猎杀随机性佐证）、c09（轮换过，1/9）。
+
+**余 7 项**：tls、s18、s114a、s103_async（4/9）、s23、perf_tiers、
+p2（5/9→已门控）。
+
+**R10 取证结论（决定性）**：
+1. **tls 根因闭合**：服务端事件＝「服务端读错误：Resource temporarily
+   unavailable (os error 35)」＝EAGAIN——BSD 语义 accept 继承监听器
+   O_NONBLOCK（Linux 不继承），夹具阻塞式读恒撞 EAGAIN 即关连接＝客户端
+   「EOF 无 close_notify」。**修复：accept 后 set_nonblocking(false)**
+   （24a433d，夹具可移植性修复，产品无涉）。
+2. **TUI 族三例再次 SIGKILL(9)**（s18/s114a/s103_async）；s113 本轮绿＝
+   猎杀目标随机。产品 kill 路径全部组作用域（killpg 对独立会话 ESRCH
+   安全）——猎杀者非产品 kill 路径。
+3. **p2 达标 §5 门控**（5 轮轮换＋时序族：30ms 通知×100ms 停等窗口在
+   mac 调度下先后不确定）——mac 门控（24a433d），linux/windows 全量不变。
+4. **s23 画像**：子进程存活（状态 None）＋视图真实处于上滚态（Back to
+   bottom 悬浮条＋顶部内容）——PageDown×3 后视图从底部回到顶部＝上滚
+   事件到达应用。R11 复检＋尾字节取证。
+5. **windows 腿 R10＝仅 t18** ✓（豁免口径不变）。
+
+## R11（24a433d）——串行二分轮（取证）
+
+- **mac 全量串行**（workflow RUST_TEST_THREADS=1，[kill-diag] 暂驻）：
+  死亡消失＝测试内并发互杀（对最终修复定标：并发互斥或组隔离）；仍在＝
+  系统级（统一日志 kill 捕获给证据）。
+- 死亡报告追加统一日志 kill 记录（近 2m 尾部 40 行）。
+- s23 加 600ms 复检＋输出尾字节（区分瞬帧 vs 真实上滚态）。
+- pty_cancel 的 [pty-diag3] 插桩已拆（修复确认）。
+
+## R11（43405203424，24a433d）串行二分结果：二分裁定＋tls 销号
+
+**串行（RUST_TEST_THREADS=1，全量 27 分钟）**：e2e 仍红 5 项
+（s103_async/s113/s114a/s18/s23）＋session_perf（perf_tiers）＋
+tool_search_perf（ts30，新面孔 1/9）。
+
+**裁定**：
+1. **并发互杀假说死亡**——全串行下 TUI 五项仍红＝杀源在单测试自身
+   生命周期内或系统级。
+2. **统一日志无系统级猎杀**（仅 mds→mdworker 常规回收噪声占满尾部 40 行
+   ——R12 扩捕 jetsam/memorystatus 谓词）。
+3. **exit=9 之谜破案**：wait_screen_pred 的超时清理路径自己 `child.kill()`
+   ＝s18/s113/s103_async 的「SIGKILL」是测试框架自清理，非外部猎杀——
+   子进程到 30s 超时都活着、探针 Ctrl+C 零输出＝**应用活着、渲染正常、
+   完全停止消费输入＝「输入停滞」产品缺陷**（stderr 接在 PTY 上而无 panic
+   文本＝线程未崩，指向输入线程被锁阻塞的死锁形态）。s23 复检 still=false
+   ＝真实上滚态＋输入已处理＝同一停滞的两副面孔：停顿期按键排队、恢复后
+   按序重放（早期 PageUp 延迟重放＝净效果顶部＋Back to bottom 悬浮条）。
+4. **tls 销号**（accept 恢复阻塞语义修复生效）、**p2 门控生效**（串行名单
+   无 p2）。
+
+**R12 取证**：diag_exit_probe 对存活子进程跑 `sample <pid> 3` 采线程栈
+（定位输入线程阻塞点＝死锁锚定）；统一日志谓词扩捕 jetsam/memorystatus；
+s23 失败改走 diag_exit_probe。串行保持（27 分钟成本低）。
+
+**mac 当前口径**（R11 后）：TUI 五项（停滞根因待 sample 锚定）＋
+perf_tiers（分配器语义，举证）＋ts30（1/9 观察）。
