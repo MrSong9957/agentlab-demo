@@ -61,3 +61,30 @@ Linux 防回归：全量 3924/2（turn::tests＋multi_agent 各 1——单跑绿
 ①批准 mac PTY 专项取证（多轮插桩迭代）；②按 §5 门控 23 项（e2e_acceptance
 的 TUI 交互面在 mac 平台登记，linux/windows 全量不变）；③合并现状（mac
 failure 维持、ubuntu 绿、Windows 仅 t18）。
+
+
+## 验证轮与轮换面扩大（2026-11-13，43381070533，3e5b095）
+
+批 A 三项修复在后续轮次**持续有效**（s71/s72/s6 未再出现）。
+门控修正轮（cfg 小写修正后）暴露 **runner 机器池轮换的又一批子集（15 项）**：
+attack×3、bin_pipe、env_and_fd(fd5)、matrix_a、perf_tiers、pty_cancel、
+s103_mcp_reload、s113、s114a、s18、s23、s73、tls——其中：
+- **既有轮换族**（s113/s114a/s18/s23/s73/pty_cancel/tls/s103）：基线 26 项
+  内已有登记（时序/PTY/连接面）；
+- **新轮换面**（attack×3/bin_pipe/matrix_a/perf/fd5）：基线轮通过、本轮
+  命中——attack×3 为批次六修复后的**残留路径**（产品侧 path_covers 之外
+  仍有 /var 形态敏感点），需产品侧深挖非断言归一。
+
+**止损判定**：mac runner 机器池轮换导致失败子集逐轮漂移（26→22→15→…），
+逐批修复速度追不上轮换暴露；attack×3 残留需产品侧深挖。按任务止损线
+（连续两轮同项红且无新证据／修复追不上）**停下回报，待裁决**：
+①批准 mac 深挖专项（attack 残留路径＋轮换面逐项）；
+②按 §5 大范围门控（mac 平台登记 e2e/security/perf 面全部已知不稳定项，
+ linux/windows 全量不变）；
+③合并现状（mac failure 维持台账，ubuntu 绿、Windows 仅 t18）。
+
+## 提交索引（分支 fix/mac-ci-failures）
+
+6a7d75a（批 A）→ b3f076f/007fbbf/31325c0/c3db79d（取证设施）→ bafeb3a
+（mac-diag2）→ 45aa5fb（15 门控）→ 3e5b095（cfg 小写修正）→ fd50208/…
+（台账）——PR #7 未合并，等验收。
