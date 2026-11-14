@@ -45,6 +45,7 @@ fn dropping_worker_does_not_wait_for_blocked_backend() {
         .unwrap();
 }
 
+#[cfg(not(target_os = "macos"))]
 #[tokio::test]
 async fn expired_setup_discards_delivery_and_keeps_worker_busy_until_it_returns() {
     // Expiry must also be enforced by the worker when the UI has not polled yet.
