@@ -411,7 +411,7 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
     // （timer 超时不醒）——mac 换心跳线程计时（heartbeat 模块文档）；linux/
     // windows 保持 tokio Interval 原路径。
     #[cfg(target_os = "macos")]
-    let mut ticker = crate::tui::tui::heartbeat::Heartbeat::new(FRAME_TICK);
+    let mut ticker = crate::tui::heartbeat::Heartbeat::new(FRAME_TICK);
     #[cfg(not(target_os = "macos"))]
     let mut ticker = tokio::time::interval(FRAME_TICK);
     #[cfg(not(target_os = "macos"))]
