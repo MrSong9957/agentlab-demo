@@ -714,7 +714,17 @@ fn bin_pipe_session_chats_and_lists_models() {
     assert_eq!(body["messages"][1]["role"], "user");
     let ctx = body["messages"][1]["content"].as_str().unwrap();
     assert!(ctx.starts_with("<environment_context>"), "ctx＝环境块：{ctx}");
-    assert!(ctx.contains(&format!("<cwd>{}</cwd>", project.path().display())));
+    // 038 macOS CI：环境块 cwd＝子进程 getcwd() 结果，内核恒返物理路径
+    // （/var/folders/… → /private/var/…）；断言侧同源归一（s6 同法）。
+    // linux /tmp 为真实目录，canonicalize 恒等零漂移。
+    #[cfg(target_os = "macos")]
+    let cwd_expect = std::fs::canonicalize(project.path())
+        .unwrap()
+        .display()
+        .to_string();
+    #[cfg(not(target_os = "macos"))]
+    let cwd_expect = project.path().display().to_string();
+    assert!(ctx.contains(&format!("<cwd>{cwd_expect}</cwd>")));
     assert!(ctx.contains("<current_date>"));
     assert_eq!(body["messages"][2]["role"], "user");
     assert_eq!(body["messages"][2]["content"], "你好");

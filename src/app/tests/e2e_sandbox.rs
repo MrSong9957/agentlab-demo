@@ -183,6 +183,15 @@ fn matrix_a_full_chain_multi_tool() {
     let sandbox_mode = std::env::var("TCHAT_SANDBOX")
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
+    // 038 macOS CI（7/7 轮同点位）：本测试面＝Linux 沙箱设施验证——/proc
+    // 扫描（哨兵前置与遗留进程扫描）、/proc/self/ns/pid 证据链、bwrap/seccomp
+    // 探针在 macOS 均不存在（无 /proc：前置断言 fs::metadata("/proc/<pid>")
+    // 恒败；无 bwrap，沙箱矩阵无验证对象）。按 attack03/04 bwrap skip 先例
+    // 做能力前置；Linux 全量不变（Windows 侧文件级 #![cfg(unix)] 不编译）。
+    if !Path::new("/proc/self").exists() {
+        eprintln!("跳过：/proc 与 bwrap/seccomp 设施不存在（Linux 沙箱矩阵验证面）");
+        return;
+    }
 
     // ---- 夹具：隔离配置/用户目录、假凭据（先证沙箱外可读＋唯一标记）、哨兵、监听器 ----
     let cfg = TempDir::new("033mx-cfg");

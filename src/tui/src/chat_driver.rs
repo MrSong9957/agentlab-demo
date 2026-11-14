@@ -18,6 +18,7 @@
 //! PagerKeymap.close）。替代入口：清选区＝点击输入区、回底＝Ctrl+End、解焦＝F4、
 //! 收 ? 提示＝再按 ?。
 
+
 use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
@@ -27,6 +28,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::Event as CrosstermEvent;
+// 038 macOS CI：EventStream 在 mac 的「后台唤醒任务＋双 waker」结构触发输入
+// 延迟数十秒泄洪（R11–R20 取证）——mac 换专属读线程事件源（详见
+// threaded_event_source 模块文档）；linux/windows 保持 EventStream 原路径。
+#[cfg(target_os = "macos")]
+use crate::tui::threaded_event_source::ThreadedEventSource;
+#[cfg(not(target_os = "macos"))]
 use crossterm::event::EventStream;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -396,8 +403,18 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
         pane.set_task_running(true);
         (hooks.spawn_turn)(submission, turn_tx.clone());
     }
+    #[cfg(target_os = "macos")]
+    let mut events = ThreadedEventSource::new();
+    #[cfg(not(target_os = "macos"))]
     let mut events = EventStream::new();
+    // 038 macOS CI（R25 全量栈）：tokio driver 的 kqueue 在该 runner 失效
+    // （timer 超时不醒）——mac 换心跳线程计时（heartbeat 模块文档）；linux/
+    // windows 保持 tokio Interval 原路径。
+    #[cfg(target_os = "macos")]
+    let mut ticker = crate::tui::heartbeat::Heartbeat::new(FRAME_TICK);
+    #[cfg(not(target_os = "macos"))]
     let mut ticker = tokio::time::interval(FRAME_TICK);
+    #[cfg(not(target_os = "macos"))]
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // 011 §7：帧调度通知（FrameScheduler 合并＋120fps 限频后的 Draw 唤醒）——
     // 部件侧动画/冲刷定时/剪贴板完成经此请求绘制；驱动侧状态变化直接置脏

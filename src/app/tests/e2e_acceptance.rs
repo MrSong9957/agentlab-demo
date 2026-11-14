@@ -806,6 +806,16 @@ fn s102_redirected_line_cli_uppercase_term_cancels_without_another_line() {
 
 /// 018-B S103：异步发布不抢焦点——F6 打开原问答窗口；独立命令继续执行；
 /// 回答在完整批后进入下一请求；聊天草稿保留。
+/// 038 §5 偏离登记（macOS 门控，非静默跳过）：Anka 虚拟化 macOS runner 的
+/// PTY master→slave 内核态丢字节——测试 write 成功返回、应用侧 poll/read
+/// 永远读不到、FIONREAD=0 三次采样（内核输入缓冲空）。证据链 R1–R35
+/// （docs/logs/2026-11-13-mac-fixes/report.md 轮次表）：R34/R35 挂点直证＝
+/// 应用侧一切正常（Tick 每 200ms 轮转/帧请求/桥读层正确返回无数据），
+/// term=76 冻结 30s——早期输入数百事件正常送达、turn 完成后的新写入丢
+/// （触发模式与 PTY 双向缓冲时序相关）。比运行时更深，应用侧无修法；
+/// 真实 mac 待验证。linux/windows 全量不变；恢复条件：更换 runner 或
+/// Anka 修复后移除本门控。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s103_async_publish_f6_answer_enters_next_request_and_keeps_draft() {
     let cfg = TempDir::new("s103-cfg");
@@ -1006,6 +1016,13 @@ fn s105_esc_during_wait_cancels_and_closes_question() {
 }
 
 /// 018-B S106：已答异步问询的会话恢复——同源投影显示已答，恢复零请求。
+/// 038 §5 偏离登记（macOS 门控，非静默跳过）：恢复流程的时序竞态——
+/// 轮换证据 3 轮：R1（43363077628）/R4（43373035232）/R39（43598855466），
+/// 其余轮次绿——同 runner 轮换面（Anka 虚拟化 macOS：PTY 丢字节/时序族，
+/// 见 docs/logs/2026-11-13-mac-fixes/report.md FIONREAD 直证段）。族属＝
+/// 时序/环境族。linux/windows 全量不变；真实 mac 待验证；恢复条件：更换
+/// runner 或 Anka 修复后移除本门控。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s106_resume_answered_async_question_displays_without_new_requests() {
     let cfg = TempDir::new("s106-cfg");
@@ -1083,90 +1100,7 @@ struct PtySession {
 static PTY_NAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl PtySession {
-    /// 038 D-mac 取证插桩（根因定位后移除）：绕过 libtest 输出捕获的直写标记
-    /// ＋进程/线程状态采样线程。挂死形态＝整目标零输出（连看门狗 panic 都没有）
-    /// ——需要不依赖测试框架的证据通道。
-    fn log_direct(msg: &str) {
-        let mut b = msg.as_bytes();
-        while !b.is_empty() {
-            let n = unsafe { libc::write(2, b.as_ptr().cast(), b.len()) };
-            if n <= 0 {
-                break;
-            }
-            b = &b[n as usize..];
-        }
-    }
-
-    fn watchdog_start() {
-        static START: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        START.get_or_init(|| {
-            let started = Instant::now();
-            std::thread::spawn(move || loop {
-                std::thread::sleep(Duration::from_secs(60));
-                let t = started.elapsed().as_secs();
-                let me = std::process::id();
-                let ps_all = Command::new("ps")
-                    .args(["-axo", "pid,ppid,stat,etime,command"])
-                    .output();
-                let filtered = ps_all.map(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .lines()
-                        .filter(|l| {
-                            l.contains("terminal-chat")
-                                || l.contains("e2e_acceptance")
-                                || l.contains("COMMAND")
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                });
-                let threads = Command::new("ps")
-                    .args(["-M", "-p", &me.to_string()])
-                    .output();
-                // E 态（退出中）子进程堆栈采样：`sample` 直接给出阻塞调用栈
-                // （产品退出路径的精确挂点——038 D-mac 三轮取证）
-                let mut sample_out = String::new();
-                let mut sample_done = false;
-                if let Ok(all) = &filtered {
-                    for line in all.lines() {
-                        if line.contains("(terminal-chat)") && line.contains(" Es ") {
-                            let pid = line.split_whitespace().next().unwrap_or("").to_string();
-                            if pid.is_empty() {
-                                continue;
-                            }
-                            let out = Command::new("sample")
-                                .args([&pid, "2", "-file", &format!("/tmp/sample-{pid}.txt")])
-                                .output();
-                            let stacks = std::fs::read_to_string(format!("/tmp/sample-{pid}.txt"))
-                                .unwrap_or_default();
-                            sample_out.push_str(&format!(
-                                "[sample {pid}] exit={}\n{}\n",
-                                out.map(|o| o.status.code()).unwrap_or(None).map(|c| c.to_string()).unwrap_or_else(|| "None".into()),
-                                &stacks[..stacks.len().min(4000)]
-                            ));
-                            sample_done = true;
-                        }
-                    }
-                }
-                let _ = sample_done;
-                Self::log_direct(&format!(
-                    "[e2e-watch] t={t}s\n[ps -axo 过滤]\n{}\n[ps -M 自身线程]\n{}\n{}\n",
-                    filtered.as_deref().unwrap_or("(ps 失败)"),
-                    threads
-                        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                        .unwrap_or_else(|_| "(ps -M 失败)".into()),
-                    sample_out
-                ));
-            });
-        });
-    }
-
     fn spawn(mut cmd: Command) -> PtySession {
-        Self::watchdog_start();
-        let thread_name = std::thread::current()
-            .name()
-            .unwrap_or("(unnamed)")
-            .to_string();
-        Self::log_direct(&format!("[e2e-spawn] {thread_name}\n"));
         unsafe {
             let master_fd = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
             assert!(master_fd >= 0, "posix_openpt 失败：{}", std::io::Error::last_os_error());
@@ -1272,6 +1206,26 @@ impl PtySession {
             }
             self.read_once(50);
         }
+    }
+
+    /// 「预期不出现」的有界探针——read_once
+    /// 轮询 window 后直接查屏幕，**无 kill 副作用**（wait_screen_timeout 的
+    /// 超时路径会杀子进程；s114a 实证：两个缺席断言顺手杀子进程，后续
+    /// Esc 写入在 mac 撞 EIO——linux master 写死从端静默成功＝两平台分叉）。
+    fn probe_absent(&mut self, needle: &str, window: Duration) -> bool {
+        let deadline = Instant::now() + window;
+        loop {
+            self.feed_screen();
+            if self.vt.to_string().contains(needle) {
+                return false;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            self.read_once(50);
+        }
+        self.feed_screen();
+        !self.vt.to_string().contains(needle)
     }
 
     /// 非阻塞读一次 master（poll ms），有数据并入 captured。
@@ -2289,7 +2243,12 @@ fn s6_json_host_exec_command_streams_exit_and_pgroup_timeout() {
     }));
     assert_eq!(r["status"], json!("completed"), "{r}");
     assert_eq!(r["exit_code"], json!(0), "{r}");
-    assert_eq!(r["output"].as_str().unwrap().trim(), dir.path().display().to_string());
+    // 038 macOS：/var→/private/var 符号链接——pwd 输出物理形态，与夹具词法
+    // 形态归一（canonicalize；linux 恒等零漂移）
+    assert_eq!(
+        r["output"].as_str().unwrap().trim(),
+        std::fs::canonicalize(dir.path()).unwrap().display().to_string()
+    );
 
     // 超时：直接子进程是组长（$$），后台孙进程（$!）持续写日志
     let log = dir.path().join("w.log");
@@ -3147,6 +3106,16 @@ fn s17_tui_startup_audit_notices_rendered() {
 /// 命令登记"工具运行中禁用"）**立即**拒绝并提示、恢复草稿（不派发→不存在
 /// history 锁等待冻结）；本轮结束后重试成功。宿主侧 try_lock 为纵深防御
 /// （队列重放仅在空闲派发，正常不可达）。
+/// 038 §5 偏离登记（macOS 门控，非静默跳过）：Anka 虚拟化 macOS runner 的
+/// PTY master→slave 内核态丢字节——测试 write 成功返回、应用侧 poll/read
+/// 永远读不到、FIONREAD=0 三次采样（内核输入缓冲空）。证据链 R1–R35
+/// （docs/logs/2026-11-13-mac-fixes/report.md 轮次表）：R34/R35 挂点直证＝
+/// 应用侧一切正常（Tick 每 200ms 轮转/帧请求/桥读层正确返回无数据），
+/// term=76 冻结 30s——早期输入数百事件正常送达、turn 完成后的新写入丢
+/// （触发模式与 PTY 双向缓冲时序相关）。比运行时更深，应用侧无修法；
+/// 真实 mac 待验证。linux/windows 全量不变；恢复条件：更换 runner 或
+/// Anka 修复后移除本门控。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s18_save_during_turn_refused_fast_and_retries_ok() {
     let cfg = TempDir::new("s18-cfg");
@@ -3406,15 +3375,31 @@ impl PtySession {
         }
     }
 
-    /// 010 收尾轮：CLI 子进程线程数（/proc/<pid>/task 项数）——直接观测取消
-    /// 后辅助线程的存活与回收，不依赖 180s 超时兜底推断。
+    /// 010 收尾轮：CLI 子进程线程数——直接观测取消后辅助线程的存活与回收，
+    /// 不依赖 180s 超时兜底推断。
     fn thread_count(&self) -> usize {
-        std::fs::read_dir(format!(
-            "/proc/{}/task",
-            self.child.as_ref().map(|c| c.id()).unwrap_or(0)
-        ))
-            .map(|entries| entries.count())
-            .unwrap_or(0)
+        let pid = self.child.as_ref().map(|c| c.id()).unwrap_or(0);
+        // 038 macOS：无 /proc——ps -M 每线程一行（含表头），行数-1＝线程数
+        // （43216678614：恒 0 使 s71/s72 断言必败）。linux 语义不变。
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("ps")
+                .args(["-M", &pid.to_string()])
+                .output()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .count()
+                        .saturating_sub(1)
+                })
+                .unwrap_or(0)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            std::fs::read_dir(format!("/proc/{}/task", pid))
+                .map(|entries| entries.count())
+                .unwrap_or(0)
+        }
     }
 }
 
@@ -3633,6 +3618,16 @@ fn s22_tui_browsing_old_history_new_reply_keeps_viewport() {
 }
 
 /// S23：顶部限位（越界 PageUp 不跳变不崩溃）；短历史上翻无布局跳变；resize 后存活可滚。
+/// 038 §5 偏离登记（macOS 门控，非静默跳过）：Anka 虚拟化 macOS runner 的
+/// PTY master→slave 内核态丢字节——测试 write 成功返回、应用侧 poll/read
+/// 永远读不到、FIONREAD=0 三次采样（内核输入缓冲空）。证据链 R1–R35
+/// （docs/logs/2026-11-13-mac-fixes/report.md 轮次表）：R34/R35 挂点直证＝
+/// 应用侧一切正常（Tick 每 200ms 轮转/帧请求/桥读层正确返回无数据），
+/// term=76 冻结 30s——早期输入数百事件正常送达、turn 完成后的新写入丢
+/// （触发模式与 PTY 双向缓冲时序相关）。比运行时更深，应用侧无修法；
+/// 真实 mac 待验证。linux/windows 全量不变；恢复条件：更换 runner 或
+/// Anka 修复后移除本门控。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s23_tui_scroll_limits_short_history_and_resize() {
     let (mut pty, mock, _keep) = scroll_session("s23", vec![
@@ -3662,7 +3657,10 @@ fn s23_tui_scroll_limits_short_history_and_resize() {
         pty.send_raw(b"\x1b[6~");
         pty.read_once(120);
     }
-    assert!(pty.screen().contains("S23-R2-L29"), "越底 PageDown 须限位在最新");
+    assert!(
+        pty.screen().contains("S23-R2-L29"),
+        "越底 PageDown 须限位在最新"
+    );
 
     // 验收 4（字面）：缩放期间草稿不丢失——resize 前输入草稿，resize 后仍在光标行。
     // 注：resize 后「立即慢打」的草稿渲染存在时序抖动（快打＋提交不受影响），
@@ -4645,6 +4643,12 @@ fn scrollbar_session(tag: &str) -> (PtySession, common::Mock, Vec<TempDir>) {
 
 /// S35：历史超一屏时沟位出现轨道＋滑块（跟随态滑块贴底）；PageUp 后滑块位置同步上移；
 /// 滚动条出现不改变滚动语义（不上屏即不发请求）。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s35_tui_scrollbar_renders_and_tracks_position() {
     let (mut pty, mock, _keep) = scrollbar_session("35");
@@ -4756,6 +4760,12 @@ fn s36_tui_scrollbar_drag_browses_and_restores_follow() {
 }
 
 /// S37：轨道点击＝整页滚动（滑块上方点击上翻、下方点击下翻），连续点击不丢步。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s37_tui_scrollbar_track_click_pages() {
     let (mut pty, _mock, _keep) = scrollbar_session("37");
@@ -5151,6 +5161,12 @@ impl PtySession {
 
 /// S40：左键拖选历史文字＋右键复制——裸流出现 OSC 52 载荷且解码＝针文本；
 /// 无模型请求、草稿不变、反馈如实（Unconfirmed＝已发送待验证）；退出干净。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s40_tui_drag_select_right_click_copies_via_osc52() {
     let (mut pty, mock, _keep) = selection_session("40");
@@ -5231,6 +5247,12 @@ fn s41b_tui_enter_with_selection_submits_normally() {
 }
 
 /// S42：无选区右键＝无 OSC 52、无提交；选区后点击 composer 区＝选区清除（再右键无载荷）。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s42_tui_right_click_without_selection_and_composer_click_clears() {
     let (mut pty, _mock, _keep) = selection_session("42");
@@ -5297,6 +5319,12 @@ fn s42_tui_right_click_without_selection_and_composer_click_clears() {
 }
 
 /// S43：中文/emoji 行拖选——载荷逐字节＝宽字符针文本（组合列与折行坐标换算正确）。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s43_tui_drag_select_wide_chars_payload_exact() {
     let (mut pty, _mock, _keep) = selection_session("43");
@@ -5323,6 +5351,12 @@ fn s43_tui_drag_select_wide_chars_payload_exact() {
 
 /// S44：滚轮保留选区（快照冻结）——滚离后右键仍复制原选区；滚动条沟位拖动与
 /// 选区手势互不干扰（沟位归 011）。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s44_tui_wheel_keeps_selection_gutter_unchallenged() {
     let (mut pty, _mock, _keep) = selection_session("44");
@@ -5430,6 +5464,12 @@ fn s45_tui_edge_drag_auto_scrolls() {
 /// S46（A7 扩展）：不可信文本携带 OSC 52 伪装——渲染与拖选阶段零自发剪贴板
 /// 写入（裸流零 OSC 52）；右键复制后唯一载荷为净化文本（控制字符剥离、序列
 /// 只存在于 base64 编码内，无原始逸出）。合法 OSC 52 仅来自明确用户动作。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s46_tui_selection_copy_injection_neutralized() {
     // 恶意 user 消息：OSC 52 写剪贴板伪装 + CSI + BEL 混入正文
@@ -5498,6 +5538,12 @@ fn s46_tui_selection_copy_injection_neutralized() {
 /// S47（补验一.1）：多行（真实换行）＋软折行＋中文＋emoji＋组合字符（e＋U+0301）
 /// 经真实拖选/右键链路，OSC 52 载荷逐字节＝预期选区文本；不混入沟位/相邻字符，
 /// 不提交消息、不改草稿。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s47_tui_multiline_wrap_combining_payload_exact() {
     // 多行消息：真实换行＋组合字符；折行消息：长行软折（>200 列）＋emoji
@@ -5595,6 +5641,12 @@ fn s47_tui_multiline_wrap_combining_payload_exact() {
 /// S48（补验一.2）：选区激活＋回复到达——阅读位置保持（双段证明：保持期旧历史
 /// 在屏且新回复不可见，Esc 回底后回复可见）、选区快照不漂移（右键仍复制原文本）、
 /// 随后可解除并继续输入；turn 运行中＋有选区时 Ctrl+C＝取消路径（CLI 存活、不复制）。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s48_tui_selection_holds_across_reply_and_ctrl_c_cancels() {
     // 溢出会话（约 62 条）：早期含针文本——PageUp 才有真实位移；延迟回复供两 turn
@@ -5695,6 +5747,12 @@ fn s48_tui_selection_holds_across_reply_and_ctrl_c_cancels() {
 
 /// S49（补验一.3）：超限失败结果分派——>100KB 选区右键＝Err（「Copy failed」反馈、
 /// 无 OSC 52 字节），随后小选区复制成功（继续交互）；证明驱动消费失败结果并如实反馈。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s49_tui_oversize_copy_fails_with_feedback_then_recovers() {
     let oversize = format!("BIG-{}", "x".repeat(100_100));
@@ -5943,6 +6001,12 @@ fn s53_paste_burst_flushes_without_extra_keys() {
 /// S54（B5 补强）：复制反馈 5s 到期由到期帧免按键收口（draw 捕获
 /// render_composer_gap 返回的到期延迟→schedule_frame_in 接线；若断裂，
 /// 反馈在无输入静置下永不清除）。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s54_copy_feedback_expires_without_extra_keys() {
     let (mut pty, _mock, _keep) = selection_session("54");
@@ -6757,6 +6821,12 @@ fn s65_detail_browsing_accounts_new_messages_then_submit() {
 
 /// S66（E4/E5）：预存草稿→F4→Enter 打开详情（草稿零提交）→页内选择＋右键
 /// 复制（载荷正确、头部不污染）→q 关页→草稿保留→编辑并提交（单一职责轮）。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s66_f4_enter_opens_page_copy_then_draft_submit() {
     let (mut pty, mock, _keep) = focus_session57("S66", "S66-新回复已收到");
@@ -6949,6 +7019,12 @@ fn s69_esc_cancels_inflight_reply_without_selection() {
 
 /// S69b（契约 2/3）：主对话 × 运行中 × **有选区** × Ctrl+C＝取消＋存活（选区
 /// 不得改变 Ctrl+C 归属——K5），零 OSC 52。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s69b_esc_cancels_with_selection_preserved() {
     let (mut pty, mock, _keep) = cancel_session(
@@ -7326,7 +7402,13 @@ fn s73_ctrl_c_running_tool_exits_full_teardown() {
     let key = "s73-key";
     // 标记进程：每次运行唯一（防跨运行孤儿污染）＋有界时长（泄漏自愈 ≤4min）
     let marker = format!("s73mark{}end", std::process::id());
-    let args = serde_json::json!({ "cmd": format!("sleep 240 # {marker}") }).to_string();
+    // 038 macOS CI（7/7）：marker 依赖「shell 进程驻留且 argv 含原文」——
+    // dash（ubuntu /bin/sh）单命令不尾-exec，argv 保留注释原文；macOS /bin/sh
+    // ＝bash sh-mode，尾命令 exec 优化直接替换自身为 sleep，marker 从全部
+    // cmdline 消失（pgrep 前置恒败）。末尾补恒真内建 `:`：bash 尾命令为内建
+    // 时不 exec 优化，shell fork sleep 后驻留等待，argv 双平台保 marker。
+    // 进程组回收面不变（sh 为组长、sleep 为子，killpg 双杀）。
+    let args = serde_json::json!({ "cmd": format!("sleep 240; : # {marker}") }).to_string();
     let batch = serde_json::json!({ "choices": [{ "message": {
         "role": "assistant", "content": null,
         "tool_calls": [
@@ -7526,6 +7608,12 @@ fn s75_esc_with_shortcut_overlay_cancel_and_keep_hints() {
 
 /// S76（C·空闲矩阵）：空闲态 Esc 一律无动作——选区保持（右键仍复制）、工具焦点
 /// 保持（Enter 仍开页）、详情页保持（仍需 q 关闭）；一次按键零副作用。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s76_idle_esc_is_noop_across_states() {
     let cfg = TempDir::new("s76-cfg");
@@ -8714,6 +8802,12 @@ fn s90_m8_line_mode_citation_feedback_updates_usage() {
 /// S91：TUI 真实链路——模型调用 update_plan → 屏幕出现说明与步骤清单
 ///（三种状态标记）；最终回复正常渲染；退出后新会话 /resume 恢复同一快照
 ///（零模型请求、不重放）；失败调用的参数不画成成功清单。
+    // 038 macOS §5 用例级门控（偏离登记，非静默跳过；linux/windows 继续运行）：
+    // runner 无 GUI 会话下 arboard::Clipboard::new（NSPasteboard 初始化）挂死
+    // ——插桩实证（43373035232）：native_copy enter 后诊断永停、反馈行/渲染
+    // 推进全无，TUI 主线程挂死致 30s 超时与连锁（剪贴板 12＋渲染 3）。
+    // linux 全量同断言通过；产品在真实桌面（有 GUI）不受影响。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s91_tui_update_plan_snapshot_and_resume_consistency() {
     let cfg = TempDir::new("s91-cfg");
@@ -9390,6 +9484,16 @@ fn s112_tui_delete_first_attachment_renumbers_and_excludes() {
 
 /// 020 S113（A13 L3）：带图入史后取消（gated 响应挂起时 Esc）——消息与
 /// 图片在历史保留恰一份；继续新输入后请求同时含旧图与新文本。
+/// 038 §5 偏离登记（macOS 门控，非静默跳过）：Anka 虚拟化 macOS runner 的
+/// PTY master→slave 内核态丢字节——测试 write 成功返回、应用侧 poll/read
+/// 永远读不到、FIONREAD=0 三次采样（内核输入缓冲空）。证据链 R1–R35
+/// （docs/logs/2026-11-13-mac-fixes/report.md 轮次表）：R34/R35 挂点直证＝
+/// 应用侧一切正常（Tick 每 200ms 轮转/帧请求/桥读层正确返回无数据），
+/// term=76 冻结 30s——早期输入数百事件正常送达、turn 完成后的新写入丢
+/// （触发模式与 PTY 双向缓冲时序相关）。比运行时更深，应用侧无修法；
+/// 真实 mac 待验证。linux/windows 全量不变；恢复条件：更换 runner 或
+/// Anka 修复后移除本门控。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s113_tui_cancel_after_history_keeps_image_once() {
     let cfg = TempDir::new("s113-cfg");
@@ -9488,20 +9592,37 @@ fn s114a_tui_question_window_rejects_image_paste() {
     std::thread::sleep(Duration::from_millis(250));
     pty.send_raw(b"\r");
     pty.wait_screen_timeout("S114A-请选择方向", Duration::from_secs(5)).unwrap();
-    // Ctrl+V：问询窗口活动——不应建附件、不应出现剪贴板提示
+    // Ctrl+V：问询窗口活动——不应建附件、不应出现剪贴板提示。
+    // 缺席断言用 probe_absent（无 kill 副作用）——wait_screen_timeout 的
+    // 超时路径「只 kill 不 wait」：两个 300ms 缺席断言顺手杀子进程，后续
+    // Esc 写入在 mac 撞 EIO（linux master 写死从端静默成功＝平台分叉）。
     pty.send_raw(b"\x16");
     std::thread::sleep(Duration::from_millis(600));
-    let no_attachment = pty.wait_screen_timeout("[Image #", Duration::from_millis(300)).is_err();
+    let no_attachment = pty.probe_absent("[Image #", Duration::from_millis(300));
     assert!(no_attachment, "问询窗口不建附件");
-    let no_clip_hint = pty
-        .wait_screen_timeout("剪贴板图片", Duration::from_millis(300))
-        .is_err();
+    let no_clip_hint = pty.probe_absent("剪贴板图片", Duration::from_millis(300));
     assert!(no_clip_hint, "不触发剪贴板提示（按键归问询视图）");
-    // 收尾：Esc 中断问询后退出（问询期间按键不建附件、不触发剪贴板读取已断言
-    // 为本用例核心；退出码不属本用例验证目标，按框架清理收尾）
+    // 收尾：显式杀清＋排干等待（问询期间按键不建附件、不触发剪贴板读取已
+    // 断言为本用例核心；probe_absent 无杀副作用＝子进程仍活，finish 会等活
+    // 进程退出——退出码不属本用例验证目标。杀清后按 finish 同款排干等待：
+    // 不排干则 E 态子进程阻塞在退出写上、wait 无限等（24c8ca3 教训＋R13
+    // CI 实证挂死）；有界 10s 超限交 Drop 分离承接）
     pty.send_raw(b"\x1b");
     std::thread::sleep(Duration::from_millis(800));
-    let _ = pty.finish();
+    let _ = pty.child.as_mut().map(|c| c.kill());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        pty.read_once(20);
+        let gone = pty
+            .child
+            .as_mut()
+            .and_then(|c| c.try_wait().ok())
+            .flatten()
+            .is_some();
+        if gone || Instant::now() >= deadline {
+            break;
+        }
+    }
 }
 
 // ---------- S21：021 send_message_to_user_async（A15/A04 L3 行式管道）----------
@@ -9950,7 +10071,20 @@ fn mcp_record(path: &Path) -> Vec<Value> {
 
 /// 进程是否仍存活（/proc 探测；进程组回收的 L3 证据）。
 fn process_alive(pid: u64) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    // 038 macOS CI（7/7 同点位）：/proc 为 Linux 专属——macOS 恒 false＝
+    // 存活断言必败、gone 断言恒真（空真）。macOS 改 POSIX kill(pid,0) 存活
+    // 查询（ESRCH＝不存在；EPERM＝存在非己属仍计存活；僵尸 kill 成功＝计
+    // 存活，与 /proc 目录存在语义一致）。Linux 口径零漂移。
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY：kill(2) 空信号仅查询存活，无内存影响。
+        let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Path::new(&format!("/proc/{pid}")).exists()
+    }
 }
 
 fn wait_pid_gone(pid: u64, timeout: Duration) -> bool {
@@ -11344,4 +11478,81 @@ fn s142_resume_shows_permission_history_and_requires_new_confirmation() {
             .contains("S142-PROOF2"),
         "恢复后的 exec 应落回基线拒绝"
     );
+}
+
+/// 038 运行时专项验收探针（docs/logs/2026-11-13-mac-fixes/report.md）：输入
+/// 延迟量化——打字回显/回车提交→回复/Ctrl+C 退出三段实测。println 落台账
+/// 对照；断言上界＝防降级（mac kqueue 失效形态为 30s+ 停滞；量化线目标
+/// <50ms，250ms 为 CI 抖动余量上界）。
+#[test]
+fn input_latency_probe() {
+    let cfg = TempDir::new("latency-cfg");
+    let user = TempDir::new("latency-user");
+    let mock = spawn_mock(vec![MockResp::json(200, chat_body("LAT-回复"))]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_LAT_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("lat-key"),
+    );
+    let mut pty = PtySession::spawn(pty_cli(None, &[
+        ("TCHAT_CONFIG_DIR", cfg.path().to_str().unwrap()),
+        ("TCHAT_USER_DIR", user.path().to_str().unwrap()),
+        ("TCHAT_LAT_KEY", "lat-key"),
+    ]));
+    pty.wait_screen("? for shortcuts").unwrap();
+
+    // ① 打字回显：单字符 → composer 渲染（read_once(5)＝5ms 轮询粒度）
+    let t0 = Instant::now();
+    pty.send_raw(b"z");
+    let mut echo_ms = 0u128;
+    loop {
+        pty.feed_screen();
+        if pty.vt.to_string().contains('z') {
+            echo_ms = t0.elapsed().as_millis();
+            break;
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(10),
+            "打字回显超 10s（停滞形态）"
+        );
+        pty.read_once(5);
+    }
+
+    // ② 回车提交→回复渲染（含 turn 网络往返＋渲染）；send_line 语义
+    //（行＋150ms＋CR 分发——与既有用例一致，排除连写解析变量）
+    let t1 = Instant::now();
+    pty.send_line("hi");
+    let mut submit_ms = 0u128;
+    loop {
+        pty.feed_screen();
+        if pty.vt.to_string().contains("LAT-回复") {
+            submit_ms = t1.elapsed().as_millis();
+            break;
+        }
+        assert!(
+            t1.elapsed() < Duration::from_secs(10),
+            "回车→回复超 10s，mock 计数={}，屏幕：\n{}",
+            mock.count(),
+            pty.screen()
+        );
+        pty.read_once(5);
+    }
+
+    // ③ Ctrl+C 退出响应（空闲态＝退出）
+    let t2 = Instant::now();
+    pty.send_raw(b"\x03");
+    pty.wait_output("再见!", WATCHDOG).unwrap();
+    let quit_ms = t2.elapsed().as_millis();
+
+    println!("latency-probe: echo={echo_ms}ms submit={submit_ms}ms quit={quit_ms}ms");
+    assert!(echo_ms < 250, "打字回显 {echo_ms}ms（目标 <50ms，250ms 抖动上界）");
+    assert!(
+        submit_ms < 2000,
+        "回车→回复 {submit_ms}ms（含本地 mock 网络往返）"
+    );
+    assert!(quit_ms < 1000, "Ctrl+C 退出 {quit_ms}ms");
+    let (out, status) = pty.finish();
+    assert_eq!(status.code(), Some(0), "{out}");
+    assert!(user.path().join("sessions/auto-").exists() || out.contains("再见"), "{out}");
 }

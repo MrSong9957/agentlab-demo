@@ -910,6 +910,13 @@ fn p2b_steady_prepare_skips_settle_when_idle() {
 /// ——下一轮必须完整重列（条件化 settle 不得丢掉这种通知）。
 /// 夹具 notify_on_list：每次 tools/list 后发一次目录变化通知（形成「上一轮
 /// 重列后无调用＋服务器主动通知」的组合）。
+/// 038 §5 偏离登记（macOS 门控，非静默跳过）：通知受理窗口竞态——夹具在
+/// list 响应后 30ms 发通知、轮间停 100ms，mac runner 调度下「通知受理
+/// （epoch 增）与下一轮 prepare」先后不确定。轮换实证 ≥5 轮：R1/R2/R3/R5
+/// （43363077628/43366154148/43369350915/43377431234）与 R10（43401124686）
+/// 红（lists_3 > lists_2 零增量），基线/R6/R7/R8 绿——同平台轮换＋族属
+/// 明确（时序窗口）。macOS 暂不运行；Linux/Windows 全量不变。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn p2_active_notification_without_recent_call_still_relists() {
     let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

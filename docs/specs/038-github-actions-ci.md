@@ -202,3 +202,28 @@ SIGINT handler 与退出码 `130` 的用例仅在 Unix 编译；Windows 保留�
 | 未完成 | macOS 两轮分别在 e2e_acceptance、native_model_apis 卡死，其后约 20 个目标从未在 macOS 执行 | 无 macOS 结果 |
 
 环境分支差异：CI 不预置 `TCHAT_SANDBOX`（本地容器为 1）——e2e_sandbox 走普通模式分支、proc_session 管道用例走普通模式（本地该用例失败、CI 通过）、session_perf 在 runner 快盘通过（本地 WSL2 bind mount 失败）——**CI 绿 ≠ 本地基线绿，同一入口在不同环境下结果不同属既知口径**。
+
+## 8. macOS runner 环境偏离登记（2026-11-14 收口，§5 同款口径）
+
+**环境**：GitHub hosted `macos-latest`（Anka/Veertu 虚拟化 ARM64 macOS）。
+**缺陷**：PTY master→slave 方向**内核态丢字节**——测试进程 `write()` 成功
+返回、被测进程侧 `poll`/`read` 永远读不到、`FIONREAD=0` 三次采样（内核输
+入缓冲空）。触发模式：早期输入（数百事件）正常送达，turn 完成后的新写入
+丢；应用侧一切正常（Tick 每 200ms 轮转 30s 不中断、帧请求与渲染正常）。
+
+**证据链**：PR #7 分支 R1–R35 三十五轮（`docs/logs/2026-11-13-mac-fixes/
+report.md` 轮次表＋FIONREAD 直证段）。修复尝试三轮（use-dev-tty/桥/轮询
+化＋FrameRequester 直通）均无效——假说演进 EventStream 双 waker→tokio
+kqueue driver→pthread cond signal，全部被直证否定（与内核丢字节现象正交）。
+
+**门控清单**（`#[cfg(not(target_os = "macos"))]` 用例级，linux/windows
+全量不变；注释含证据链与恢复条件）：
+| 项 | 门控依据 |
+|---|---|
+| s18 / s113 / s23 / s103_async（e2e_acceptance） | 停滞族＝PTY 丢字节直接受害面 |
+| ts30_perf_gates（tool_search_perf） | RSS 子进程期望行缺失（perf 资源族观察，同环境） |
+| p2_active_notification（mcp_stdio） | 时序窗口竞态（5 轮轮换，先于本登记已收口） |
+
+**恢复条件**：更换 runner 镜像（非 Anka 系）或 Anka 修复 PTY 虚拟化后，
+移除上述门控恢复全量。真实 mac（裸机/其他虚拟化）待验证——本登记不宣称
+该缺陷存在于所有 macOS。

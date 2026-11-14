@@ -103,7 +103,14 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Globali
 
 # 038-CI：clock_format/screen_reader/system_motion 的 macOS 分支依赖此前未声明
 #（与 windows-sys 同类缺口），声明对照上游 97771b1 codex-rs/tui 原样补齐。
+# 038 macOS CI（R25 全量栈实证）：该 runner（Anka 虚拟化）的 kqueue EVFILT 层
+# 失效——crossterm mio 与 tokio driver 两个独立 kqueue 双双收不到事件（输入
+# EVFILT_READ 不触发、timer 超时不返回）。组合绕开：①use-dev-tty＝读层改
+# POSIX poll(2)（filedescriptor crate，非 kqueue）；②心跳线程替代 tokio
+# Interval（timer 层）；③ThreadedEventSource 桥（唤醒层 pthread unpark）。
+# linux/windows 构建零变化。
 [target.'cfg(target_os = "macos")'.dependencies]
+crossterm = { version = "0.29.0", features = ["bracketed-paste", "event-stream", "use-dev-tty"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAccessibility", "NSWorkspace"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSDateFormatter", "NSFormatter", "NSLocale", "NSString"] }
 

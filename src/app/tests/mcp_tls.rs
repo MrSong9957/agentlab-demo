@@ -117,11 +117,17 @@ fn start_tls_server() -> (String, Arc<AtomicBool>) {
             };
             let config = config.clone();
             std::thread::spawn(move || {
+                // 038 macOS CI（R9/R10 服务端捕获实证）：BSD 语义下 accept 的
+                // socket 继承监听器的 O_NONBLOCK（Linux 不继承）——服务端阻塞式
+                // read 在 mac 撞 EAGAIN（os error 35）被当致命错关闭连接＝客户端
+                // 「EOF 无 close_notify」。accept 后显式恢复阻塞语义，两端平台
+                // 行为一致（产品传输面无涉，测试夹具可移植性修复）。
+                let mut stream = stream;
+                stream.set_nonblocking(false).expect("恢复阻塞语义");
                 let mut conn = match rustls::ServerConnection::new(config) {
                     Ok(c) => c,
                     Err(_) => return,
                 };
-                let mut stream = stream;
                 let mut tls = rustls::Stream::new(&mut conn, &mut stream);
                 // 读一个完整 HTTP 请求：header 终止符＋Content-Length 定长 body。
                 let mut buf: Vec<u8> = Vec::new();
@@ -246,7 +252,6 @@ fn tls_https_round_trip_with_injected_root() {
         c._shutdown = shutdown.clone();
         c
     };
-    // [tls-diag]（038 取证，暂驻）：snapshot 空时透出装载/连接错误面
     assert_eq!(
         ctx.snapshot.len(),
         1,
