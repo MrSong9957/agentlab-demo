@@ -416,7 +416,7 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
     // 部件侧动画/冲刷定时/剪贴板完成经此请求绘制；驱动侧状态变化直接置脏
     let mut draw_rx = tui.subscribe_draw_notifications();
     #[cfg(target_os = "macos")]
-    let mut last_tick = Instant::now();
+    let mut last_tick = std::time::Instant::now();
     // 011 §7：脏标记——循环尾仅在有未显示变化时绘制（取消无条件 draw）。
     // 置脏来源：驱动侧状态变化（cells/滚动/选区/沟位/resize/命令结果）与
     // Draw 通知；composer 键/粘贴路径自请求（request_redraw），不在此置脏
@@ -1483,7 +1483,7 @@ enum Ev {
 fn poll_event_mac(
     app_rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     draw_rx: &mut tokio::sync::broadcast::Receiver<()>,
-    last_tick: &mut Instant,
+    last_tick: &mut std::time::Instant,
 ) -> Option<Ev> {
     /// 轮询采样间隔：输入延迟上界 10ms（<50ms 量化线内）。
     const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -1491,7 +1491,7 @@ fn poll_event_mac(
         // Tick：elapsed 计时（Interval 的 MissedTickBehavior::Skip 等价——
         // 错过的帧不堆积，命中即置一次）。
         if last_tick.elapsed() >= FRAME_TICK {
-            *last_tick = Instant::now();
+            *last_tick = std::time::Instant::now();
             return Some(Ev::Tick);
         }
         // Term：主线程同线程非阻塞试读 tty（poll(ZERO) 报就绪才 read——
