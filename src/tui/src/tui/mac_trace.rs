@@ -1,5 +1,5 @@
 //! [r33-trace]（038 取证，暂驻）：mac 挂点直证日志——文件通道
-//! `/tmp/tchat-mac-trace.log`（append＋pid 前缀，绕开 libtest 捕获与 PTY
+//! `/tmp/tchat-mac-trace-<pid>.log`（append，per-pid 文件，绕开 libtest 捕获与 PTY
 //! 屏幕污染）。打点面：桥读层（poll/read/send）、主循环事件流（Term/Tick/
 //! App/Draw）、submit 点、帧请求与发出、主循环退出——停滞发生时最后一笔
 //! 事件的时间戳与所在环节即挂点。取证后拆除。
@@ -26,6 +26,11 @@ static N_FRAME_SENT: AtomicU64 = AtomicU64::new(0);
 static N_POLL_TRUE: AtomicU64 = AtomicU64::new(0);
 static N_POLL_FALSE: AtomicU64 = AtomicU64::new(0);
 
+fn trace_path() -> String {
+    let pid = PID.get_or_init(std::process::id);
+    format!("/tmp/tchat-mac-trace-{pid}.log")
+}
+
 fn bump(c: &AtomicU64) -> u64 {
     c.fetch_add(1, Ordering::Relaxed) + 1
 }
@@ -36,9 +41,7 @@ pub fn trace(msg: &str) {
     let pid = PID.get_or_init(std::process::id);
     let line = format!("[{:.3}] pid={pid} {msg}\n", start.elapsed().as_secs_f64());
     if let Ok(_g) = WRITE_LOCK.lock() {
-        if let Ok(mut f) =
-            OpenOptions::new().create(true).append(true).open("/tmp/tchat-mac-trace.log")
-        {
+        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(trace_path()) {
             let _ = f.write_all(line.as_bytes());
         }
     }

@@ -848,7 +848,10 @@ fn s103_async_publish_f6_answer_enters_next_request_and_keeps_draft() {
     pty.send_raw(b"\x1b[17~"); // F6（xterm 转义序列）
     pty.wait_screen("S103-报告面向谁").unwrap();
     pty.send_raw(b"\r");
-    pty.wait_screen("Questions 1/1 answered").unwrap();
+    if let Err(e) = pty.wait_screen("Questions 1/1 answered") {
+        let pid = pty.child.as_ref().map(|c| c.id()).unwrap_or(0);
+        panic!("{e}\n[r33-trace] 产品进程挂点日志：\n{}", dump_mac_trace(pid));
+    }
     // 回答已受理；解除独立命令的阻塞，批收尾后回答进入下一请求
     std::fs::write(&gate, b"1").unwrap();
     pty.wait_screen("S103-完成").unwrap();
@@ -1069,6 +1072,20 @@ fn s106_resume_answered_async_question_displays_without_new_requests() {
 /// 跳转），含空格文本在原始字节流中不连续——新增 wait_screen 在 VT100 解析后
 /// 的屏幕文本上等待；send_line 改以 CR 结尾（TUI raw mode 下 Enter＝CR，
 /// rustyline 阶段 CR 经 ICRNL 同样按行结束）。
+/// [r33-trace]（取证，暂驻）：读取产品进程的挂点直证日志（mac only）。
+fn dump_mac_trace(child_pid: u32) -> String {
+    #[cfg(target_os = "macos")]
+    {
+        std::fs::read_to_string(format!("/tmp/tchat-mac-trace-{child_pid}.log"))
+            .unwrap_or_else(|_| format!("(trace 文件不存在 pid={child_pid})"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = child_pid;
+        String::new()
+    }
+}
+
 struct PtySession {
     master: File,
     child: Option<Child>,
@@ -3141,7 +3158,10 @@ fn s18_save_during_turn_refused_fast_and_retries_ok() {
     }
     std::thread::sleep(Duration::from_millis(200));
     pty.send_line("/save busy1");
-    pty.wait_screen("已保存快照 busy1").unwrap();
+    if let Err(e) = pty.wait_screen("已保存快照 busy1") {
+        let pid = pty.child.as_ref().map(|c| c.id()).unwrap_or(0);
+        panic!("{e}\n[r33-trace] 产品进程挂点日志：\n{}", dump_mac_trace(pid));
+    }
     pty.send_line("/exit");
     pty.wait_output("再见!", WATCHDOG).unwrap();
     let (out, status) = pty.finish();
@@ -3620,10 +3640,13 @@ fn s23_tui_scroll_limits_short_history_and_resize() {
         pty.send_raw(b"\x1b[6~");
         pty.read_once(120);
     }
-    assert!(
-        pty.screen().contains("S23-R2-L29"),
-        "越底 PageDown 须限位在最新"
-    );
+    if !pty.screen().contains("S23-R2-L29") {
+        let pid = pty.child.as_ref().map(|c| c.id()).unwrap_or(0);
+        panic!(
+            "越底 PageDown 须限位在最新\n[r33-trace] 产品进程挂点日志：\n{}",
+            dump_mac_trace(pid)
+        );
+    }
 
     // 验收 4（字面）：缩放期间草稿不丢失——resize 前输入草稿，resize 后仍在光标行。
     // 注：resize 后「立即慢打」的草稿渲染存在时序抖动（快打＋提交不受影响），
@@ -9489,7 +9512,10 @@ fn s113_tui_cancel_after_history_keeps_image_once() {
     pty.send_raw(b"next");
     std::thread::sleep(Duration::from_millis(250));
     pty.send_raw(b"\r");
-    pty.wait_screen_timeout("S113-第二轮完成", Duration::from_secs(10)).unwrap();
+    if let Err(e) = pty.wait_screen_timeout("S113-第二轮完成", Duration::from_secs(10)) {
+        let pid = pty.child.as_ref().map(|c| c.id()).unwrap_or(0);
+        panic!("{e}\n[r33-trace] 产品进程挂点日志：\n{}", dump_mac_trace(pid));
+    }
     // next 轮请求（首个索引）：gated 响应在取消后已被消费丢弃
     let body: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
     let urls: Vec<&str> = body["messages"]
