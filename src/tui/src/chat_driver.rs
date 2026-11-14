@@ -407,7 +407,14 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
     let mut events = ThreadedEventSource::new();
     #[cfg(not(target_os = "macos"))]
     let mut events = EventStream::new();
+    // 038 macOS CI（R25 全量栈）：tokio driver 的 kqueue 在该 runner 失效
+    // （timer 超时不醒）——mac 换心跳线程计时（heartbeat 模块文档）；linux/
+    // windows 保持 tokio Interval 原路径。
+    #[cfg(target_os = "macos")]
+    let mut ticker = crate::tui::tui::heartbeat::Heartbeat::new(FRAME_TICK);
+    #[cfg(not(target_os = "macos"))]
     let mut ticker = tokio::time::interval(FRAME_TICK);
+    #[cfg(not(target_os = "macos"))]
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // 011 §7：帧调度通知（FrameScheduler 合并＋120fps 限频后的 Draw 唤醒）——
     // 部件侧动画/冲刷定时/剪贴板完成经此请求绘制；驱动侧状态变化直接置脏

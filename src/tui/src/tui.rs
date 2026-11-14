@@ -66,6 +66,8 @@ mod event_stream;
 mod frame_rate_limiter;
 mod frame_requester;
 mod history_tail;
+#[cfg(target_os = "macos")]
+pub(crate) mod heartbeat;
 mod input_boundary;
 #[cfg(unix)]
 mod job_control;

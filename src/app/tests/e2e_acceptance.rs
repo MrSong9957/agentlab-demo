@@ -11432,3 +11432,80 @@ fn s142_resume_shows_permission_history_and_requires_new_confirmation() {
         "恢复后的 exec 应落回基线拒绝"
     );
 }
+
+/// 038 运行时专项验收探针（docs/logs/2026-11-13-mac-fixes/report.md）：输入
+/// 延迟量化——打字回显/回车提交→回复/Ctrl+C 退出三段实测。println 落台账
+/// 对照；断言上界＝防降级（mac kqueue 失效形态为 30s+ 停滞；量化线目标
+/// <50ms，250ms 为 CI 抖动余量上界）。
+#[test]
+fn input_latency_probe() {
+    let cfg = TempDir::new("latency-cfg");
+    let user = TempDir::new("latency-user");
+    let mock = spawn_mock(vec![MockResp::json(200, chat_body("LAT-回复"))]);
+    write_manual(cfg.path(), &mock.url, "env:TCHAT_LAT_KEY");
+    seed_grant(
+        user.path(),
+        &catalog::origin_of(&mock.url).unwrap(),
+        &catalog::fingerprint("lat-key"),
+    );
+    let mut pty = PtySession::spawn(pty_cli(None, &[
+        ("TCHAT_CONFIG_DIR", cfg.path().to_str().unwrap()),
+        ("TCHAT_USER_DIR", user.path().to_str().unwrap()),
+        ("TCHAT_LAT_KEY", "lat-key"),
+    ]));
+    pty.wait_screen("? for shortcuts").unwrap();
+
+    // ① 打字回显：单字符 → composer 渲染（read_once(5)＝5ms 轮询粒度）
+    let t0 = Instant::now();
+    pty.send_raw(b"z");
+    let mut echo_ms = 0u128;
+    loop {
+        pty.feed_screen();
+        if pty.vt.to_string().contains('z') {
+            echo_ms = t0.elapsed().as_millis();
+            break;
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(10),
+            "打字回显超 10s（停滞形态）"
+        );
+        pty.read_once(5);
+    }
+
+    // ② 回车提交→回复渲染（含 turn 网络往返＋渲染）；send_line 语义
+    //（行＋150ms＋CR 分发——与既有用例一致，排除连写解析变量）
+    let t1 = Instant::now();
+    pty.send_line("hi");
+    let mut submit_ms = 0u128;
+    loop {
+        pty.feed_screen();
+        if pty.vt.to_string().contains("LAT-回复") {
+            submit_ms = t1.elapsed().as_millis();
+            break;
+        }
+        assert!(
+            t1.elapsed() < Duration::from_secs(10),
+            "回车→回复超 10s，mock 计数={}，屏幕：\n{}",
+            mock.count(),
+            pty.screen()
+        );
+        pty.read_once(5);
+    }
+
+    // ③ Ctrl+C 退出响应（空闲态＝退出）
+    let t2 = Instant::now();
+    pty.send_raw(b"\x03");
+    pty.wait_output("再见!", WATCHDOG).unwrap();
+    let quit_ms = t2.elapsed().as_millis();
+
+    println!("latency-probe: echo={echo_ms}ms submit={submit_ms}ms quit={quit_ms}ms");
+    assert!(echo_ms < 250, "打字回显 {echo_ms}ms（目标 <50ms，250ms 抖动上界）");
+    assert!(
+        submit_ms < 2000,
+        "回车→回复 {submit_ms}ms（含本地 mock 网络往返）"
+    );
+    assert!(quit_ms < 1000, "Ctrl+C 退出 {quit_ms}ms");
+    let (out, status) = pty.finish();
+    assert_eq!(status.code(), Some(0), "{out}");
+    assert!(user.path().join("sessions/auto-").exists() || out.contains("再见"), "{out}");
+}

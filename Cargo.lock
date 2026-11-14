@@ -845,6 +845,7 @@ dependencies = [
  "bitflags 2.13.2",
  "crossterm_winapi",
  "derive_more",
+ "filedescriptor",
  "futures-core",
  "mio",
  "parking_lot",

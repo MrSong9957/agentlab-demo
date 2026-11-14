@@ -474,3 +474,38 @@ turn/MCP/UI 全部并发面，行为变化面大）——**超出「输入架构
 唤醒丢失）。
 
 **探针已拆**（r24-diag 标记归零；插桩净保持）。
+
+## 运行时专项（裁决①执行，2026-11-14）
+
+**根因链终局**（R25 全量栈）：该 runner（Anka 虚拟化 macOS）的 **kqueue
+EVFILT 层失效**——crossterm mio 与 tokio driver 两个独立 kqueue 双双收不
+到事件（输入 EVFILT_READ 不触发、timer 超时不返回）；epoll（linux）无此
+问题。全部历史现象由「kqueue 沉默＋SIGINT 中断强制唤醒」统一解释。
+
+**选型**（影响面最小＋全链路去 kqueue）：**组合拳**而非 current_thread——
+current_thread 不解决（主线程 block_on 的 park/unpark 虽是 pthread Condvar，
+但 timer/IO 仍依赖 driver kqueue；且 turn 并发模型变化风险大）。三件套
+（全部 cfg(target_os = "macos")，linux/windows 构建零变化）：
+1. **读层**：crossterm `use-dev-tty`——tty.rs 用 POSIX poll(2)
+   （filedescriptor crate）读 stdin，绕 mio/kqueue；tty_fd()＝stdin is
+   tty ? STDIN_FILENO : /dev/tty（TUI 进程 stdin＝PTY slave）。
+2. **timer 层**：`Heartbeat`（src/tui/src/tui/heartbeat.rs）——独立
+   std::thread 以 thread::sleep(100ms) 计时（内核 sleep，不经 kqueue），
+   tokio mpsc bounded(1)＋try_send 满则丢（＝MissedTickBehavior::Skip
+   等价）；select! 的 `ticker.tick()` 分支签名兼容（Interval::tick 同
+   async fn 形态），分支代码零改动。
+3. **唤醒层**：既有 ThreadedEventSource 桥——通道 send→waker→主线程
+   CachedParkThread unparker→pthread cond signal（不经 kqueue）。
+
+**语义对照（逐条）**：打字（poll(2) EVFILT 等价读＋同一解析器）、回车
+（同上）、Ctrl+C（内核信号面不变——TIOCSCTTY/ISIG 原样）、暂停恢复
+（tty.rs 的 wake_pipe/SIGWINCH 接收器为 use-dev-tty 内建；EventBroker
+pause/resume drop/recreate 桥生命周期承接）。FRAME_TICK=100ms 语义保持
+（Skip 等价）；app/draw 分支（tokio mpsc/broadcast send→直接 unpark
+主线程）不经 kqueue 原样保留。
+
+**验证硬性要求**：
+- linux 全量（本机，epoll 正常路径原样编译）＋TUI lib 2175 全绿；
+- CI（R26）＝mac 停滞族 4 项恢复＋linux 全绿＋win 仅 t18；
+- 延迟量化探针 `input_latency_probe`（e2e_acceptance，三段实测 println：
+  echo/submit/quit；断言防降级上界 250ms/2000ms/1000ms，目标 <50ms）。
