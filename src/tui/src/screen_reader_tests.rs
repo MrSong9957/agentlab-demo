@@ -102,7 +102,6 @@ async fn preserves_preferences_from_other_layers_and_edits_during_detection() ->
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
 #[tokio::test]
 async fn persisted_default_loads_and_renders_without_animation() -> anyhow::Result<()> {
     use crate::app_event_sender::AppEventSender;

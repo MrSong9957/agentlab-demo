@@ -126,19 +126,23 @@ impl<S: EventSource + Default> EventBroker<S> {
 
 /// Real crossterm-backed event source.
 pub struct CrosstermEventSource {
-    // 038 macOS CI：产品输入路径（chat_driver 主循环）在 mac 轮询化后不经
-    // 本结构（见 chat_driver poll_event_mac）；本结构（测试面）三平台统一
-    // EventStream 原样。
-    #[cfg(not(windows))]
+    // 038 macOS CI：mac 换专属读线程事件源（R11–R20 取证——EventStream 的
+    // 「后台唤醒任务＋双 waker」结构在 mac 输入延迟数十秒泄洪；见
+    // threaded_event_source 模块文档）。linux/windows 保持 EventStream 原路径。
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     events: crossterm::event::EventStream,
+    #[cfg(target_os = "macos")]
+    events: super::threaded_event_source::ThreadedEventSource,
     #[cfg(windows)]
     events: super::windows_key_sequence::WindowsKeySequence<crossterm::event::EventStream>,
 }
 
 impl Default for CrosstermEventSource {
     fn default() -> Self {
-        #[cfg(not(windows))]
+        #[cfg(all(not(windows), not(target_os = "macos")))]
         let events = crossterm::event::EventStream::new();
+        #[cfg(target_os = "macos")]
+        let events = super::threaded_event_source::ThreadedEventSource::new();
         #[cfg(windows)]
         let events = crossterm::event::EventStream::new();
         Self {
