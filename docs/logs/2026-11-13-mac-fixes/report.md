@@ -542,3 +542,37 @@ FRAME_TICK 帧节奏（Tick elapsed 计时 Skip 等价）；app/draw 通道语�
 **Linux 防回归**：本机全量（除 2 项已知本机环境临界竞态——stash 对照
 基线同样间歇红非引入）全绿；tchat-tui lib 2175 全绿；探针
 echo=104/submit=315/quit=3ms。
+
+## 运行时专项两轮结果与阻断（R26–R32，2026-11-14 停下回报）
+
+**组合拳轮（R27 有效验证）**：早期交互全过（input_latency_probe 绿）；
+停滞族 4 项依旧红——「EventStream 双 waker」假说否定。
+**轮询化轮（R32 有效验证）**：**回归扩大**——
+- e2e_acceptance 33/100（TUI 大面积；探针打字回显 10s 不上屏＝比前更糟）；
+- **波及非 TUI 套件**：sandbox_lifecycle 0/4、user_input_security 6/3、
+  native_model_apis 31/2、session_cli 26/1（e12 观察项）——影响面超出
+  TUI 进程边界；
+- windows 仅 t18 ✓、ubuntu 绿 ✓（linux 路径零变化复证）。
+
+**编译翻车记录（mac-only cfg 本机不可编译验证的结构性障碍）**：R26 路径
+笔误、R28 Instant 未导入、R29 TryRecvError 变体名（Disconnected）、R30
+test_channel/元组元素 cfg 不合法＋tests mod 残余、R31 screen_reader/
+clipboard 两函数遗漏——**六个 mac-only 编译轮**。
+
+**根因假说演进**：EventStream 双 waker（R23 否定）→ tokio kqueue driver
+（R25）→ pthread cond signal 跨线程丢失（R27 形态）——三个假说均有证据
+支撑但轮询化（消除全部唤醒依赖）仍大面积回归＝**假说不完备，缺一份
+「挂点直证」**（poll(0)/首帧 draw/初始化的具体挂点无栈数据）。
+
+**两项已闭环**（独立于停滞族）：perf_tiers mac 断言收口、s114a/s114a 类
+测试设计修复、p2 门控、tls/pty_cancel/attack×3/bin_pipe/fd5/matrix_a/
+s103_reload/s73 全部销号——mac 现存红＝停滞族 4 项＋perf/ts30 观察项。
+
+**三选项（回到裁决）**：
+①**挂点直证专项**：产品代码加暂驻文件日志（mac 分支 run_tui/run_interactive
+ 各阶段＋poll_event_mac 采样计数）跑一轮定位 R32 的 100 失败挂点——上一轮
+ 的 sample 栈已不可用（探针已拆），需要新的挂点证据再修；
+②**§5 门控收口**：停滞族 4 项＋perf_tiers/ts30 登记 mac 平台限制（11+ 轮
+ 证据线），mac 达标口径=门控生效；插桩已拆净、ubuntu/win 基线绿——PR 现状
+ 已是「除门控外全绿」；
+③**现状候选验收**：PR #7 现状（mac 红面=停滞族，台账齐全）合并候选。
