@@ -621,3 +621,19 @@ R27 组合拳（use-dev-tty＋Heartbeat＋桥，探针绿无回归）＋input_la
 ＋全部已销号修复（attack×3/bin_pipe/fd5/matrix_a/s103_reload/s73/
 pty_cancel/tls/s114a/p2 门控/perf_tiers 收口）。
 **达标口径**：mac 仅剩已门控不出现项＋ubuntu 绿＋windows 仅 t18。
+
+## 达标（R36/R37，45b43c8，2026-11-14）
+
+**R36**：mac 门控 5 项全部生效（停滞族 4＋ts30 不出现）✓；唯一失败＝c12
+（multi_agent 中断落点竞态，轮换型第 2 轮）；windows＝t18＋a15（回环噪声，
+第 2 轮）——均未达 ≥3 轮门控线，复验轮裁决。
+**R37（同 commit dispatch 复验）**：**mac 全绿（PR #7 首次）＋ubuntu 绿＋
+windows 仅 t18**——c12/a15 均轮换过（观察名单，不门控）。
+
+**达标口径判定**：
+- mac＝已门控项（p2/停滞族 4/ts30）全部不出现＋无其他失败 ✓
+- ubuntu 绿 ✓ / windows 仅 t18 ✓
+
+**PR #7 候选就绪**（不合并等验收）。分支 tip＝45b43c8（门控与登记）。
+轮换观察名单（未达门控线继续计数）：c12 2 轮、a15 2 轮、c09/e12/s69/s106
+各 1 轮。
