@@ -13,11 +13,14 @@
 //! dedicated scheduler task and lightweight request handles.
 
 use std::time::Duration;
+#[cfg(not(target_os = "macos"))]
 use std::time::Instant;
 
 use tokio::sync::broadcast;
+#[cfg(not(target_os = "macos"))]
 use tokio::sync::mpsc;
 
+#[cfg(not(target_os = "macos"))]
 use super::frame_rate_limiter::FrameRateLimiter;
 
 /// A requester for scheduling future frame draws on the TUI event loop.
@@ -29,7 +32,15 @@ use super::frame_rate_limiter::FrameRateLimiter;
 /// from anywhere in the TUI code.
 #[derive(Clone, Debug)]
 pub struct FrameRequester {
+    // 038 macOS CI（R25/R27）：Anka 虚拟化的跨线程唤醒全部丢失（pthread cond
+    // signal＋kqueue EVFILT）——scheduler task 的 tokio 唤醒同样失效＝部件自
+    // 请求的渲染链断（打字不上屏）。mac 直通模式：请求即时广播（合并/120fps
+    // 限频牺牲——主循环 draw 为同步重绘，打字键速下无碍；schedule_frame_in
+    // 的延迟语义退化为立即，登记于台账）；linux/windows 保持 actor 原样。
+    #[cfg(not(target_os = "macos"))]
     frame_schedule_tx: mpsc::UnboundedSender<Instant>,
+    #[cfg(target_os = "macos")]
+    draw_tx: broadcast::Sender<()>,
 }
 
 impl FrameRequester {
@@ -37,22 +48,36 @@ impl FrameRequester {
     ///
     /// The provided `draw_tx` is used to notify the TUI event loop of scheduled draws.
     pub fn new(draw_tx: broadcast::Sender<()>) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let scheduler = FrameScheduler::new(rx, draw_tx);
-        tokio::spawn(scheduler.run());
-        Self {
-            frame_schedule_tx: tx,
+        #[cfg(not(target_os = "macos"))]
+        {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let scheduler = FrameScheduler::new(rx, draw_tx);
+            tokio::spawn(scheduler.run());
+            Self {
+                frame_schedule_tx: tx,
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Self { draw_tx }
         }
     }
 
     /// Schedule a frame draw as soon as possible.
     pub fn schedule_frame(&self) {
+        #[cfg(not(target_os = "macos"))]
         let _ = self.frame_schedule_tx.send(Instant::now());
+        #[cfg(target_os = "macos")]
+        let _ = self.draw_tx.send(());
     }
 
     /// Schedule a frame draw to occur after the specified duration.
     pub fn schedule_frame_in(&self, dur: Duration) {
+        #[cfg(not(target_os = "macos"))]
         let _ = self.frame_schedule_tx.send(Instant::now() + dur);
+        // mac 直通：延迟帧退化为立即（Anka 唤醒丢失下无可靠定时；登记）。
+        #[cfg(target_os = "macos")]
+        let _ = self.draw_tx.send(());
     }
 }
 
@@ -61,8 +86,17 @@ impl FrameRequester {
     /// Create a no-op frame requester for tests.
     pub(crate) fn test_dummy() -> Self {
         let (tx, _rx) = mpsc::unbounded_channel();
-        FrameRequester {
-            frame_schedule_tx: tx,
+        let (draw_tx, _d) = broadcast::channel::<()>(1);
+        let _ = tx;
+        #[cfg(not(target_os = "macos"))]
+        {
+            FrameRequester {
+                frame_schedule_tx: tx,
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            FrameRequester { draw_tx }
         }
     }
 }
@@ -73,12 +107,16 @@ impl FrameRequester {
 ///
 /// To avoid wasted redraw work, draw notifications are clamped to a maximum of 120 FPS (see
 /// [`FrameRateLimiter`]).
+// 038 macOS CI：mac 直通模式不 spawn 本 task（跨线程唤醒丢失下合并/限频失效
+// ——见 FrameRequester 字段注释）。
+#[cfg(not(target_os = "macos"))]
 struct FrameScheduler {
     receiver: mpsc::UnboundedReceiver<Instant>,
     draw_tx: broadcast::Sender<()>,
     rate_limiter: FrameRateLimiter,
 }
 
+#[cfg(not(target_os = "macos"))]
 impl FrameScheduler {
     /// Create a new FrameScheduler with the provided receiver and draw notification sender.
     fn new(receiver: mpsc::UnboundedReceiver<Instant>, draw_tx: broadcast::Sender<()>) -> Self {
@@ -126,7 +164,9 @@ impl FrameScheduler {
         }
     }
 }
-#[cfg(test)]
+// 038 macOS CI：scheduler 合并/限频行为测试随 actor 实现一起（linux 验证；
+// mac 直通模式无此行为面）。
+#[cfg(all(test, not(target_os = "macos")))]
 mod tests {
     use super::super::frame_rate_limiter::MIN_FRAME_INTERVAL;
     use super::*;

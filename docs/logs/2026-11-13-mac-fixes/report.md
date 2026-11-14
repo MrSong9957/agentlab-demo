@@ -509,3 +509,36 @@ pause/resume drop/recreate 桥生命周期承接）。FRAME_TICK=100ms 语义保
 - CI（R26）＝mac 停滞族 4 项恢复＋linux 全绿＋win 仅 t18；
 - 延迟量化探针 `input_latency_probe`（e2e_acceptance，三段实测 println：
   echo/submit/quit；断言防降级上界 250ms/2000ms/1000ms，目标 <50ms）。
+
+## R27 形态与最终形态（轮询化主循环，2026-11-14）
+
+**R27（组合拳验证轮）**：mac 编译过（129 passed）＋input_latency_probe
+**通过**（早期交互全链路 OK）——但停滞族 4 项依旧红（s18 的 /save busy1
+turn 后提交静默：字符渲染了、回车无反应）。假说再修正：早期交互通过
+（事件已在通道无需唤醒）＋turn 后卡死＋R14「SIGINT 唯一可靠唤醒」＝
+**Anka VM 的 pthread cond signal 跨线程丢失**（一切 park 型等待在首个
+Pending 后永久睡死；kqueue EVFILT 与 pthread 双失效的虚拟化缺陷）。
+
+**最终形态（唤醒依赖归零）**：
+- **删除** ThreadedEventSource 桥＋Heartbeat（park/唤醒面全部退场）；
+- **mac 主循环轮询化**（poll_event_mac，chat_driver）：主线程同线程非阻塞
+  读输入（crossterm 公共 API poll(ZERO)+read；读层 use-dev-tty＝POSIX
+  poll(2)）＋app/draw 通道 try_recv＋Tick＝elapsed 计时；无事件
+  sleep(10ms)——root future 永不 Pending＝永不 park；输入延迟上界 10ms；
+- **FrameRequester mac 直通化**：schedule_frame/schedule_frame_in 绕开
+  FrameScheduler task（其 tokio 唤醒同样丢失＝打字上屏链断）——请求即时
+  广播；合并/120fps 限频牺牲（登记；schedule_frame_in 延迟帧退化为立即）。
+  scheduler 行为测试 cfg(not macos)（linux 验证）。
+- EventBroker 三平台统一 EventStream 原样（mac 产品路径不经它；惰性不创建
+  ——无与主循环 poll(0) 的输入竞争）。
+
+**语义对照（逐条）**：打字（同线程 poll(2) 读＋同一解析器＋直通帧请求）、
+回车/Ctrl+C（同输入面＋内核信号面不变）、SIGWINCH（tty.rs 源内建
+winch_signal_receiver）、暂停恢复（EventBroker pause/resume 的
+drop/recreate 与产品主循环无关——产品唯一输入路径为 poll_event_mac）；
+FRAME_TICK 帧节奏（Tick elapsed 计时 Skip 等价）；app/draw 通道语义
+（try_recv 的 Empty/Closed/Lagged 与 select 分支逐条对齐）。
+
+**Linux 防回归**：本机全量（除 2 项已知本机环境临界竞态——stash 对照
+基线同样间歇红非引入）全绿；tchat-tui lib 2175 全绿；探针
+echo=104/submit=315/quit=3ms。

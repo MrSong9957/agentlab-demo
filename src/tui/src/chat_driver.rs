@@ -28,11 +28,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::Event as CrosstermEvent;
-// 038 macOS CI：EventStream 在 mac 的「后台唤醒任务＋双 waker」结构触发输入
-// 延迟数十秒泄洪（R11–R20 取证）——mac 换专属读线程事件源（详见
-// threaded_event_source 模块文档）；linux/windows 保持 EventStream 原路径。
-#[cfg(target_os = "macos")]
-use crate::tui::threaded_event_source::ThreadedEventSource;
+// 038 macOS CI（R25/R27 全量栈＋形态分析）：该 runner（Anka 虚拟化 macOS）的
+// **跨线程唤醒全部丢失**（pthread cond signal 虚拟化缺陷＋kqueue EVFILT 层
+// 失效——park 型等待在首个 Pending 后永久睡死，SIGINT 是唯一能强制唤醒的
+// 信号）。mac 主循环**轮询化**：主线程同线程非阻塞读输入（crossterm 公共
+// API poll(ZERO)+read，读层经 use-dev-tty 走 POSIX poll(2)）＋通道 try_recv
+// ＋elapsed 计时，无事件 sleep(10ms)——root future 永不 Pending＝永不 park
+// ＝唤醒依赖归零；输入延迟上界 10ms（<50ms 量化线）。linux/windows 保持
+// EventStream＋select! 事件驱动原路径。
 #[cfg(not(target_os = "macos"))]
 use crossterm::event::EventStream;
 use crossterm::event::KeyCode;
@@ -403,15 +406,8 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
         pane.set_task_running(true);
         (hooks.spawn_turn)(submission, turn_tx.clone());
     }
-    #[cfg(target_os = "macos")]
-    let mut events = ThreadedEventSource::new();
     #[cfg(not(target_os = "macos"))]
     let mut events = EventStream::new();
-    // 038 macOS CI（R25 全量栈）：tokio driver 的 kqueue 在该 runner 失效
-    // （timer 超时不醒）——mac 换心跳线程计时（heartbeat 模块文档）；linux/
-    // windows 保持 tokio Interval 原路径。
-    #[cfg(target_os = "macos")]
-    let mut ticker = crate::tui::heartbeat::Heartbeat::new(FRAME_TICK);
     #[cfg(not(target_os = "macos"))]
     let mut ticker = tokio::time::interval(FRAME_TICK);
     #[cfg(not(target_os = "macos"))]
@@ -419,6 +415,8 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
     // 011 §7：帧调度通知（FrameScheduler 合并＋120fps 限频后的 Draw 唤醒）——
     // 部件侧动画/冲刷定时/剪贴板完成经此请求绘制；驱动侧状态变化直接置脏
     let mut draw_rx = tui.subscribe_draw_notifications();
+    #[cfg(target_os = "macos")]
+    let mut last_tick = Instant::now();
     // 011 §7：脏标记——循环尾仅在有未显示变化时绘制（取消无条件 draw）。
     // 置脏来源：驱动侧状态变化（cells/滚动/选区/沟位/resize/命令结果）与
     // Draw 通知；composer 键/粘贴路径自请求（request_redraw），不在此置脏
@@ -426,12 +424,17 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
 
     loop {
         // 事件多路：crossterm / tick / app event / draw 通知
+        #[cfg(target_os = "macos")]
+        let ev = poll_event_mac(&mut app_rx, &mut draw_rx, &mut last_tick);
+        #[cfg(not(target_os = "macos"))]
         let ev = tokio::select! {
             maybe_event = events.next() => match maybe_event {
                 Some(Ok(ev)) => Some(Ev::Term(ev)),
                 Some(Err(_)) => None,
                 None => None, // 事件流关闭：退出主循环
             },
+            // 038 mac 轮询化后 tick/app/draw 三源移入 poll_event_mac（linux/
+            // windows 原样保留 select! 事件驱动；ticker 本分支同 cfg 定义）。
             _ = ticker.tick() => Some(Ev::Tick),
             app = app_rx.recv() => app.map(Ev::App),
             _ = draw_rx.recv() => Some(Ev::DrawRequested),
@@ -1467,6 +1470,58 @@ enum Ev {
     App(AppEvent),
     /// 011 §7：FrameScheduler 帧通知（部件请求，已合并＋限频）
     DrawRequested,
+}
+
+/// 038 macOS CI（R25/R27）：主循环轮询化的事件收割器——一次调用返回一个
+/// 事件；无事件 sleep(10ms) 重试（调用方阻塞于此＝root future 永不 Pending
+/// ＝永不 park，唤醒依赖归零）。输入＝主线程同线程非阻塞读（crossterm 公共
+/// API poll(ZERO)+read——use-dev-tty 读层 POSIX poll(2)，无读线程/无跨线程/
+/// 无 kqueue）；其余三源 try_recv（tokio 通道同线程收割不依赖 driver）。四
+/// 源优先级 Tick→Term→App→Draw；流关闭返回 None（调用方 break，与 next()/
+/// recv() 的 None 同语义）。
+#[cfg(target_os = "macos")]
+fn poll_event_mac(
+    app_rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    draw_rx: &mut tokio::sync::broadcast::Receiver<()>,
+    last_tick: &mut Instant,
+) -> Option<Ev> {
+    /// 轮询采样间隔：输入延迟上界 10ms（<50ms 量化线内）。
+    const POLL_INTERVAL: Duration = Duration::from_millis(10);
+    loop {
+        // Tick：elapsed 计时（Interval 的 MissedTickBehavior::Skip 等价——
+        // 错过的帧不堆积，命中即置一次）。
+        if last_tick.elapsed() >= FRAME_TICK {
+            *last_tick = Instant::now();
+            return Some(Ev::Tick);
+        }
+        // Term：主线程同线程非阻塞试读 tty（poll(ZERO) 报就绪才 read——
+        // 读层 use-dev-tty＝POSIX poll(2)；partial escape 内部缓冲跨调用
+        // 保留）。Err＝读层错误→退出主循环（与 select 的 Some(Err) 同语义）。
+        match crossterm::event::poll(Duration::ZERO) {
+            Ok(true) => match crossterm::event::read() {
+                Ok(term) => return Some(Ev::Term(term)),
+                Err(_) => return None,
+            },
+            Ok(false) => {}
+            Err(_) => return None,
+        }
+        // App：宿主事件通道（Closed→退出主循环，与 recv() None 同语义）
+        match app_rx.try_recv() {
+            Ok(app) => return Some(Ev::App(app)),
+            Err(tokio::sync::mpsc::error::TryRecvError::Closed) => return None,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+        }
+        // Draw：帧调度通知（Ok/Lagged 均触发——与 select 分支忽略 recv 值
+        // 同语义）
+        match draw_rx.try_recv() {
+            Ok(()) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                return Some(Ev::DrawRequested);
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => return None,
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {}
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
 }
 
 
