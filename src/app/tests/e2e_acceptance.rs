@@ -1016,6 +1016,13 @@ fn s105_esc_during_wait_cancels_and_closes_question() {
 }
 
 /// 018-B S106：已答异步问询的会话恢复——同源投影显示已答，恢复零请求。
+/// 038 §5 偏离登记（macOS 门控，非静默跳过）：恢复流程的时序竞态——
+/// 轮换证据 3 轮：R1（43363077628）/R4（43373035232）/R39（43598855466），
+/// 其余轮次绿——同 runner 轮换面（Anka 虚拟化 macOS：PTY 丢字节/时序族，
+/// 见 docs/logs/2026-11-13-mac-fixes/report.md FIONREAD 直证段）。族属＝
+/// 时序/环境族。linux/windows 全量不变；真实 mac 待验证；恢复条件：更换
+/// runner 或 Anka 修复后移除本门控。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s106_resume_answered_async_question_displays_without_new_requests() {
     let cfg = TempDir::new("s106-cfg");
