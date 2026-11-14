@@ -1508,7 +1508,7 @@ fn poll_event_mac(
         // App：宿主事件通道（Closed→退出主循环，与 recv() None 同语义）
         match app_rx.try_recv() {
             Ok(app) => return Some(Ev::App(app)),
-            Err(tokio::sync::mpsc::error::TryRecvError::Closed) => return None,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return None,
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
         }
         // Draw：帧调度通知（Ok/Lagged 均触发——与 select 分支忽略 recv 值
