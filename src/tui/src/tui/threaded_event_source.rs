@@ -89,6 +89,12 @@ impl ThreadedEventSource {
                         // 空闲窗口：让出调度（pause/stop 在此生效）。
                         Ok(false) => {
                             super::mac_trace::trace_poll(false);
+                            // [r33-trace]：每 50 次空闲采样一次内核缓冲量
+                            // （100ms×50＝5s 一次；停滞期可见字节进出）。
+                            let n = super::mac_trace::poll_false_count();
+                            if n % 50 == 0 {
+                                super::mac_trace::trace_stdin_bytes();
+                            }
                         }
                         Err(e) => {
                             super::mac_trace::trace(&format!("bridge poll err {e}"));

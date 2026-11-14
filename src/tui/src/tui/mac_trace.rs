@@ -81,6 +81,19 @@ pub fn trace_frame_sent() {
         trace(&format!("frame sent #{n}"));
     }
 }
+/// [r33-trace]：内核输入缓冲待读字节量（FIONREAD）——区分「字节在缓冲而
+/// poll 不报」vs「字节真丢」。
+pub fn poll_false_count() -> u64 {
+    N_POLL_FALSE.load(Ordering::Relaxed)
+}
+
+pub fn trace_stdin_bytes() {
+    let mut n: libc::c_int = 0;
+    // SAFETY：FIONREAD ioctl 仅查询待读字节量。
+    let rc = unsafe { libc::ioctl(libc::STDIN_FILENO, libc::FIONREAD, &mut n) };
+    trace(&format!("stdin FIONREAD rc={rc} bytes={n}"));
+}
+
 pub fn trace_poll(ready: bool) {
     if ready {
         let n = bump(&N_POLL_TRUE);
