@@ -228,6 +228,11 @@ fn ts30_rss_child_mode() {
     );
 }
 
+/// 038 §5 偏离登记（macOS 门控，非静默跳过）：RSS 子进程未输出期望行
+/// （R14 首现、R32/R34 复现间隔出现）——perf 资源族观察项，与停滞族同环境
+/// （Anka 虚拟化 macOS runner）；证据链 R1–R35（docs/logs/2026-11-13-mac-fixes/
+/// report.md）。linux/windows 全量不变；真实 mac 待验证；恢复条件同上。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn ts30_perf_gates() {
     if rss_child_mode() {

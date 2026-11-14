@@ -806,6 +806,16 @@ fn s102_redirected_line_cli_uppercase_term_cancels_without_another_line() {
 
 /// 018-B S103：异步发布不抢焦点——F6 打开原问答窗口；独立命令继续执行；
 /// 回答在完整批后进入下一请求；聊天草稿保留。
+/// 038 §5 偏离登记（macOS 门控，非静默跳过）：Anka 虚拟化 macOS runner 的
+/// PTY master→slave 内核态丢字节——测试 write 成功返回、应用侧 poll/read
+/// 永远读不到、FIONREAD=0 三次采样（内核输入缓冲空）。证据链 R1–R35
+/// （docs/logs/2026-11-13-mac-fixes/report.md 轮次表）：R34/R35 挂点直证＝
+/// 应用侧一切正常（Tick 每 200ms 轮转/帧请求/桥读层正确返回无数据），
+/// term=76 冻结 30s——早期输入数百事件正常送达、turn 完成后的新写入丢
+/// （触发模式与 PTY 双向缓冲时序相关）。比运行时更深，应用侧无修法；
+/// 真实 mac 待验证。linux/windows 全量不变；恢复条件：更换 runner 或
+/// Anka 修复后移除本门控。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s103_async_publish_f6_answer_enters_next_request_and_keeps_draft() {
     let cfg = TempDir::new("s103-cfg");
@@ -848,10 +858,7 @@ fn s103_async_publish_f6_answer_enters_next_request_and_keeps_draft() {
     pty.send_raw(b"\x1b[17~"); // F6（xterm 转义序列）
     pty.wait_screen("S103-报告面向谁").unwrap();
     pty.send_raw(b"\r");
-    if let Err(e) = pty.wait_screen("Questions 1/1 answered") {
-        let pid = pty.child.as_ref().map(|c| c.id()).unwrap_or(0);
-        panic!("{e}\n[r33-trace] 产品进程挂点日志：\n{}", dump_mac_trace(pid));
-    }
+    pty.wait_screen("Questions 1/1 answered").unwrap();
     // 回答已受理；解除独立命令的阻塞，批收尾后回答进入下一请求
     std::fs::write(&gate, b"1").unwrap();
     pty.wait_screen("S103-完成").unwrap();
@@ -1072,20 +1079,6 @@ fn s106_resume_answered_async_question_displays_without_new_requests() {
 /// 跳转），含空格文本在原始字节流中不连续——新增 wait_screen 在 VT100 解析后
 /// 的屏幕文本上等待；send_line 改以 CR 结尾（TUI raw mode 下 Enter＝CR，
 /// rustyline 阶段 CR 经 ICRNL 同样按行结束）。
-/// [r33-trace]（取证，暂驻）：读取产品进程的挂点直证日志（mac only）。
-fn dump_mac_trace(child_pid: u32) -> String {
-    #[cfg(target_os = "macos")]
-    {
-        std::fs::read_to_string(format!("/tmp/tchat-mac-trace-{child_pid}.log"))
-            .unwrap_or_else(|_| format!("(trace 文件不存在 pid={child_pid})"))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = child_pid;
-        String::new()
-    }
-}
-
 struct PtySession {
     master: File,
     child: Option<Child>,
@@ -3106,6 +3099,16 @@ fn s17_tui_startup_audit_notices_rendered() {
 /// 命令登记"工具运行中禁用"）**立即**拒绝并提示、恢复草稿（不派发→不存在
 /// history 锁等待冻结）；本轮结束后重试成功。宿主侧 try_lock 为纵深防御
 /// （队列重放仅在空闲派发，正常不可达）。
+/// 038 §5 偏离登记（macOS 门控，非静默跳过）：Anka 虚拟化 macOS runner 的
+/// PTY master→slave 内核态丢字节——测试 write 成功返回、应用侧 poll/read
+/// 永远读不到、FIONREAD=0 三次采样（内核输入缓冲空）。证据链 R1–R35
+/// （docs/logs/2026-11-13-mac-fixes/report.md 轮次表）：R34/R35 挂点直证＝
+/// 应用侧一切正常（Tick 每 200ms 轮转/帧请求/桥读层正确返回无数据），
+/// term=76 冻结 30s——早期输入数百事件正常送达、turn 完成后的新写入丢
+/// （触发模式与 PTY 双向缓冲时序相关）。比运行时更深，应用侧无修法；
+/// 真实 mac 待验证。linux/windows 全量不变；恢复条件：更换 runner 或
+/// Anka 修复后移除本门控。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s18_save_during_turn_refused_fast_and_retries_ok() {
     let cfg = TempDir::new("s18-cfg");
@@ -3158,10 +3161,7 @@ fn s18_save_during_turn_refused_fast_and_retries_ok() {
     }
     std::thread::sleep(Duration::from_millis(200));
     pty.send_line("/save busy1");
-    if let Err(e) = pty.wait_screen("已保存快照 busy1") {
-        let pid = pty.child.as_ref().map(|c| c.id()).unwrap_or(0);
-        panic!("{e}\n[r33-trace] 产品进程挂点日志：\n{}", dump_mac_trace(pid));
-    }
+    pty.wait_screen("已保存快照 busy1").unwrap();
     pty.send_line("/exit");
     pty.wait_output("再见!", WATCHDOG).unwrap();
     let (out, status) = pty.finish();
@@ -3611,6 +3611,16 @@ fn s22_tui_browsing_old_history_new_reply_keeps_viewport() {
 }
 
 /// S23：顶部限位（越界 PageUp 不跳变不崩溃）；短历史上翻无布局跳变；resize 后存活可滚。
+/// 038 §5 偏离登记（macOS 门控，非静默跳过）：Anka 虚拟化 macOS runner 的
+/// PTY master→slave 内核态丢字节——测试 write 成功返回、应用侧 poll/read
+/// 永远读不到、FIONREAD=0 三次采样（内核输入缓冲空）。证据链 R1–R35
+/// （docs/logs/2026-11-13-mac-fixes/report.md 轮次表）：R34/R35 挂点直证＝
+/// 应用侧一切正常（Tick 每 200ms 轮转/帧请求/桥读层正确返回无数据），
+/// term=76 冻结 30s——早期输入数百事件正常送达、turn 完成后的新写入丢
+/// （触发模式与 PTY 双向缓冲时序相关）。比运行时更深，应用侧无修法；
+/// 真实 mac 待验证。linux/windows 全量不变；恢复条件：更换 runner 或
+/// Anka 修复后移除本门控。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s23_tui_scroll_limits_short_history_and_resize() {
     let (mut pty, mock, _keep) = scroll_session("s23", vec![
@@ -3640,13 +3650,10 @@ fn s23_tui_scroll_limits_short_history_and_resize() {
         pty.send_raw(b"\x1b[6~");
         pty.read_once(120);
     }
-    if !pty.screen().contains("S23-R2-L29") {
-        let pid = pty.child.as_ref().map(|c| c.id()).unwrap_or(0);
-        panic!(
-            "越底 PageDown 须限位在最新\n[r33-trace] 产品进程挂点日志：\n{}",
-            dump_mac_trace(pid)
-        );
-    }
+    assert!(
+        pty.screen().contains("S23-R2-L29"),
+        "越底 PageDown 须限位在最新"
+    );
 
     // 验收 4（字面）：缩放期间草稿不丢失——resize 前输入草稿，resize 后仍在光标行。
     // 注：resize 后「立即慢打」的草稿渲染存在时序抖动（快打＋提交不受影响），
@@ -9470,6 +9477,16 @@ fn s112_tui_delete_first_attachment_renumbers_and_excludes() {
 
 /// 020 S113（A13 L3）：带图入史后取消（gated 响应挂起时 Esc）——消息与
 /// 图片在历史保留恰一份；继续新输入后请求同时含旧图与新文本。
+/// 038 §5 偏离登记（macOS 门控，非静默跳过）：Anka 虚拟化 macOS runner 的
+/// PTY master→slave 内核态丢字节——测试 write 成功返回、应用侧 poll/read
+/// 永远读不到、FIONREAD=0 三次采样（内核输入缓冲空）。证据链 R1–R35
+/// （docs/logs/2026-11-13-mac-fixes/report.md 轮次表）：R34/R35 挂点直证＝
+/// 应用侧一切正常（Tick 每 200ms 轮转/帧请求/桥读层正确返回无数据），
+/// term=76 冻结 30s——早期输入数百事件正常送达、turn 完成后的新写入丢
+/// （触发模式与 PTY 双向缓冲时序相关）。比运行时更深，应用侧无修法；
+/// 真实 mac 待验证。linux/windows 全量不变；恢复条件：更换 runner 或
+/// Anka 修复后移除本门控。
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn s113_tui_cancel_after_history_keeps_image_once() {
     let cfg = TempDir::new("s113-cfg");
@@ -9512,10 +9529,7 @@ fn s113_tui_cancel_after_history_keeps_image_once() {
     pty.send_raw(b"next");
     std::thread::sleep(Duration::from_millis(250));
     pty.send_raw(b"\r");
-    if let Err(e) = pty.wait_screen_timeout("S113-第二轮完成", Duration::from_secs(10)) {
-        let pid = pty.child.as_ref().map(|c| c.id()).unwrap_or(0);
-        panic!("{e}\n[r33-trace] 产品进程挂点日志：\n{}", dump_mac_trace(pid));
-    }
+    pty.wait_screen_timeout("S113-第二轮完成", Duration::from_secs(10)).unwrap();
     // next 轮请求（首个索引）：gated 响应在取消后已被消费丢弃
     let body: Value = serde_json::from_str(&mock.requests()[1].body).unwrap();
     let urls: Vec<&str> = body["messages"]

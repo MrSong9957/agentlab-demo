@@ -607,3 +607,17 @@ R1–R35 全时间线＋FIONREAD 直证，族属明确＝环境 PTY 丢字节）
 dump_mac_trace 全部移除——git grep 标记=0）；**保留**：R27 组合拳形态
 （use-dev-tty＋Heartbeat＋桥——无回归、探针绿、语义对照逐条落台账）＋
 input_latency_probe（验收探针，linux 基线 echo=104/submit=315/quit=4ms）。
+
+## 收口（裁决②执行，2026-11-14）
+
+**§5 门控 5 项**（cfg(not(macos)) 用例级＋证据链注释）：s18/s113/s23/
+s103_async（停滞族＝FIONREAD 直证的 PTY 丢字节受害面）＋ts30（perf 资源
+族观察）——linux/windows 全量不变；p2 先期已门控。
+**规格登记**：docs/specs/038-github-actions-ci.md §8「macOS runner 环境
+偏离登记」（Anka PTY 内核态丢字节＋门控清单＋恢复条件；与 Windows §5
+同款口径）。
+**三项净确认**：探针标记 git grep=0；workflow 并行态；mac 分支保留＝
+R27 组合拳（use-dev-tty＋Heartbeat＋桥，探针绿无回归）＋input_latency_probe
+＋全部已销号修复（attack×3/bin_pipe/fd5/matrix_a/s103_reload/s73/
+pty_cancel/tls/s114a/p2 门控/perf_tiers 收口）。
+**达标口径**：mac 仅剩已门控不出现项＋ubuntu 绿＋windows 仅 t18。
