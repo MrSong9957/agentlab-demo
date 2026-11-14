@@ -75,8 +75,6 @@ mod keyboard_modes;
 mod link_pointer;
 mod notification_preview;
 #[cfg(target_os = "macos")]
-pub(crate) mod mac_trace;
-#[cfg(target_os = "macos")]
 pub(crate) mod threaded_event_source;
 #[cfg(test)]
 #[path = "tui/owned_screen_tests.rs"]

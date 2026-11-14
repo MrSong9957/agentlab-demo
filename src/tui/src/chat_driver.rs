@@ -391,11 +391,7 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
     let mut tool_detail: Option<ToolDetail> = None;
 
     // 首帧
-    #[cfg(target_os = "macos")]
-    crate::tui::mac_trace::trace("first draw: enter");
     draw(&mut tui, &pane, &mut transcript, &mut scrollbar_rows, &cells, stream.as_ref())?;
-    #[cfg(target_os = "macos")]
-    crate::tui::mac_trace::trace("first draw: done");
     // 020 A04：-i/--image 启动图片——驱动就绪（保护性输入尚未开始）后提交
     // 一次；空消息无附件时不产生任何 turn
     let mut initial_submission = hooks.initial_submission;
@@ -405,18 +401,12 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
         turn_running = true;
         turn_cancelled = false;
         pane.set_task_running(true);
-        #[cfg(target_os = "macos")]
-        crate::tui::mac_trace::trace("submit(initial): spawn_turn enter");
         (hooks.spawn_turn)(submission, turn_tx.clone());
-        #[cfg(target_os = "macos")]
-        crate::tui::mac_trace::trace("submit(initial): spawn_turn returned");
     }
     #[cfg(target_os = "macos")]
     let mut events = ThreadedEventSource::new();
     #[cfg(not(target_os = "macos"))]
     let mut events = EventStream::new();
-    #[cfg(target_os = "macos")]
-    crate::tui::mac_trace::trace("events ready (ThreadedEventSource)");
     // 038 macOS CI（R25 全量栈）：tokio driver 的 kqueue 在该 runner 失效
     // （timer 超时不醒）——mac 换心跳线程计时（heartbeat 模块文档）；linux/
     // windows 保持 tokio Interval 原路径。
@@ -446,18 +436,7 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
             app = app_rx.recv() => app.map(Ev::App),
             _ = draw_rx.recv() => Some(Ev::DrawRequested),
         };
-        let Some(ev) = ev else {
-            #[cfg(target_os = "macos")]
-            crate::tui::mac_trace::trace("loop exit (stream closed)");
-            break;
-        };
-        #[cfg(target_os = "macos")]
-        match &ev {
-            Ev::Term(_) => crate::tui::mac_trace::trace_term(),
-            Ev::Tick => crate::tui::mac_trace::trace_tick(),
-            Ev::App(_) => crate::tui::mac_trace::trace_app(),
-            Ev::DrawRequested => crate::tui::mac_trace::trace_drawreq(),
-        }
+        let Some(ev) = ev else { break };
         match ev {
             Ev::Tick => {
                 // 011 §7：tick 推进产生可见变化才置脏（无变化＝零帧）
@@ -875,19 +854,13 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                             }
                         }
                         Some(IdleSubmission::Turn) => {
-                            #[cfg(target_os = "macos")]
-                            crate::tui::mac_trace::trace("submit(idle-replay): spawn_turn enter");
                             queue_paused = false;
                             user_cell_base = Some(cells.len());
                             spawn_turn_cells(&mut cells, &mut stream_indices, &submission);
                             turn_running = true;
                             turn_cancelled = false;
                             pane.set_task_running(true);
-                            #[cfg(target_os = "macos")]
-                            crate::tui::mac_trace::trace("submit(idle-replay): spawn_turn call");
                             (hooks.spawn_turn)(submission, turn_tx.clone());
-                            #[cfg(target_os = "macos")]
-                            crate::tui::mac_trace::trace("submit(idle-replay): spawn_turn returned");
                         }
                         None => {}
                     }
@@ -1262,11 +1235,7 @@ pub async fn run(mut tui: Tui, mut hooks: DriverHooks) -> io::Result<DriverExit>
                                             turn_running = true;
                                             turn_cancelled = false;
                                             pane.set_task_running(true);
-                                            #[cfg(target_os = "macos")]
-                                            crate::tui::mac_trace::trace("submit(replay): spawn_turn call");
                                             (hooks.spawn_turn)(submission, turn_tx.clone());
-                                            #[cfg(target_os = "macos")]
-                                            crate::tui::mac_trace::trace("submit(replay): spawn_turn returned");
                                             needs_draw = true;
                                         }
                                     }
@@ -2386,9 +2355,6 @@ pub type HostCell = std::sync::Arc<dyn HistoryCell>;
 /// 008-P3 公共入口：初始化终端（raw mode/备用屏策略）→ 组装 Tui → 运行主循环。
 /// 终端恢复由 Tui/守卫 Drop 承担（母本语义）。
 pub async fn run_interactive(hooks: DriverHooks) -> io::Result<DriverExit> {
-    // [r33-trace]（取证，暂驻）
-    #[cfg(target_os = "macos")]
-    crate::tui::mac_trace::trace("run_interactive enter");
     let initialized = crate::tui::init()?;
     let mut tui = Tui::new(
         initialized.terminal,

@@ -58,52 +58,31 @@ impl ThreadedEventSource {
         std::thread::Builder::new()
             .name("tchat-tty-events".into())
             .spawn(move || {
-                // [r33-trace]（取证，暂驻）：读层挂点直证
-                super::mac_trace::trace("bridge thread enter");
                 while !stop_flag.load(Ordering::SeqCst) {
                     match crossterm::event::poll(Duration::from_millis(100)) {
                         // 就绪：read 取事件（阻塞态但 poll 已确认就绪，
                         // 无界等待面与 EventStream 的 poll_internal(None) 同）。
-                        Ok(true) => {
-                            super::mac_trace::trace_poll(true);
-                            match crossterm::event::read() {
-                                Ok(ev) => {
-                                    super::mac_trace::trace(&format!(
-                                        "bridge read {:?}",
-                                        std::mem::discriminant(&ev)
-                                    ));
-                                    if tx.send(Ok(ev)).is_err() {
-                                        // 消费方已 drop：退出（EventStream 的
-                                        // shutdown 标志同形态）。
-                                        super::mac_trace::trace("bridge send failed, exit");
-                                        break;
-                                    }
-                                }
-                                Err(e) => {
-                                    super::mac_trace::trace(&format!("bridge read err {e}"));
-                                    let _ = tx.send(Err(e));
+                        Ok(true) => match crossterm::event::read() {
+                            Ok(ev) => {
+                                if tx.send(Ok(ev)).is_err() {
+                                    // 消费方已 drop：退出（EventStream 的
+                                    // shutdown 标志同形态）。
                                     break;
                                 }
                             }
-                        }
-                        // 空闲窗口：让出调度（pause/stop 在此生效）。
-                        Ok(false) => {
-                            super::mac_trace::trace_poll(false);
-                            // [r33-trace]：每 50 次空闲采样一次内核缓冲量
-                            // （100ms×50＝5s 一次；停滞期可见字节进出）。
-                            let n = super::mac_trace::poll_false_count();
-                            if n % 50 == 0 {
-                                super::mac_trace::trace_stdin_bytes();
+                            Err(e) => {
+                                let _ = tx.send(Err(e));
+                                break;
                             }
-                        }
+                        },
+                        // 空闲窗口：让出调度（pause/stop 在此生效）。
+                        Ok(false) => {}
                         Err(e) => {
-                            super::mac_trace::trace(&format!("bridge poll err {e}"));
                             let _ = tx.send(Err(e));
                             break;
                         }
                     }
                 }
-                super::mac_trace::trace("bridge thread exit");
             })
             .expect("tty 事件读线程创建失败");
         Self { rx, stop }

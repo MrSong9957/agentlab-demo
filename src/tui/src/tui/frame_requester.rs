@@ -47,8 +47,6 @@ impl FrameRequester {
 
     /// Schedule a frame draw as soon as possible.
     pub fn schedule_frame(&self) {
-        #[cfg(target_os = "macos")]
-        crate::tui::mac_trace::trace_frame_req();
         let _ = self.frame_schedule_tx.send(Instant::now());
     }
 
@@ -121,8 +119,6 @@ impl FrameScheduler {
                     if next_deadline.is_some() {
                         next_deadline = None;
                         self.rate_limiter.mark_emitted(Instant::now());
-                        #[cfg(target_os = "macos")]
-                        crate::tui::mac_trace::trace_frame_sent();
                         let _ = self.draw_tx.send(());
                     }
                 }
